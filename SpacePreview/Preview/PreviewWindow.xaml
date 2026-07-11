@@ -298,7 +298,7 @@
                                         Tag="{x:Static u:Metrics.PillLeftCorner}"
                                         Content="-"
                                         AutomationProperties.Name="Zoom out"
-                                        ToolTip="Zoom out (Ctrl+wheel)" />
+                                        ToolTip="Zoom out (Ctrl+Minus)" />
                                 <Button x:Name="ZoomResetButton"
                                         Width="46"
                                         Height="27"
@@ -306,7 +306,7 @@
                                          Focusable="False"
                                          VerticalAlignment="Center"
                                          AutomationProperties.Name="Reset zoom"
-                                         ToolTip="Reset zoom">
+                                         ToolTip="Reset zoom (Ctrl+0)">
                                     <Button.Template>
                                         <ControlTemplate TargetType="{x:Type Button}">
                                             <Border x:Name="Chrome" Background="Transparent">
@@ -333,7 +333,7 @@
                                         Tag="{x:Static u:Metrics.PillRightCorner}"
                                         Content="+"
                                         AutomationProperties.Name="Zoom in"
-                                        ToolTip="Zoom in (Ctrl+wheel)" />
+                                        ToolTip="Zoom in (Ctrl+Plus)" />
                             </StackPanel>
                         </Border>
 
@@ -442,7 +442,7 @@
                                     Visibility="Collapsed">
                             <TextBlock x:Name="LoadingTitle"
                                        HorizontalAlignment="Center"
-                                       FontSize="13.5"
+                                       FontSize="{x:Static u:Metrics.FontBody}"
                                        FontWeight="SemiBold"
                                        Foreground="{DynamicResource Theme.TextPrimary}" />
                             <TextBlock x:Name="LoadingSubtitle"

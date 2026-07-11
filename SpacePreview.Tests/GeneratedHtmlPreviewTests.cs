@@ -52,7 +52,7 @@ tags:
     {
         const long totalBytes = TextPreviewLoader.MaxPreviewBytes + 1024;
         var preview = new TextPreview(
-            "# Hello\n\n- Preview truncated at 2 MB of 2 MB -",
+            "# Hello" + TextPreviewLoader.TruncationNotice(TextPreviewLoader.MaxPreviewBytes, totalBytes),
             Truncated: true,
             TotalBytes: totalBytes);
 
@@ -61,7 +61,7 @@ tags:
 
         Assert.Equal("# Hello", source);
         Assert.Contains("Showing the first", notice, StringComparison.Ordinal);
-        Assert.DoesNotContain("Preview truncated at", notice, StringComparison.Ordinal);
+        Assert.DoesNotContain("Showing the first", source, StringComparison.Ordinal);
     }
 
     [Fact]

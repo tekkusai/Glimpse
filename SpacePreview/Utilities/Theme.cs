@@ -33,6 +33,7 @@ internal sealed record ThemePalette(
     Color TextTertiary,
     Color TextFaint,
     Color Accent,
+    Color Warning,
     Color ScrollThumb,
     Color HoverBg,
     Color PressedBg,
@@ -58,6 +59,7 @@ internal static class Theme
         TextTertiary: Rgb(0x8F, 0x95, 0xA0),
         TextFaint: Rgb(0x7E, 0x84, 0x90),
         Accent: Rgb(0x4E, 0x80, 0xF5),
+        Warning: Rgb(0xD9, 0xA6, 0x6A),
         ScrollThumb: Rgb(0x5C, 0x61, 0x6E),
         HoverBg: Rgb(0x39, 0x3B, 0x44),
         PressedBg: Rgb(0x47, 0x4A, 0x55),
@@ -79,11 +81,21 @@ internal static class Theme
         TextTertiary: Rgb(0x87, 0x8D, 0x99),
         TextFaint: Rgb(0x9A, 0xA0, 0xAB),
         Accent: Rgb(0x3B, 0x72, 0xE8),
+        Warning: Rgb(0x9A, 0x6B, 0x24),
         ScrollThumb: Rgb(0xB4, 0xB8, 0xC2),
         HoverBg: Rgb(0xE7, 0xE8, 0xED),
         PressedBg: Rgb(0xDC, 0xDE, 0xE5),
         BadgeBg: Rgb(0xF5, 0xF5, 0xF8),
         BadgeBorder: Rgb(0xD9, 0xDB, 0xE2));
+
+    // Canvas HUDs (zoom readout, mesh overlay, ink-capture backdrop) float
+    // dark glass over content in both themes, so these live beside the
+    // palette rather than on it: they deliberately never change with it.
+    public static readonly Color OverlayScrim = Color.FromArgb(0xB8, 0x0F, 0x10, 0x14);
+    public static readonly Color OverlayBorder = Color.FromArgb(0x5A, 0xFF, 0xFF, 0xFF);
+    public static readonly Color OverlayText = Color.FromRgb(0xF1, 0xF4, 0xF8);
+    public static readonly Color OverlayTextSecondary = Color.FromRgb(0xB4, 0xBB, 0xC7);
+    public static readonly Color OverlayTextTertiary = Color.FromRgb(0x87, 0x8F, 0x9C);
 
     public static ThemePalette Current { get; private set; } = Dark;
 

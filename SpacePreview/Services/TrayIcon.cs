@@ -68,6 +68,36 @@ internal sealed class TrayIcon : IDisposable
         CreateMessageWindow();
         RebuildIcon();
         AddIcon();
+
+        // The taskbar's own theme (a separate setting from app theme) picks
+        // the glyph color; broadcasts never reach a message-only window, so
+        // SystemEvents carries the change here instead.
+        _userPreferenceChanged = (_, args) =>
+        {
+            if (args.Category == Microsoft.Win32.UserPreferenceCategory.General)
+            {
+                Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIconForTheme));
+            }
+        };
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged += _userPreferenceChanged;
+    }
+
+    private readonly Microsoft.Win32.UserPreferenceChangedEventHandler _userPreferenceChanged;
+
+    private void RefreshIconForTheme()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        RebuildIcon();
+        if (_iconVisible)
+        {
+            var data = NewIconData();
+            data.uFlags = NativeMethods.NIF_ICON;
+            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+        }
     }
 
     private static MenuItem MakeItem(string header, Action onClick)
@@ -448,7 +478,7 @@ internal sealed class TrayIcon : IDisposable
     {
         var data = NewIconData();
         data.uFlags = NativeMethods.NIF_INFO;
-        data.szInfoTitle = "Preview unavailable for this app";
+        data.szInfoTitle = PreviewAccessWarningWindow.Heading;
         data.szInfo = PreviewAccessWarningWindow.BuildMessage(warning);
         data.dwInfoFlags = NativeMethods.NIIF_INFO
             | NativeMethods.NIIF_NOSOUND
@@ -600,6 +630,7 @@ internal sealed class TrayIcon : IDisposable
         }
 
         _disposed = true;
+        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;
         _previewAccessWarningWindow?.Dismiss("dispose");
         _previewAccessWarningWindow = null;
 
@@ -621,8 +652,9 @@ internal sealed class TrayIcon : IDisposable
 }
 
 /// <summary>
-/// Draws the tray glyph at the taskbar's real pixel size and hands back an HICON.
-/// A rounded-rect spacebar key, light for Win11's dark taskbar.
+/// Draws the tray glyph at the taskbar's real pixel size and hands back an
+/// HICON: light on a dark taskbar, dark on a light one. The taskbar follows
+/// SystemUsesLightTheme, not the app-theme value the palettes track.
 /// </summary>
 internal static class TrayIconRenderer
 {
@@ -651,7 +683,9 @@ internal static class TrayIconRenderer
         using var dc = visual.RenderOpen();
 
         double s = size;
-        var fill = new SolidColorBrush(Color.FromRgb(0xF2, 0xF3, 0xF6));
+        var fill = new SolidColorBrush(TaskbarIsLight()
+            ? Color.FromRgb(0x2A, 0x2C, 0x33)
+            : Color.FromRgb(0xF2, 0xF3, 0xF6));
         fill.Freeze();
 
         // The brand glint, scaled from its -50..50 box into the icon square.
@@ -664,6 +698,20 @@ internal static class TrayIconRenderer
         dc.DrawGeometry(fill, null, spark);
 
         return visual;
+    }
+
+    private static bool TaskbarIsLight()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("SystemUsesLightTheme") is int value && value != 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static IntPtr ToHIcon(RenderTargetBitmap bitmap, int size)

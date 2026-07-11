@@ -26,6 +26,7 @@ public partial class PreviewAccessWarningWindow : Window
         InitializeComponent();
         Theme.ApplyResources(this);
         AccentBar.Background = Theme.Brush(Theme.Current.Accent);
+        HeadingText.Text = Heading;
         BodyText.Text = BuildMessage(warning);
 
         _dismissTimer = new DispatcherTimer(
@@ -46,9 +47,12 @@ public partial class PreviewAccessWarningWindow : Window
         };
     }
 
+    /// <summary>One heading for this warning, wherever it appears: this window and the tray toast.</summary>
+    internal const string Heading = "Preview unavailable for this app";
+
     internal static string BuildMessage(PreviewAccessWarningInfo warning) =>
         warning.Kind == PreviewAccessWarningKind.ConfirmedElevationMismatch
-            ? $"{warning.DisplayName} is running as administrator, but Glimpse isn't. Run both at the same level to preview files."
+            ? $"{warning.DisplayName} is running as administrator, but Glimpse isn't. Run both at the same permission level to preview files."
             : "Glimpse couldn't access this file picker. If the app is running as administrator, run both apps at the same permission level.";
 
     internal static Point CalculatePlacement(Rect workArea, Size windowSize, double margin)

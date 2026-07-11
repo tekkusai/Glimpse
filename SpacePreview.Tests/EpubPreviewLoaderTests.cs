@@ -62,7 +62,7 @@ public sealed class EpubPreviewLoaderTests
         var body = EpubPreviewLoader.TryBuildBody(path);
 
         Assert.NotNull(body);
-        Assert.Contains("Preview truncated. Open the book for the rest.", body!, StringComparison.Ordinal);
+        Assert.Contains("Showing the beginning of this book. Open the book for the rest.", body!, StringComparison.Ordinal);
         Assert.DoesNotContain("TAIL", body, StringComparison.Ordinal);
     }
 

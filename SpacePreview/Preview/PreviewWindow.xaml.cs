@@ -622,7 +622,7 @@ public partial class PreviewWindow : Window
         ("Preparing document previews", "Just this once. After this, they open instantly.");
 
     private static readonly (string Title, string Subtitle) SlowConversionMessage =
-        ("Preparing this document", "Just this once. Next time it opens instantly.");
+        ("Preparing this document", "Next time it opens instantly.");
 
     /// <summary>
     /// First-run introduction: the app shows a short built-in introduction. The
@@ -681,7 +681,7 @@ public partial class PreviewWindow : Window
         var title = new TextBlock
         {
             Text = Branding.Name,
-            FontSize = 34,
+            FontSize = Metrics.FontDisplay,
             FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 18, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
@@ -1408,7 +1408,7 @@ public partial class PreviewWindow : Window
             DiagnosticLog.Write($"preview load failed {path}: {ex.GetType().Name}: {ex.Message}");
             if (!token.IsCancellationRequested && version == _loadVersion)
             {
-                SetPreviewContent(BuildErrorPreview("Couldn't preview this file", ex.Message), null);
+                SetPreviewContent(BuildErrorPreview("Glimpse can't preview this file", "Something went wrong while reading it."), null);
             }
         }
     }
@@ -2042,9 +2042,9 @@ public partial class PreviewWindow : Window
 
         var hudText = new TextBlock
         {
-            FontSize = 12,
+            FontSize = Metrics.FontLabel,
             FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(Color.FromRgb(241, 244, 248))
+            Foreground = Theme.Brush(Theme.OverlayText)
         };
         var hud = new Border
         {
@@ -2053,7 +2053,7 @@ public partial class PreviewWindow : Window
             Margin = new Thickness(0, 0, 0, 18),
             Padding = new Thickness(12, 6, 12, 7),
             CornerRadius = Metrics.PillCorner,
-            Background = new SolidColorBrush(Color.FromArgb(184, 15, 16, 20)),
+            Background = Theme.Brush(Theme.OverlayScrim),
             IsHitTestVisible = false,
             Opacity = 0,
             Child = hudText
@@ -4171,7 +4171,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         {
             var tile = new Border
             {
-                CornerRadius = new CornerRadius(7),
+                CornerRadius = Metrics.RowCorner,
                 Padding = new Thickness(8, 6, 8, 7),
                 Margin = new Thickness(0, 0, 0, 2),
                 Background = Brushes.Transparent,
@@ -4328,7 +4328,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         {
             Width = 22,
             Height = 22,
-            CornerRadius = new CornerRadius(7),
+            CornerRadius = Metrics.IconCorner,
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
             ToolTip = tooltip,
@@ -4430,7 +4430,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
             var tile = new Border
             {
-                CornerRadius = new CornerRadius(8),
+                CornerRadius = Metrics.RowCorner,
                 Padding = new Thickness(7),
                 Margin = new Thickness(0, 0, 0, 8),
                 Background = Brushes.Transparent,
@@ -4789,7 +4789,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     {
         var pdf = await Task.Run(() => PdfPreviewRenderer.TryRender(path, token), token);
         return pdf is null
-            ? BuildErrorPreview("PDF preview failed", "PDFium could not render this file.")
+            ? BuildErrorPreview("Glimpse can't preview this PDF", "The file may be damaged.")
             : BuildPdfPreview(pdf);
     }
 
@@ -4830,7 +4830,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             {
                 if (version == _loadVersion)
                 {
-                    SetPreviewContent(BuildErrorPreview("Document preview failed", "The converted document could not be displayed."), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Glimpse can't preview this document", "The converted document could not be displayed."), null, animate: false);
                 }
             },
             configure: core =>
@@ -4965,7 +4965,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             var chrome = new Border
             {
                 CornerRadius = Metrics.RowCorner,
-                Padding = new Thickness(11, 4, 11, 5),
+                Padding = Metrics.ChipPadding,
                 Margin = new Thickness(0, 0, 4, 0),
                 BorderThickness = new Thickness(1),
                 Background = Brushes.Transparent,
@@ -5058,7 +5058,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             {
                 if (IsCurrentContentPath(path))
                 {
-                    SetPreviewContent(BuildErrorPreview("Media preview failed", "The media engine could not start."), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Glimpse can't play this file", MediaOpenInsteadText(path)), null, animate: false);
                 }
             },
             configure: core =>
@@ -5240,6 +5240,9 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     internal static bool IsLoadIdentityCurrent(long requestVersion, long currentVersion, bool cancellationRequested) =>
         !cancellationRequested && requestVersion == currentVersion;
 
+    // The player is dark glass in both themes, so this template does not
+    // follow the app theme; its hex values mirror Theme.cs Dark (TextPrimary,
+    // TextSecondary, TextTertiary, Accent). If those tokens move, move these.
     private static Uri WriteMediaHtml(string mediaPath)
     {
         var source = WebUtility.HtmlEncode(new Uri(mediaPath, UriKind.Absolute).AbsoluteUri);
@@ -5701,7 +5704,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             Margin = new Thickness(0, 18, 0, 0),
             Padding = new Thickness(32, 30, 32, 34),
-            CornerRadius = new CornerRadius(18),
+            CornerRadius = Metrics.CardCorner,
             Background = Theme.Brush(palette.SurfaceBg),
             BorderBrush = Theme.Brush(palette.SurfaceBorder),
             BorderThickness = new Thickness(1),
@@ -6551,7 +6554,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             {
                 Width = 96,
                 Height = 120,
-                CornerRadius = new CornerRadius(14),
+                CornerRadius = Metrics.CardCorner,
                 BorderThickness = new Thickness(1),
                 BorderBrush = Theme.Brush(palette.BadgeBorder),
                 Background = Theme.Brush(palette.BadgeBg),
@@ -6872,7 +6875,37 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var warning = AppCapabilityWarnings.Contains(capability);
         return AppCapabilityLabels.TryGetValue(capability, out var label)
             ? (label, true, warning)
-            : (capability, false, warning);
+            : (HumanizeCapability(capability), false, warning);
+    }
+
+    /// <summary>
+    /// An unmapped capability still reads as words, not manifest camelCase:
+    /// "userNotificationListener" becomes "User notification listener".
+    /// </summary>
+    internal static string HumanizeCapability(string capability)
+    {
+        if (string.IsNullOrWhiteSpace(capability))
+        {
+            return capability;
+        }
+
+        var builder = new StringBuilder(capability.Length + 8);
+        builder.Append(char.ToUpperInvariant(capability[0]));
+        for (var i = 1; i < capability.Length; i++)
+        {
+            var c = capability[i];
+            if (char.IsUpper(c) && !char.IsUpper(capability[i - 1]))
+            {
+                builder.Append(' ');
+                builder.Append(char.ToLowerInvariant(c));
+            }
+            else
+            {
+                builder.Append(c);
+            }
+        }
+
+        return builder.ToString();
     }
 
     /// <summary>
@@ -6883,10 +6916,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     private static FrameworkElement BuildAppPackageCard(AppPackageInfo info)
     {
         var palette = Theme.Current;
-        var warningBrush = new SolidColorBrush(palette.IsDark
-            ? Color.FromRgb(0xD9, 0xA6, 0x6A)
-            : Color.FromRgb(0x9A, 0x6B, 0x24));
-        warningBrush.Freeze();
+        var warningBrush = Theme.Brush(palette.Warning);
 
         var stack = new StackPanel
         {
@@ -6993,7 +7023,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             if (info.CapabilityOverflow > 0)
             {
                 chips.Children.Add(BuildAppChip($"{info.CapabilityOverflow:N0} more", palette,
-                    Theme.Brush(palette.TextTertiary), Theme.Brush(palette.BadgeBorder), mono: false));
+                    Theme.Brush(palette.TextTertiary), Theme.Brush(palette.BadgeBorder)));
             }
             stack.Children.Add(chips);
         }
@@ -7009,7 +7039,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             Width = 96,
             Height = 96,
-            CornerRadius = new CornerRadius(22),
+            CornerRadius = Metrics.CardCorner,
             HorizontalAlignment = HorizontalAlignment.Center,
             Background = Theme.Brush(palette.BadgeBg),
             BorderBrush = Theme.Brush(palette.BadgeBorder),
@@ -7114,24 +7144,23 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var border = warning
             ? warningBrush
             : Theme.Brush(palette.BadgeBorder);
-        return BuildAppChip(label, palette, foreground, border, mono: !known);
+        return BuildAppChip(label, palette, foreground, border);
     }
 
-    private static FrameworkElement BuildAppChip(string label, ThemePalette palette, Brush foreground, Brush border, bool mono)
+    private static FrameworkElement BuildAppChip(string label, ThemePalette palette, Brush foreground, Brush border)
     {
         return new Border
         {
-            CornerRadius = new CornerRadius(6),
+            CornerRadius = Metrics.RowCorner,
             Background = Theme.Brush(palette.BadgeBg),
             BorderBrush = border,
             BorderThickness = new Thickness(1),
-            Padding = new Thickness(9, 4, 9, 5),
+            Padding = Metrics.ChipPadding,
             Margin = new Thickness(3),
             Child = new TextBlock
             {
                 Text = label,
                 FontSize = 12,
-                FontFamily = mono ? new FontFamily("Cascadia Mono, Consolas") : SystemFonts.MessageFontFamily,
                 Foreground = foreground
             }
         };
@@ -7239,7 +7268,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         if (text.Length > displayLimit)
         {
             text = text[..displayLimit]
-                + $"\n\n- Showing the first {FileKinds.FormatSize(displayLimit)} of {FileKinds.FormatSize(preview.TotalBytes)}. Open the file for the rest. -";
+                + $"\n\nShowing the first {FileKinds.FormatSize(displayLimit)} of {FileKinds.FormatSize(preview.TotalBytes)}. Open the file for the rest.";
             wrap = false;
         }
 
@@ -7312,8 +7341,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             HorizontalAlignment = HorizontalAlignment.Left,
             Margin = new Thickness(24, 20, 24, 0),
-            Padding = new Thickness(10, 5, 10, 6),
-            CornerRadius = new CornerRadius(13),
+            Padding = Metrics.ChipPadding,
+            CornerRadius = Metrics.PillCorner,
             Background = new SolidColorBrush(Color.FromArgb(42, accent.R, accent.G, accent.B)),
             BorderBrush = new SolidColorBrush(Color.FromArgb(110, accent.R, accent.G, accent.B)),
             BorderThickness = new Thickness(1),
@@ -7515,8 +7544,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Margin = new Thickness(18),
             Padding = new Thickness(12, 8, 12, 9),
             CornerRadius = Metrics.PillCorner,
-            Background = new SolidColorBrush(Color.FromArgb(184, 15, 16, 20)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)),
+            Background = Theme.Brush(Theme.OverlayScrim),
+            BorderBrush = Theme.Brush(Theme.OverlayBorder),
             BorderThickness = new Thickness(1),
             Child = new StackPanel
             {
@@ -7525,23 +7554,23 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                     new TextBlock
                     {
                         Text = preview.FormatName,
-                        FontSize = 12.5,
+                        FontSize = Metrics.FontLabel,
                         FontWeight = FontWeights.SemiBold,
-                        Foreground = new SolidColorBrush(Color.FromRgb(241, 244, 248))
+                        Foreground = Theme.Brush(Theme.OverlayText)
                     },
                     new TextBlock
                     {
                         Text = triangleText,
                         Margin = new Thickness(0, 2, 0, 0),
-                        FontSize = 11.5,
-                        Foreground = new SolidColorBrush(Color.FromRgb(180, 187, 199))
+                        FontSize = Metrics.FontCaption,
+                        Foreground = Theme.Brush(Theme.OverlayTextSecondary)
                     },
                     new TextBlock
                     {
                         Text = "Drag to rotate · wheel to zoom",
                         Margin = new Thickness(0, 5, 0, 0),
-                        FontSize = 11,
-                        Foreground = new SolidColorBrush(Color.FromRgb(135, 143, 156))
+                        FontSize = Metrics.FontCaption,
+                        Foreground = Theme.Brush(Theme.OverlayTextTertiary)
                     }
                 }
             }
@@ -7623,8 +7652,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             HorizontalAlignment = HorizontalAlignment.Left,
             Margin = new Thickness(24, 20, 24, 0),
-            Padding = new Thickness(10, 5, 10, 6),
-            CornerRadius = new CornerRadius(13),
+            Padding = Metrics.ChipPadding,
+            CornerRadius = Metrics.PillCorner,
             Background = new SolidColorBrush(Color.FromArgb(42, accent.R, accent.G, accent.B)),
             BorderBrush = new SolidColorBrush(Color.FromArgb(110, accent.R, accent.G, accent.B)),
             BorderThickness = new Thickness(1),
@@ -7691,7 +7720,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         if (!FileKinds.TryFindPdfHeaderOffset(path, out _))
         {
             builder.AppendLine();
-            builder.AppendLine($"This Illustrator file is legacy PostScript artwork, not PDF-compatible, so {Branding.Name} shows metadata instead of a generic shell thumbnail.");
+            builder.AppendLine($"This Illustrator file is legacy PostScript artwork, so {Branding.Name} shows its details instead.");
         }
 
         return builder.ToString().TrimEnd();
@@ -7752,17 +7781,16 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         string title,
         string subtitle,
         string path,
-        string accentHex,
+        Color accent,
         PreviewAction? action = null)
     {
         var palette = Theme.Current;
-        var accent = (Color)ColorConverter.ConvertFromString(accentHex);
 
         var badge = new Border
         {
             Width = 116,
             Height = 144,
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = Metrics.CardCorner,
             BorderThickness = new Thickness(1),
             BorderBrush = Theme.Brush(palette.BadgeBorder),
             Background = Theme.Brush(palette.BadgeBg),
@@ -7789,7 +7817,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             Text = title,
             Margin = new Thickness(0, 22, 0, 0),
-            FontSize = 21,
+            FontSize = Metrics.FontTitle,
             FontWeight = FontWeights.SemiBold,
             Foreground = Theme.Brush(palette.TextPrimary),
             TextAlignment = TextAlignment.Center,
@@ -7832,7 +7860,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var label = new TextBlock
         {
             Text = action.Label,
-            FontSize = 13,
+            FontSize = Metrics.FontBody,
             FontWeight = FontWeights.SemiBold,
             Foreground = Theme.Brush(palette.TextPrimary)
         };
@@ -7840,7 +7868,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             Text = action.Detail,
             Margin = new Thickness(0, 2, 0, 0),
-            FontSize = 11.5,
+            FontSize = Metrics.FontCaption,
             Foreground = Theme.Brush(palette.TextSecondary)
         };
         var arrow = new TextBlock
@@ -7931,12 +7959,12 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 "Get HEVC support",
                 "Opens Microsoft Store",
                 HevcVideoExtensionStoreUri,
-                "Open HEVC Video Extensions in Microsoft Store.")
+                "Open HEVC Video Extensions in Microsoft Store")
             : new PreviewAction(
                 "Get HEIF support",
                 "Opens Microsoft Store",
                 HeifImageExtensionStoreUri,
-                "Open HEIF Image Extensions in Microsoft Store.");
+                "Open HEIF Image Extensions in Microsoft Store");
 
         return BuildErrorPreview(
             "Glimpse can't preview this image",
@@ -7952,7 +7980,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 "Get HEVC support",
                 "Opens Microsoft Store",
                 HevcVideoExtensionStoreUri,
-                "Open HEVC Video Extensions in Microsoft Store.");
+                "Open HEVC Video Extensions in Microsoft Store");
         }
 
         if (codecs?.HasAv1Video == true)
@@ -7961,7 +7989,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 "Get AV1 support",
                 "Opens Microsoft Store",
                 Av1VideoExtensionStoreUri,
-                "Open AV1 Video Extension in Microsoft Store.");
+                "Open AV1 Video Extension in Microsoft Store");
         }
 
         return null;
@@ -7978,7 +8006,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
     private static FrameworkElement BuildErrorPreview(string title, string detail, PreviewAction? action = null)
     {
-        return BuildCenteredBadge("!", title, detail, string.Empty, "#FFB86B", action);
+        return BuildCenteredBadge("!", title, detail, string.Empty, Theme.Current.Warning, action);
     }
 
     private static TextBox BuildSelectableTextBox(
@@ -8983,7 +9011,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                     new TextBlock
                     {
                         Text = "Sign",
-                        FontSize = 12,
+                        FontSize = Metrics.FontLabel,
                         FontWeight = FontWeights.SemiBold,
                         VerticalAlignment = VerticalAlignment.Center,
                         Foreground = Theme.Brush(palette.TextPrimary)
@@ -9517,7 +9545,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var title = new TextBlock
         {
             Text = "This is a basic preview",
-            FontSize = 13,
+            FontSize = Metrics.FontBody,
             FontWeight = FontWeights.SemiBold,
             Foreground = Theme.Brush(palette.TextPrimary)
         };
@@ -9548,7 +9576,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             BorderBrush = Theme.Brush(palette.SurfaceBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
-            ToolTip = "Opens libreoffice.org in your browser.",
+            ToolTip = "Opens libreoffice.org in your browser",
             Child = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
@@ -9858,7 +9886,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         }
 
         // The target is a link: click reveals it in its containing folder.
-        var link = new Hyperlink(new Run($"Shortcut -> {shortcutTarget}"))
+        var link = new Hyperlink(new Run($"Shortcut → {shortcutTarget}"))
         {
             Foreground = Theme.Brush(Theme.Current.TextSecondary),
             TextDecorations = null,
@@ -9897,7 +9925,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         string subtitle;
         if (shortcutTarget is not null)
         {
-            subtitle = $"Shortcut -> {shortcutTarget}";
+            subtitle = $"Shortcut → {shortcutTarget}";
         }
         else if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path)) && TryGetImagePixelSize(path, out var pixelSize))
         {
@@ -10021,7 +10049,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Child = new TextBlock
             {
                 Text = label,
-                FontSize = 12,
+                FontSize = Metrics.FontLabel,
                 FontWeight = FontWeights.SemiBold,
                 MaxWidth = hasMenu ? HeaderOpenLabelWithMenuMaxWidth : HeaderOpenLabelMaxWidth,
                 TextTrimming = TextTrimming.CharacterEllipsis,

@@ -72,7 +72,7 @@ public sealed class AppPackagePreviewLoaderTests
         Assert.Equal(("Internet access", true, false), PreviewWindow.DescribeAppCapability("internetClient"));
         Assert.Equal(("Full file system access", true, true), PreviewWindow.DescribeAppCapability("broadFileSystemAccess"));
         Assert.Equal(("Runs with full trust", true, true), PreviewWindow.DescribeAppCapability("runFullTrust"));
-        Assert.Equal(("rareDeviceAccess", false, false), PreviewWindow.DescribeAppCapability("rareDeviceAccess"));
+        Assert.Equal(("Rare device access", false, false), PreviewWindow.DescribeAppCapability("rareDeviceAccess"));
     }
 
     [Fact]

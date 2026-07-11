@@ -131,8 +131,9 @@ public partial class App : Application
         }
         catch (Exception ex)
         {
+            DiagnosticLog.Write($"startup failed: {ex}");
             MessageBox.Show(
-                $"{Branding.Name} could not start.\n\n" + ex.Message,
+                $"{Branding.Name} could not start. Try launching it again.\n\nDetails were saved to the log:\n{DiagnosticLog.Pathname}",
                 Branding.Name,
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);

@@ -79,7 +79,7 @@ public sealed class ElevationMismatchNotificationTests
         Assert.Contains("NativeMethods.NIF_INFO", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_NOSOUND", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", source, StringComparison.Ordinal);
-        Assert.Contains("Preview unavailable for this app", source, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningWindow.Heading", source, StringComparison.Ordinal);
         Assert.Contains("ShowAppOwnedWarning(warning)", source, StringComparison.Ordinal);
         Assert.Contains("ShowTrayWarning(warning)", source, StringComparison.Ordinal);
     }
@@ -259,7 +259,7 @@ public sealed class ElevationMismatchNotificationTests
 
         var message = PreviewAccessWarningWindow.BuildMessage(warning);
         Assert.Contains("AdminApp is running as administrator", message, StringComparison.Ordinal);
-        Assert.Contains("Run both at the same level", message, StringComparison.Ordinal);
+        Assert.Contains("Run both at the same permission level", message, StringComparison.Ordinal);
     }
 
     [Fact]

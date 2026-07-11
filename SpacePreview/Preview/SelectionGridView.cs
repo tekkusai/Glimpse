@@ -136,7 +136,7 @@ internal sealed class SelectionGridView
         var caption = new TextBlock
         {
             Text = Path.GetFileName(_paths[index].TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
-            FontSize = 11.5,
+            FontSize = Metrics.FontCaption,
             Foreground = Theme.Brush(palette.TextSecondary),
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
@@ -157,7 +157,7 @@ internal sealed class SelectionGridView
         {
             Margin = new Thickness(4),
             Padding = new Thickness(7),
-            CornerRadius = new CornerRadius(9),
+            CornerRadius = Metrics.SurfaceCorner,
             Background = Brushes.Transparent,
             BorderBrush = Brushes.Transparent,
             BorderThickness = new Thickness(2),

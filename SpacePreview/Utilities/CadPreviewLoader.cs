@@ -26,7 +26,7 @@ internal static partial class CadPreviewLoader
                 {
                     return new CadPreview(
                         "STL mesh",
-                        $"{triangleCount:N0} triangles - {FileKinds.FormatSize(file.Length)}",
+                        $"{triangleCount:N0} triangles · {FileKinds.FormatSize(file.Length)}",
                         $"Binary STL mesh\nTriangles: {triangleCount:N0}\nSize: {FileKinds.FormatSize(file.Length)}\nModified: {file.LastWriteTime:g}");
                 }
             }
@@ -37,12 +37,13 @@ internal static partial class CadPreviewLoader
             var facets = Regex.Matches(sample, @"\bfacet\s+normal\b", RegexOptions.IgnoreCase).Count;
             return new CadPreview(
                 "STL mesh",
-                facets > 0 ? $"{facets:N0} facets - {FileKinds.FormatSize(file.Length)}" : $"ASCII STL - {FileKinds.FormatSize(file.Length)}",
+                facets > 0 ? $"{facets:N0} facets · {FileKinds.FormatSize(file.Length)}" : $"ASCII STL · {FileKinds.FormatSize(file.Length)}",
                 $"ASCII STL mesh\nFacets detected: {facets:N0}\nSize: {FileKinds.FormatSize(file.Length)}\nModified: {file.LastWriteTime:g}");
         }
         catch (Exception ex)
         {
-            return new CadPreview("STL mesh", FileKinds.BuildSubtitle(path), ex.Message);
+            Services.DiagnosticLog.Write($"stl card failed {path}: {ex.GetType().Name}: {ex.Message}");
+            return new CadPreview("STL mesh", FileKinds.BuildSubtitle(path), UnreadableDetails);
         }
     }
 
@@ -82,14 +83,18 @@ internal static partial class CadPreviewLoader
 
             return new CadPreview(
                 "STEP assembly",
-                $"{schemaName} - {entityCount:N0} entities - {FileKinds.FormatSize(file.Length)}",
+                $"{schemaName} · {entityCount:N0} entities · {FileKinds.FormatSize(file.Length)}",
                 builder.ToString().TrimEnd());
         }
         catch (Exception ex)
         {
-            return new CadPreview("STEP assembly", FileKinds.BuildSubtitle(path), ex.Message);
+            Services.DiagnosticLog.Write($"step card failed {path}: {ex.GetType().Name}: {ex.Message}");
+            return new CadPreview("STEP assembly", FileKinds.BuildSubtitle(path), UnreadableDetails);
         }
     }
+
+    // The card states the outcome; the diagnostic log keeps the exception.
+    private const string UnreadableDetails = "This file couldn't be read. It may be damaged or in use.";
 
     [GeneratedRegex(@"PRODUCT\s*\(\s*'([^']*)'", RegexOptions.IgnoreCase)]
     private static partial Regex ProductRegex();

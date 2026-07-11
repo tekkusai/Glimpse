@@ -268,11 +268,11 @@ internal static class FileKinds
             if (Directory.Exists(path))
             {
                 var info = new DirectoryInfo(path);
-                return $"Folder - Modified {info.LastWriteTime:g}";
+                return $"Folder · Modified {info.LastWriteTime:g}";
             }
 
             var file = new FileInfo(path);
-            return $"{FriendlyKind(path)} - {FormatSize(file.Length)} - Modified {file.LastWriteTime:g}";
+            return $"{FriendlyKind(path)} · {FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
         }
         catch
         {
@@ -286,6 +286,13 @@ internal sealed record TextPreview(string Text, bool Truncated, long TotalBytes)
 internal static class TextPreviewLoader
 {
     public const int MaxPreviewBytes = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// The one truncation sentence, shared with the lanes that need to strip
+    /// or restate it: change it here and everywhere agrees.
+    /// </summary>
+    public static string TruncationNotice(long shownBytes, long totalBytes) =>
+        $"\n\nShowing the first {FileKinds.FormatSize(shownBytes)} of {FileKinds.FormatSize(totalBytes)}. Open the file for the rest.";
 
     public static TextPreview? TryLoad(string path)
     {
@@ -328,7 +335,7 @@ internal static class TextPreviewLoader
             var truncated = file.Length > buffer.Length;
             if (truncated)
             {
-                text += $"\n\n- Preview truncated at {FileKinds.FormatSize(buffer.Length)} of {FileKinds.FormatSize(file.Length)} -";
+                text += TruncationNotice(buffer.Length, file.Length);
             }
 
             return new TextPreview(text, truncated, file.Length);

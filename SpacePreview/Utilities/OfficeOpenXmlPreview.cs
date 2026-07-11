@@ -505,7 +505,7 @@ internal static class OfficeOpenXmlPreviewLoader
             }
 
             builder.AppendLine();
-            builder.Append("- Preview truncated -");
+            builder.Append("Showing the beginning of this document. Open the file for the rest.");
             return;
         }
 

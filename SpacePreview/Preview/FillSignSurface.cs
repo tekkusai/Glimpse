@@ -46,6 +46,8 @@ internal sealed class FillSignSurface : Grid
     private Border? _signaturePill;
     private Border? _newStampPill;
     private TextBlock? _inkTitle;
+    private StackPanel? _saveChoiceRow;
+    private TextBlock? _saveStatusLabel;
     private Grid? _flyoutHost;
     private Border? _signatureFlyout;
     private string? _selectedSignaturePath;
@@ -205,12 +207,21 @@ internal sealed class FillSignSurface : Grid
         ExitRequested?.Invoke();
     }
 
-    /// <summary>While the writer runs, nothing here accepts input.</summary>
+    /// <summary>
+    /// While the writer runs, nothing here accepts input, and the save bar
+    /// says so: replacing the original can retry for a few seconds, and
+    /// silent numbness reads as a hang.
+    /// </summary>
     public void SetSaving(bool saving)
     {
         _toolBar.IsEnabled = !saving;
         _saveBar.IsEnabled = !saving;
         _placementLayer.IsEnabled = !saving;
+        if (_saveChoiceRow is not null && _saveStatusLabel is not null)
+        {
+            _saveChoiceRow.Visibility = saving ? Visibility.Collapsed : Visibility.Visible;
+            _saveStatusLabel.Visibility = saving ? Visibility.Visible : Visibility.Collapsed;
+        }
     }
 
     // ------------------------------------------------------------------
@@ -230,18 +241,18 @@ internal sealed class FillSignSurface : Grid
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(12, 0, 0, 0)
         };
-        _signaturePill = BuildPill(palette, "Signature", () => ArmTool(SignPlacementKind.Signature),
+        _signaturePill = BuildPill("Signature", () => ArmTool(SignPlacementKind.Signature),
             isSelected: () => _armedTool == SignPlacementKind.Signature);
         tools.Children.Add(_signaturePill);
-        tools.Children.Add(BuildPill(palette, "Date", () => ArmTool(SignPlacementKind.Date),
+        tools.Children.Add(BuildPill("Date", () => ArmTool(SignPlacementKind.Date),
             isSelected: () => _armedTool == SignPlacementKind.Date));
-        tools.Children.Add(BuildPill(palette, "Stamp", () => ArmTool(SignPlacementKind.Stamp),
+        tools.Children.Add(BuildPill("Stamp", () => ArmTool(SignPlacementKind.Stamp),
             isSelected: () => _armedTool == SignPlacementKind.Stamp));
 
         // Replacing the stored stamp is offered exactly when the user is
         // holding that tool, and nowhere else. Signatures manage themselves
         // in the picker instead.
-        _newStampPill = BuildPill(palette, "New stamp", ReplaceStamp, PillRole.Ghost);
+        _newStampPill = BuildPill("New stamp", ReplaceStamp, PillRole.Ghost);
         _newStampPill.Visibility = Visibility.Collapsed;
         tools.Children.Add(_newStampPill);
         bar.Children.Add(tools);
@@ -279,8 +290,8 @@ internal sealed class FillSignSurface : Grid
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 12, 0)
         };
-        actions.Children.Add(BuildPill(palette, "Cancel", () => ExitRequested?.Invoke(), PillRole.Ghost));
-        actions.Children.Add(BuildPill(palette, "Save", ShowSaveChoice, PillRole.Accent));
+        actions.Children.Add(BuildPill("Cancel", () => ExitRequested?.Invoke(), PillRole.Ghost));
+        actions.Children.Add(BuildPill("Save", ShowSaveChoice, PillRole.Accent));
         SetColumn(actions, 2);
         bar.Children.Add(actions);
 
@@ -303,106 +314,34 @@ internal sealed class FillSignSurface : Grid
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
-        row.Children.Add(BuildPill(palette, "Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent));
-        row.Children.Add(BuildPill(palette, "Replace the original", () => RequestSave(overwrite: true)));
-        row.Children.Add(BuildPill(palette, "Keep editing", HideSaveChoice, PillRole.Ghost));
+        row.Children.Add(BuildPill("Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent));
+        row.Children.Add(BuildPill("Replace the original", () => RequestSave(overwrite: true)));
+        row.Children.Add(BuildPill("Keep editing", HideSaveChoice, PillRole.Ghost));
+        _saveChoiceRow = row;
         bar.Children.Add(row);
+
+        _saveStatusLabel = new TextBlock
+        {
+            Text = "Saving…",
+            FontSize = Metrics.FontLabel,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Theme.Brush(palette.TextSecondary),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed
+        };
+        bar.Children.Add(_saveStatusLabel);
         return bar;
     }
 
-    private enum PillRole
-    {
-        Surface,
-        Accent,
-        Ghost
-    }
-
     /// <summary>
-    /// The app's pill, in code: Metrics corners and padding, Surface fill
-    /// with HoverBg/PressedBg motion, action on release. Accent is reserved
-    /// for the mode's single commit action; Ghost is for quiet exits.
+    /// The house pill (see <see cref="HousePill"/>), with its refresher
+    /// enrolled so armed-tool state can repaint every pill at once.
     /// </summary>
-    private Border BuildPill(ThemePalette palette, string label, Action onClick, PillRole role = PillRole.Surface, Func<bool>? isSelected = null)
+    private Border BuildPill(string label, Action onClick, PillRole role = PillRole.Surface, Func<bool>? isSelected = null)
     {
-        var text = new TextBlock
-        {
-            Text = label,
-            FontSize = 12.5,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = role == PillRole.Accent
-                ? Brushes.White
-                : Theme.Brush(role == PillRole.Ghost ? palette.TextSecondary : palette.TextPrimary),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        var pill = new Border
-        {
-            Margin = new Thickness(0, 0, 8, 0),
-            Padding = Metrics.PillPadding,
-            CornerRadius = Metrics.PillCorner,
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = text
-        };
-
-        void Rest()
-        {
-            pill.Opacity = 1;
-            if (role == PillRole.Accent)
-            {
-                pill.Background = Theme.Brush(palette.Accent);
-                pill.BorderBrush = Theme.Brush(palette.Accent);
-                return;
-            }
-
-            var selected = isSelected?.Invoke() == true;
-            pill.Background = selected
-                ? Theme.Brush(palette.PressedBg)
-                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.SurfaceBg);
-            pill.BorderBrush = selected
-                ? Theme.Brush(palette.Accent)
-                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.SurfaceBorder);
-            text.Foreground = selected || role != PillRole.Ghost
-                ? Theme.Brush(palette.TextPrimary)
-                : Theme.Brush(palette.TextSecondary);
-        }
-
-        pill.MouseEnter += (_, _) =>
-        {
-            if (role == PillRole.Accent)
-            {
-                pill.Opacity = 0.9;
-            }
-            else if (isSelected?.Invoke() != true)
-            {
-                pill.Background = Theme.Brush(palette.HoverBg);
-            }
-        };
-        pill.MouseLeave += (_, _) => Rest();
-        pill.MouseLeftButtonDown += (_, e) =>
-        {
-            if (role == PillRole.Accent)
-            {
-                pill.Opacity = 0.82;
-            }
-            else
-            {
-                pill.Background = Theme.Brush(palette.PressedBg);
-            }
-
-            e.Handled = true;
-        };
-        pill.MouseLeftButtonUp += (_, e) =>
-        {
-            Rest();
-            onClick();
-            e.Handled = true;
-        };
-
-        _pillRefreshers.Add(Rest);
-        Rest();
+        var pill = HousePill.Build(label, onClick, out var refresh, role, isSelected);
+        _pillRefreshers.Add(refresh);
         return pill;
     }
 
@@ -694,7 +633,7 @@ internal sealed class FillSignSurface : Grid
             column.Children.Add(BuildSignatureRow(palette, path));
         }
 
-        var newPill = BuildPill(palette, "New signature", ShowInkCapture, PillRole.Ghost);
+        var newPill = BuildPill("New signature", ShowInkCapture, PillRole.Ghost);
         newPill.Margin = new Thickness(0, 6, 0, 0);
         newPill.HorizontalAlignment = HorizontalAlignment.Center;
         column.Children.Add(newPill);
@@ -1121,11 +1060,20 @@ internal sealed class FillSignSurface : Grid
             return;
         }
 
+        // Dressed to the page, not the system: white paper, black ink, and
+        // an accent hairline standing in for the dashed selection outline.
         var editor = new TextBox
         {
             Text = label.Text,
             FontSize = label.FontSize,
             FontFamily = label.FontFamily,
+            Background = Brushes.White,
+            Foreground = Brushes.Black,
+            CaretBrush = Brushes.Black,
+            BorderBrush = Theme.Brush(Theme.Current.Accent),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(0),
+            FocusVisualStyle = null,
             VerticalContentAlignment = VerticalAlignment.Center,
             HorizontalContentAlignment = HorizontalAlignment.Center
         };
@@ -1195,7 +1143,7 @@ internal sealed class FillSignSurface : Grid
     {
         var overlay = new Grid
         {
-            Background = new SolidColorBrush(Color.FromArgb(0xB0, 0x10, 0x11, 0x14)),
+            Background = Theme.Brush(Theme.OverlayScrim),
             Visibility = Visibility.Collapsed
         };
 
@@ -1238,9 +1186,9 @@ internal sealed class FillSignSurface : Grid
             HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 12, 0, 0)
         };
-        buttons.Children.Add(BuildPill(palette, "Use it", CommitInk, PillRole.Accent));
-        buttons.Children.Add(BuildPill(palette, "Clear", ClearInk));
-        buttons.Children.Add(BuildPill(palette, "Back", HideInkCapture, PillRole.Ghost));
+        buttons.Children.Add(BuildPill("Use it", CommitInk, PillRole.Accent));
+        buttons.Children.Add(BuildPill("Clear", ClearInk));
+        buttons.Children.Add(BuildPill("Back", HideInkCapture, PillRole.Ghost));
         column.Children.Add(buttons);
 
         card.Child = column;

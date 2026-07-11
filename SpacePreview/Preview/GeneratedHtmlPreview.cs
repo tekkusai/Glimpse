@@ -236,7 +236,8 @@ internal static partial class GeneratedHtmlPreview
         var source = preview.Text;
         if (preview.Truncated)
         {
-            var marker = $"\n\n- Preview truncated at {FileKinds.FormatSize(Math.Min(preview.TotalBytes, TextPreviewLoader.MaxPreviewBytes))} of {FileKinds.FormatSize(preview.TotalBytes)} -";
+            var marker = TextPreviewLoader.TruncationNotice(
+                Math.Min(preview.TotalBytes, TextPreviewLoader.MaxPreviewBytes), preview.TotalBytes);
             if (source.EndsWith(marker, StringComparison.Ordinal))
             {
                 source = source[..^marker.Length];

@@ -170,7 +170,7 @@ internal static partial class EpubPreviewLoader
 
                 if (remaining <= 0)
                 {
-                    builder.Append("<p><em>Preview truncated. Open the book for the rest.</em></p>");
+                    builder.Append("<p><em>Showing the beginning of this book. Open the book for the rest.</em></p>");
                 }
             }
 
