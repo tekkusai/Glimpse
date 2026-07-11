@@ -1,0 +1,9 @@
+<Application x:Class="SpacePreview.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- NOTE: resources declared here never load. This app has no StartupUri,
+         so the generated Main() skips InitializeComponent entirely. Shared
+         resources live in Themes\*.xaml and are merged in App.OnStartup. -->
+    <Application.Resources>
+    </Application.Resources>
+</Application>

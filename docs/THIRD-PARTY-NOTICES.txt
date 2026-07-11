@@ -1,0 +1,5 @@
+Glimpse includes and uses third-party components at runtime.
+
+PDF rendering is provided through Docnet.Core, which includes PDFium binaries and notices in the published output. Web-backed previews use Microsoft WebView2 when it is installed on the machine or installed by the setup program. Archive previews use SharpCompress. Markdown rendering uses Markdig. Syntax highlighting uses TextMateSharp and Onigwrap.
+
+Each dependency keeps its own license. Glimpse's own source license is in LICENSE in the source repository and LICENSE.txt in published output.

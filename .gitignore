@@ -1,0 +1,30 @@
+# Build output
+bin/
+obj/
+artifacts/
+publish/
+TestResults/
+
+# IDE/editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local app data and diagnostics
+*.log
+*.tmp
+*.bak
+*.cache
+*.dmp
+*.etl
+
+# Installer/downloaded payloads
+SpacePreview/installer/assets/*.exe
+SpacePreview/installer/assets/*.msi
+
+# Probe artifacts
+probe-*.png
