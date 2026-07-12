@@ -35,7 +35,7 @@ Don't commit generated installers, publish directories, bootstrapper downloads, 
 
 ## Publish on GitHub
 
-Attach `Glimpse-Setup-<version>.exe` to the release. It should be the obvious choice for users; GitHub's source archives are for developers.
+Publish it as a stable release, not a draft or prerelease. Attach both `Glimpse-Setup-<version>.exe` and its generated `.sha256` sidecar. Keep the release tag and both asset names on the same three-part version; the in-app updater rejects missing, renamed, or mismatched assets. The installer should be the obvious choice for users; GitHub's source archives are for developers.
 
 Write release notes for people using the app, not as a dump of commit messages. Start with what changed in day-to-day use, mention any compatibility or installation concerns, and include the installer's SHA-256. If the build isn't code-signed, say so plainly so the SmartScreen warning isn't a surprise.
 

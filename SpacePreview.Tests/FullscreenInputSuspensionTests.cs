@@ -16,6 +16,7 @@ public sealed class FullscreenInputSuspensionTests
     [InlineData("WorkerW")]
     [InlineData("CabinetWClass")]
     [InlineData("ExploreWClass")]
+    [InlineData("XamlExplorerHostIslandWindow")]
     [InlineData("Shell_TrayWnd")]
     [InlineData("Shell_SecondaryTrayWnd")]
     public void ShellAndExplorerWindowsNeverSuspendInput(string className)

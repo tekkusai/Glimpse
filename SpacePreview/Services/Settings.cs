@@ -33,6 +33,15 @@ internal sealed record Settings
     public Dictionary<string, PreviewAccessWarningHistoryEntry> PreviewAccessWarnings { get; init; } =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// The release whose automatic update prompt was most recently dismissed.
+    /// A different release always gets its own first prompt.
+    /// </summary>
+    public string? UpdateNotificationVersion { get; init; }
+
+    /// <summary>When that release may be offered automatically again.</summary>
+    public DateTimeOffset? UpdateNotificationSnoozedUntilUtc { get; init; }
+
     // Stage size is deliberately not persisted: content shapes the stage,
     // and a border-drag holds only until the preview closes.
 
@@ -98,7 +107,24 @@ internal sealed record Settings
             }
         }
 
-        return settings with { PreviewAccessWarnings = history };
+        var notificationVersion = settings.UpdateNotificationVersion?.Trim();
+        var snoozedUntil = settings.UpdateNotificationSnoozedUntilUtc?.ToUniversalTime();
+        if (!AppUpdateService.TryParseVersion(notificationVersion, out var parsedNotificationVersion))
+        {
+            notificationVersion = null;
+            snoozedUntil = null;
+        }
+        else
+        {
+            notificationVersion = parsedNotificationVersion.ToString(3);
+        }
+
+        return settings with
+        {
+            PreviewAccessWarnings = history,
+            UpdateNotificationVersion = notificationVersion,
+            UpdateNotificationSnoozedUntilUtc = snoozedUntil
+        };
     }
 
     public void Save()

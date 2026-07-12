@@ -4,6 +4,22 @@ namespace SpacePreview.Tests;
 
 public sealed class PreviewInputPolicyTests
 {
+    [Theory]
+    [InlineData("CabinetWClass")]
+    [InlineData("ExploreWClass")]
+    [InlineData("XamlExplorerHostIslandWindow")]
+    public void SupportedExplorerRootsResolveToExplorerSelection(string className)
+    {
+        var context = PreviewInputPolicy.ResolveForegroundContext(
+            new IntPtr(0x1000),
+            className,
+            ignoreTextEditing: true,
+            rootThreadHasTextEditingFocus: false);
+
+        Assert.NotNull(context);
+        Assert.Equal(SelectionSource.Explorer, context!.Source);
+    }
+
     [Fact]
     public void DesktopContextIsSuppressedWhileTextEditingWhenSpaceWouldBeCaptured()
     {
@@ -97,6 +113,27 @@ public sealed class PreviewInputPolicyTests
             foregroundRoot: new IntPtr(0x2000),
             previewHwnd: new IntPtr(0x1000),
             ownerRootHwnd: new IntPtr(0x2000)));
+    }
+
+    [Fact]
+    public void SpaceYieldsToRenameOnlyInThePreviewOwnerWindow()
+    {
+        var owner = new IntPtr(0x2000);
+
+        Assert.True(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(owner, owner, ownerIsTextEditing: true));
+        Assert.False(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(owner, owner, ownerIsTextEditing: false));
+        Assert.False(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(new IntPtr(0x3000), owner, ownerIsTextEditing: true));
+    }
+
+    [Fact]
+    public void ControllerChecksRenameBeforeTakingTheSpaceLatch()
+    {
+        var method = TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown");
+        var spaceBranch = method[method.LastIndexOf("if (vk == NativeMethods.VK_SPACE", StringComparison.Ordinal)..];
+
+        Assert.True(
+            spaceBranch.IndexOf("ShouldYieldSpaceToOwnerTextEditing", StringComparison.Ordinal)
+            < spaceBranch.IndexOf("_spaceKey.TryPress", StringComparison.Ordinal));
     }
 
     [Fact]

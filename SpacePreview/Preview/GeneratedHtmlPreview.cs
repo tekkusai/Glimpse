@@ -1,4 +1,6 @@
+using System.Buffers.Binary;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -29,6 +31,7 @@ internal static partial class GeneratedHtmlPreview
     private static readonly SyntaxState Syntax = new();
 
     private static readonly MarkdownPipeline MarkdownPipeline = new MarkdownPipelineBuilder()
+        .DisableHtml()
         .UsePipeTables()
         .UseTaskLists()
         .UseAutoLinks()
@@ -40,11 +43,16 @@ internal static partial class GeneratedHtmlPreview
     {
         try
         {
+            var preview = TextPreviewLoader.TryLoad(path);
+            if (preview is null)
+            {
+                return null;
+            }
+
             var theme = Theme.Current.IsDark ? "dark" : "light";
-            var stamp = new FileInfo(path);
             var htmlPath = PreviewWindow.TempHtmlPath(
                 "MarkdownHtml",
-                $"{path}|{stamp.LastWriteTimeUtc.Ticks}|{Theme.Current.IsDark}|md-v1");
+                $"{path}|{StableTextContentToken(preview)}|{Theme.Current.IsDark}|md-v2");
             var directory = Path.GetDirectoryName(Path.GetFullPath(path));
             var host = $"glimpse-md-{StableToken(path)}.local".ToLowerInvariant();
             if (HasCachedHtml(htmlPath))
@@ -56,12 +64,6 @@ internal static partial class GeneratedHtmlPreview
                     directory is null ? null : host,
                     directory,
                     BackgroundForTheme());
-            }
-
-            var preview = TextPreviewLoader.TryLoad(path);
-            if (preview is null)
-            {
-                return null;
             }
 
             var source = MarkdownSourceWithoutLoaderNotice(preview);
@@ -120,11 +122,17 @@ internal static partial class GeneratedHtmlPreview
                     preserveFallbackText ? TextPreviewLoader.TryLoad(path) : null);
             }
 
-            var stamp = new FileInfo(path);
+            loadedText = TextPreviewLoader.TryLoad(path);
+            if (loadedText is null)
+            {
+                return new GeneratedCodeAttempt(null, null);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
             var theme = Theme.Current.IsDark ? "dark" : "light";
             var htmlPath = PreviewWindow.TempHtmlPath(
                 "CodeHtml",
-                $"{path}|{stamp.LastWriteTimeUtc.Ticks}|{Theme.Current.IsDark}|code-v1");
+                $"{path}|{StableTextContentToken(loadedText)}|{Theme.Current.IsDark}|code-v2");
             if (HasCachedHtml(htmlPath))
             {
                 return new GeneratedCodeAttempt(
@@ -136,12 +144,6 @@ internal static partial class GeneratedHtmlPreview
                         null,
                         BackgroundForTheme()),
                     null);
-            }
-
-            loadedText = TextPreviewLoader.TryLoad(path);
-            if (loadedText is null)
-            {
-                return new GeneratedCodeAttempt(null, null);
             }
 
             if (!CanHighlightCodeLength(loadedText.Text.Length))
@@ -187,15 +189,15 @@ internal static partial class GeneratedHtmlPreview
         }
     }
 
-    public static GeneratedHtmlDocument? TryBuildEpub(string path)
+    public static GeneratedHtmlDocument? TryBuildEpub(string path, CancellationToken cancellationToken = default)
     {
         try
         {
-            var stamp = new FileInfo(path);
+            cancellationToken.ThrowIfCancellationRequested();
             var theme = Theme.Current.IsDark ? "dark" : "light";
             var htmlPath = PreviewWindow.TempHtmlPath(
                 "EpubHtml",
-                $"{path}|{stamp.LastWriteTimeUtc.Ticks}|{Theme.Current.IsDark}|epub-v1");
+                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{Theme.Current.IsDark}|epub-v3");
             if (HasCachedHtml(htmlPath))
             {
                 return new GeneratedHtmlDocument(
@@ -207,12 +209,13 @@ internal static partial class GeneratedHtmlPreview
                     BackgroundForTheme());
             }
 
-            var body = EpubPreviewLoader.TryBuildBody(path);
+            var body = EpubPreviewLoader.TryBuildBody(path, cancellationToken);
             if (body is null)
             {
                 return null;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             var html = BuildShell(theme, null, body);
             WriteCachedHtml(htmlPath, html);
 
@@ -223,6 +226,10 @@ internal static partial class GeneratedHtmlPreview
                 null,
                 null,
                 BackgroundForTheme());
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -548,6 +555,38 @@ internal static partial class GeneratedHtmlPreview
     {
         var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant()));
         return Convert.ToHexString(bytes)[..12];
+    }
+
+    private static string StableTextContentToken(TextPreview preview)
+    {
+        var content = $"{preview.Truncated}|{preview.TotalBytes}|{preview.Text}";
+        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(content));
+        return Convert.ToHexString(bytes);
+    }
+
+    internal static string StableEpubContentToken(string path, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        using var archive = ZipFile.OpenRead(path);
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Span<byte> metadata = stackalloc byte[29];
+        foreach (var entry in archive.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var name = Encoding.UTF8.GetBytes(entry.FullName);
+            BinaryPrimitives.WriteInt32LittleEndian(metadata[..4], name.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(metadata.Slice(4, 8), entry.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(metadata.Slice(12, 8), entry.CompressedLength);
+            BinaryPrimitives.WriteUInt32LittleEndian(metadata.Slice(20, 4), entry.Crc32);
+            BinaryPrimitives.WriteInt32LittleEndian(metadata.Slice(24, 4), entry.ExternalAttributes);
+            metadata[28] = entry.IsEncrypted ? (byte)1 : (byte)0;
+            hash.AppendData(metadata);
+            hash.AppendData(name);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     [GeneratedRegex("<pre><code([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]

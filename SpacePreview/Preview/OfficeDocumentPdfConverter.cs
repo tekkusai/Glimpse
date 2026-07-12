@@ -33,6 +33,9 @@ internal static class OfficeDocumentPdfConverter
     private const int ProgressiveDocumentPageThreshold = 25;
     private const long ProgressiveDocumentSizeThreshold = 1_500_000;
     private const long MaxAppPropertiesBytes = 256 * 1024;
+    private const string BlockedProxyHost = "127.0.0.1";
+    private const int BlockedProxyPort = 9;
+    private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
     private static readonly SemaphoreSlim ConversionLane = new(1, 1);
 
     /// <summary>Whether the conversion engine exists on this machine.</summary>
@@ -345,6 +348,73 @@ internal static class OfficeDocumentPdfConverter
         AppPaths.DataRoot,
         "LibreOfficeProfile");
 
+    internal static void PrepareNetworkIsolatedProfile(string profileDirectory)
+    {
+        var userDirectory = Path.Combine(profileDirectory, "user");
+        Directory.CreateDirectory(userDirectory);
+        var settingsPath = Path.Combine(userDirectory, "registrymodifications.xcu");
+
+        XDocument document;
+        if (File.Exists(settingsPath))
+        {
+            document = XDocument.Load(settingsPath, LoadOptions.PreserveWhitespace);
+        }
+        else
+        {
+            document = new XDocument(
+                new XDeclaration("1.0", "UTF-8", null),
+                new XElement(
+                    OfficeRegistry + "items",
+                    new XAttribute(XNamespace.Xmlns + "oor", OfficeRegistry)));
+        }
+
+        var root = document.Root ?? throw new InvalidDataException("LibreOffice profile has no settings root.");
+        const string settingsNode = "/org.openoffice.Inet/Settings";
+        var values = new (string Name, string Value)[]
+        {
+            ("ooInetProxyType", "2"),
+            ("ooInetHTTPProxyName", BlockedProxyHost),
+            ("ooInetHTTPProxyPort", BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ("ooInetHTTPSProxyName", BlockedProxyHost),
+            ("ooInetHTTPSProxyPort", BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ("ooInetNoProxy", string.Empty)
+        };
+
+        var protectedNames = values.Select(value => value.Name).ToHashSet(StringComparer.Ordinal);
+        foreach (var item in root.Elements("item")
+                     .Where(item => (string?)item.Attribute(OfficeRegistry + "path") == settingsNode)
+                     .ToList())
+        {
+            foreach (var property in item.Elements("prop")
+                         .Where(property => protectedNames.Contains((string?)property.Attribute(OfficeRegistry + "name") ?? string.Empty))
+                         .ToList())
+            {
+                property.Remove();
+            }
+
+            if (!item.Elements().Any())
+            {
+                item.Remove();
+            }
+        }
+
+        var networkItem = new XElement("item", new XAttribute(OfficeRegistry + "path", settingsNode));
+        foreach (var (name, value) in values)
+        {
+            networkItem.Add(
+                new XElement(
+                    "prop",
+                    new XAttribute(OfficeRegistry + "name", name),
+                    new XAttribute(OfficeRegistry + "op", "fuse"),
+                    new XElement("value", value)));
+        }
+
+        root.Add(networkItem);
+        var tempPath = settingsPath + ".tmp";
+        document.Save(tempPath);
+        File.Move(tempPath, settingsPath, overwrite: true);
+    }
+
     private static ConvertedOfficeDocument? RunConversion(
         string soffice,
         string path,
@@ -382,13 +452,23 @@ internal static class OfficeDocumentPdfConverter
         }
 
         var profileDirectory = GetProfileDirectory();
-        Directory.CreateDirectory(profileDirectory);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(ConversionTimeoutSeconds));
 
         try
         {
+            using var preparedSource = OfficePreviewSourceSanitizer.Prepare(
+                path,
+                cacheDirectory,
+                timeout.Token);
+            if (preparedSource.ExternalRelationshipsRemoved > 0)
+            {
+                DiagnosticLog.Write(
+                    $"office external relationships removed count={preparedSource.ExternalRelationshipsRemoved} {path}");
+            }
+
+            PrepareNetworkIsolatedProfile(profileDirectory);
             using var process = new Process();
             process.StartInfo.FileName = soffice;
             process.StartInfo.UseShellExecute = false;
@@ -397,6 +477,14 @@ internal static class OfficeDocumentPdfConverter
             process.StartInfo.RedirectStandardError = true;
             process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
             process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
+            var blockedProxy = $"http://{BlockedProxyHost}:{BlockedProxyPort}";
+            foreach (var key in new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" })
+            {
+                process.StartInfo.Environment[key] = blockedProxy;
+            }
+
+            process.StartInfo.Environment["NO_PROXY"] = string.Empty;
+            process.StartInfo.Environment["no_proxy"] = string.Empty;
             process.StartInfo.ArgumentList.Add("--headless");
             process.StartInfo.ArgumentList.Add("--nologo");
             process.StartInfo.ArgumentList.Add("--nodefault");
@@ -408,7 +496,7 @@ internal static class OfficeDocumentPdfConverter
             process.StartInfo.ArgumentList.Add(convertTo);
             process.StartInfo.ArgumentList.Add("--outdir");
             process.StartInfo.ArgumentList.Add(cacheDirectory);
-            process.StartInfo.ArgumentList.Add(path);
+            process.StartInfo.ArgumentList.Add(preparedSource.Path);
 
             DiagnosticLog.Write($"office conversion start {path}");
             process.Start();

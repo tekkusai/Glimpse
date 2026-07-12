@@ -90,6 +90,20 @@ public sealed class HookPathArchitectureTests
     }
 
     [Fact]
+    public void HeaderInteractionReturnsVerticalArrowsToPreviewBrowsing()
+    {
+        var activation = TestSource.CodeMethod(
+            @"SpacePreview\Preview\PreviewWindow.xaml.cs",
+            "ActivateForInteraction");
+        var headerBranch = activation.IndexOf("if (!clickedContent)", StringComparison.Ordinal);
+        var engagementReset = activation.IndexOf("_userEngagedContent = false", headerBranch, StringComparison.Ordinal);
+        var branchReturn = activation.IndexOf("return;", headerBranch, StringComparison.Ordinal);
+
+        Assert.True(headerBranch >= 0);
+        Assert.True(engagementReset > headerBranch && engagementReset < branchReturn);
+    }
+
+    [Fact]
     public void TrayIconDrawsTheBrandGlint()
     {
         var body = TestSource.CodeMethod(@"SpacePreview\Services\TrayIcon.cs", "BuildVisual");

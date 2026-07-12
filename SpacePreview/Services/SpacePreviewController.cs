@@ -75,6 +75,12 @@ internal sealed class SpacePreviewController : IDisposable
 
     public event Action<PreviewAccessWarningInfo>? PreviewAccessWarningDetected;
 
+    internal bool CanShowUpdateNotification =>
+        !_disposed
+        && !_previewVisible
+        && _pinnedWindows.Count == 0
+        && !_fullscreenInputSuspension.IsSuspended;
+
     public SpacePreviewController(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
@@ -442,6 +448,21 @@ internal sealed class SpacePreviewController : IDisposable
 
         if (vk == NativeMethods.VK_SPACE && NoModifierKeysDown())
         {
+            if (_previewVisible)
+            {
+                var foregroundRoot = GetForegroundRoot();
+                var ownerIsTextEditing = foregroundRoot == _previewOwnerRootHwnd
+                    && ExplorerSelectionService.IsWindowTextEditing(_previewOwnerRootHwnd);
+                if (PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(
+                        foregroundRoot,
+                        _previewOwnerRootHwnd,
+                        ownerIsTextEditing))
+                {
+                    DiagnosticLog.Write("space -> owner text editor");
+                    return false;
+                }
+            }
+
             if (!_spaceKey.TryPress())
             {
                 _spaceKey.RepairIfReleased();

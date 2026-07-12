@@ -121,6 +121,74 @@ public sealed class EpubPreviewLoaderTests
         Assert.Empty(chapters!);
     }
 
+    [Fact]
+    public void GeneratedEpubCacheChangesWhenContentChangesButModifiedTimeDoesNot()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "changing.epub");
+        CreateMinimalEpub(path, chapter2Text: "AAAA");
+        var modified = File.GetLastWriteTimeUtc(path);
+        var first = GeneratedHtmlPreview.TryBuildEpub(path);
+
+        File.Delete(path);
+        CreateMinimalEpub(path, chapter2Text: "BBBB");
+        File.SetLastWriteTimeUtc(path, modified);
+        var second = GeneratedHtmlPreview.TryBuildEpub(path);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.HtmlPath, second!.HtmlPath);
+        Assert.Contains("BBBB", File.ReadAllText(second.HtmlPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratedEpubCacheTokenHonorsCancellation()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "cancelled.epub");
+        CreateMinimalEpub(path);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() =>
+            GeneratedHtmlPreview.TryBuildEpub(path, cancellation.Token));
+    }
+
+    [Fact]
+    public void TryBuildBodyRethrowsCancellation()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "cancelled-body.epub");
+        CreateMinimalEpub(path);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() =>
+            EpubPreviewLoader.TryBuildBody(path, cancellation.Token));
+    }
+
+    [Fact]
+    public void GeneratedEpubPassesCancellationIntoBodyExtraction()
+    {
+        var method = TestSource.CodeMethod(
+            @"SpacePreview\Preview\GeneratedHtmlPreview.cs",
+            "TryBuildEpub");
+
+        Assert.Contains("TryBuildBody(path, cancellationToken)", method, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void GeneratedEpubCacheTokenUsesZipDirectoryChecksumsInsteadOfPayloadReads()
+    {
+        var method = TestSource.CodeMethod(
+            @"SpacePreview\Preview\GeneratedHtmlPreview.cs",
+            "StableEpubContentToken");
+
+        Assert.Contains("entry.Crc32", method, StringComparison.Ordinal);
+        Assert.Contains("entry.CompressedLength", method, StringComparison.Ordinal);
+        Assert.DoesNotContain("stream.Read", method, StringComparison.Ordinal);
+    }
+
     private static void CreateMinimalEpub(
         string path,
         bool encrypted = false,

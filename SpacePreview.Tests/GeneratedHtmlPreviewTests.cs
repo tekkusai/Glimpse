@@ -48,6 +48,40 @@ tags:
     }
 
     [Fact]
+    public void MarkdownTreatsRawHtmlAsTextInsteadOfBrowserInstructions()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "refresh.md");
+        File.WriteAllText(path, "<meta http-equiv=\"refresh\" content=\"0;url=https://example.com/\">\n\n# Notes");
+
+        var document = GeneratedHtmlPreview.TryBuildMarkdown(path);
+
+        Assert.NotNull(document);
+        var html = File.ReadAllText(document!.HtmlPath);
+        Assert.DoesNotContain("<meta http-equiv", html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Notes", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MarkdownCacheChangesWhenContentChangesButModifiedTimeDoesNot()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "notes.md");
+        File.WriteAllText(path, "# First\n\nAAAA");
+        var modified = File.GetLastWriteTimeUtc(path);
+        var first = GeneratedHtmlPreview.TryBuildMarkdown(path);
+
+        File.WriteAllText(path, "# First\n\nBBBB");
+        File.SetLastWriteTimeUtc(path, modified);
+        var second = GeneratedHtmlPreview.TryBuildMarkdown(path);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.HtmlPath, second!.HtmlPath);
+        Assert.Contains("BBBB", File.ReadAllText(second.HtmlPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MarkdownSourceWithoutLoaderNoticeKeepsTruncationOutOfRenderedMarkdown()
     {
         const long totalBytes = TextPreviewLoader.MaxPreviewBytes + 1024;
@@ -119,6 +153,25 @@ tags:
     }
 
     [Fact]
+    public void CodeCacheChangesWhenContentChangesButModifiedTimeDoesNot()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "preserved.json");
+        File.WriteAllText(path, "{\"value\":\"AAAA\"}");
+        var modified = File.GetLastWriteTimeUtc(path);
+        var first = GeneratedHtmlPreview.TryBuildCode(path);
+
+        File.WriteAllText(path, "{\"value\":\"BBBB\"}");
+        File.SetLastWriteTimeUtc(path, modified);
+        var second = GeneratedHtmlPreview.TryBuildCode(path);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.NotEqual(first!.HtmlPath, second!.HtmlPath);
+        Assert.Contains("BBBB", File.ReadAllText(second.HtmlPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TryBuildCodeHonorsCancellationBeforeSyntaxWork()
     {
         using var temp = new TempDirectory();
@@ -157,16 +210,26 @@ tags:
     [Fact]
     public void PathologicalSingleLineGetsTheTighterNativeDisplayBudget()
     {
-        Assert.True(FileKinds.IsText("sample.torrent"));
         var source = new string('x', PreviewWindow.LongLineDisplayLimit) + "TAIL";
         var preview = new TextPreview(source, Truncated: false, TotalBytes: source.Length);
 
-        var formatted = PreviewWindow.FormatTextPreview("sample.torrent", preview);
+        var formatted = PreviewWindow.FormatTextPreview("sample.map", preview);
 
         Assert.NotNull(formatted);
         Assert.False(formatted.Value.Wrap);
         Assert.DoesNotContain("TAIL", formatted.Value.Text, StringComparison.Ordinal);
         Assert.Contains("Showing the first", formatted.Value.Text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("sample.torrent")]
+    [InlineData("README.torrent")]
+    [InlineData("LICENSE.torrent")]
+    [InlineData(".env.backup.torrent")]
+    public void TorrentMetadataUsesTheLightweightFileCardInsteadOfRawBencodedText(string path)
+    {
+        Assert.False(FileKinds.IsText(path));
+        Assert.True(FileKinds.CanUseSignatureRouting(path));
     }
 
     [Fact]

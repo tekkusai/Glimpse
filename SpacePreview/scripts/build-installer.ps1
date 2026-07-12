@@ -42,5 +42,10 @@ Assert-SignedBy -Path $bootstrapper -Publisher "Microsoft Corporation"
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
 
 $setup = Join-Path $root "artifacts\installer\Glimpse-Setup-$version.exe"
+$hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash
+$checksum = "$setup.sha256"
+$checksumLine = "$hash  $(Split-Path -Leaf $setup)"
+[System.IO.File]::WriteAllText($checksum, $checksumLine + [Environment]::NewLine, [System.Text.Encoding]::ASCII)
 Write-Host ("Installer: {0} ({1:N1} MB)" -f $setup, ((Get-Item $setup).Length / 1MB))
-Write-Host ("SHA256: {0}" -f (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash)
+Write-Host ("Checksum: {0}" -f $checksum)
+Write-Host ("SHA256: {0}" -f $hash)

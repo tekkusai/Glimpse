@@ -13,6 +13,7 @@ internal sealed class FullscreenInputSuspension : IDisposable
         "WorkerW",
         "CabinetWClass",
         "ExploreWClass",
+        "XamlExplorerHostIslandWindow",
         "Shell_TrayWnd",
         "Shell_SecondaryTrayWnd"
     };

@@ -1319,6 +1319,7 @@ public partial class PreviewWindow : Window
             // Small yield so rapid arrow-key navigation coalesces on the newest file.
             await Task.Delay(20, token);
             FrameworkElement content;
+            string? fillSignPath = null;
             if (Directory.Exists(contentPath))
             {
                 // A folder's first frame is entirely local UI. Shell icons,
@@ -1341,8 +1342,7 @@ public partial class PreviewWindow : Window
                     {
                         // The one lane fill and sign serves: real .pdf files,
                         // never conversion artifacts.
-                        _fillSignPath = contentPath;
-                        UpdateFillSignPill();
+                        fillSignPath = contentPath;
                     }
 
                     content = nativePdf
@@ -1398,6 +1398,8 @@ public partial class PreviewWindow : Window
                 return;
             }
 
+            _fillSignPath = fillSignPath;
+            UpdateFillSignPill();
             SetPreviewContent(content, disposable);
         }
         catch (OperationCanceledException)
@@ -1408,6 +1410,8 @@ public partial class PreviewWindow : Window
             DiagnosticLog.Write($"preview load failed {path}: {ex.GetType().Name}: {ex.Message}");
             if (!token.IsCancellationRequested && version == _loadVersion)
             {
+                _fillSignPath = null;
+                UpdateFillSignPill();
                 SetPreviewContent(BuildErrorPreview("Glimpse can't preview this file", "Something went wrong while reading it."), null);
             }
         }
@@ -1520,7 +1524,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsEpub(path) || zipPackage == ZipPackageKind.Epub)
         {
-            var epub = await Task.Run(() => GeneratedHtmlPreview.TryBuildEpub(path), token);
+            var epub = await Task.Run(() => GeneratedHtmlPreview.TryBuildEpub(path, token), token);
             if (epub is not null)
             {
                 return BuildEpubWebPreview(epub, path, token);
@@ -1564,7 +1568,7 @@ public partial class PreviewWindow : Window
 
             if (FileKinds.IsStl(path))
             {
-                var cadPreview = await Task.Run(() => CadPreviewLoader.TryLoadStl(path), token);
+                var cadPreview = await Task.Run(() => CadPreviewLoader.TryLoadStl(path, token), token);
                 return BuildCadPreview(cadPreview, "#C8A2FF");
             }
 
@@ -2430,7 +2434,10 @@ public partial class PreviewWindow : Window
                     break;
                 case GeneratedHtmlNavigationAction.OpenExternally:
                     args.Cancel = true;
-                    OpenExternalUri(args.Uri);
+                    if (args.IsUserInitiated)
+                    {
+                        OpenExternalUri(args.Uri);
+                    }
                     break;
                 default:
                     args.Cancel = true;
@@ -2440,7 +2447,8 @@ public partial class PreviewWindow : Window
         core.NewWindowRequested += (_, args) =>
         {
             args.Handled = true;
-            if (DecideGeneratedHtmlNavigation(document.HtmlPath, document.ResourceHost, args.Uri) == GeneratedHtmlNavigationAction.OpenExternally)
+            if (args.IsUserInitiated
+                && DecideGeneratedHtmlNavigation(document.HtmlPath, document.ResourceHost, args.Uri) == GeneratedHtmlNavigationAction.OpenExternally)
             {
                 OpenExternalUri(args.Uri);
             }
@@ -3185,20 +3193,11 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height), state.Version);
     }
 
+    // Direct PDFs use the same short-lived helper as converted Office PDFs.
+    // A malformed or incompatible document can crash native PDFium, but it
+    // must never take the resident preview process down with it.
     private Task LoadPdfPageRailAsync(PdfPageRailState state) =>
-        LoadPdfPageRailCoreAsync(
-            state,
-            (pageLimit, startPage) => Task.Run(
-                () => PdfPreviewRenderer.TryRenderThumbnails(
-                    state.Path,
-                    state.Token,
-                    pageLimit,
-                    startPage),
-                state.Token),
-            () => Task.Run(
-                () => PdfPreviewRenderer.TryRenderThumbnails(state.Path, state.Token),
-                state.Token),
-            "pdf page rail");
+        LoadPdfPageRailOutOfProcessAsync(state);
 
     private Task LoadPdfPageRailOutOfProcessAsync(PdfPageRailState state) =>
         LoadPdfPageRailCoreAsync(
@@ -9037,7 +9036,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
     private async Task EnterFillSignModeAsync()
     {
-        if (_fillSignPath is not { } path || _fillSignSurface is not null)
+        if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))
         {
             return;
         }
@@ -9046,7 +9045,17 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var pageIndex = Math.Max(0, (_activePdfRail?.CurrentPage ?? 1) - 1);
         var totalPages = _activePdfRail?.Document?.TotalPages ?? pageIndex + 1;
         var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
-        if (page is null || version != _loadVersion || _fillSignSurface is not null
+        if (page is null)
+        {
+            if (version == _loadVersion && IsCurrentContentPath(path) && _fillSignSurface is null)
+            {
+                DiagnosticLog.Write($"fill-sign entry render failed page={pageIndex + 1}");
+            }
+
+            return;
+        }
+
+        if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null
             || PreviewContent.Content is not FrameworkElement current)
         {
             return;
@@ -9066,13 +9075,13 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
     private async Task ShowFillSignPageAsync(FillSignSurface surface, int pageIndex)
     {
-        if (_fillSignPath is not { } path || !ReferenceEquals(_fillSignSurface, surface))
+        if (_fillSignPath is not { } path || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
         {
             return;
         }
 
         var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
-        if (page is null || !ReferenceEquals(_fillSignSurface, surface))
+        if (page is null || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
         {
             DiagnosticLog.Write($"fill-sign page render failed page={pageIndex + 1}");
             return;
@@ -9107,7 +9116,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
     private async void OnFillSignSaveRequested(SignSession session, bool overwrite)
     {
-        if (_fillSignPath is not { } path || _fillSignSurface is not { } surface || !session.HasWork)
+        if (_fillSignPath is not { } path
+            || _fillSignSurface is not { } surface
+            || !IsCurrentContentPath(path)
+            || !session.HasWork)
         {
             return;
         }
@@ -9726,6 +9738,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
         if (!clickedContent)
         {
+            // The browser child can retain Win32 focus after a content click.
+            // A later header action means arrows belong to preview browsing
+            // again, even though that stale child still reports focus.
+            _userEngagedContent = false;
             _lastContentClickInViewerChrome = false;
             return;
         }

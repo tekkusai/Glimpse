@@ -15,6 +15,46 @@ namespace SpacePreview.Tests;
 public sealed class FillSignFlowTests
 {
     [Fact]
+    public void FillSignPathIsCommittedOnlyAfterTheLoadStillOwnsThePreview()
+    {
+        var load = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "LoadPreviewAsync");
+        var ownershipGuard = load.IndexOf("token.IsCancellationRequested || version != _loadVersion", StringComparison.Ordinal);
+        var commit = load.IndexOf("_fillSignPath = fillSignPath", StringComparison.Ordinal);
+
+        Assert.True(ownershipGuard >= 0);
+        Assert.True(commit > ownershipGuard);
+        Assert.Contains("fillSignPath = contentPath", load, StringComparison.Ordinal);
+        Assert.DoesNotContain("_fillSignPath = contentPath", load, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreviewLoadErrorClearsTheFillSignActionBeforeShowingTheError()
+    {
+        var load = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "LoadPreviewAsync");
+        var failureLog = load.IndexOf("preview load failed", StringComparison.Ordinal);
+        var clear = load.IndexOf("_fillSignPath = null", failureLog, StringComparison.Ordinal);
+        var pill = load.IndexOf("UpdateFillSignPill()", clear, StringComparison.Ordinal);
+        var error = load.IndexOf("SetPreviewContent(BuildErrorPreview", pill, StringComparison.Ordinal);
+
+        Assert.True(failureLog >= 0);
+        Assert.True(clear > failureLog);
+        Assert.True(pill > clear);
+        Assert.True(error > pill);
+    }
+
+    [Fact]
+    public void FillSignEntryPagingAndSaveRequireTheCurrentDocument()
+    {
+        var entry = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "EnterFillSignModeAsync");
+        var paging = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ShowFillSignPageAsync");
+        var save = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "OnFillSignSaveRequested");
+
+        Assert.Contains("!IsCurrentContentPath(path)", entry, StringComparison.Ordinal);
+        Assert.Contains("!IsCurrentContentPath(path)", paging, StringComparison.Ordinal);
+        Assert.Contains("!IsCurrentContentPath(path)", save, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PlacementsSnapshotTheirPixelsAtPlacementTime()
     {
         // The record carries the pixels; Clamped() must not shed them.

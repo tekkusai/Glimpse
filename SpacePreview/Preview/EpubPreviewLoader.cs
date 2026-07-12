@@ -67,18 +67,19 @@ internal static partial class EpubPreviewLoader
         }
     }
 
-    public static string? TryBuildBody(string path)
+    public static string? TryBuildBody(string path, CancellationToken cancellationToken = default)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             using var archive = ZipFile.OpenRead(path);
-            var packagePath = FindPackagePath(archive);
+            var packagePath = FindPackagePath(archive, cancellationToken);
             if (packagePath is null)
             {
                 return null;
             }
 
-            var package = LoadXml(archive, packagePath);
+            var package = LoadXml(archive, packagePath, cancellationToken);
             if (package is null)
             {
                 return null;
@@ -87,7 +88,7 @@ internal static partial class EpubPreviewLoader
             var packageBase = PathPrefix(packagePath);
             var manifest = LoadManifest(package, packageBase);
             var spine = LoadSpine(package);
-            var titles = LoadNavigationTitles(archive, package, manifest);
+            var titles = LoadNavigationTitles(archive, package, manifest, cancellationToken);
             var chapters = spine
                 .Select(id => manifest.TryGetValue(id, out var item) ? item : null)
                 .Where(item => item is not null && IsDocumentMedia(item.MediaType))
@@ -96,7 +97,7 @@ internal static partial class EpubPreviewLoader
 
             var title = MetadataValue(package, "title") ?? Path.GetFileNameWithoutExtension(path);
             var creator = MetadataValue(package, "creator");
-            var cover = FindCoverDataUri(archive, package, manifest);
+            var cover = FindCoverDataUri(archive, package, manifest, cancellationToken);
             var protectedBook = archive.GetEntry("META-INF/encryption.xml") is not null;
 
             var builder = new StringBuilder(32_000);
@@ -127,6 +128,7 @@ internal static partial class EpubPreviewLoader
                 builder.Append("<h2>Contents</h2><ol>");
                 foreach (var chapter in chapters.Take(60))
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     builder.Append("<li>");
                     builder.Append(WebUtility.HtmlEncode(TitleFor(chapter.Path, titles)));
                     builder.Append("</li>");
@@ -144,6 +146,7 @@ internal static partial class EpubPreviewLoader
                 var remaining = MaxBookCharacters;
                 for (var spineIndex = 0; spineIndex < spine.Count; spineIndex++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (remaining <= 0)
                     {
                         break;
@@ -154,7 +157,7 @@ internal static partial class EpubPreviewLoader
                         continue;
                     }
 
-                    var preview = BuildChapterPreview(archive, chapter, titles, ref remaining);
+                    var preview = BuildChapterPreview(archive, chapter, titles, ref remaining, cancellationToken);
                     if (!string.IsNullOrWhiteSpace(preview))
                     {
                         // The id matches EpubChapterEntry.SpineIndex so the
@@ -177,6 +180,10 @@ internal static partial class EpubPreviewLoader
             builder.Append("</div>");
             return builder.ToString();
         }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             DiagnosticLog.Write($"epub preview failed {path}: {ex.GetType().Name}: {ex.Message}");
@@ -184,9 +191,9 @@ internal static partial class EpubPreviewLoader
         }
     }
 
-    private static string? FindPackagePath(ZipArchive archive)
+    private static string? FindPackagePath(ZipArchive archive, CancellationToken cancellationToken = default)
     {
-        var container = LoadXml(archive, "META-INF/container.xml");
+        var container = LoadXml(archive, "META-INF/container.xml", cancellationToken);
         var rootFile = container?
             .Descendants()
             .FirstOrDefault(e => e.Name.LocalName.Equals("rootfile", StringComparison.OrdinalIgnoreCase));
@@ -237,14 +244,15 @@ internal static partial class EpubPreviewLoader
     private static Dictionary<string, string> LoadNavigationTitles(
         ZipArchive archive,
         XDocument package,
-        IReadOnlyDictionary<string, ManifestItem> manifest)
+        IReadOnlyDictionary<string, ManifestItem> manifest,
+        CancellationToken cancellationToken = default)
     {
         var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var nav = manifest.Values.FirstOrDefault(item =>
             item.Properties.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("nav", StringComparer.OrdinalIgnoreCase));
         if (nav is not null)
         {
-            var navXml = LoadXml(archive, nav.Path);
+            var navXml = LoadXml(archive, nav.Path, cancellationToken);
             if (navXml is not null)
             {
                 foreach (var link in navXml.Descendants().Where(e => e.Name.LocalName.Equals("a", StringComparison.OrdinalIgnoreCase)))
@@ -260,7 +268,7 @@ internal static partial class EpubPreviewLoader
             ?.Attribute("toc")?.Value;
         if (!string.IsNullOrWhiteSpace(tocId) && manifest.TryGetValue(tocId, out var ncx))
         {
-            var ncxXml = LoadXml(archive, ncx.Path);
+            var ncxXml = LoadXml(archive, ncx.Path, cancellationToken);
             if (ncxXml is not null)
             {
                 foreach (var point in ncxXml.Descendants().Where(e => e.Name.LocalName.Equals("navPoint", StringComparison.OrdinalIgnoreCase)))
@@ -279,9 +287,10 @@ internal static partial class EpubPreviewLoader
         ZipArchive archive,
         ManifestItem chapter,
         IReadOnlyDictionary<string, string> titles,
-        ref int remainingCharacters)
+        ref int remainingCharacters,
+        CancellationToken cancellationToken = default)
     {
-        var xml = LoadXml(archive, chapter.Path);
+        var xml = LoadXml(archive, chapter.Path, cancellationToken);
         if (xml is null)
         {
             return null;
@@ -293,7 +302,7 @@ internal static partial class EpubPreviewLoader
             return null;
         }
 
-        var context = new ChapterContext(archive, chapter.Path, remainingCharacters);
+        var context = new ChapterContext(archive, chapter.Path, remainingCharacters, cancellationToken);
         var builder = new StringBuilder(32_000);
         var hasHeading = body.Descendants().Any(element => IsHeading(element.Name.LocalName));
         if (!hasHeading)
@@ -305,6 +314,7 @@ internal static partial class EpubPreviewLoader
 
         foreach (var node in body.Nodes())
         {
+            context.ThrowIfCancellationRequested();
             if (!context.HasTextBudget)
             {
                 break;
@@ -348,6 +358,7 @@ internal static partial class EpubPreviewLoader
 
     private static void AppendSanitizedNode(StringBuilder builder, XNode node, ChapterContext context)
     {
+        context.ThrowIfCancellationRequested();
         switch (node)
         {
             case XText text:
@@ -416,7 +427,8 @@ internal static partial class EpubPreviewLoader
     private static string? FindCoverDataUri(
         ZipArchive archive,
         XDocument package,
-        IReadOnlyDictionary<string, ManifestItem> manifest)
+        IReadOnlyDictionary<string, ManifestItem> manifest,
+        CancellationToken cancellationToken = default)
     {
         var cover = manifest.Values.FirstOrDefault(item =>
             item.Properties.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("cover-image", StringComparer.OrdinalIgnoreCase));
@@ -434,11 +446,17 @@ internal static partial class EpubPreviewLoader
             }
         }
 
-        return cover is null ? null : ReadImageDataUri(archive, cover.Path, 0, out _);
+        return cover is null ? null : ReadImageDataUri(archive, cover.Path, 0, out _, cancellationToken);
     }
 
-    private static string? ReadImageDataUri(ZipArchive archive, string entryPath, long alreadyEmbedded, out long bytesRead)
+    private static string? ReadImageDataUri(
+        ZipArchive archive,
+        string entryPath,
+        long alreadyEmbedded,
+        out long bytesRead,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         bytesRead = 0;
         var entry = archive.GetEntry(NormalizeEntryPath(entryPath));
         if (entry is null || entry.Length <= 0 || entry.Length > MaxImageBytes || alreadyEmbedded + entry.Length > MaxEmbeddedImageBytes)
@@ -454,13 +472,24 @@ internal static partial class EpubPreviewLoader
 
         using var stream = entry.Open();
         using var memory = new MemoryStream();
-        stream.CopyTo(memory);
+        var buffer = new byte[81920];
+        int read;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            memory.Write(buffer, 0, read);
+        }
+
         bytesRead = memory.Length;
         return $"data:{contentType};base64,{Convert.ToBase64String(memory.ToArray())}";
     }
 
-    private static XDocument? LoadXml(ZipArchive archive, string entryPath)
+    private static XDocument? LoadXml(
+        ZipArchive archive,
+        string entryPath,
+        CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var entry = archive.GetEntry(NormalizeEntryPath(entryPath));
         if (entry is null || entry.Length > 5 * 1024 * 1024)
         {
@@ -473,7 +502,9 @@ internal static partial class EpubPreviewLoader
             DtdProcessing = DtdProcessing.Ignore,
             XmlResolver = null
         });
-        return XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+        var document = XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+        cancellationToken.ThrowIfCancellationRequested();
+        return document;
     }
 
     private static string? MetadataValue(XDocument package, string name)
@@ -616,13 +647,19 @@ internal static partial class EpubPreviewLoader
         public string? TryRenderBody() => TryRenderChapterBody(SourcePath, EntryPath, Title);
     }
 
-    private sealed class ChapterContext(ZipArchive archive, string chapterPath, int remainingCharacters)
+    private sealed class ChapterContext(
+        ZipArchive archive,
+        string chapterPath,
+        int remainingCharacters,
+        CancellationToken cancellationToken)
     {
         private long _embeddedBytes;
 
         public int RemainingCharacters { get; private set; } = remainingCharacters;
 
         public bool HasTextBudget => RemainingCharacters > 0;
+
+        public void ThrowIfCancellationRequested() => cancellationToken.ThrowIfCancellationRequested();
 
         public string TakeText(string text)
         {
@@ -654,7 +691,7 @@ internal static partial class EpubPreviewLoader
             }
 
             var entryPath = NormalizeEntryPath(CombineEntryPath(PathPrefix(chapterPath), source));
-            var data = ReadImageDataUri(archive, entryPath, _embeddedBytes, out var bytesRead);
+            var data = ReadImageDataUri(archive, entryPath, _embeddedBytes, out var bytesRead, cancellationToken);
             _embeddedBytes += bytesRead;
             return data;
         }

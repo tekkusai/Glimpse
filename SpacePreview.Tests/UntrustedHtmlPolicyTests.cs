@@ -131,6 +131,18 @@ public sealed class UntrustedHtmlPolicyTests
     }
 
     [Fact]
+    public void GeneratedHtmlOpensExternalLinksOnlyFromUserInput()
+    {
+        var source = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var hardener = TestSource.MethodFrom(source, "private static void HardenForGeneratedHtml");
+
+        Assert.Contains("args.IsUserInitiated", hardener, StringComparison.Ordinal);
+        Assert.Equal(2, hardener.Split("args.IsUserInitiated", StringSplitOptions.None).Length - 1);
+        Assert.Contains("args.Cancel = true", hardener, StringComparison.Ordinal);
+        Assert.Contains("args.Handled = true", hardener, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TempHtmlPruneDeletesOldestFilesOnly()
     {
         using var temp = new TempDirectory();

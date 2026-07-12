@@ -1,11 +1,11 @@
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Utilities;
@@ -22,10 +22,18 @@ internal sealed class TrayIcon : IDisposable
 {
     private const int IconId = 1;
     private static readonly TimeSpan UnstablePreviewAccessWarningRepeatInterval = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(6);
+    private static readonly TimeSpan UpdateMenuRetryInterval = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan UpdateNotificationRetryInterval = TimeSpan.FromSeconds(15);
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly uint _taskbarCreatedMessage;
     private readonly ContextMenu _menu;
+    private readonly AppUpdateService _updateService;
+    private readonly CancellationTokenSource _updateLifetime = new();
+    private readonly DispatcherTimer _updateTimer;
+    private readonly DispatcherTimer _updateNotificationTimer;
+    private readonly Func<bool> _canShowUpdateNotification;
     private IntPtr _hwnd;
     private IntPtr _icon;
     private ushort _classAtom;
@@ -33,6 +41,10 @@ internal sealed class TrayIcon : IDisposable
     private bool _iconVisible;
     private bool _hiddenForSession;
     private bool _disposed;
+    private bool _updateCheckRunning;
+    private DateTime _lastUpdateCheckAt;
+    private AppUpdateRelease? _availableUpdate;
+    private AppUpdateWindow? _updateWindow;
     private readonly Dictionary<string, long> _previewAccessWarningTicks = new(StringComparer.OrdinalIgnoreCase);
     private PreviewAccessWarningWindow? _previewAccessWarningWindow;
 
@@ -50,17 +62,39 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>Raised when the user picks Quit.</summary>
     public event Action? QuitRequested;
 
-    public TrayIcon(ThemePreference theme)
+    public TrayIcon(
+        ThemePreference theme,
+        Func<bool>? canShowUpdateNotification = null)
     {
         _wndProc = WindowProc;
         _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
+        _canShowUpdateNotification = canShowUpdateNotification ?? (() => true);
 
         _followSystemItem = MakeItem("Follow system", () => PickTheme(ThemePreference.FollowSystem));
         _lightItem = MakeItem("Light", () => PickTheme(ThemePreference.Light));
         _darkItem = MakeItem("Dark", () => PickTheme(ThemePreference.Dark));
         _startupItem = MakeItem("Start with Windows", ToggleStartup);
-        _versionItem = new MenuItem { IsEnabled = false };
+        _versionItem = MakeItem("Version", ShowAvailableUpdate);
+        _versionItem.IsEnabled = false;
         _documentPreviewItem = new MenuItem { IsEnabled = false };
+        _updateService = new AppUpdateService();
+        _updateService.CleanupStaleDownloads();
+
+        _updateTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = UpdateCheckInterval
+        };
+        _updateTimer.Tick += (_, _) => _ = CheckForUpdatesAsync();
+        _updateTimer.Start();
+        _updateNotificationTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = UpdateNotificationRetryInterval
+        };
+        _updateNotificationTimer.Tick += (_, _) =>
+        {
+            _updateNotificationTimer.Stop();
+            ScheduleUpdateNotification();
+        };
 
         _menu = BuildMenu();
         SyncThemeChecks(theme);
@@ -68,6 +102,7 @@ internal sealed class TrayIcon : IDisposable
         CreateMessageWindow();
         RebuildIcon();
         AddIcon();
+        _ = CheckForUpdatesAfterStartupAsync();
 
         // The taskbar's own theme (a separate setting from app theme) picks
         // the glyph color; broadcasts never reach a message-only window, so
@@ -216,6 +251,10 @@ internal sealed class TrayIcon : IDisposable
         // have changed it elsewhere since the menu was last opened.
         _startupItem.IsChecked = StartupRegistration.IsInstalled();
         RefreshAboutItems();
+        if (DateTime.UtcNow - _lastUpdateCheckAt >= UpdateMenuRetryInterval)
+        {
+            _ = CheckForUpdatesAsync();
+        }
 
         NativeMethods.SetForegroundWindow(_hwnd);
         _menu.IsOpen = true;
@@ -223,30 +262,173 @@ internal sealed class TrayIcon : IDisposable
 
     private void RefreshAboutItems()
     {
-        _versionItem.Header = $"Version {GetVersion()}";
+        if (_availableUpdate is { } update)
+        {
+            _versionItem.Header = $"Update to {update.VersionText}";
+            _versionItem.IsEnabled = true;
+        }
+        else
+        {
+            _versionItem.Header = $"Version {GetVersion()}";
+            _versionItem.IsEnabled = false;
+        }
+
         _documentPreviewItem.Header = OfficeDocumentPdfConverter.IsAvailable
             ? $"Documents: {OfficeDocumentPdfConverter.EngineName}"
             : "Documents: basic previews";
     }
 
-    private static string GetVersion()
+    private async Task CheckForUpdatesAfterStartupAsync()
     {
         try
         {
-            var path = Environment.ProcessPath ?? Assembly.GetExecutingAssembly().Location;
-            var version = FileVersionInfo.GetVersionInfo(path).ProductVersion;
-            if (!string.IsNullOrWhiteSpace(version))
-            {
-                return version;
-            }
+            await Task.Delay(TimeSpan.FromSeconds(4), _updateLifetime.Token);
+            await CheckForUpdatesAsync();
         }
-        catch
+        catch (OperationCanceledException)
         {
-            // Fall through to assembly identity.
+            // App shutdown owns the cancellation.
+        }
+    }
+
+    private async Task CheckForUpdatesAsync()
+    {
+        if (_disposed || _updateCheckRunning)
+        {
+            return;
         }
 
-        return Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "unknown";
+        _updateCheckRunning = true;
+        _lastUpdateCheckAt = DateTime.UtcNow;
+        try
+        {
+            var update = await _updateService.CheckForUpdateAsync(_updateLifetime.Token);
+            if (_disposed)
+            {
+                return;
+            }
+
+            _availableUpdate = update;
+            RefreshAboutItems();
+            if (update is not null)
+            {
+                DiagnosticLog.Write(
+                    $"update available current={_updateService.CurrentVersionText} latest={update.VersionText}");
+            }
+            else
+            {
+                DiagnosticLog.Write($"update check current={_updateService.CurrentVersionText}");
+            }
+
+            ScheduleUpdateNotification();
+        }
+        catch (OperationCanceledException) when (_updateLifetime.IsCancellationRequested)
+        {
+            // App shutdown owns the cancellation.
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _updateCheckRunning = false;
+        }
     }
+
+    private void ShowAvailableUpdate()
+    {
+        if (_availableUpdate is not { } update)
+        {
+            return;
+        }
+
+        _menu.IsOpen = false;
+        if (_updateWindow is not null)
+        {
+            _updateWindow.Activate();
+            return;
+        }
+
+        ShowUpdateWindow(update, activate: true, automatic: false);
+    }
+
+    private void ScheduleUpdateNotification()
+    {
+        _updateNotificationTimer.Stop();
+        if (_disposed
+            || _availableUpdate is not { } update
+            || _updateWindow is not null)
+        {
+            return;
+        }
+
+        var delay = UpdateNotificationPolicy.DelayUntilPrompt(
+            Settings.Current,
+            update.Version,
+            DateTimeOffset.UtcNow);
+        if (delay > TimeSpan.Zero)
+        {
+            _updateNotificationTimer.Interval = delay < UpdateCheckInterval
+                ? delay
+                : UpdateCheckInterval;
+            _updateNotificationTimer.Start();
+            return;
+        }
+
+        if (!_canShowUpdateNotification())
+        {
+            _updateNotificationTimer.Interval = UpdateNotificationRetryInterval;
+            _updateNotificationTimer.Start();
+            return;
+        }
+
+        ShowUpdateWindow(update, activate: false, automatic: true);
+    }
+
+    private void ShowUpdateWindow(
+        AppUpdateRelease update,
+        bool activate,
+        bool automatic)
+    {
+        var window = new AppUpdateWindow(_updateService, update)
+        {
+            ShowActivated = activate
+        };
+        _updateWindow = window;
+        window.Closed += (_, _) =>
+        {
+            _updateWindow = null;
+            if (_disposed
+                || window.InstallerLaunched
+                || !window.SnoozeRequested)
+            {
+                _updateNotificationTimer.Stop();
+                return;
+            }
+
+            var dismissedAt = DateTimeOffset.UtcNow;
+            Settings.Update(settings => UpdateNotificationPolicy.Snooze(
+                settings,
+                update.Version,
+                dismissedAt));
+            DiagnosticLog.Write(
+                $"update notification snoozed version={update.VersionText} days=7");
+            ScheduleUpdateNotification();
+        };
+        window.Show();
+        if (activate)
+        {
+            window.Activate();
+        }
+
+        if (automatic)
+        {
+            DiagnosticLog.Write($"update notification shown version={update.VersionText}");
+        }
+    }
+
+    private static string GetVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
 
     private static void CopyDiagnostics()
     {
@@ -630,6 +812,13 @@ internal sealed class TrayIcon : IDisposable
         }
 
         _disposed = true;
+        _updateTimer.Stop();
+        _updateNotificationTimer.Stop();
+        _updateLifetime.Cancel();
+        _updateWindow?.Close();
+        _updateWindow = null;
+        _updateService.Dispose();
+        _updateLifetime.Dispose();
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;
         _previewAccessWarningWindow?.Dismiss("dispose");
         _previewAccessWarningWindow = null;

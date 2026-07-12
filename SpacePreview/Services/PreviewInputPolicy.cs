@@ -14,7 +14,8 @@ internal static class PreviewInputPolicy
     private static readonly HashSet<string> ExplorerWindowClasses = new(StringComparer.OrdinalIgnoreCase)
     {
         "CabinetWClass",
-        "ExploreWClass"
+        "ExploreWClass",
+        "XamlExplorerHostIslandWindow"
     };
 
     private static readonly HashSet<string> DesktopWindowClasses = new(StringComparer.OrdinalIgnoreCase)
@@ -91,6 +92,14 @@ internal static class PreviewInputPolicy
 
         return ownerRootHwnd != IntPtr.Zero && foregroundRoot == ownerRootHwnd;
     }
+
+    public static bool ShouldYieldSpaceToOwnerTextEditing(
+        IntPtr foregroundRoot,
+        IntPtr ownerRootHwnd,
+        bool ownerIsTextEditing) =>
+        ownerRootHwnd != IntPtr.Zero
+        && foregroundRoot == ownerRootHwnd
+        && ownerIsTextEditing;
 
     public static RefreshSelectionDecision DecideRefresh(ExplorerSelection? selection, string? currentPath)
     {

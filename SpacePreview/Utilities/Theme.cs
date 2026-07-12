@@ -138,6 +138,8 @@ internal static class Theme
         resources["Theme.PressedBg"] = Brush(p.PressedBg);
         resources["Theme.SurfaceBg"] = Brush(p.SurfaceBg);
         resources["Theme.SurfaceBorder"] = Brush(p.SurfaceBorder);
+        resources["Theme.Accent"] = Brush(p.Accent);
+        resources["Theme.Warning"] = Brush(p.Warning);
     }
 
     public static SolidColorBrush Brush(Color color)

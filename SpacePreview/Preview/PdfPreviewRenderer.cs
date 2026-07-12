@@ -23,6 +23,8 @@ internal static class PdfPreviewRenderer
     private const int MaxThumbnailPages = 120;
     private const int MaxPageRasterEdge = 8192;
     private const long MaxPageRasterPixels = 20_000_000;
+    private const long PreferredInteractivePageRasterPixels = 12_000_000;
+    private const double AdaptiveRasterHeadroom = 0.98;
     private const int MaxThumbnailRasterEdge = 4096;
     private const long MaxThumbnailRasterPixels = 4_000_000;
 
@@ -108,14 +110,34 @@ internal static class PdfPreviewRenderer
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                using var document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint));
-                if (pageIndex < 0 || pageIndex >= document.GetPageCount())
+                double adaptiveScale;
+                using (var document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint)))
+                {
+                    if (pageIndex < 0 || pageIndex >= document.GetPageCount())
+                    {
+                        return null;
+                    }
+
+                    using var pageReader = document.GetPageReader(pageIndex);
+                    var width = pageReader.GetPageWidth();
+                    var height = pageReader.GetPageHeight();
+                    if (IsRasterSizeSafe(width, height, thumbnail: false))
+                    {
+                        return RenderPage(pageReader, thumbnail: false);
+                    }
+
+                    adaptiveScale = PageScaleForRasterBudget(width, height, PixelsPerPoint);
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                using var adaptedDocument = DocLib.Instance.GetDocReader(path, new PageDimensions(adaptiveScale));
+                if (pageIndex >= adaptedDocument.GetPageCount())
                 {
                     return null;
                 }
 
-                using var pageReader = document.GetPageReader(pageIndex);
-                return RenderPage(pageReader, thumbnail: false);
+                using var adaptedPageReader = adaptedDocument.GetPageReader(pageIndex);
+                return RenderPage(adaptedPageReader, thumbnail: false);
             }
             catch (OperationCanceledException)
             {
@@ -130,6 +152,22 @@ internal static class PdfPreviewRenderer
         {
             PdfiumGate.Release();
         }
+    }
+
+    internal static double PageScaleForRasterBudget(int width, int height, double currentScale)
+    {
+        if (width <= 0 || height <= 0 || !double.IsFinite(currentScale) || currentScale <= 0)
+        {
+            return 0.01;
+        }
+
+        var edgeFactor = Math.Min(
+            (double)MaxPageRasterEdge / width,
+            (double)MaxPageRasterEdge / height);
+        var pixelFactor = Math.Sqrt(
+            PreferredInteractivePageRasterPixels / ((double)width * height));
+        var factor = Math.Min(1, Math.Min(edgeFactor, pixelFactor));
+        return Math.Max(0.01, currentScale * factor * AdaptiveRasterHeadroom);
     }
 
     public static PdfPreviewDocument? TryRenderThumbnails(

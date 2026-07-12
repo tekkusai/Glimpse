@@ -184,7 +184,8 @@ public sealed class PreviewChromeRegressionTests
         Assert.DoesNotContain("ApplyPdfRailWidthUnderHeldFrameAsync", windowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png", windowSource, StringComparison.Ordinal);
         Assert.Contains("PdfPageRailInitialPages = 10", windowSource, StringComparison.Ordinal);
-        Assert.Contains("PdfPreviewRenderer.TryRenderThumbnails", inProcessRailBody, StringComparison.Ordinal);
+        Assert.Contains("LoadPdfPageRailOutOfProcessAsync(state)", inProcessRailBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("PdfPreviewRenderer.TryRenderThumbnails", inProcessRailBody, StringComparison.Ordinal);
         Assert.Contains("TryRenderPdfThumbnailsOutOfProcessAsync", officeRailBody, StringComparison.Ordinal);
         Assert.Contains("AnimateRail(state.Host, targetWidth, content)", windowSource, StringComparison.Ordinal);
         Assert.Contains("BuildCollapsedRail(document.TotalPages, \"Show pages\"", windowSource, StringComparison.Ordinal);
@@ -583,7 +584,7 @@ public sealed class PreviewChromeRegressionTests
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var coreBody = ReadMethod(windowSource, "private async Task LoadPdfPageRailCoreAsync");
-        var inProcessBody = ReadMethod(windowSource, "private Task LoadPdfPageRailAsync");
+        var directPdfBody = ReadMethod(windowSource, "private Task LoadPdfPageRailAsync");
         var outOfProcessBody = ReadMethod(windowSource, "private Task LoadPdfPageRailOutOfProcessAsync");
 
         Assert.Contains("var firstPages = await renderRange(PdfPageRailInitialPages, 0)", coreBody, StringComparison.Ordinal);
@@ -592,9 +593,9 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("CombinePdfPreviewDocuments(firstPages, remainingPages)", coreBody, StringComparison.Ordinal);
         Assert.Contains("state.Version != _loadVersion", coreBody, StringComparison.Ordinal);
         Assert.Contains("state.Token.IsCancellationRequested", coreBody, StringComparison.Ordinal);
-        Assert.Contains("LoadPdfPageRailCoreAsync", inProcessBody, StringComparison.Ordinal);
+        Assert.Contains("LoadPdfPageRailOutOfProcessAsync(state)", directPdfBody, StringComparison.Ordinal);
         Assert.Contains("LoadPdfPageRailCoreAsync", outOfProcessBody, StringComparison.Ordinal);
-        Assert.Contains("PdfPreviewRenderer.TryRenderThumbnails", inProcessBody, StringComparison.Ordinal);
+        Assert.DoesNotContain("PdfPreviewRenderer.TryRenderThumbnails", directPdfBody, StringComparison.Ordinal);
         Assert.Contains("TryRenderPdfThumbnailsOutOfProcessAsync", outOfProcessBody, StringComparison.Ordinal);
         Assert.Contains("PdfPageRailMaxPages", outOfProcessBody, StringComparison.Ordinal);
     }

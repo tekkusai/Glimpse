@@ -9,10 +9,13 @@ internal sealed record CadPreview(string Title, string Subtitle, string Details)
 
 internal static partial class CadPreviewLoader
 {
-    public static CadPreview TryLoadStl(string path)
+    internal const int MaxStlSampleBytes = 8 * 1024 * 1024;
+
+    public static CadPreview TryLoadStl(string path, CancellationToken cancellationToken = default)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var file = new FileInfo(path);
             using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             if (stream.Length > 84)
@@ -32,13 +35,35 @@ internal static partial class CadPreviewLoader
             }
 
             stream.Position = 0;
-            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
-            var sample = reader.ReadToEnd();
+            var sampleBytes = new byte[(int)Math.Min(stream.Length, MaxStlSampleBytes)];
+            var bytesRead = 0;
+            while (bytesRead < sampleBytes.Length)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var read = stream.Read(sampleBytes, bytesRead, sampleBytes.Length - bytesRead);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                bytesRead += read;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var sample = Encoding.UTF8.GetString(sampleBytes, 0, bytesRead);
             var facets = Regex.Matches(sample, @"\bfacet\s+normal\b", RegexOptions.IgnoreCase).Count;
+            var sampled = stream.Length > bytesRead;
+            var facetLabel = sampled ? "Facets in first 8 MB" : "Facets detected";
             return new CadPreview(
                 "STL mesh",
-                facets > 0 ? $"{facets:N0} facets · {FileKinds.FormatSize(file.Length)}" : $"ASCII STL · {FileKinds.FormatSize(file.Length)}",
-                $"ASCII STL mesh\nFacets detected: {facets:N0}\nSize: {FileKinds.FormatSize(file.Length)}\nModified: {file.LastWriteTime:g}");
+                facets > 0
+                    ? $"{facets:N0}{(sampled ? "+" : string.Empty)} facets · {FileKinds.FormatSize(file.Length)}"
+                    : $"ASCII STL · {FileKinds.FormatSize(file.Length)}",
+                $"ASCII STL mesh\n{facetLabel}: {facets:N0}\nSize: {FileKinds.FormatSize(file.Length)}\nModified: {file.LastWriteTime:g}");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {

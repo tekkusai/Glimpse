@@ -7,7 +7,7 @@
 ; entry, and deletes the app's data folder.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.1.0"
 #endif
 #define MyAppName "Glimpse"
 #define MyAppExeName "Glimpse.exe"
@@ -25,6 +25,7 @@ DisableDirPage=yes
 DisableProgramGroupPage=yes
 DisableWelcomePage=yes
 UsePreviousAppDir=no
+UsePreviousTasks=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -62,11 +63,13 @@ Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
 Filename: "{tmp}\MicrosoftEdgeWebView2Setup.exe"; Parameters: "/silent /install"; StatusMsg: "Setting up the document viewer..."; Check: WebView2Missing; Flags: waituntilterminated
-; Engine only: no desktop link, no Quickstarter, and it never takes over
-; anyone's file associations. Elevation is msiexec's own UAC prompt.
-Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\LibreOffice.msi"" /qn CREATEDESKTOPLINK=0 QUICKSTART=0 REGISTER_ALL_MSO_TYPES=0 REGISTER_NO_MSO_TYPES=1 ISCHECKFORPRODUCTUPDATES=0 REBOOTYESNO=No"; StatusMsg: "Setting up full document previews (a few minutes)..."; Check: EngineDownloadSucceeded; Verb: "runas"; Flags: shellexec waituntilterminated
-Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-startup"; Tasks: startup; Flags: runhidden waituntilterminated
+; Extract the official MSI as an engine-only, per-user image. It stays
+; silent and does not require elevation, create shortcuts, or take over files.
+Filename: "msiexec.exe"; Parameters: "/a ""{tmp}\LibreOffice.msi"" /qn TARGETDIR=""{localappdata}\Programs\LibreOffice"""; StatusMsg: "Setting up full document previews (a few minutes)..."; Check: EngineDownloadSucceeded; AfterInstall: MarkBundledOfficeEngine; Flags: waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--uninstall-startup"; Check: StartupTaskNotSelected; Flags: runhidden waituntilterminated
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--install-startup"; Check: StartupTaskSelected; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Description: "Start {#MyAppName} now"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Check: AutoUpdateRequested; Flags: nowait runhidden
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\Glimpse"
@@ -74,11 +77,17 @@ Type: filesandordirs; Name: "{localappdata}\SpacePreview"
 
 #define LibreOfficeUrl "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/win/x86_64/LibreOffice_26.2.4.2_Win_x86-64.msi"
 #define LibreOfficeSha256 "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f"
+#define LibreOfficeManagedMarker ".glimpse-managed-engine"
+#define LibreOfficeManagedMarkerText "Glimpse managed LibreOffice 26.2.4.2"
 
 [Code]
 var
   EngineDownloadPage: TDownloadWizardPage;
   EngineDownloadOk: Boolean;
+  ExistingInstallAtStart: Boolean;
+  StartupRegisteredAtStart: Boolean;
+  ExplicitTaskSelectionAtStart: Boolean;
+  StartupDefaultApplied: Boolean;
 
 // Only engines the app's converter can actually drive count as present.
 function HasOfficeEngineRegistry(const RootKey: Integer; const SubKey: String): Boolean;
@@ -114,39 +123,155 @@ begin
   Result := EngineDownloadOk;
 end;
 
+function BundledOfficeEngineRoot(): String;
+begin
+  Result := ExpandConstant('{localappdata}\Programs\LibreOffice');
+end;
+
+function BundledOfficeEngineMarker(): String;
+begin
+  Result := AddBackslash(BundledOfficeEngineRoot()) + '{#LibreOfficeManagedMarker}';
+end;
+
+procedure MarkBundledOfficeEngine();
+begin
+  if EngineDownloadOk
+    and FileExists(AddBackslash(BundledOfficeEngineRoot()) + 'program\soffice.exe') then
+  begin
+    if SaveStringToFile(BundledOfficeEngineMarker(), '{#LibreOfficeManagedMarkerText}', False) then
+      Log('Marked the bundled LibreOffice engine for uninstall cleanup.')
+    else
+      Log('Could not mark the bundled LibreOffice engine for uninstall cleanup.');
+  end;
+end;
+
+procedure RemoveBundledOfficeEngine();
+var
+  MarkerText: AnsiString;
+begin
+  if LoadStringFromFile(BundledOfficeEngineMarker(), MarkerText)
+    and (MarkerText = '{#LibreOfficeManagedMarkerText}') then
+  begin
+    if DelTree(BundledOfficeEngineRoot(), True, True, True) then
+      Log('Removed the bundled LibreOffice engine.')
+    else
+      Log('Could not completely remove the bundled LibreOffice engine.');
+  end;
+end;
+
+function HasExplicitTaskSelection(): Boolean;
+var
+  I: Integer;
+  Parameter: String;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    Parameter := Uppercase(ParamStr(I));
+    if (Pos('/TASKS=', Parameter) = 1) or (Pos('/MERGETASKS=', Parameter) = 1) then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
+procedure ApplyLiveStartupDefault();
+begin
+  if StartupDefaultApplied
+    or not ExistingInstallAtStart
+    or ExplicitTaskSelectionAtStart then
+    Exit;
+
+  if StartupRegisteredAtStart then
+    WizardSelectTasks('startup')
+  else
+    WizardSelectTasks('!startup');
+  StartupDefaultApplied := True;
+end;
+
+function StartupTaskSelected(): Boolean;
+begin
+  if WizardSilent
+    and ExistingInstallAtStart
+    and not ExplicitTaskSelectionAtStart then
+    Result := StartupRegisteredAtStart
+  else
+    Result := WizardIsTaskSelected('startup');
+end;
+
+function StartupTaskNotSelected(): Boolean;
+begin
+  Result := not StartupTaskSelected();
+end;
+
+function AutoUpdateRequested(): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 1 to ParamCount do
+  begin
+    if CompareText(ParamStr(I), '/GLIMPSEUPDATE') = 0 then
+    begin
+      Result := True;
+      Exit;
+    end;
+  end;
+end;
+
 procedure InitializeWizard();
 begin
+  ExistingInstallAtStart :=
+    FileExists(ExpandConstant('{localappdata}\Programs\{#MyAppName}\{#MyAppExeName}'))
+    or RegKeyExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{7C3A9F41-6E8B-4D2C-9A57-D14B20F3E6A8}_is1');
+  StartupRegisteredAtStart :=
+    RegValueExists(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', '{#MyAppName}');
+  ExplicitTaskSelectionAtStart := HasExplicitTaskSelection();
   EngineDownloadPage := CreateDownloadPage(
     'Full document previews',
     'Getting LibreOffice from The Document Foundation...',
     nil);
+
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if CurPageID = wpSelectTasks then
+    ApplyLiveStartupDefault();
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if (CurPageID = wpReady) and WizardIsTaskSelected('fullpreviews') then
+  if CurPageID = wpReady then
   begin
-    EngineDownloadPage.Clear;
-    EngineDownloadPage.Add('{#LibreOfficeUrl}', 'LibreOffice.msi', '{#LibreOfficeSha256}');
-    EngineDownloadPage.Show;
-    try
+    if WizardSilent then
+      ApplyLiveStartupDefault();
+
+    if WizardIsTaskSelected('fullpreviews') and not AutoUpdateRequested() then
+    begin
+      EngineDownloadPage.Clear;
+      EngineDownloadPage.Add('{#LibreOfficeUrl}', 'LibreOffice.msi', '{#LibreOfficeSha256}');
+      EngineDownloadPage.Show;
       try
-        EngineDownloadPage.Download;
-        EngineDownloadOk := True;
-      except
-        // Offline or cancelled: the app still installs and works, documents
-        // preview in their basic form, and the in-app card offers the fix.
-        EngineDownloadOk := False;
-        if EngineDownloadPage.AbortedByUser then
-          Log('Engine download cancelled; continuing without it.')
-        else
-          SuppressibleMsgBox(
-            'The LibreOffice download did not finish. Glimpse will still work; documents show a basic preview until LibreOffice is installed.',
-            mbInformation, MB_OK, IDOK);
+        try
+          EngineDownloadPage.Download;
+          EngineDownloadOk := True;
+        except
+          // Offline or cancelled: the app still installs and works, documents
+          // preview in their basic form, and the in-app card offers the fix.
+          EngineDownloadOk := False;
+          if EngineDownloadPage.AbortedByUser then
+            Log('Engine download cancelled; continuing without it.')
+          else
+            SuppressibleMsgBox(
+              'The LibreOffice download did not finish. Glimpse will still work; documents show a basic preview until LibreOffice is installed.',
+              mbInformation, MB_OK, IDOK);
+        end;
+      finally
+        EngineDownloadPage.Hide;
       end;
-    finally
-      EngineDownloadPage.Hide;
     end;
   end;
 end;
@@ -214,5 +339,6 @@ begin
       Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--uninstall-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
     else
       Exec(ExpandConstant('{app}\{#MyOldAppExeName}'), '--uninstall-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    RemoveBundledOfficeEngine();
   end;
 end;

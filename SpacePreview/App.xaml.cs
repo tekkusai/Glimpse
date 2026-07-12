@@ -416,7 +416,9 @@ public partial class App : Application
 
     private TrayIcon CreateTrayIcon()
     {
-        var tray = new TrayIcon(Settings.Current.Theme);
+        var tray = new TrayIcon(
+            Settings.Current.Theme,
+            () => _controller?.CanShowUpdateNotification == true);
 
         tray.ThemeChanged += preference =>
         {

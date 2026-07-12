@@ -32,7 +32,7 @@ internal static class FileKinds
         ".py", ".pyi", ".ps1", ".psm1", ".psd1", ".bat", ".cmd", ".sh", ".bash", ".zsh", ".nsh",
         ".sql", ".rs", ".go", ".java", ".kt", ".kts", ".swift", ".rb", ".php", ".lua", ".r", ".pl",
         ".vue", ".svelte", ".astro", ".graphql", ".gql", ".proto", ".prisma", ".zig", ".dart", ".ex", ".exs",
-        ".dockerfile", ".gradle", ".lock", ".reg", ".res", ".str", ".meta", ".info", ".version", ".nfo", ".torrent"
+        ".dockerfile", ".gradle", ".lock", ".reg", ".res", ".str", ".meta", ".info", ".version", ".nfo"
     };
 
     public static bool IsImage(string path) => ImageExtensions.Contains(Path.GetExtension(path));
@@ -42,6 +42,11 @@ internal static class FileKinds
     public static bool IsText(string path)
     {
         var extension = Path.GetExtension(path);
+        if (extension.Equals(".torrent", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         if (TextExtensions.Contains(extension))
         {
             return true;

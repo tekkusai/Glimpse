@@ -3,6 +3,30 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
+    public void ProductAndInstallerVersionsAre110()
+    {
+        var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
+        var manifest = TestSource.Read(@"SpacePreview\app.manifest");
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        Assert.Contains("<Version>1.1.0</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"1.1.0.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"1.1.0\"", installer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Public110NotesArePlainAndCarryTheFinalInstallerHash()
+    {
+        var notes = TestSource.Read(@"docs\RELEASE-NOTES-1.1.0.md");
+
+        Assert.Contains("# Glimpse 1.1.0", notes, StringComparison.Ordinal);
+        Assert.Contains("09FD4FCF13B2C739B2FB619788FC72EF4063F4D2CD860EBEAE1C8056AF8FB0D5", notes, StringComparison.Ordinal);
+        Assert.DoesNotContain("PENDING", notes, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("not code-signed", notes, StringComparison.Ordinal);
+        Assert.Contains("SmartScreen", notes, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void PublicDocsPointUsersAtGlimpseArtifacts()
     {
         var text = string.Join("\n", new[]
@@ -45,6 +69,88 @@ public sealed class ReleaseHygieneTests
         Assert.Contains("Glimpse contributors", license, StringComparison.Ordinal);
         Assert.Contains("source license is in LICENSE", notices, StringComparison.Ordinal);
         Assert.DoesNotContain("SpacePreview contributors", license, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PublishedPayloadCarriesDependencyLicenseFiles()
+    {
+        var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
+        var notices = TestSource.Read(@"docs\THIRD-PARTY-NOTICES.txt");
+
+        Assert.Contains("Microsoft.Web.WebView2-LICENSE.txt", project, StringComparison.Ordinal);
+        Assert.Contains("Microsoft.Web.WebView2-NOTICE.txt", project, StringComparison.Ordinal);
+        Assert.Contains("Onigwrap-THIRD-PARTY-NOTICES.txt", project, StringComparison.Ordinal);
+        Assert.Contains("CopyToPublishDirectory=\"PreserveNewest\"", project, StringComparison.Ordinal);
+        Assert.Contains("Copyright (c) 2018 Modestas Petravicius", notices, StringComparison.Ordinal);
+        Assert.Contains("Copyright (c) 2014 Adam Hathcock", notices, StringComparison.Ordinal);
+        Assert.Contains("Copyright (c) 2018-2019, Alexandre Mutel", notices, StringComparison.Ordinal);
+        Assert.Contains("Redistributions in binary form must reproduce", notices, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InstallerKeepsLibreOfficeSelectedWithoutAnElevationHandoff()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        Assert.Contains("Name: \"fullpreviews\"", installer, StringComparison.Ordinal);
+        Assert.Contains("/a \"\"{tmp}\\LibreOffice.msi\"\" /qn", installer, StringComparison.Ordinal);
+        Assert.Contains("TARGETDIR=\"\"{localappdata}\\Programs\\LibreOffice\"\"", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Verb: \"runas\"", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("Name: \"fullpreviews\"; Flags: unchecked", installer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void UninstallRemovesOnlyTheLibreOfficeImageOwnedByGlimpse()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        Assert.Contains("AfterInstall: MarkBundledOfficeEngine", installer, StringComparison.Ordinal);
+        Assert.Contains("LoadStringFromFile(BundledOfficeEngineMarker(), MarkerText)", installer, StringComparison.Ordinal);
+        Assert.Contains("MarkerText = '{#LibreOfficeManagedMarkerText}'", installer, StringComparison.Ordinal);
+        Assert.Contains("DelTree(BundledOfficeEngineRoot(), True, True, True)", installer, StringComparison.Ordinal);
+        Assert.Contains("RemoveBundledOfficeEngine();", installer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReinstallUsesTheLiveStartupPreference()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        Assert.Contains("HasExplicitTaskSelection", installer, StringComparison.Ordinal);
+        Assert.Contains("UsePreviousTasks=yes", installer, StringComparison.Ordinal);
+        Assert.Contains("StartupRegisteredAtStart", installer, StringComparison.Ordinal);
+        Assert.Contains("ApplyLiveStartupDefault", installer, StringComparison.Ordinal);
+        Assert.Contains("if WizardSilent", installer, StringComparison.Ordinal);
+        Assert.Contains("WizardSelectTasks('startup')", installer, StringComparison.Ordinal);
+        Assert.Contains("WizardSelectTasks('!startup')", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("WizardSelectTasks('*startup')", installer, StringComparison.Ordinal);
+        Assert.DoesNotContain("WizardSelectTasks('*!startup')", installer, StringComparison.Ordinal);
+        Assert.Contains("Parameters: \"--uninstall-startup\"; Check: StartupTaskNotSelected", installer, StringComparison.Ordinal);
+        Assert.Contains("Parameters: \"--install-startup\"; Check: StartupTaskSelected", installer, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InstallerBuildWritesACompanionChecksumFile()
+    {
+        var script = TestSource.Read(@"SpacePreview\scripts\build-installer.ps1");
+
+        Assert.Contains("$checksum = \"$setup.sha256\"", script, StringComparison.Ordinal);
+        Assert.Contains("[System.IO.File]::WriteAllText", script, StringComparison.Ordinal);
+        Assert.Contains("$(Split-Path -Leaf $setup)", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InAppUpdateUsesTheExistingInstallerWithoutASecondLibreOfficeDownload()
+    {
+        var updater = TestSource.Read(@"SpacePreview\Services\AppUpdateService.cs");
+        var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        Assert.Contains("Update to {update.VersionText}", tray, StringComparison.Ordinal);
+        Assert.Contains("/GLIMPSEUPDATE", updater, StringComparison.Ordinal);
+        Assert.Contains("function AutoUpdateRequested", installer, StringComparison.Ordinal);
+        Assert.Contains("Parameters: \"--updated\"; Check: AutoUpdateRequested", installer, StringComparison.Ordinal);
+        Assert.Contains("and not AutoUpdateRequested()", installer, StringComparison.Ordinal);
     }
 
 }
