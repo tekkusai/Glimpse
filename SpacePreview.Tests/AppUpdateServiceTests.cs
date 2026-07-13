@@ -99,6 +99,36 @@ public sealed class AppUpdateServiceTests
         Assert.False(AppUpdateService.TryParseVersion(tag, out _));
     }
 
+    [Fact]
+    public void InstallerIdentityMustMatchTheExpectedProductAndVersion()
+    {
+        AppUpdateService.ValidateInstallerIdentity(
+            " Glimpse ",
+            " Glimpse Setup ",
+            "1.1.0",
+            new Version(1, 1, 0));
+    }
+
+    [Theory]
+    [InlineData("Other", "Glimpse Setup", "1.1.0")]
+    [InlineData(null, "Glimpse Setup", "1.1.0")]
+    [InlineData("Glimpse", "Other Setup", "1.1.0")]
+    [InlineData("Glimpse", null, "1.1.0")]
+    [InlineData("Glimpse", "Glimpse Setup", "1.0.0")]
+    [InlineData("Glimpse", "Glimpse Setup", "1.1.0-beta")]
+    [InlineData("Glimpse", "Glimpse Setup", null)]
+    public void InstallerIdentityRejectsWrongOrAmbiguousMetadata(
+        string? productName,
+        string? fileDescription,
+        string? productVersion)
+    {
+        Assert.Throws<InvalidDataException>(() => AppUpdateService.ValidateInstallerIdentity(
+            productName,
+            fileDescription,
+            productVersion,
+            new Version(1, 1, 0)));
+    }
+
     [Theory]
     [InlineData("http://github.com/tekkusai/Glimpse/releases/download/v1.1.0/Glimpse-Setup-1.1.0.exe")]
     [InlineData("https://example.com/tekkusai/Glimpse/releases/download/v1.1.0/Glimpse-Setup-1.1.0.exe")]

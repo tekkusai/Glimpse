@@ -17,6 +17,8 @@ internal static class NativeMethods
     public const int WM_RBUTTONUP = 0x0205;
     public const int WM_MBUTTONDOWN = 0x0207;
     public const int WM_XBUTTONDOWN = 0x020B;
+    public const uint WM_QUIT = 0x0012;
+    public const uint PM_NOREMOVE = 0x0000;
     public const int WM_CONTEXTMENU = 0x007B;
     public const uint WM_GETTEXT = 0x000D;
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
@@ -71,6 +73,7 @@ internal static class NativeMethods
     public const int GWL_EXSTYLE = -20;
     public const int WS_CAPTION = 0x00C00000;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
+    public const int WS_EX_APPWINDOW = 0x00040000;
     public const int WS_EX_NOACTIVATE = 0x08000000;
     public const int WS_EX_LAYERED = 0x00080000;
     public const uint LWA_ALPHA = 0x00000002;
@@ -118,6 +121,18 @@ internal static class NativeMethods
         public uint flags;
         public uint time;
         public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MSG
+    {
+        public IntPtr hwnd;
+        public uint message;
+        public UIntPtr wParam;
+        public IntPtr lParam;
+        public uint time;
+        public POINT pt;
+        public uint lPrivate;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -192,6 +207,22 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PostThreadMessage(uint idThread, uint msg, UIntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool PeekMessage(
+        out MSG lpMsg,
+        IntPtr hWnd,
+        uint wMsgFilterMin,
+        uint wMsgFilterMax,
+        uint wRemoveMsg);
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     public static extern IntPtr GetModuleHandle(string? lpModuleName);
@@ -643,6 +674,52 @@ internal static class NativeMethods
     public static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
     {
         return IntPtr.Size == 8 ? SetWindowLongPtr64(hWnd, nIndex, dwNewLong) : new IntPtr(SetWindowLong32(hWnd, nIndex, dwNewLong.ToInt32()));
+    }
+
+    // ---------------------------------------------------------------------
+    // ITaskbarList: the shell's own add/remove-a-taskbar-button channel. It
+    // updates a live window's button in place; toggling WPF's ShowInTaskbar
+    // instead hides and re-shows the frame, a visible flash.
+    // ---------------------------------------------------------------------
+
+    [ComImport]
+    [Guid("56FDF342-FD6D-11d0-958A-006097C9A090")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface ITaskbarList
+    {
+        void HrInit();
+        void AddTab(IntPtr hwnd);
+        void DeleteTab(IntPtr hwnd);
+        void ActivateTab(IntPtr hwnd);
+        void SetActiveAlt(IntPtr hwnd);
+    }
+
+    [ComImport]
+    [Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
+    private class TaskbarListObject
+    {
+    }
+
+    private static ITaskbarList? _taskbarList;
+
+    /// <summary>Adds or removes a window's taskbar button in place. UI thread only.</summary>
+    public static void SetTaskbarTab(IntPtr hwnd, bool present)
+    {
+        if (_taskbarList is null)
+        {
+            var list = (ITaskbarList)new TaskbarListObject();
+            list.HrInit();
+            _taskbarList = list;
+        }
+
+        if (present)
+        {
+            _taskbarList.AddTab(hwnd);
+        }
+        else
+        {
+            _taskbarList.DeleteTab(hwnd);
+        }
     }
 
     public static string GetClassNameString(IntPtr hwnd)

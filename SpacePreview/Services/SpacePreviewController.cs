@@ -46,6 +46,7 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _idleTrimTimer;
     private readonly DispatcherTimer _dialogOwnerTimer;
     private readonly List<PreviewWindow> _pinnedWindows = [];
+    private IntPtr[] _mouseActivationWindows = [];
     private PreviewWindow? _previewWindow;
     private IntPtr _lastExplorerHwnd;
     private IntPtr _previewOwnerRootHwnd;
@@ -85,7 +86,7 @@ internal sealed class SpacePreviewController : IDisposable
     {
         _dispatcher = dispatcher;
         _keyboardHook = new KeyboardHook(OnKeyDown, OnKeyUp);
-        _mouseHook = new MouseHook(OnMouseDown);
+        _mouseHook = new MouseHook(QueueMouseDown, IsMouseActivationWindow);
         _fullscreenInputSuspension = new FullscreenInputSuspension();
         _fullscreenInputSuspension.SuspensionChanged += OnFullscreenSuspensionChanged;
         _commonFileDialogMonitor = new CommonFileDialogSelectionMonitor(dispatcher);
@@ -135,18 +136,58 @@ internal sealed class SpacePreviewController : IDisposable
         if (active)
         {
             _keyboardHook.Start();
-            _mouseHook.Start();
         }
         else
         {
             _keyboardHook.Stop();
-            _mouseHook.Stop();
             _spaceKey.Reset();
             ClearNavigationRefreshTokens();
             ClearPendingFileDialogPreview();
         }
 
         _inputHooksActive = active;
+        SyncMouseHook();
+    }
+
+    private void SyncMouseHook()
+    {
+        var windows = new List<IntPtr>(_pinnedWindows.Count + 1);
+        if (_previewVisible && _previewWindow?.Hwnd is { } activeHwnd && activeHwnd != IntPtr.Zero)
+        {
+            windows.Add(activeHwnd);
+        }
+
+        foreach (var pinned in _pinnedWindows)
+        {
+            if (pinned.Hwnd != IntPtr.Zero)
+            {
+                windows.Add(pinned.Hwnd);
+            }
+        }
+
+        var activationWindows = windows.ToArray();
+        Volatile.Write(ref _mouseActivationWindows, activationWindows);
+        if (MouseHook.ShouldRun(_inputHooksActive, _previewVisible, _pinnedWindows.Count))
+        {
+            _mouseHook.Start();
+        }
+        else
+        {
+            _mouseHook.Stop();
+        }
+    }
+
+    private bool IsMouseActivationWindow(IntPtr hwnd)
+    {
+        foreach (var candidate in Volatile.Read(ref _mouseActivationWindows))
+        {
+            if (candidate == hwnd)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void SetFullscreenPreviewSuppressed(bool suppressed)
@@ -607,30 +648,34 @@ internal sealed class SpacePreviewController : IDisposable
             DispatcherPriority.Input);
     }
 
-    private bool OnMouseDown(int message, int screenX, int screenY)
+    private void QueueMouseDown(int message, int screenX, int screenY)
+    {
+        _dispatcher.BeginInvoke(
+            () => OnMouseDown(message, screenX, screenY),
+            DispatcherPriority.Input);
+    }
+
+    private void OnMouseDown(int message, int screenX, int screenY)
     {
         ClearPendingFileDialogPreview();
 
         if (_fullscreenInputSuspension.ShouldPassThroughInput())
         {
-            return false;
+            return;
         }
 
         if (!_previewVisible && _pinnedWindows.Count == 0)
         {
-            return false;
+            return;
         }
 
         var hit = NativeMethods.GetRootWindowAt(screenX, screenY);
         var target = FindOwnedWindowAt(screenX, screenY, hit);
         if (target is not null)
         {
-            // Take the foreground NOW, synchronously inside the hook
-            // callback: while this input event is ours, Windows permits the
-            // switch. Deferred activation runs after the click's privilege
-            // has moved to the browser process under the cursor (WebView2
-            // clicks never activate their host), leaving the keyboard with
-            // Explorer - where Ctrl+C copies the file, not the highlight.
+            // The observer thread already took the foreground synchronously
+            // while Windows still grants activation for this click. This is a
+            // harmless fallback for a window published during the same input.
             var hwnd = target.Hwnd;
             if (hwnd != IntPtr.Zero && NativeMethods.GetForegroundWindow() != hwnd)
             {
@@ -640,12 +685,12 @@ internal sealed class SpacePreviewController : IDisposable
             // Clicking into the preview focuses it so Ctrl+C and viewer
             // shortcuts reach the content the user is interacting with.
             _dispatcher.BeginInvoke(() => target.ActivateForInteraction(screenX, screenY));
-            return false;
+            return;
         }
 
         if (FindOwnedPopupAt(screenX, screenY, hit) is not null)
         {
-            return false;
+            return;
         }
 
         // Clicking another file in an upload/open dialog changes the glance;
@@ -656,7 +701,7 @@ internal sealed class SpacePreviewController : IDisposable
             && hit == _previewOwnerRootHwnd)
         {
             _commonFileDialogMonitor.RequestRefresh(_previewOwnerRootHwnd, settleMilliseconds: 60);
-            return false;
+            return;
         }
 
         var outsideDismissSuppressed = _previewWindow?.IsOutsideDismissSuppressed == true;
@@ -669,8 +714,6 @@ internal sealed class SpacePreviewController : IDisposable
             DiagnosticLog.Write($"outside click -> hide x={screenX} y={screenY}");
             _dispatcher.BeginInvoke(HidePreview);
         }
-
-        return false;
     }
 
     /// <summary>
@@ -773,6 +816,7 @@ internal sealed class SpacePreviewController : IDisposable
         DiagnosticLog.Write("welcome shown");
         _previewWindow.ShowWelcome();
         _previewVisible = true;
+        SyncMouseHook();
     }
 
     private PreviewWindow CreatePreviewWindow()
@@ -901,6 +945,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         UpdatePinCapacity();
+        SyncMouseHook();
     }
 
     private void OnPinnedCloseRequested(PreviewWindow window)
@@ -916,6 +961,7 @@ internal sealed class SpacePreviewController : IDisposable
 
         RetireWindow(window);
         UpdatePinCapacity();
+        SyncMouseHook();
         DiagnosticLog.Write($"pinned preview closed ({_pinnedWindows.Count} of {MaxPinnedPreviews})");
     }
 
@@ -999,6 +1045,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         _previewVisible = true;
+        SyncMouseHook();
     }
 
     private void ApplyCommonFileDialogContext(ExplorerSelection selection)
@@ -1509,6 +1556,7 @@ internal sealed class SpacePreviewController : IDisposable
         CancelOfficeNeighborPreconversion();
         DiagnosticLog.Write("hide preview");
         _previewWindow?.HidePreview();
+        SyncMouseHook();
         ScheduleIdleTrim();
     }
 

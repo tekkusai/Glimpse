@@ -211,6 +211,13 @@ internal sealed partial class AppUpdateService : IDisposable
             throw new InvalidDataException("The downloaded installer could not be verified before launch.");
         }
 
+        var versionInfo = FileVersionInfo.GetVersionInfo(actualPath);
+        ValidateInstallerIdentity(
+            versionInfo.ProductName,
+            versionInfo.FileDescription,
+            versionInfo.ProductVersion,
+            release.Version);
+
         var logPath = AppPaths.InDataRoot("update-install.log");
         using var process = Process.Start(new ProcessStartInfo(actualPath)
         {
@@ -327,6 +334,22 @@ internal sealed partial class AppUpdateService : IDisposable
             && int.TryParse(match.Groups["minor"].Value, out var minor)
             && int.TryParse(match.Groups["patch"].Value, out var patch)
             && SetVersion(major, minor, patch, out version);
+    }
+
+    internal static void ValidateInstallerIdentity(
+        string? productName,
+        string? fileDescription,
+        string? productVersion,
+        Version expectedVersion)
+    {
+        if (!string.Equals(productName?.Trim(), "Glimpse", StringComparison.Ordinal)
+            || !string.Equals(fileDescription?.Trim(), "Glimpse Setup", StringComparison.Ordinal)
+            || !TryParseVersion(productVersion, out var parsedVersion)
+            || NormalizeVersion(parsedVersion) != NormalizeVersion(expectedVersion))
+        {
+            throw new InvalidDataException(
+                "The downloaded installer did not identify as the expected Glimpse Setup version.");
+        }
     }
 
     internal static bool IsExpectedReleaseAssetUri(Uri uri, string tag, string fileName)

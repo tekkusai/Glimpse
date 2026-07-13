@@ -3,24 +3,24 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
-    public void ProductAndInstallerVersionsAre110()
+    public void ProductAndInstallerVersionsAre111()
     {
         var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
         var manifest = TestSource.Read(@"SpacePreview\app.manifest");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("<Version>1.1.0</Version>", project, StringComparison.Ordinal);
-        Assert.Contains("version=\"1.1.0.0\"", manifest, StringComparison.Ordinal);
-        Assert.Contains("#define MyAppVersion \"1.1.0\"", installer, StringComparison.Ordinal);
+        Assert.Contains("<Version>1.1.1</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"1.1.1.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"1.1.1\"", installer, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Public110NotesArePlainAndCarryTheFinalInstallerHash()
+    public void Public111NotesArePlainAndCarryTheFinalInstallerHash()
     {
-        var notes = TestSource.Read(@"docs\RELEASE-NOTES-1.1.0.md");
+        var notes = TestSource.Read(@"docs\RELEASE-NOTES-1.1.1.md");
 
-        Assert.Contains("# Glimpse 1.1.0", notes, StringComparison.Ordinal);
-        Assert.Contains("09FD4FCF13B2C739B2FB619788FC72EF4063F4D2CD860EBEAE1C8056AF8FB0D5", notes, StringComparison.Ordinal);
+        Assert.Contains("# Glimpse 1.1.1", notes, StringComparison.Ordinal);
+        Assert.Contains("68C40499EFCF441BA3BD4780AB3AE71B7B87733A119B6FDF06CF4414C96C8025", notes, StringComparison.Ordinal);
         Assert.DoesNotContain("PENDING", notes, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("not code-signed", notes, StringComparison.Ordinal);
         Assert.Contains("SmartScreen", notes, StringComparison.Ordinal);

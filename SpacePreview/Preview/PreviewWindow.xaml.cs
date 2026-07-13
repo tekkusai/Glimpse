@@ -134,6 +134,7 @@ public partial class PreviewWindow : Window
     public PreviewWindow()
     {
         InitializeComponent();
+        ApplyTopmost();
         Theme.Refresh();
         Theme.ApplyResources(this);
         _appliedResources = Theme.Current;
@@ -179,6 +180,11 @@ public partial class PreviewWindow : Window
     /// unpinning releases it.
     /// </summary>
     public bool IsPinned { get; private set; }
+
+    // The one bit the pinned-only Always on top toggle owns. Fresh default
+    // (on) at every pin-state change; never persisted.
+    private bool _pinnedAlwaysOnTop = true;
+    private bool _topmostSuppressed;
 
     public string? CurrentPath { get; private set; }
 
@@ -264,9 +270,95 @@ public partial class PreviewWindow : Window
 
     public bool HasHeaderZoom => _zoomWebView is not null;
 
+    /// <summary>
+    /// The only Topmost derivation. Transient previews always float (the
+    /// quick-look contract); a pinned window floats while its Always on top
+    /// toggle is on; fullscreen suppression outranks both.
+    /// </summary>
+    private bool EffectiveTopmost => (!IsPinned || _pinnedAlwaysOnTop) && !_topmostSuppressed;
+
+    /// <summary>
+    /// A pinned window the user took off the top layer is an ordinary window,
+    /// and an ordinary window must be recoverable from the taskbar and
+    /// Alt+Tab when buried. Floating and transient previews stay out of both.
+    /// Fullscreen suppression is temporary, not a choice, so it never adds an
+    /// entry.
+    /// </summary>
+    private bool TaskbarReachable => IsPinned && !_pinnedAlwaysOnTop;
+
+    private void ApplyTopmost()
+    {
+        Topmost = EffectiveTopmost;
+        SyncShellPresence();
+    }
+
+    // Last taskbar-tab state actually handed to the shell.
+    private bool _taskbarTabShown;
+
+    /// <summary>
+    /// Shell presence without ever touching WPF's ShowInTaskbar at runtime:
+    /// flipping that property hides and re-shows the frame, a visible flash
+    /// on a live window. The extended style bits govern Alt+Tab (TOOLWINDOW
+    /// excludes, APPWINDOW forces inclusion past the hidden owner WPF gives
+    /// non-taskbar windows), and ITaskbarList adds or removes the taskbar
+    /// button in place.
+    /// </summary>
+    private void SyncShellPresence()
+    {
+        if (Hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var reachable = TaskbarReachable;
+        var exStyle = NativeMethods.GetWindowLongPtr(Hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
+        var desired = reachable
+            ? (exStyle & ~NativeMethods.WS_EX_TOOLWINDOW) | NativeMethods.WS_EX_APPWINDOW
+            : (exStyle | NativeMethods.WS_EX_TOOLWINDOW) & ~NativeMethods.WS_EX_APPWINDOW;
+        if (desired != exStyle)
+        {
+            NativeMethods.SetWindowLongPtr(Hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(desired));
+        }
+
+        if (reachable == _taskbarTabShown)
+        {
+            return;
+        }
+
+        try
+        {
+            NativeMethods.SetTaskbarTab(Hwnd, reachable);
+            _taskbarTabShown = reachable;
+        }
+        catch (Exception exception)
+        {
+            DiagnosticLog.Write($"taskbar tab sync failed {exception.Message}");
+        }
+    }
+
+    /// <summary>Probe: the shell-presence state matches the derivation.</summary>
+    private bool ShellPresenceApplied(bool reachable)
+    {
+        if (TaskbarReachable != reachable)
+        {
+            return false;
+        }
+
+        if (Hwnd == IntPtr.Zero)
+        {
+            return true;
+        }
+
+        var exStyle = NativeMethods.GetWindowLongPtr(Hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
+        var toolWindow = (exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0;
+        var appWindow = (exStyle & NativeMethods.WS_EX_APPWINDOW) != 0;
+        return toolWindow == !reachable && appWindow == reachable && _taskbarTabShown == reachable;
+    }
+
     public void SetTopmostSuppressed(bool suppressed)
     {
-        Topmost = !suppressed;
+        _topmostSuppressed = suppressed;
+        ApplyTopmost();
     }
 
     /// <summary>
@@ -588,7 +680,7 @@ public partial class PreviewWindow : Window
 
             // Reassert topmost without activation. This matches Quick Look's "above Finder" feel.
             Topmost = false;
-            Topmost = true;
+            ApplyTopmost();
         }
 
         // A first office conversion builds LibreOffice's profile (~15s). It is
@@ -9248,7 +9340,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             return new Rect(origin, new Size(element.ActualWidth, element.ActualHeight));
         }
 
-        bool ButtonOwnsCenter(Button button)
+        bool ButtonOwnsCenter(System.Windows.Controls.Primitives.ButtonBase button)
         {
             if (!button.IsVisible || button.ActualWidth <= 0 || button.ActualHeight <= 0)
             {
@@ -9272,7 +9364,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             return false;
         }
 
-        var namedButtons = new (string Name, Button Button)[]
+        var namedButtons = new (string Name, System.Windows.Controls.Primitives.ButtonBase Button)[]
         {
             (nameof(BrowsePreviousButton), BrowsePreviousButton),
             (nameof(BrowseNextButton), BrowseNextButton),
@@ -9283,6 +9375,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             (nameof(ZoomInButton), ZoomInButton),
             (nameof(RotateLeftButton), RotateLeftButton),
             (nameof(RotateRightButton), RotateRightButton),
+            (nameof(AlwaysOnTopButton), AlwaysOnTopButton),
             (nameof(PinButton), PinButton),
             (nameof(MaximizeButton), MaximizeButton),
             (nameof(CloseButton), CloseButton)
@@ -9387,9 +9480,27 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             CloseButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             PinButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             var pinned = IsPinned;
+
+            // The Always on top toggle only exists pinned: revealed, default
+            // on; unchecking releases Topmost and gains taskbar reachability,
+            // rechecking restores the float and drops the entry.
+            var alwaysOnTopRevealed = pinned
+                && AlwaysOnTopButton.Visibility == Visibility.Visible
+                && AlwaysOnTopButton.IsChecked == true
+                && Topmost
+                && ShellPresenceApplied(false);
+            AlwaysOnTopButton.IsChecked = false;
+            var alwaysOnTopReleased = !Topmost && ShellPresenceApplied(true);
+            AlwaysOnTopButton.IsChecked = true;
+            var alwaysOnTopRestored = Topmost && ShellPresenceApplied(false);
+
             CloseButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             PinButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             var unpinned = !IsPinned;
+            var alwaysOnTopRetired = AlwaysOnTopButton.Visibility == Visibility.Collapsed
+                && AlwaysOnTopButton.IsChecked == true
+                && Topmost
+                && ShellPresenceApplied(false);
 
             return JsonSerializer.Serialize(new
             {
@@ -9400,7 +9511,11 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 GridOpened = gridOpened,
                 GridClosed = gridClosed,
                 Pinned = pinned,
-                Unpinned = unpinned
+                Unpinned = unpinned,
+                AlwaysOnTopRevealed = alwaysOnTopRevealed,
+                AlwaysOnTopReleased = alwaysOnTopReleased,
+                AlwaysOnTopRestored = alwaysOnTopRestored,
+                AlwaysOnTopRetired = alwaysOnTopRetired
             });
         }
         finally
@@ -10337,6 +10452,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         }
 
         UpdateMaximizeChrome();
+
+        // Idempotent insurance: state changes are the one runtime moment the
+        // shell re-evaluates a window, so re-assert the derived presence.
+        SyncShellPresence();
     }
 
     private void UpdateMaximizeChrome()
@@ -10759,9 +10878,9 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         Hwnd = hwnd;
 
         var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
-        exStyle |= NativeMethods.WS_EX_TOOLWINDOW;
         exStyle &= ~NativeMethods.WS_EX_NOACTIVATE;
         NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(exStyle));
+        SyncShellPresence();
 
         // A border-drag holds the stage size for the rest of this open;
         // the next open returns to content rules. WM_SIZING fires only for
@@ -10882,6 +11001,14 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     public void SetPinned(bool pinned)
     {
         IsPinned = pinned;
+
+        // Fresh default at every pin-state change: the next pin starts on
+        // top, and a window retiring to transient never inherits a pinned
+        // window's choice.
+        AlwaysOnTopButton.IsChecked = true;
+        SetAlwaysOnTopVisible(pinned);
+        ApplyTopmost();
+
         PinButton.IsEnabled = true;
         PinButton.Content = pinned ? UnpinGlyph : PinGlyph;
         PinButton.ToolTip = pinned ? "Unpin" : "Pin (stays open)";
@@ -10905,6 +11032,52 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         }
 
         SetBrowseControlsVisible(CurrentPath is not null && !pinned && !_isFileDialogMode);
+    }
+
+    private void AlwaysOnTopButton_CheckedChanged(object sender, RoutedEventArgs e)
+    {
+        _pinnedAlwaysOnTop = AlwaysOnTopButton.IsChecked == true;
+        ApplyTopmost();
+        if (IsPinned)
+        {
+            DiagnosticLog.Write($"always-on-top {(_pinnedAlwaysOnTop ? "on" : "off")} path={CurrentPath}");
+        }
+    }
+
+    /// <summary>
+    /// Opacity-only reveal into space the pin action just recomposed; the
+    /// window controls to its right never move. Honors the Windows animation
+    /// preference by snapping instead of fading.
+    /// </summary>
+    private void SetAlwaysOnTopVisible(bool visible)
+    {
+        if (visible == (AlwaysOnTopButton.Visibility == Visibility.Visible))
+        {
+            return;
+        }
+
+        AlwaysOnTopButton.BeginAnimation(OpacityProperty, null);
+        if (!visible)
+        {
+            AlwaysOnTopButton.Visibility = Visibility.Collapsed;
+            AlwaysOnTopButton.Opacity = 0;
+            return;
+        }
+
+        AlwaysOnTopButton.Visibility = Visibility.Visible;
+        if (!SystemParameters.ClientAreaAnimation)
+        {
+            AlwaysOnTopButton.Opacity = 1;
+            return;
+        }
+
+        AlwaysOnTopButton.Opacity = 0;
+        AlwaysOnTopButton.BeginAnimation(
+            OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
     }
 
     private void BrowsePreviousButton_Click(object sender, RoutedEventArgs e)

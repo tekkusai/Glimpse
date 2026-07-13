@@ -358,6 +358,16 @@ public partial class App : Application
             {
                 DiagnosticLog.Write($"probe buttons {window.ProbeButtonAudit()}");
             }
+            else if (string.Equals(extra, "pinnedoff", StringComparison.OrdinalIgnoreCase))
+            {
+                // Leaves the window pinned with Always on top off through the
+                // final capture, so a live pass can verify the reveal visuals
+                // and taskbar/Alt+Tab reachability from outside the process.
+                window.SetPinned(true);
+                window.AlwaysOnTopButton.IsChecked = false;
+                window.UpdateLayout();
+                await Task.Delay(120);
+            }
             else if (string.Equals(extra, "overlayrace", StringComparison.OrdinalIgnoreCase))
             {
                 if (!await window.ProbeLoadingOverlayRaceAsync())
