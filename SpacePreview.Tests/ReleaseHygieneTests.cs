@@ -3,24 +3,27 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
-    public void ProductAndInstallerVersionsAre111()
+    public void ProductAndInstallerVersionsAre112()
     {
         var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
         var manifest = TestSource.Read(@"SpacePreview\app.manifest");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("<Version>1.1.1</Version>", project, StringComparison.Ordinal);
-        Assert.Contains("version=\"1.1.1.0\"", manifest, StringComparison.Ordinal);
-        Assert.Contains("#define MyAppVersion \"1.1.1\"", installer, StringComparison.Ordinal);
+        Assert.Contains("<Version>1.1.2</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"1.1.2.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"1.1.2\"", installer, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Public111NotesArePlainAndCarryTheFinalInstallerHash()
+    public void Public112NotesArePlainAndCarryTheFinalInstallerHash()
     {
-        var notes = TestSource.Read(@"docs\RELEASE-NOTES-1.1.1.md");
+        var notes = TestSource.Read(@"docs\RELEASE-NOTES-1.1.2.md");
 
-        Assert.Contains("# Glimpse 1.1.1", notes, StringComparison.Ordinal);
-        Assert.Contains("68C40499EFCF441BA3BD4780AB3AE71B7B87733A119B6FDF06CF4414C96C8025", notes, StringComparison.Ordinal);
+        Assert.Contains("# Glimpse 1.1.2", notes, StringComparison.Ordinal);
+        Assert.Contains("C4E726BCE4C6B4FD7B793DC29937FD72241C16193535B646162CD292F303A292", notes, StringComparison.Ordinal);
+        Assert.Contains("installer or uninstaller", notes, StringComparison.Ordinal);
+        Assert.Contains("certain large PDFs", notes, StringComparison.Ordinal);
+        Assert.DoesNotContain("INSTALLER_SHA256", notes, StringComparison.Ordinal);
         Assert.DoesNotContain("PENDING", notes, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("not code-signed", notes, StringComparison.Ordinal);
         Assert.Contains("SmartScreen", notes, StringComparison.Ordinal);

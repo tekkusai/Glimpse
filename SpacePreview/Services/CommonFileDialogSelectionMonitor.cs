@@ -23,7 +23,6 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     private IntPtr _cachedDialog;
     private IntPtr _pendingDialog;
     private IntPtr _disabledDialog;
-    private IntPtr _observedDialogCandidate;
     private IntPtr _verifiedDialog;
     private ExplorerSelection? _cachedSelection;
     private long _refreshGeneration;
@@ -44,7 +43,6 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 
     public event Action<IntPtr, ExplorerSelection?>? SelectionChanged;
     public event Action<IntPtr, ExplorerSelection?>? RefreshCompleted;
-    public event Action<IntPtr>? DialogObserved;
 
     public void Start()
     {
@@ -226,24 +224,20 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         var root = GetRoot(hwnd);
         if (!CommonFileDialogSelectionService.HasDialogWindowClass(root))
         {
-            _observedDialogCandidate = IntPtr.Zero;
             _verifiedDialog = IntPtr.Zero;
             return;
         }
 
-        // A lower-integrity process can identify an elevated dialog by its
-        // top-level class even when UIPI prevents child-window enumeration.
-        // Announce that candidate for the integrity check, but only read its
-        // selection after the complete Common Item Dialog shape is verified.
-        if (_observedDialogCandidate != root)
+        if (_verifiedDialog == root)
         {
-            _observedDialogCandidate = root;
-            _verifiedDialog = IntPtr.Zero;
-            DialogObserved?.Invoke(root);
+            return;
         }
 
-        if (_verifiedDialog != root
-            && CommonFileDialogSelectionService.IsCommonFileDialogRoot(root))
+        // #32770 is also used by installers and uninstallers. It is enough
+        // to consider after an explicit Space press, but passive monitoring
+        // only caches a dialog after the shell view proves it is a picker.
+        _verifiedDialog = IntPtr.Zero;
+        if (CommonFileDialogSelectionService.IsCommonFileDialogRoot(root))
         {
             _verifiedDialog = root;
             RequestRefresh(root, settleMilliseconds: 0);
@@ -339,7 +333,6 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             _cachedDialog = IntPtr.Zero;
             _pendingDialog = IntPtr.Zero;
             _disabledDialog = IntPtr.Zero;
-            _observedDialogCandidate = IntPtr.Zero;
             _verifiedDialog = IntPtr.Zero;
             _cachedSelection = null;
         }

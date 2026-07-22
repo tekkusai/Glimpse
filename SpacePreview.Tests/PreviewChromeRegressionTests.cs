@@ -234,6 +234,23 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("StartPdfPageSync(railState)", windowSource, StringComparison.Ordinal);
         Assert.Contains("SyncPdfPageFromViewer", windowSource, StringComparison.Ordinal);
         Assert.Contains("TryReadPdfPageFromAutomation", windowSource, StringComparison.Ordinal);
+        var syncStart = windowSource.IndexOf(
+            "private async void SyncPdfPageFromViewer",
+            StringComparison.Ordinal);
+        Assert.True(syncStart >= 0);
+        var syncEnd = windowSource.IndexOf(
+            "private void SetPdfCurrentPageFromViewer",
+            syncStart,
+            StringComparison.Ordinal);
+        Assert.True(syncEnd > syncStart);
+        var pageSync = windowSource[syncStart..syncEnd];
+        Assert.Contains("var probeTask = Task.Run(() =>", pageSync, StringComparison.Ordinal);
+        Assert.Contains("TryReadPdfPageFromAutomation(hwnd, totalPages, cachedElement)", pageSync, StringComparison.Ordinal);
+        Assert.Contains("Task.WhenAny(probeTask, timeoutTask)", pageSync, StringComparison.Ordinal);
+        Assert.DoesNotContain("AutomationElement.FromHandle", pageSync, StringComparison.Ordinal);
+        Assert.Contains("PdfPageAutomationTimeout", windowSource, StringComparison.Ordinal);
+        Assert.Contains("PageSyncGeneration", windowSource, StringComparison.Ordinal);
+        Assert.Contains("PageSyncDisabled", windowSource, StringComparison.Ordinal);
         Assert.Contains("AutomationElement.FromHandle", windowSource, StringComparison.Ordinal);
         Assert.Contains("ValuePattern.Pattern", windowSource, StringComparison.Ordinal);
         Assert.Contains("TryReadPdfPageFromSource", windowSource, StringComparison.Ordinal);

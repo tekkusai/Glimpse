@@ -92,7 +92,6 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor = new CommonFileDialogSelectionMonitor(dispatcher);
         _commonFileDialogMonitor.SelectionChanged += OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted += OnCommonFileDialogRefreshCompleted;
-        _commonFileDialogMonitor.DialogObserved += QueueElevationMismatchCheck;
         _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
         {
             Interval = IdleTrimDelay
@@ -2023,7 +2022,6 @@ internal sealed class SpacePreviewController : IDisposable
         CancelOfficeNeighborPreconversion();
         _commonFileDialogMonitor.SelectionChanged -= OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted -= OnCommonFileDialogRefreshCompleted;
-        _commonFileDialogMonitor.DialogObserved -= QueueElevationMismatchCheck;
         ClearPendingFileDialogPreview();
         _commonFileDialogMonitor.Dispose();
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;

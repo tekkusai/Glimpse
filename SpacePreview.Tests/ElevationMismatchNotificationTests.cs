@@ -294,29 +294,25 @@ public sealed class ElevationMismatchNotificationTests
     }
 
     [Fact]
-    public void ForegroundDialogObservationPublishesWithoutAWithheldSpaceHook()
+    public void ForegroundObservationOnlyRefreshesVerifiedFileDialogs()
     {
         var monitor = TestSource.Read(@"SpacePreview\Services\CommonFileDialogSelectionMonitor.cs");
         var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
 
-        Assert.Contains("DialogObserved?.Invoke(root)", monitor, StringComparison.Ordinal);
+        Assert.DoesNotContain("DialogObserved", monitor, StringComparison.Ordinal);
         Assert.Contains("HasDialogWindowClass(root)", monitor, StringComparison.Ordinal);
         Assert.Contains("OnForegroundPoll", monitor, StringComparison.Ordinal);
         Assert.Contains("_foregroundPoll.Start()", monitor, StringComparison.Ordinal);
         Assert.Contains("_foregroundPoll.Stop()", monitor, StringComparison.Ordinal);
-        Assert.Contains("_verifiedDialog != root", monitor, StringComparison.Ordinal);
+        Assert.Contains("_verifiedDialog == root", monitor, StringComparison.Ordinal);
+        Assert.Contains("IsCommonFileDialogRoot(root)", monitor, StringComparison.Ordinal);
+        Assert.Contains("RequestRefresh(root, settleMilliseconds: 0)", monitor, StringComparison.Ordinal);
         Assert.Contains("CompletePreviewAccessCheck", controller, StringComparison.Ordinal);
         Assert.Contains("PreviewAccessWarningDetected?.Invoke(warning)", controller, StringComparison.Ordinal);
         Assert.DoesNotContain("PollPreviewAccessAttempt", controller, StringComparison.Ordinal);
         Assert.DoesNotContain("_previewAccessAttemptTimer", controller, StringComparison.Ordinal);
-        Assert.Contains(
-            "DialogObserved += QueueElevationMismatchCheck",
-            controller,
-            StringComparison.Ordinal);
-        Assert.Contains(
-            "DialogObserved -= QueueElevationMismatchCheck",
-            controller,
-            StringComparison.Ordinal);
+        Assert.DoesNotContain("DialogObserved", controller, StringComparison.Ordinal);
+        Assert.Contains("QueueForegroundElevationMismatchCheck();", controller, StringComparison.Ordinal);
     }
 
     [Fact]

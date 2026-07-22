@@ -62,6 +62,7 @@ public partial class PreviewWindow : Window
     private const double PdfPageRailWidth = 132;
     private const double PdfPageRailCollapsedWidth = 32;
     private const int PdfPageRailInitialPages = 10;
+    private static readonly TimeSpan PdfPageAutomationTimeout = TimeSpan.FromSeconds(2);
     // Wider than the thumbnail rail: chapter titles are words, not pictures.
     private const double EpubChapterRailWidth = 168;
     private const int PdfPageRailMaxPages = 120;
@@ -3241,12 +3242,19 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         public Border? SelectedPageTile { get; set; }
         public ScrollViewer? PageRailScrollViewer { get; set; }
         public DispatcherTimer? PageSyncTimer { get; set; }
+        public Task<PdfPageAutomationProbeResult>? PageSyncProbeTask { get; set; }
         public bool PageSyncInFlight { get; set; }
+        public bool PageSyncDisabled { get; set; }
+        public long PageSyncGeneration { get; set; }
         public string? LastPageSource { get; set; }
         public System.Windows.Automation.AutomationElement? PageAutomationElement { get; set; }
         public TaskCompletionSource<bool> FirstRailReady { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
+
+    private readonly record struct PdfPageAutomationProbeResult(
+        int Page,
+        System.Windows.Automation.AutomationElement? PageElement);
 
     private static ContentControl BuildPdfPageRailHost()
     {
@@ -3728,6 +3736,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             return;
         }
 
+        state.PageSyncDisabled = false;
         state.LastPageSource = state.WebView.CoreWebView2?.Source;
         var timer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -3742,13 +3751,13 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     {
         state.PageSyncTimer?.Stop();
         state.PageSyncTimer = null;
-        state.PageSyncInFlight = false;
+        state.PageSyncGeneration++;
         state.PageAutomationElement = null;
     }
 
-    private void SyncPdfPageFromViewer(PdfPageRailState state)
+    private async void SyncPdfPageFromViewer(PdfPageRailState state)
     {
-        if (state.PageSyncInFlight || state.JumpInFlight)
+        if (state.JumpInFlight)
         {
             return;
         }
@@ -3759,7 +3768,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             return;
         }
 
-        state.PageSyncInFlight = true;
+        var ownsProbe = false;
         try
         {
             if (!string.Equals(core.Source, state.LastPageSource, StringComparison.Ordinal))
@@ -3772,9 +3781,71 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
                 }
             }
 
-            if (TryReadPdfPageFromAutomation(state, out var automationPage))
+            if (state.PageSyncInFlight
+                || state.PageSyncDisabled
+                || state.PageSyncProbeTask is { IsCompleted: false })
             {
-                SetPdfCurrentPageFromViewer(state, automationPage);
+                return;
+            }
+
+            var totalPages = state.Document?.TotalPages ?? 0;
+            var hwnd = TryGetPdfAutomationHwnd(state.WebView);
+            if (totalPages <= 1 || hwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            var generation = state.PageSyncGeneration;
+            var cachedElement = state.PageAutomationElement;
+            state.PageSyncInFlight = true;
+            ownsProbe = true;
+
+            // UI Automation crosses into Chromium's PDF provider and can
+            // block while a large document is scrolling or zooming. Never
+            // let that provider own the WPF dispatcher.
+            var probeTask = Task.Run(() =>
+            {
+                try
+                {
+                    return TryReadPdfPageFromAutomation(hwnd, totalPages, cachedElement);
+                }
+                catch
+                {
+                    return default;
+                }
+            });
+            state.PageSyncProbeTask = probeTask;
+
+            var timeoutTask = Task.Delay(PdfPageAutomationTimeout);
+            if (await Task.WhenAny(probeTask, timeoutTask) != probeTask)
+            {
+                // UIA calls cannot be cancelled safely. Keep the single
+                // worker isolated and stop polling this viewer rather than
+                // stacking more blocked probes behind it.
+                if (generation == state.PageSyncGeneration
+                    && state.Version == _loadVersion
+                    && !state.Token.IsCancellationRequested)
+                {
+                    state.PageSyncDisabled = true;
+                    DiagnosticLog.Write(
+                        $"pdf page sync disabled after {PdfPageAutomationTimeout.TotalSeconds:0}s timeout");
+                }
+
+                return;
+            }
+
+            var result = await probeTask;
+            if (generation != state.PageSyncGeneration
+                || state.Version != _loadVersion
+                || state.Token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            state.PageAutomationElement = result.PageElement;
+            if (result.Page > 0)
+            {
+                SetPdfCurrentPageFromViewer(state, result.Page);
             }
         }
         catch
@@ -3783,7 +3854,10 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         }
         finally
         {
-            state.PageSyncInFlight = false;
+            if (ownsProbe)
+            {
+                state.PageSyncInFlight = false;
+            }
         }
     }
 
@@ -3878,25 +3952,25 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         }
     }
 
-    private bool TryReadPdfPageFromAutomation(PdfPageRailState state, out int page)
+    private static PdfPageAutomationProbeResult TryReadPdfPageFromAutomation(
+        IntPtr hwnd,
+        int totalPages,
+        System.Windows.Automation.AutomationElement? cachedElement)
     {
-        page = 0;
-        var totalPages = state.Document?.TotalPages ?? 0;
         if (totalPages <= 1)
         {
-            return false;
+            return default;
         }
 
-        if (TryReadPdfPageFromAutomationElement(state.PageAutomationElement, totalPages, out page))
+        if (TryReadPdfPageFromAutomationElement(cachedElement, totalPages, out var page))
         {
-            return true;
+            return new PdfPageAutomationProbeResult(page, cachedElement);
         }
 
-        state.PageAutomationElement = null;
-        var root = TryCreatePdfAutomationRoot(state.WebView);
+        var root = TryCreatePdfAutomationRoot(hwnd);
         if (root is null)
         {
-            return false;
+            return default;
         }
 
         var condition = new System.Windows.Automation.OrCondition(
@@ -3914,29 +3988,38 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         }
         catch
         {
-            return false;
+            return default;
         }
 
         foreach (System.Windows.Automation.AutomationElement candidate in candidates)
         {
             if (TryReadPdfPageFromAutomationElement(candidate, totalPages, out page))
             {
-                state.PageAutomationElement = candidate;
-                return true;
+                return new PdfPageAutomationProbeResult(page, candidate);
             }
         }
 
-        return false;
+        return default;
     }
 
-    private System.Windows.Automation.AutomationElement? TryCreatePdfAutomationRoot(WebView2 webView)
+    private IntPtr TryGetPdfAutomationHwnd(WebView2 webView)
     {
         try
         {
-            var hwnd = PresentationSource.FromVisual(webView) is HwndSource source
+            return PresentationSource.FromVisual(webView) is HwndSource source
                 ? source.Handle
                 : new WindowInteropHelper(this).Handle;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
 
+    private static System.Windows.Automation.AutomationElement? TryCreatePdfAutomationRoot(IntPtr hwnd)
+    {
+        try
+        {
             return hwnd == IntPtr.Zero
                 ? null
                 : System.Windows.Automation.AutomationElement.FromHandle(hwnd);
@@ -4793,6 +4876,9 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
             old.Dispose();
             state.WebView = fresh;
+            state.PageSyncGeneration++;
+            state.PageSyncDisabled = false;
+            state.PageAutomationElement = null;
             onSwapped?.Invoke();
         }
 
