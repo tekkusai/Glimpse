@@ -8,8 +8,7 @@ namespace SpacePreview.Preview;
 /// (images, video) is honest at its native size and is never inflated past
 /// it. Page content (documents) has an aspect but no native pixels, so it
 /// takes generous room at that aspect. Compact content (audio) wants the
-/// floor. Formats with no intrinsic shape send no hint and keep the
-/// default stage.
+/// floor. Formats with no intrinsic shape keep the default stage.
 /// </summary>
 internal readonly struct StageFitHint
 {
@@ -129,12 +128,12 @@ internal static class StageFit
     internal const double ChromeHeight = 54;
 
     /// <summary>
-    /// The window size for a hint on a given monitor. <paramref name="dpiScale"/>
-    /// converts native pixels to DIPs so "never upscaled" means device
-    /// pixels, not logical ones. <paramref name="documentRailWidth"/> is the
-    /// page rail documents carry beside their viewer. <paramref name="documentToolbarHeight"/>
-    /// is the embedded viewer's own toolbar above the page. Page fits
-    /// reserve both so the page itself gets the promised aspect.
+    /// The window size for a hint on a given monitor.
+    /// <paramref name="dpiScale"/> converts native pixels to DIPs so "never
+    /// upscaled" means device pixels, not logical ones.
+    /// <paramref name="documentRailWidth"/> and <paramref name="documentToolbarHeight"/>
+    /// are the rail and toolbar a document's viewer carries; page fits reserve
+    /// both so the page itself gets the promised aspect.
     /// </summary>
     internal static Size WindowFor(
         StageFitHint hint,

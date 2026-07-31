@@ -11,6 +11,10 @@ internal static class StaTask
 {
     private static readonly BlockingCollection<IWorkItem> Queue = new();
     private static readonly Thread Worker = StartWorker();
+    private static int _workerManagedThreadId;
+
+    internal static bool IsWorkerThread =>
+        Environment.CurrentManagedThreadId == Volatile.Read(ref _workerManagedThreadId);
 
     public static Task<T> Run<T>(Func<T> work)
     {
@@ -33,6 +37,7 @@ internal static class StaTask
 
     private static void WorkerLoop()
     {
+        Volatile.Write(ref _workerManagedThreadId, Environment.CurrentManagedThreadId);
         foreach (var item in Queue.GetConsumingEnumerable())
         {
             item.Run();

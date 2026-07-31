@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -176,6 +177,15 @@ public partial class PreviewWindow : Window
     internal event EventHandler? ContentReady;
 
     /// <summary>
+    /// The WPF tree can finish rendering while Windows still refuses the
+    /// non-activating stage its expected z-order. Report that separately so
+    /// the controller never leaves a logical "visible" ghost behind.
+    /// </summary>
+    internal event Action<PreviewWindow, string>? PresentationFailed;
+
+    internal string LastPresentationFailureReason { get; private set; } = string.Empty;
+
+    /// <summary>
     /// A pinned preview stays put: dismissal gestures (Space, Esc, outside
     /// clicks, opening the file) leave it alone. Only its X button or
     /// unpinning releases it.
@@ -189,11 +199,6 @@ public partial class PreviewWindow : Window
 
     public string? CurrentPath { get; private set; }
 
-    /// <summary>
-    /// Left/right should keep browsing after a normal click into preview
-    /// content. The explicit exceptions are content where those keys have a
-    /// stronger local meaning: media seek, and WPF text caret/selection.
-    /// </summary>
     /// <summary>
     /// Ctrl+F reached the browser while it owned the keyboard. Only the PDF
     /// viewer actually opens a find bar for it (plain pages have no find UI
@@ -297,12 +302,11 @@ public partial class PreviewWindow : Window
     private bool _taskbarTabShown;
 
     /// <summary>
-    /// Shell presence without ever touching WPF's ShowInTaskbar at runtime:
+    /// Shell presence without touching WPF's ShowInTaskbar at runtime:
     /// flipping that property hides and re-shows the frame, a visible flash
     /// on a live window. The extended style bits govern Alt+Tab (TOOLWINDOW
     /// excludes, APPWINDOW forces inclusion past the hidden owner WPF gives
-    /// non-taskbar windows), and ITaskbarList adds or removes the taskbar
-    /// button in place.
+    /// non-taskbar windows), and ITaskbarList moves the taskbar button.
     /// </summary>
     private void SyncShellPresence()
     {
@@ -518,7 +522,7 @@ public partial class PreviewWindow : Window
     /// <summary>Cached for the keyboard hook thread; set once on SourceInitialized.</summary>
     public IntPtr Hwnd { get; private set; }
 
-    public void ShowPreview(
+    public bool ShowPreview(
         string path,
         IntPtr explorerHwnd,
         int selectedCount = 1,
@@ -589,13 +593,22 @@ public partial class PreviewWindow : Window
         if (_shortcutTarget is not null)
         {
             var target = _shortcutTarget;
-            secondaryActions.Add(("Show target in Explorer", () => RevealShortcutTarget(target)));
+            secondaryActions.Add(("Show target in Explorer", () => RevealInExplorer(target)));
         }
 
         if (File.Exists(contentPath) && LooksLikeLocalDrivePath(contentPath))
         {
             var sharePath = contentPath;
             secondaryActions.Add(("Share", () => SharePath(sharePath)));
+        }
+
+        // Not every previewed item was reached through an Explorer selection
+        // (file dialogs, folder browsing), so every preview answers "where is
+        // this file".
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            var revealPath = path;
+            secondaryActions.Add(("Show in Explorer", () => RevealInExplorer(revealPath)));
         }
 
         UpdateOpenControl(GetOpenLabel(contentPath), secondaryActions);
@@ -635,6 +648,7 @@ public partial class PreviewWindow : Window
         var hasInitialStageFitHint = _stageFitVersion == version;
 
         var freshOpen = !IsVisible;
+        var presented = true;
         _swapStartedAt = freshOpen ? DateTime.MinValue : DateTime.UtcNow;
         if (!freshOpen)
         {
@@ -672,7 +686,7 @@ public partial class PreviewWindow : Window
         {
             ClearPreviewContent();
             HideLoadingOverlay();
-            ShowWithEntrance(useScale: ShouldScaleEntrance());
+            presented = ShowWithEntrance(useScale: ShouldScaleEntrance());
         }
         else
         {
@@ -682,6 +696,8 @@ public partial class PreviewWindow : Window
             // Reassert topmost without activation. This matches Quick Look's "above Finder" feel.
             Topmost = false;
             ApplyTopmost();
+            presented = TryConfirmNativePresentation(out var failureReason);
+            LastPresentationFailureReason = presented ? string.Empty : failureReason;
         }
 
         // A first office conversion builds LibreOffice's profile (~15s). It is
@@ -709,6 +725,7 @@ public partial class PreviewWindow : Window
         }
 
         _ = LoadPreviewAsync(path, contentPath, version, token);
+        return presented;
     }
 
     private static readonly (string Title, string Subtitle) FirstOfficeRunMessage =
@@ -722,7 +739,7 @@ public partial class PreviewWindow : Window
     /// preview window opens once after install, teaches the single gesture,
     /// and is dismissed with that same gesture.
     /// </summary>
-    public void ShowWelcome()
+    public bool ShowWelcome()
     {
         Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
@@ -761,7 +778,7 @@ public partial class PreviewWindow : Window
         HideContentSwapScrim();
         HideLoadingOverlay();
         SetPreviewContent(BuildWelcomeContent(), null, animate: false);
-        ShowWithEntrance();
+        return ShowWithEntrance();
     }
 
     private static FrameworkElement BuildWelcomeContent()
@@ -902,6 +919,14 @@ public partial class PreviewWindow : Window
 
     private void CompleteHide()
     {
+        // A maximize (ours or the OS's) dies with the open: the next Space
+        // must always open a normal stage. This has to happen while the window
+        // still exists on screen. Setting it on a hidden window moves only the
+        // property, so the stage would come back maximized while the property
+        // and the header button both said otherwise, and the next click on
+        // that button would be swallowed reconciling the two. The window is
+        // already faded out here, so the restore is not visible.
+        WindowState = WindowState.Normal;
         Hide();
         ClearPreviewContent();
         SetBrowseControlsVisible(false);
@@ -909,10 +934,10 @@ public partial class PreviewWindow : Window
         // The user's dragged size dies with the open; content rules again.
         _itemStageSize = null;
         _recenterStage = false;
-        // A maximize (ours or the OS's) dies with the open too: the next
-        // Space must always open a normal stage.
-        WindowState = WindowState.Normal;
         _contentDrivenMaximize = false;
+        // Insurance for the paths that reach here already hidden, where the
+        // restore above raises no StateChanged to move the glyph.
+        UpdateMaximizeChrome();
     }
 
     public bool ContainsScreenPoint(int x, int y)
@@ -995,13 +1020,38 @@ public partial class PreviewWindow : Window
         _stageFitVersion != _loadVersion
         || _stageFitHint is not { Kind: StageFitHint.FitKind.PageAspect };
 
-    private void ShowWithEntrance(bool useScale = true)
+    private bool ShowWithEntrance(bool useScale = true)
     {
         var hwnd = new WindowInteropHelper(this).EnsureHandle();
         SetWindowAlpha(hwnd, 0);
         Show();
 
-        AnimateWindowFade(hwnd, from: 0, to: 255, TimeSpan.FromMilliseconds(140), easeOut: true, () => RemoveLayeredStyle(hwnd));
+        if (!TryConfirmNativePresentation(out var failureReason))
+        {
+            LastPresentationFailureReason = failureReason;
+            // A rejected stage was never presented. Hide it while it is still
+            // transparent so the controller's cleanup cannot briefly flash a
+            // window that Windows refused to place where the user expects it.
+            Hide();
+            RemoveLayeredStyle(hwnd);
+            return false;
+        }
+
+        LastPresentationFailureReason = string.Empty;
+
+        AnimateWindowFade(hwnd, from: 0, to: 255, TimeSpan.FromMilliseconds(140), easeOut: true, () =>
+        {
+            RemoveLayeredStyle(hwnd);
+            if (!TryConfirmNativePresentation(out var completionFailure))
+            {
+                LastPresentationFailureReason = completionFailure;
+                PresentationFailed?.Invoke(this, completionFailure);
+                return;
+            }
+
+            DiagnosticLog.Write(
+                $"preview presentation confirmed hwnd=0x{hwnd.ToInt64():X} owner=0x{_placementOwnerHwnd.ToInt64():X}");
+        });
 
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
@@ -1009,7 +1059,7 @@ public partial class PreviewWindow : Window
         {
             RootScale.ScaleX = 1;
             RootScale.ScaleY = 1;
-            return;
+            return true;
         }
 
         RootScale.ScaleX = 0.965;
@@ -1020,6 +1070,61 @@ public partial class PreviewWindow : Window
         };
         RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, pop);
         RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, pop);
+        return true;
+    }
+
+    private bool TryConfirmNativePresentation(out string failureReason)
+    {
+        var hwnd = Hwnd != IntPtr.Zero ? Hwnd : new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero || !IsVisible || !NativeMethods.IsWindowVisible(hwnd))
+        {
+            failureReason = "window-not-visible";
+            return false;
+        }
+
+        var insertAfter = EffectiveTopmost ? new IntPtr(-1) : new IntPtr(-2);
+        if (!NativeMethods.SetWindowPos(
+                hwnd,
+                insertAfter,
+                0,
+                0,
+                0,
+                0,
+                NativeMethods.SWP_NOMOVE
+                | NativeMethods.SWP_NOSIZE
+                | NativeMethods.SWP_NOACTIVATE))
+        {
+            failureReason = $"z-order-rejected-{Marshal.GetLastWin32Error()}";
+            return false;
+        }
+
+        if (EffectiveTopmost
+            && _placementOwnerHwnd != IntPtr.Zero
+            && NativeMethods.IsWindow(_placementOwnerHwnd)
+            && IsWindowAbove(hwnd, _placementOwnerHwnd))
+        {
+            failureReason = "owner-remained-above-preview";
+            return false;
+        }
+
+        failureReason = string.Empty;
+        return true;
+    }
+
+    private static bool IsWindowAbove(IntPtr window, IntPtr candidateAbove)
+    {
+        var cursor = NativeMethods.GetWindow(window, NativeMethods.GW_HWNDPREV);
+        for (var visited = 0; cursor != IntPtr.Zero && visited < 2048; visited++)
+        {
+            if (cursor == candidateAbove)
+            {
+                return true;
+            }
+
+            cursor = NativeMethods.GetWindow(cursor, NativeMethods.GW_HWNDPREV);
+        }
+
+        return false;
     }
 
     private void AnimateWindowFade(IntPtr hwnd, byte from, byte to, TimeSpan duration, bool easeOut, Action onDone)
@@ -1149,7 +1254,6 @@ public partial class PreviewWindow : Window
         {
             LoadingOverlay.Opacity = 1;
         }
-
         if (ShimmerBand.Visibility == Visibility.Visible)
         {
             return;
@@ -1345,8 +1449,7 @@ public partial class PreviewWindow : Window
     /// WPF sibling), so web content dissolves itself: an in-page fade to the
     /// view's own background color, which the templates and converted pages
     /// keep matched to the app canvas. ExecuteScriptAsync runs even on
-    /// hardened script-off pages. A page that refuses keeps its last frame
-    /// and the swap keeps the previous frame.
+    /// hardened script-off pages. A page that refuses keeps its last frame.
     /// </summary>
     private void FadeOutWebContent()
     {
@@ -1427,9 +1530,11 @@ public partial class PreviewWindow : Window
                 var useSignatureRouting = FileKinds.CanUseSignatureRouting(contentPath);
                 if (FileKinds.IsPdf(contentPath) || (useSignatureRouting && signature == FileSignatureKind.Pdf))
                 {
-                    // Real .pdf files go to the Chromium viewer (selection, search,
-                    // zoom). PDF-compatible Illustrator files keep the pdfium render; the web
-                    // engine would treat them as a download.
+                    // Everything PDF-backed goes to the Chromium viewer, so
+                    // artwork gets the same zoom, scrolling, and page rail a
+                    // document gets. Illustrator files reach it through a
+                    // linked .pdf name; the static pdfium render is what is
+                    // left when even that fails.
                     var nativePdf = Path.GetExtension(contentPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
                     if (nativePdf)
                     {
@@ -1438,9 +1543,13 @@ public partial class PreviewWindow : Window
                         fillSignPath = contentPath;
                     }
 
-                    content = nativePdf
-                        ? BuildPdfWebPreview(contentPath, version, token)
-                        : await BuildPdfViaPdfiumAsync(contentPath, token);
+                    var viewerPath = nativePdf
+                        ? contentPath
+                        : await Task.Run(() => PdfViewerLink.TryResolve(contentPath, token), token);
+
+                    content = viewerPath is null
+                        ? await BuildPdfViaPdfiumAsync(contentPath, token)
+                        : BuildPdfWebPreview(viewerPath, version, token);
                 }
                 else if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath))
                 {
@@ -2590,6 +2699,9 @@ public partial class PreviewWindow : Window
         }
     }
 
+    // FitH is what keeps the page filling the stage when the window resizes:
+    // without it the viewer holds whatever zoom it opened at, so maximizing
+    // just adds empty canvas around an unchanged page.
     private static Uri PdfViewerSource(string path, int page = 1) =>
         new(new Uri(path, UriKind.Absolute).AbsoluteUri + $"#page={Math.Max(1, page)}&view=FitH");
 
@@ -2604,6 +2716,12 @@ public partial class PreviewWindow : Window
             // an option: removing Search collapses the entire strip, page box
             // included, and the page box is the one native affordance our
             // rail drives for instant jumps.
+            //
+            // This exact set is load-bearing. JumpPdfWithNativePageBoxAsync
+            // clicks the page box at a measured offset from the centre of the
+            // viewer, so ANY change here moves the box out from under that
+            // click, and the Ctrl+A that follows lands on the document and
+            // selects the whole thing instead. Adding Fit did exactly that.
             core.Settings.HiddenPdfToolbarItems |=
                 CoreWebView2PdfToolbarItems.Save | CoreWebView2PdfToolbarItems.SaveAs |
                 CoreWebView2PdfToolbarItems.Rotate |
@@ -2833,17 +2951,15 @@ public partial class PreviewWindow : Window
     }
 
     /// <summary>
-    /// Arbitrary saved pages scroll arbitrarily, and with their scripts off
-    /// their own scroll logic is dead. After each load, carefully: the root
-    /// is unlocked ONLY when content is genuinely trapped and no
-    /// viewport-sized container already scrolls it (unlocking otherwise
-    /// spawns a phantom root bar over the real one); an html+body double
-    /// scroller collapses to one only when both truly scroll; every bar
-    /// takes one thin app-toned style via the standard scrollbar properties
-    /// (which override a page's own styling uniformly, unlike the webkit
-    /// pseudo-elements); and the root color scheme follows the page's actual
-    /// paint so dark pages get dark bars. ExecuteScriptAsync runs regardless
-    /// of the page-script setting, so this works on hardened previews.
+    /// Saved pages scroll arbitrarily, and with their scripts off their own
+    /// scroll logic is dead. After each load: unlock the root only when
+    /// content is trapped and nothing else already scrolls it (otherwise a
+    /// phantom root bar appears over the real one), collapse an html+body
+    /// double scroller only when both really scroll, style every bar through
+    /// the standard scrollbar properties (they override a page's own styling
+    /// where the webkit pseudo-elements do not), and follow the page's actual
+    /// paint so dark pages get dark bars. ExecuteScriptAsync ignores the
+    /// page-script setting, so this still runs on hardened previews.
     /// </summary>
     private static void NormalizeHtmlPageScrolling(Microsoft.Web.WebView2.Core.CoreWebView2 core)
     {
@@ -3168,6 +3284,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     {
         var palette = Theme.Current;
         var grid = new Grid { Background = Theme.Brush(palette.DeepBg) };
+
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -3229,6 +3346,10 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         public WebView2 WebView { get; set; } = webView;
         public Grid? Surface { get; set; }
         public bool JumpInFlight { get; set; }
+
+        /// <summary>The page asked for while a jump was mid-sequence. Last one wins.</summary>
+        public int? PendingJumpPage { get; set; }
+
         public int CurrentPage { get; set; } = 1;
         public string Path { get; set; } = path;
         public long Version { get; } = version;
@@ -3270,12 +3391,11 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
     /// <summary>
     /// The rail is the truth the parser cannot always reach: the first page
-    /// thumbnail is rendered display-oriented by the document engine, so
-    /// its aspect IS the page's shape. This fires before the reveal gate
-    /// opens, so a document whose header defeated the probe still reveals
-    /// page-shaped; for probed documents the hint agrees and the hysteresis
-    /// absorbs it. A hint that loses the gate's race is dropped by the
-    /// after-reveal rule, never resizing a visible page.
+    /// thumbnail is rendered display-oriented by the document engine, so its
+    /// aspect IS the page's shape. This fires before the reveal gate opens, so
+    /// a document whose header defeated the probe still reveals page-shaped;
+    /// for probed documents the hint agrees and the hysteresis absorbs it. A
+    /// hint that loses the race is dropped by the after-reveal rule.
     /// </summary>
     private void HintStageFromRailTruth(PdfPageRailState state, PdfPreviewDocument document)
     {
@@ -4673,6 +4793,12 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     {
         if (state.JumpInFlight)
         {
+            // The jump types into the viewer's page box, so two sequences
+            // cannot overlap without typing over each other. Hold the click
+            // rather than dropping it: the rail has already moved its
+            // highlight there, and a rail pointing at a page the document
+            // never went to is worse than a wait.
+            state.PendingJumpPage = page;
             return;
         }
 
@@ -4686,8 +4812,24 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
                 return;
             }
 
-            await JumpPdfWithNativePageBoxAsync(state.WebView, core, target);
-            DiagnosticLog.Write($"pdf rail native jump -> page {target}");
+            // The synthetic click aims at where the page box sits rather than
+            // at the box itself, so it can miss for reasons this code cannot
+            // see: a runtime that moves the toolbar, a narrow stage, a page
+            // count wide enough to change the control's width. A timeout keeps
+            // a wedged call from holding the lock, and the viewer is asked
+            // afterwards where it actually landed.
+            await JumpPdfWithNativePageBoxAsync(state.WebView, core, target)
+                .WaitAsync(PdfPageAutomationTimeout);
+
+            if (await LandedOnPdfPageAsync(state, target))
+            {
+                DiagnosticLog.Write($"pdf rail native jump -> page {target}");
+            }
+            else
+            {
+                DiagnosticLog.Write($"pdf rail native jump missed page {target}, staging reload");
+                StagePdfViewerJump(state, target);
+            }
         }
         catch (Exception ex)
         {
@@ -4696,10 +4838,73 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         }
         finally
         {
-            RunAfter(TimeSpan.FromMilliseconds(650), () => state.JumpInFlight = false);
+            RunAfter(TimeSpan.FromMilliseconds(650), () =>
+            {
+                state.JumpInFlight = false;
+                if (state.PendingJumpPage is { } pending)
+                {
+                    state.PendingJumpPage = null;
+                    JumpPdfToPage(state, pending);
+                }
+            });
         }
     }
 
+    /// <summary>
+    /// Asks the viewer, through its own page control, whether the jump landed.
+    /// Unknown counts as landed: the probe is a check on the jump, not a
+    /// second gate, and a viewer that will not answer must not cost the user a
+    /// document reload. UI Automation reaches into Chromium's PDF provider and
+    /// can block, so it runs off the dispatcher under the same timeout the
+    /// page sync uses.
+    /// </summary>
+    private async Task<bool> LandedOnPdfPageAsync(PdfPageRailState state, int target)
+    {
+        if (state.Document is not { TotalPages: > 1 } document)
+        {
+            return true;
+        }
+
+        var hwnd = TryGetPdfAutomationHwnd(state.WebView);
+        if (hwnd == IntPtr.Zero)
+        {
+            return true;
+        }
+
+        var element = state.PageAutomationElement;
+        var probe = Task.Run(() =>
+        {
+            try
+            {
+                return TryReadPdfPageFromAutomation(hwnd, document.TotalPages, element);
+            }
+            catch
+            {
+                return default;
+            }
+        });
+
+        if (await Task.WhenAny(probe, Task.Delay(PdfPageAutomationTimeout)) != probe)
+        {
+            return true;
+        }
+
+        var result = await probe;
+        if (result.PageElement is not null)
+        {
+            state.PageAutomationElement = result.PageElement;
+        }
+
+        return result.Page <= 0 || result.Page == target;
+    }
+
+    /// <summary>
+    /// Clicks the viewer's own page box and types the target. The offset is
+    /// measured against the toolbar set ConfigurePdfViewer keeps: show or hide
+    /// one more item and the box slides out from under this click, after which
+    /// the Ctrl+A selects the document instead of the box. Change one, retest
+    /// the other.
+    /// </summary>
     private static async Task JumpPdfWithNativePageBoxAsync(WebView2 webView, CoreWebView2 core, int page)
     {
         var x = Math.Max(160, webView.ActualWidth / 2 + 15);
@@ -4966,7 +5171,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     {
         var pdf = await Task.Run(() => PdfPreviewRenderer.TryRender(path, token), token);
         return pdf is null
-            ? BuildErrorPreview("Glimpse can't preview this PDF", "The file may be damaged.")
+            ? BuildErrorPreview("Glimpse can't preview this PDF", "It may be damaged or in use.")
             : BuildPdfPreview(pdf);
     }
 
@@ -8482,14 +8687,13 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             : HtmlWebPaintReadyFallback;
 
     /// <summary>
-    /// Resolves through the narrowest readiness signal each renderer can
-    /// provide. Hardened static HTML cannot run page script, so a synchronous
-    /// host script flushes style and layout while the WebView remains hidden,
-    /// then the host shows the fully laid-out page directly. Interactive pages
-    /// are primed transparent, cross two animation-frame boundaries, and report
-    /// a nonce through WebMessage. The PDF plugin gets a
-    /// short DOM-free settle because outer document frames cannot observe its
-    /// embedded raster. Every lane remains bounded.
+    /// Resolves through the narrowest readiness signal each renderer can give.
+    /// Hardened static HTML cannot run page script, so a host script flushes
+    /// style and layout while the WebView is hidden, then the host shows the
+    /// laid-out page. Interactive pages are primed transparent, cross two
+    /// animation frames, and report a nonce through WebMessage. The PDF plugin
+    /// gets a short DOM-free settle: outer frames cannot observe its embedded
+    /// raster. Every lane is bounded.
     /// </summary>
     private static async Task<bool> WaitForWebPaintReadyAsync(
         WebView2 webView,
@@ -9350,7 +9554,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             UpdateFillSignPill();
 
             // The saved file is the honest outcome: show it.
-            ShowPreview(finalPath, Hwnd);
+            if (!ShowPreview(finalPath, Hwnd))
+            {
+                PresentationFailed?.Invoke(this, LastPresentationFailureReason);
+            }
         }
         catch (Exception ex)
         {
@@ -9567,14 +9774,15 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             PinButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             var pinned = IsPinned;
 
-            // The Always on top toggle only exists pinned: revealed, default
-            // on; unchecking releases Topmost and gains taskbar reachability,
-            // rechecking restores the float and drops the entry.
+            // The Always on top toggle only exists pinned: revealed at the
+            // user's configured default; unchecking releases Topmost and
+            // gains taskbar reachability, rechecking restores the float.
+            var defaultOnTop = Services.Settings.Current.PinnedAlwaysOnTopDefault;
             var alwaysOnTopRevealed = pinned
                 && AlwaysOnTopButton.Visibility == Visibility.Visible
-                && AlwaysOnTopButton.IsChecked == true
-                && Topmost
-                && ShellPresenceApplied(false);
+                && AlwaysOnTopButton.IsChecked == defaultOnTop
+                && Topmost == defaultOnTop
+                && ShellPresenceApplied(!defaultOnTop);
             AlwaysOnTopButton.IsChecked = false;
             var alwaysOnTopReleased = !Topmost && ShellPresenceApplied(true);
             AlwaysOnTopButton.IsChecked = true;
@@ -9584,7 +9792,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             PinButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             var unpinned = !IsPinned;
             var alwaysOnTopRetired = AlwaysOnTopButton.Visibility == Visibility.Collapsed
-                && AlwaysOnTopButton.IsChecked == true
+                && AlwaysOnTopButton.IsChecked == defaultOnTop
                 && Topmost
                 && ShellPresenceApplied(false);
 
@@ -9880,11 +10088,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
     /// <summary>
     /// Clicking into the preview hands it keyboard focus, so Ctrl+C and the
-    /// document viewers' own shortcuts land where the user is looking. Only
-    /// a click in the CONTENT hands the keyboard to the content itself: a
-    /// click on header chrome (chevron, pin, zoom) activates the window but
-    /// keeps the keys with it - otherwise stepping to a video with the
-    /// chevron would silently give every arrow key to the player.
+    /// viewers' own shortcuts land where the user is looking. Only a click in
+    /// the CONTENT hands the keyboard to the content: a click on header chrome
+    /// (chevron, pin, zoom) activates the window but keeps the keys, or
+    /// stepping to a video would give every arrow key to the player.
     /// </summary>
     public void ActivateForInteraction(int screenX, int screenY)
     {
@@ -10111,7 +10318,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Focusable = false,
             ToolTip = "Show target in Explorer"
         };
-        link.Click += (_, _) => RevealShortcutTarget(shortcutTarget);
+        link.Click += (_, _) => RevealInExplorer(shortcutTarget);
         link.MouseEnter += (_, _) => link.TextDecorations = TextDecorations.Underline;
         link.MouseLeave += (_, _) => link.TextDecorations = null;
         SubtitleText.Inlines.Add(link);
@@ -10122,19 +10329,12 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         }
     }
 
-    private void RevealShortcutTarget(string target)
+    private void RevealInExplorer(string target)
     {
-        try
+        if (ExplorerRevealService.TryShow(target))
         {
-            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{target}\"") { UseShellExecute = true });
+            DismissRequested?.Invoke(this, EventArgs.Empty);
         }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"reveal target failed {target}: {ex.GetType().Name}: {ex.Message}");
-            return;
-        }
-
-        DismissRequested?.Invoke(this, EventArgs.Empty);
     }
 
     private static string BuildHeaderSubtitle(string path, string? shortcutTarget, int selectedCount)
@@ -10552,15 +10752,11 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     }
 
     // ---------------------------------------------------------------------
-    // Geometry.
+    // Geometry. Changes wait for the dissolve and then happen in one step,
+    // while the preview is blank: animating a window resize makes WPF title
+    // text and browser children relayout at every intermediate size.
     // ---------------------------------------------------------------------
 
-    /// <summary>
-    /// Geometry waits for the dissolve, then changes in one step while the
-    /// preview is blank. Animated window resize makes WPF title text and
-    /// browser children relayout across intermediate sizes; stable states are
-    /// cleaner than visible resizing.
-    /// </summary>
     /// <summary>
     /// Places the stage: centered on the Explorer window's monitor, at the
     /// current item's shape when it is known, otherwise the
@@ -10586,10 +10782,10 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     /// <summary>
     /// The current item's shape request. One rule governs lateness: a hint
     /// applies only while its item is unrevealed. Before the reveal it may
-    /// still retake the stage (the content is hidden or dissolving, so the
-    /// change happens on a blank canvas); after the reveal it is dropped and
-    /// the stage holds until the next item. A stale version is dropped too,
-    /// so browsing away cancels a slow probe's hint by construction.
+    /// still retake the stage, since the content is hidden or dissolving;
+    /// after the reveal it is dropped and the stage holds until the next
+    /// item. A stale version is dropped too, so browsing away cancels a slow
+    /// probe's hint by construction.
     /// </summary>
     internal void SetStageFitHint(StageFitHint hint, long version)
     {
@@ -11088,10 +11284,11 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     {
         IsPinned = pinned;
 
-        // Fresh default at every pin-state change: the next pin starts on
-        // top, and a window retiring to transient never inherits a pinned
-        // window's choice.
-        AlwaysOnTopButton.IsChecked = true;
+        // Fresh default at every pin-state change: the next pin starts from
+        // the user's chosen default, and a window retiring to transient never
+        // inherits a pinned window's per-window choice. (Transients float
+        // regardless; the bit only matters while pinned.)
+        AlwaysOnTopButton.IsChecked = Services.Settings.Current.PinnedAlwaysOnTopDefault;
         SetAlwaysOnTopVisible(pinned);
         ApplyTopmost();
 

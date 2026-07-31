@@ -14,14 +14,13 @@ namespace SpacePreview.Services;
 
 /// <summary>
 /// The whole tray presence: a shell notification icon backed by a message-only
-/// window, and the WPF flyout that doubles as the app's settings. There is no
-/// settings window; the menu is the settings. Manages its GDI handles and cleans
-/// them up on <see cref="Dispose"/>.
+/// window, a compact WPF flyout, and ownership of the settings and notification
+/// windows opened from that surface. Manages its GDI handles and cleans them up
+/// on <see cref="Dispose"/>.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
     private const int IconId = 1;
-    private static readonly TimeSpan UnstablePreviewAccessWarningRepeatInterval = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(6);
     private static readonly TimeSpan UpdateMenuRetryInterval = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan UpdateNotificationRetryInterval = TimeSpan.FromSeconds(15);
@@ -45,16 +44,11 @@ internal sealed class TrayIcon : IDisposable
     private DateTime _lastUpdateCheckAt;
     private AppUpdateRelease? _availableUpdate;
     private AppUpdateWindow? _updateWindow;
-    private readonly Dictionary<string, long> _previewAccessWarningTicks = new(StringComparer.OrdinalIgnoreCase);
     private PreviewAccessWarningWindow? _previewAccessWarningWindow;
 
-    // Menu items whose checked state must reflect live state.
-    private readonly MenuItem _followSystemItem;
-    private readonly MenuItem _lightItem;
-    private readonly MenuItem _darkItem;
-    private readonly MenuItem _startupItem;
-    private readonly MenuItem _versionItem;
-    private readonly MenuItem _documentPreviewItem;
+    // The one stateful menu item: present only while an update is pending.
+    private readonly MenuItem _updateItem;
+    private SettingsWindow? _settingsWindow;
 
     /// <summary>Raised when the user picks a theme. Handler should persist and re-resolve.</summary>
     public event Action<ThemePreference>? ThemeChanged;
@@ -62,21 +56,14 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>Raised when the user picks Quit.</summary>
     public event Action? QuitRequested;
 
-    public TrayIcon(
-        ThemePreference theme,
-        Func<bool>? canShowUpdateNotification = null)
+    public TrayIcon(Func<bool>? canShowUpdateNotification = null)
     {
         _wndProc = WindowProc;
         _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
         _canShowUpdateNotification = canShowUpdateNotification ?? (() => true);
 
-        _followSystemItem = MakeItem("Follow system", () => PickTheme(ThemePreference.FollowSystem));
-        _lightItem = MakeItem("Light", () => PickTheme(ThemePreference.Light));
-        _darkItem = MakeItem("Dark", () => PickTheme(ThemePreference.Dark));
-        _startupItem = MakeItem("Start with Windows", ToggleStartup);
-        _versionItem = MakeItem("Version", ShowAvailableUpdate);
-        _versionItem.IsEnabled = false;
-        _documentPreviewItem = new MenuItem { IsEnabled = false };
+        _updateItem = MakeItem("Update", ShowAvailableUpdate);
+        _updateItem.Visibility = Visibility.Collapsed;
         _updateService = new AppUpdateService();
         _updateService.CleanupStaleDownloads();
 
@@ -97,7 +84,6 @@ internal sealed class TrayIcon : IDisposable
         };
 
         _menu = BuildMenu();
-        SyncThemeChecks(theme);
 
         CreateMessageWindow();
         RebuildIcon();
@@ -154,37 +140,14 @@ internal sealed class TrayIcon : IDisposable
         var itemStyle = (Style)app.FindResource("PreviewMenuItem");
         var separatorStyle = (Style)app.FindResource("PreviewMenuSeparator");
 
-        // IsCheckable reserves the check gutter in the shared template, so
-        // stateful items align while action items sit flush left.
-        _startupItem.Style = itemStyle;
-        _startupItem.IsCheckable = true;
-
-        var theme = new MenuItem { Header = "Theme", Style = itemStyle };
-        foreach (var child in new[] { _followSystemItem, _lightItem, _darkItem })
-        {
-            child.Style = itemStyle;
-            child.IsCheckable = true;
-            theme.Items.Add(child);
-        }
-
-        var about = new MenuItem { Header = "About", Style = itemStyle };
-        _versionItem.Style = itemStyle;
-        _documentPreviewItem.Style = itemStyle;
-
-        var copyDiagnostics = MakeItem("Copy diagnostics", CopyDiagnostics);
-        copyDiagnostics.Style = itemStyle;
-
-        var openLog = MakeItem("Open log", OpenLog);
-        openLog.Style = itemStyle;
+        // The menu is a door, not a settings tree: everything stateful lives
+        // in the Settings window. Only a pending update earns a direct item.
+        var settings = MakeItem("Settings…", OpenSettings);
+        settings.Style = itemStyle;
+        _updateItem.Style = itemStyle;
 
         var hideTray = MakeItem("Hide tray icon", HideForSession);
         hideTray.Style = itemStyle;
-
-        about.Items.Add(_versionItem);
-        about.Items.Add(_documentPreviewItem);
-        about.Items.Add(new Separator { Style = separatorStyle });
-        about.Items.Add(copyDiagnostics);
-        about.Items.Add(openLog);
 
         var quit = MakeItem("Quit", () => QuitRequested?.Invoke());
         quit.Style = itemStyle;
@@ -193,9 +156,8 @@ internal sealed class TrayIcon : IDisposable
         // it, not dismiss-and-reopen in the same click.
         menu.Closed += (_, _) => _menuClosedAt = DateTime.UtcNow;
 
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(theme);
-        menu.Items.Add(about);
+        menu.Items.Add(settings);
+        menu.Items.Add(_updateItem);
         menu.Items.Add(hideTray);
         menu.Items.Add(new Separator { Style = separatorStyle });
         menu.Items.Add(quit);
@@ -204,27 +166,26 @@ internal sealed class TrayIcon : IDisposable
 
     private void PickTheme(ThemePreference preference)
     {
-        SyncThemeChecks(preference);
         ThemeChanged?.Invoke(preference);
     }
 
-    private void SyncThemeChecks(ThemePreference preference)
+    private void OpenSettings()
     {
-        _followSystemItem.IsChecked = preference == ThemePreference.FollowSystem;
-        _lightItem.IsChecked = preference == ThemePreference.Light;
-        _darkItem.IsChecked = preference == ThemePreference.Dark;
-    }
+        _menu.IsOpen = false;
+        if (_settingsWindow is not null)
+        {
+            _settingsWindow.Activate();
+            return;
+        }
 
-    private void ToggleStartup()
-    {
-        if (StartupRegistration.IsInstalled())
-        {
-            StartupRegistration.Uninstall();
-        }
-        else
-        {
-            StartupRegistration.Install();
-        }
+        var window = new SettingsWindow(
+            () => _availableUpdate,
+            ShowAvailableUpdate,
+            PickTheme);
+        _settingsWindow = window;
+        window.Closed += (_, _) => _settingsWindow = null;
+        window.Show();
+        window.Activate();
     }
 
     private void ShowMenu()
@@ -247,10 +208,7 @@ internal sealed class TrayIcon : IDisposable
             }
         }
 
-        // The startup box must reflect the registry, not an assumption: the user may
-        // have changed it elsewhere since the menu was last opened.
-        _startupItem.IsChecked = StartupRegistration.IsInstalled();
-        RefreshAboutItems();
+        RefreshUpdateItem();
         if (DateTime.UtcNow - _lastUpdateCheckAt >= UpdateMenuRetryInterval)
         {
             _ = CheckForUpdatesAsync();
@@ -260,22 +218,17 @@ internal sealed class TrayIcon : IDisposable
         _menu.IsOpen = true;
     }
 
-    private void RefreshAboutItems()
+    private void RefreshUpdateItem()
     {
         if (_availableUpdate is { } update)
         {
-            _versionItem.Header = $"Update to {update.VersionText}";
-            _versionItem.IsEnabled = true;
+            _updateItem.Header = $"Update to {update.VersionText}";
+            _updateItem.Visibility = Visibility.Visible;
         }
         else
         {
-            _versionItem.Header = $"Version {GetVersion()}";
-            _versionItem.IsEnabled = false;
+            _updateItem.Visibility = Visibility.Collapsed;
         }
-
-        _documentPreviewItem.Header = OfficeDocumentPdfConverter.IsAvailable
-            ? $"Documents: {OfficeDocumentPdfConverter.EngineName}"
-            : "Documents: basic previews";
     }
 
     private async Task CheckForUpdatesAfterStartupAsync()
@@ -309,7 +262,7 @@ internal sealed class TrayIcon : IDisposable
             }
 
             _availableUpdate = update;
-            RefreshAboutItems();
+            RefreshUpdateItem();
             if (update is not null)
             {
                 DiagnosticLog.Write(
@@ -430,7 +383,7 @@ internal sealed class TrayIcon : IDisposable
 
     private static string GetVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
 
-    private static void CopyDiagnostics()
+    internal static void CopyDiagnostics()
     {
         try
         {
@@ -450,7 +403,7 @@ internal sealed class TrayIcon : IDisposable
         }
     }
 
-    private static void OpenLog()
+    internal static void OpenLog()
     {
         try
         {
@@ -499,145 +452,72 @@ internal sealed class TrayIcon : IDisposable
 
     public void ShowPreviewAccessWarning(PreviewAccessWarningInfo warning)
     {
-        var nowTick = Environment.TickCount64;
-        var nowUtc = DateTimeOffset.UtcNow;
-        var hasPersistedKey = PreviewAccessWarningPolicy.TryBuildPersistedKey(
-            warning,
-            out var persistedKey);
         if (_disposed)
         {
             return;
         }
 
-        if (!CanShowPreviewAccessWarning(
-                warning,
-                hasPersistedKey ? persistedKey : null,
-                nowUtc,
-                nowTick))
+        var nowUtc = DateTimeOffset.UtcNow;
+        var state = PreviewAccessWarningPolicy.FromSettings(Settings.Current);
+        if (!PreviewAccessWarningPolicy.CanShowLifetime(state, nowUtc))
         {
             DiagnosticLog.Write(
-                $"preview access warning suppressed by reminder policy kind={warning.Kind} process={warning.DisplayName} pid={warning.ProcessId}");
+                $"preview access warning suppressed by lifetime policy kind={warning.Kind} process={warning.DisplayName} pid={warning.ProcessId}");
             return;
         }
 
-        var appWarningShown = ShowAppOwnedWarning(warning);
+        var finalReminder = state.Shows == PreviewAccessWarningPolicy.LifetimeShowLimit - 1;
+        var appWarningShown = ShowAppOwnedWarning(warning, finalReminder);
         var trayWarningShown = false;
         if (!_hiddenForSession && _iconVisible)
         {
-            trayWarningShown = ShowTrayWarning(warning);
+            trayWarningShown = ShowTrayWarning(warning, finalReminder);
         }
 
         if (appWarningShown || trayWarningShown)
         {
-            RecordPreviewAccessWarningShown(
-                warning,
-                hasPersistedKey ? persistedKey : null,
-                nowUtc,
-                nowTick);
-        }
-        else
-        {
-            _previewAccessWarningTicks.Remove(TransientPreviewAccessWarningKey(warning));
+            Settings.Update(current =>
+                PreviewAccessWarningPolicy.ApplyLifetimeState(
+                    current,
+                    PreviewAccessWarningPolicy.RecordLifetimeShow(
+                        PreviewAccessWarningPolicy.FromSettings(current),
+                        nowUtc)));
         }
     }
 
-    private bool CanShowPreviewAccessWarning(
-        PreviewAccessWarningInfo warning,
-        string? persistedKey,
-        DateTimeOffset nowUtc,
-        long nowTick)
+    private void PermanentlyDismissPreviewAccessWarnings()
     {
-        if (persistedKey is not null)
+        if (_disposed)
         {
-            PreviewAccessWarningHistoryEntry? entry = null;
-            if (Settings.Current.PreviewAccessWarnings is { } history)
-            {
-                history.TryGetValue(persistedKey, out entry);
-            }
-
-            return PreviewAccessWarningPolicy.CanShow(entry, nowUtc);
-        }
-
-        if (!_previewAccessWarningTicks.TryGetValue(
-                TransientPreviewAccessWarningKey(warning),
-                out var previous))
-        {
-            return true;
-        }
-
-        return HasWarningCooldownElapsed(
-            previous,
-            nowTick,
-            (long)UnstablePreviewAccessWarningRepeatInterval.TotalMilliseconds);
-    }
-
-    private void RecordPreviewAccessWarningShown(
-        PreviewAccessWarningInfo warning,
-        string? persistedKey,
-        DateTimeOffset nowUtc,
-        long nowTick)
-    {
-        if (persistedKey is null)
-        {
-            _previewAccessWarningTicks[TransientPreviewAccessWarningKey(warning)] = nowTick;
             return;
         }
 
+        var nowUtc = DateTimeOffset.UtcNow;
         Settings.Update(current =>
-        {
-            var history = new Dictionary<string, PreviewAccessWarningHistoryEntry>(
-                StringComparer.OrdinalIgnoreCase);
-            if (current.PreviewAccessWarnings is { } existing)
-            {
-                foreach (var pair in existing)
-                {
-                    if (!string.IsNullOrWhiteSpace(pair.Key) && pair.Value is { } entry)
-                    {
-                        history[pair.Key] = entry;
-                    }
-                }
-            }
-
-            history.TryGetValue(persistedKey, out var previous);
-            history[persistedKey] = PreviewAccessWarningPolicy.RecordShown(previous, nowUtc);
-            PrunePreviewAccessWarningHistory(history, persistedKey);
-            return current with { PreviewAccessWarnings = history };
-        });
+            PreviewAccessWarningPolicy.ApplyLifetimeState(
+                current,
+                PreviewAccessWarningPolicy.DismissForever(
+                    PreviewAccessWarningPolicy.FromSettings(current),
+                    nowUtc)));
+        DiagnosticLog.Write("preview access warnings permanently dismissed");
     }
 
-    private static string TransientPreviewAccessWarningKey(PreviewAccessWarningInfo warning) =>
-        $"{warning.Kind}|{warning.Key}";
-
-    private static void PrunePreviewAccessWarningHistory(
-        Dictionary<string, PreviewAccessWarningHistoryEntry> history,
-        string currentKey)
-    {
-        while (history.Count > PreviewAccessWarningPolicy.MaximumPersistedApps)
-        {
-            var oldest = history
-                .Where(pair => !string.Equals(pair.Key, currentKey, StringComparison.OrdinalIgnoreCase))
-                .MinBy(pair => pair.Value.LastShownUtc);
-            if (oldest.Key is null)
-            {
-                break;
-            }
-
-            history.Remove(oldest.Key);
-        }
-    }
-
-    internal static bool HasWarningCooldownElapsed(long previous, long now, long intervalMilliseconds) =>
-        intervalMilliseconds <= 0
-        || now < previous
-        || now - previous >= intervalMilliseconds;
-
-    private bool ShowAppOwnedWarning(PreviewAccessWarningInfo warning)
+    private bool ShowAppOwnedWarning(
+        PreviewAccessWarningInfo warning,
+        bool finalReminder)
     {
         try
         {
-            _previewAccessWarningWindow?.Dismiss("replaced");
-            var window = new PreviewAccessWarningWindow(warning);
+            _previewAccessWarningWindow?.Dismiss(PreviewAccessWarningDismissalReason.Replaced);
+            var window = new PreviewAccessWarningWindow(warning, finalReminder);
             _previewAccessWarningWindow = window;
+            window.Dismissed += reason =>
+            {
+                if (reason == PreviewAccessWarningDismissalReason.Manual)
+                {
+                    PermanentlyDismissPreviewAccessWarnings();
+                }
+            };
             window.Closed += (_, _) =>
             {
                 if (ReferenceEquals(_previewAccessWarningWindow, window))
@@ -656,12 +536,14 @@ internal sealed class TrayIcon : IDisposable
         }
     }
 
-    private bool ShowTrayWarning(PreviewAccessWarningInfo warning)
+    private bool ShowTrayWarning(
+        PreviewAccessWarningInfo warning,
+        bool finalReminder)
     {
         var data = NewIconData();
         data.uFlags = NativeMethods.NIF_INFO;
         data.szInfoTitle = PreviewAccessWarningWindow.Heading;
-        data.szInfo = PreviewAccessWarningWindow.BuildMessage(warning);
+        data.szInfo = PreviewAccessWarningWindow.BuildTrayMessage(warning, finalReminder);
         data.dwInfoFlags = NativeMethods.NIIF_INFO
             | NativeMethods.NIIF_NOSOUND
             | NativeMethods.NIIF_RESPECT_QUIET_TIME;
@@ -815,12 +697,14 @@ internal sealed class TrayIcon : IDisposable
         _updateTimer.Stop();
         _updateNotificationTimer.Stop();
         _updateLifetime.Cancel();
+        _settingsWindow?.Close();
+        _settingsWindow = null;
         _updateWindow?.Close();
         _updateWindow = null;
         _updateService.Dispose();
         _updateLifetime.Dispose();
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;
-        _previewAccessWarningWindow?.Dismiss("dispose");
+        _previewAccessWarningWindow?.Dismiss(PreviewAccessWarningDismissalReason.Disposed);
         _previewAccessWarningWindow = null;
 
         if (_hwnd != IntPtr.Zero)

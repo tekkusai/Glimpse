@@ -26,9 +26,25 @@ internal sealed record Settings
     public bool MediaMuted { get; init; }
 
     /// <summary>
-    /// Per-app delivery history for inaccessible file-picker warnings. Entries
-    /// are versioned so a future warning redesign can intentionally start a new
-    /// reminder cycle without disturbing unrelated preferences.
+    /// Whether a newly pinned preview starts above other windows. Each pinned
+    /// window can still override this for its own lifetime.
+    /// </summary>
+    public bool PinnedAlwaysOnTopDefault { get; init; } = true;
+
+    /// <summary>
+    /// Global, update-stable budget for inaccessible file-picker notices.
+    /// Manual dismissal permanently completes the budget; a timed-out first
+    /// notice permits one final reminder after seven days.
+    /// </summary>
+    public int PreviewAccessWarningLifetimeShows { get; init; }
+
+    public DateTimeOffset? PreviewAccessWarningLastShownUtc { get; init; }
+
+    public bool PreviewAccessWarningDismissedForever { get; init; }
+
+    /// <summary>
+    /// Legacy per-app history retained for conservative one-time migration.
+    /// Existing users never receive a replenished budget after an update.
     /// </summary>
     public Dictionary<string, PreviewAccessWarningHistoryEntry> PreviewAccessWarnings { get; init; } =
         new(StringComparer.OrdinalIgnoreCase);
@@ -78,8 +94,24 @@ internal sealed record Settings
             if (File.Exists(Pathname))
             {
                 var json = File.ReadAllText(Pathname);
-                return Normalize(
-                    JsonSerializer.Deserialize<Settings>(json, Options) ?? new Settings());
+                var loaded = JsonSerializer.Deserialize<Settings>(json, Options) ?? new Settings();
+                var normalized = Normalize(loaded);
+
+                // Persist the legacy per-app migration immediately. Keeping
+                // the normalized lifetime fields on disk makes the global
+                // budget explicit and stable even if a later release stops
+                // understanding the old dictionary shape.
+                if (loaded.PreviewAccessWarningLifetimeShows
+                        != normalized.PreviewAccessWarningLifetimeShows
+                    || loaded.PreviewAccessWarningLastShownUtc?.ToUniversalTime()
+                        != normalized.PreviewAccessWarningLastShownUtc
+                    || loaded.PreviewAccessWarningDismissedForever
+                        != normalized.PreviewAccessWarningDismissedForever)
+                {
+                    normalized.Save();
+                }
+
+                return normalized;
             }
         }
         catch
@@ -107,6 +139,12 @@ internal sealed record Settings
             }
         }
 
+        var lifetime = PreviewAccessWarningPolicy.NormalizeLifetimeState(
+            settings.PreviewAccessWarningLifetimeShows,
+            settings.PreviewAccessWarningLastShownUtc,
+            settings.PreviewAccessWarningDismissedForever,
+            history.Values);
+
         var notificationVersion = settings.UpdateNotificationVersion?.Trim();
         var snoozedUntil = settings.UpdateNotificationSnoozedUntilUtc?.ToUniversalTime();
         if (!AppUpdateService.TryParseVersion(notificationVersion, out var parsedNotificationVersion))
@@ -121,6 +159,9 @@ internal sealed record Settings
 
         return settings with
         {
+            PreviewAccessWarningLifetimeShows = lifetime.Shows,
+            PreviewAccessWarningLastShownUtc = lifetime.LastShownUtc,
+            PreviewAccessWarningDismissedForever = lifetime.DismissedForever,
             PreviewAccessWarnings = history,
             UpdateNotificationVersion = notificationVersion,
             UpdateNotificationSnoozedUntilUtc = snoozedUntil

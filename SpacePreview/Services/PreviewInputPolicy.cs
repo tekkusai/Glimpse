@@ -24,6 +24,9 @@ internal static class PreviewInputPolicy
         "WorkerW"
     };
 
+    internal static bool IsDesktopWindowClass(string? className) =>
+        !string.IsNullOrWhiteSpace(className) && DesktopWindowClasses.Contains(className);
+
     // "Edit" is exact and RichEdit is a prefix. XAML islands expose several
     // TextBox-flavored class names, so that one is intentionally broader.
     public static bool IsTextEditingClass(string? focusClass)
@@ -50,7 +53,7 @@ internal static class PreviewInputPolicy
             return null;
         }
 
-        if (DesktopWindowClasses.Contains(className))
+        if (IsDesktopWindowClass(className))
         {
             return ignoreTextEditing && rootThreadHasTextEditingFocus
                 ? null

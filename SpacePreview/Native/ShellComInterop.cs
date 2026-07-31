@@ -238,6 +238,11 @@ internal static class ShellBrowserIdentity
     }
 }
 
+/// <summary>Native selection count plus its filesystem-backed members.</summary>
+internal sealed record FolderViewSelectionSnapshot(
+    int SelectedCount,
+    IReadOnlyList<string> FileSystemPaths);
+
 /// <summary>
 /// Stepping through a folder the way the user reads it. The shell's own view
 /// is the reference for order and position; selecting through it is a
@@ -354,6 +359,31 @@ internal static class FolderViewNavigator
         }
     }
 
+    /// <summary>Dev benchmark cleanup: remove one known selection.</summary>
+    public static bool TryDeselectIndex(object window, int index)
+    {
+        IFolderView? view = null;
+        try
+        {
+            view = GetFolderView(window);
+            if (view is null || index < 0)
+            {
+                return false;
+            }
+
+            // SVSI_DESELECT is zero by definition.
+            return view.SelectItem(index, 0) == 0;
+        }
+        catch
+        {
+            return false;
+        }
+        finally
+        {
+            ReleaseView(view);
+        }
+    }
+
     public static IReadOnlyList<string>? TryGetNeighborPaths(object window, int currentIndex, int maxNeighbors)
     {
         IFolderView? view = null;
@@ -435,6 +465,56 @@ internal static class FolderViewNavigator
 
             var selected = ReadItemPaths(view, SvgioSelection, maxItems: 1);
             return selected is { Count: > 0 } ? selected[0] : null;
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            ReleaseView(view);
+        }
+    }
+
+    /// <summary>
+    /// A selection snapshot straight from IFolderView. Unlike the ordered
+    /// multi-selection helper, this never walks the full view; it is the
+    /// low-round-trip candidate measured against ShellFolderView automation.
+    /// </summary>
+    public static FolderViewSelectionSnapshot? TryGetSelectionSnapshot(
+        object window,
+        int maxItems = 256)
+    {
+        IFolderView? view = null;
+        try
+        {
+            view = GetFolderView(window);
+            if (view is null)
+            {
+                return null;
+            }
+
+            // Desktop IFolderView can return no item-array object for an empty
+            // selection. ItemCount is authoritative and lets both A/B readers
+            // represent that valid state as an explicit zero-item snapshot.
+            if (view.ItemCount(SvgioSelection, out var selectionCount) != 0)
+            {
+                return null;
+            }
+
+            if (selectionCount == 0)
+            {
+                return new FolderViewSelectionSnapshot(0, []);
+            }
+
+            var paths = ReadItemPaths(
+                view,
+                SvgioSelection,
+                maxItems,
+                out var selectedCount);
+            return paths is null
+                ? null
+                : new FolderViewSelectionSnapshot((int)selectedCount, paths);
         }
         catch
         {
@@ -641,8 +721,16 @@ internal static class FolderViewNavigator
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SHGetPathFromIDListEx(IntPtr pidl, System.Text.StringBuilder pszPath, uint cchPath, int uOpts);
 
-    private static List<string>? ReadItemPaths(IFolderView view, uint svgioFlags, int maxItems)
+    private static List<string>? ReadItemPaths(IFolderView view, uint svgioFlags, int maxItems) =>
+        ReadItemPaths(view, svgioFlags, maxItems, out _);
+
+    private static List<string>? ReadItemPaths(
+        IFolderView view,
+        uint svgioFlags,
+        int maxItems,
+        out uint itemCount)
     {
+        itemCount = 0;
         var iid = ShellItemArrayIid;
         if (view.Items(svgioFlags, ref iid, out var arrayPtr) != 0 || arrayPtr == IntPtr.Zero)
         {
@@ -658,13 +746,18 @@ internal static class FolderViewNavigator
 
             try
             {
-                if (items.GetCount(out var count) != 0 || count == 0)
+                if (items.GetCount(out itemCount) != 0)
                 {
                     return null;
                 }
 
-                var paths = new List<string>((int)Math.Min(count, (uint)maxItems));
-                for (uint i = 0; i < count && paths.Count < maxItems; i++)
+                if (itemCount == 0)
+                {
+                    return [];
+                }
+
+                var paths = new List<string>((int)Math.Min(itemCount, (uint)maxItems));
+                for (uint i = 0; i < itemCount && paths.Count < maxItems; i++)
                 {
                     if (items.GetItemAt(i, out var item) != 0 || item is null)
                     {

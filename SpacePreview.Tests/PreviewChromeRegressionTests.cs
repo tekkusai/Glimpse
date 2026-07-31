@@ -45,6 +45,43 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("_warmQueued.Clear();", ReadMethod(hoverSource, "public void Reset"), StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The rail jumps pages by clicking the viewer's page box at a measured
+    /// offset, so the visible toolbar set is load-bearing. Showing Fit moved
+    /// the box out from under that click and the following Ctrl+A selected the
+    /// whole document instead of the page number.
+    /// </summary>
+    [Fact]
+    public void ThePdfToolbarSetStaysPinnedToTheRailsJumpCoordinate()
+    {
+        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var configure = ReadMethod(windowSource, "private static void ConfigurePdfViewer");
+
+        foreach (var hidden in new[] { "Save", "SaveAs", "Rotate", "FitPage", "PageLayout", "Bookmarks", "FullScreen", "MoreSettings" })
+        {
+            Assert.Contains($"CoreWebView2PdfToolbarItems.{hidden}", configure, StringComparison.Ordinal);
+        }
+
+        var jump = ReadMethod(windowSource, "private static async Task JumpPdfWithNativePageBoxAsync");
+        Assert.Contains("webView.ActualWidth / 2 + 15", jump, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Two jump sequences cannot overlap, but a click during one used to be
+    /// discarded while the rail had already moved its highlight, leaving the
+    /// strip pointing at a page the document never went to.
+    /// </summary>
+    [Fact]
+    public void ARailClickDuringAJumpIsHeldRatherThanDropped()
+    {
+        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var jump = ReadMethod(windowSource, "private async Task JumpPdfToPageAsync");
+
+        Assert.Contains("state.PendingJumpPage = page;", jump, StringComparison.Ordinal);
+        Assert.Contains("state.PendingJumpPage = null;", jump, StringComparison.Ordinal);
+        Assert.Contains("JumpPdfToPage(state, pending);", jump, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void FolderHoverArtworkMatchesTheRestingRasterBounds()
     {

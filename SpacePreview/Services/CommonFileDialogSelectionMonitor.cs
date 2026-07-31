@@ -43,6 +43,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 
     public event Action<IntPtr, ExplorerSelection?>? SelectionChanged;
     public event Action<IntPtr, ExplorerSelection?>? RefreshCompleted;
+    public event Action<IntPtr>? DialogObserved;
 
     public void Start()
     {
@@ -240,6 +241,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         if (CommonFileDialogSelectionService.IsCommonFileDialogRoot(root))
         {
             _verifiedDialog = root;
+            DialogObserved?.Invoke(root);
             RequestRefresh(root, settleMilliseconds: 0);
         }
     }

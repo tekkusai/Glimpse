@@ -15,57 +15,8 @@
         FontFamily="Segoe UI Variable, Segoe UI"
         SnapsToDevicePixels="True"
         UseLayoutRounding="True">
-    <Window.Resources>
-        <Style x:Key="UpdateButton" TargetType="Button">
-            <Setter Property="Height" Value="34" />
-            <Setter Property="Padding" Value="16,0" />
-            <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.SurfaceBorder}" />
-            <Setter Property="Background" Value="{DynamicResource Theme.SurfaceBg}" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.TextPrimary}" />
-            <Setter Property="FontSize" Value="12.5" />
-            <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border x:Name="ButtonChrome"
-                                Background="{TemplateBinding Background}"
-                                BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="{x:Static u:Metrics.MenuCorner}">
-                            <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="ButtonChrome"
-                                        Property="Opacity"
-                                        Value="0.86" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="ButtonChrome"
-                                        Property="Opacity"
-                                        Value="0.68" />
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="ButtonChrome" Property="Opacity" Value="0.48" />
-                                <Setter Property="Cursor" Value="Arrow" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <Style x:Key="PrimaryUpdateButton"
-               TargetType="Button"
-               BasedOn="{StaticResource UpdateButton}">
-            <Setter Property="Background" Value="{DynamicResource Theme.Accent}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource Theme.Accent}" />
-            <Setter Property="Foreground" Value="White" />
-        </Style>
-    </Window.Resources>
+    <!-- Buttons and the close affordance come from Themes/Chrome.xaml: one
+         dialog vocabulary across settings, update, and notifications. -->
 
     <Grid Margin="14">
         <Border Background="{DynamicResource Theme.HeaderBg}"
@@ -101,41 +52,10 @@
                                VerticalAlignment="Center" />
                     <Button x:Name="CloseButton"
                             Grid.Column="1"
-                            Width="30"
-                            Height="30"
                             Margin="12,-6,-8,0"
                             VerticalAlignment="Top"
-                            ToolTip="Close"
-                            AutomationProperties.Name="Close update"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Foreground="{DynamicResource Theme.TextSecondary}"
-                            FontSize="19"
-                            Content="×">
-                        <Button.Template>
-                            <ControlTemplate TargetType="Button">
-                                <Border x:Name="CloseChrome"
-                                        Background="{TemplateBinding Background}"
-                                        CornerRadius="{x:Static u:Metrics.MenuCorner}">
-                                    <ContentPresenter HorizontalAlignment="Center"
-                                                      VerticalAlignment="Center"
-                                                      Margin="0,-2,0,0" />
-                                </Border>
-                                <ControlTemplate.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter TargetName="CloseChrome"
-                                                Property="Background"
-                                                Value="{DynamicResource Theme.HoverBg}" />
-                                    </Trigger>
-                                    <Trigger Property="IsPressed" Value="True">
-                                        <Setter TargetName="CloseChrome"
-                                                Property="Background"
-                                                Value="{DynamicResource Theme.PressedBg}" />
-                                    </Trigger>
-                                </ControlTemplate.Triggers>
-                            </ControlTemplate>
-                        </Button.Template>
-                    </Button>
+                            Style="{StaticResource DialogCloseButton}"
+                            AutomationProperties.Name="Close update" />
                 </Grid>
 
                 <TextBlock x:Name="VersionText"
@@ -178,14 +98,14 @@
                             Orientation="Horizontal">
                     <Button x:Name="SecondaryButton"
                             MinWidth="88"
-                            Style="{StaticResource UpdateButton}"
+                            Style="{StaticResource DialogButton}"
                             Content="Not now"
                             AutomationProperties.Name="Not now" />
                     <Button x:Name="PrimaryButton"
                             MinWidth="148"
                             Margin="10,0,0,0"
                             IsDefault="True"
-                            Style="{StaticResource PrimaryUpdateButton}"
+                            Style="{StaticResource DialogPrimaryButton}"
                             Content="Download and install"
                             AutomationProperties.Name="Download and install update" />
                 </StackPanel>

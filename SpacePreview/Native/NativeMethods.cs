@@ -238,6 +238,10 @@ internal static class NativeMethods
     public static extern bool IsWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
     public static extern IntPtr SetWinEventHook(
         uint eventMin,
         uint eventMax,
@@ -408,6 +412,7 @@ internal static class NativeMethods
         out IntPtr result);
 
     public const uint GW_HWNDNEXT = 2;
+    public const uint GW_HWNDPREV = 3;
     public const uint GW_CHILD = 5;
 
     [DllImport("user32.dll")]
@@ -492,6 +497,13 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, [MarshalAs(UnmanagedType.Bool)] bool fAttach);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool CreateHardLink(
+        string lpFileName,
+        string lpExistingFileName,
+        IntPtr lpSecurityAttributes);
 
     [DllImport("kernel32.dll")]
     public static extern uint GetCurrentThreadId();

@@ -17,12 +17,11 @@ internal enum RotationPersistence
 }
 
 /// <summary>
-/// Persists quarter-turn rotations without ever degrading the pixels: EXIF
-/// orientation for JPEG/TIFF, a pixel-lossless re-encode for PNG/BMP (with
-/// metadata and color profile carried when the codec round-trips them), and
-/// view-only for anything where a write would mean lossy re-compression.
-/// Every failure is a silent fall-back to view-only; the original file is
-/// never at risk.
+/// Persists quarter-turn rotations without degrading pixels: EXIF orientation
+/// for JPEG/TIFF, a pixel-lossless re-encode for PNG/BMP (metadata and color
+/// profile carried when the codec round-trips them), and view-only wherever a
+/// write would mean lossy re-compression. Every failure falls back silently
+/// to view-only; the original file is never at risk.
 /// </summary>
 internal static class ImageRotationService
 {

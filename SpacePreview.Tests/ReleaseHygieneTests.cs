@@ -3,15 +3,15 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
-    public void ProductAndInstallerVersionsAre112()
+    public void ProductAndInstallerVersionsAre200()
     {
         var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
         var manifest = TestSource.Read(@"SpacePreview\app.manifest");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("<Version>1.1.2</Version>", project, StringComparison.Ordinal);
-        Assert.Contains("version=\"1.1.2.0\"", manifest, StringComparison.Ordinal);
-        Assert.Contains("#define MyAppVersion \"1.1.2\"", installer, StringComparison.Ordinal);
+        Assert.Contains("<Version>2.0.0</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"2.0.0.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"2.0.0\"", installer, StringComparison.Ordinal);
     }
 
     [Fact]

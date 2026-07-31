@@ -10,10 +10,10 @@ namespace SpacePreview.Preview;
 /// Decodes the flattened composite a Photoshop file carries at its end, the
 /// same image Photoshop shows in its own thumbnails. Covers the shapes real
 /// files take: 8-bit RGB, grayscale, and CMYK (naive ink conversion, close
-/// enough for a preview), raw or RLE, plus raw 16-bit taken at 8. Documents
-/// of any legal PSD size decode row-streamed and integer-downsampled, so a
-/// 10800x7200 print file costs a 4K-preview's memory, not its own. Exotic
-/// documents (Lab, 32-bit, PSB) fall back to the file card rather than guess.
+/// enough for a preview), raw or RLE, plus raw 16-bit taken at 8. Any legal
+/// PSD size decodes row-streamed and integer-downsampled, so a 10800x7200
+/// print file costs a 4K preview's memory, not its own. Lab, 32-bit, and PSB
+/// fall back to the file card rather than guess.
 /// </summary>
 internal static class PsdPreviewLoader
 {

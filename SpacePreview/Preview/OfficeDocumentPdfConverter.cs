@@ -581,16 +581,13 @@ internal static class OfficeDocumentPdfConverter
     }
 
     /// <summary>
-    /// Calc's HTML export defaults to cramped, dated typography on a bare
-    /// white page. Normalization makes it work like a spreadsheet in a viewer:
-    /// the sheet sits on the app's canvas (following the system theme, like
-    /// the Chromium PDF viewer), the page scrolls inside a viewport-height
-    /// container so both scrollbars always live at the preview's edges (a
-    /// wide sheet must not bury its horizontal bar at the bottom of a tall
-    /// document), and every sheet table gains sticky row numbers and column
-    /// letters. Pure CSS + markup: the export stays script-free. Fonts the
-    /// sheet chose for itself stay untouched (they arrive as inline
-    /// attributes).
+    /// Calc's HTML export is cramped, dated typography on a bare white page.
+    /// This restyles it to read like a spreadsheet: the sheet sits on the
+    /// app's canvas and follows the system theme, the page scrolls inside a
+    /// viewport-height container so both scrollbars stay at the preview's
+    /// edges, and tables get sticky row numbers and column letters. CSS and
+    /// markup only, so the export stays script-free. The sheet's own fonts
+    /// arrive as inline attributes and are left alone.
     /// </summary>
     // Canvas colours mirror Theme.DeepBg (light E7E8EC / dark 121316);
     // header chrome mirrors the badge palette.

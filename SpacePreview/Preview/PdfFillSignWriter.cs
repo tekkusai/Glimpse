@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using SpacePreview.Services;
 
 namespace SpacePreview.Preview;
 
@@ -118,6 +119,276 @@ internal static class PdfFillSignWriter
             TryDelete(outputPath);
             throw;
         }
+    }
+
+    /// <summary>
+    /// A copy whose oversized pages are shrunk to <paramref name="maxEdgePoints"/>,
+    /// for documents a viewer cannot frame. The Chromium zoom ladder stops at
+    /// 25%, so a page that opens at 2% can never be zoomed back out to how it
+    /// arrived. Shrinking the page geometry puts the whole document inside the
+    /// ladder, and vector artwork loses nothing: it is drawn at the new scale
+    /// rather than resampled. False when every page already fits.
+    /// </summary>
+    public static bool TryWriteScaledCopy(string sourcePath, string outputPath, double maxEdgePoints)
+    {
+        var document = PdfDocumentModel.Read(sourcePath);
+
+        // A page-level scale moves page content, not every PDF coordinate
+        // system or interactive object. Leave formats this small parser cannot
+        // transform completely to the original viewer path. PDF names may use
+        // #xx escapes, so a raw substring check is not a safe gate.
+        if (FindUnsupportedScaleFeature(document.Bytes) is { } unsupported)
+        {
+            DiagnosticLog.Write($"pdf scale skipped unsupported /{unsupported}");
+            return false;
+        }
+
+        var objects = new List<PdfWriteObject>();
+        var nextObject = document.MaxObjectNumber + 1;
+        PdfRef Allocate() => new(nextObject++, 0);
+
+        foreach (var page in document.Pages)
+        {
+            var longest = Math.Max(page.Box.Width, page.Box.Height);
+            if (longest <= maxEdgePoints)
+            {
+                continue;
+            }
+
+            // The written scale and the box have to agree exactly, so round
+            // once and read it back rather than formatting twice.
+            var scaleText = (maxEdgePoints / longest).ToString("0.######", CultureInfo.InvariantCulture);
+            var scale = double.Parse(scaleText, CultureInfo.InvariantCulture);
+            if (!double.IsFinite(scale) || scale <= 0)
+            {
+                continue;
+            }
+
+            // The page's own content is left untouched between a matched
+            // q/Q pair, so nothing has to be understood to be scaled.
+            var open = Allocate();
+            var close = Allocate();
+            objects.Add(new PdfWriteObject(open, StreamObject("<<", AsLatin1($"q {scaleText} 0 0 {scaleText} 0 0 cm\n"))));
+            objects.Add(new PdfWriteObject(close, StreamObject("<<", AsLatin1("\nQ"))));
+
+            if (WrapPageContents(document, page.Body, open, close) is not { } contents)
+            {
+                return false;
+            }
+
+            var body = ReplaceOrAddDictionaryValue(page.Body, "Contents", contents);
+            body = ScalePageBoxes(body, page.Boxes, scale);
+            objects.Add(new PdfWriteObject(page.Ref, AsLatin1(body)));
+        }
+
+        if (objects.Count == 0)
+        {
+            return false;
+        }
+
+        try
+        {
+            var outputDirectory = Path.GetDirectoryName(outputPath);
+            if (!string.IsNullOrWhiteSpace(outputDirectory))
+            {
+                Directory.CreateDirectory(outputDirectory);
+            }
+
+            using var output = File.Create(outputPath);
+            output.Write(document.Bytes);
+            WriteIncrementalUpdate(output, document, objects);
+        }
+        catch
+        {
+            TryDelete(outputPath);
+            throw;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// The page's existing content, wrapped by the two new streams. Contents
+    /// is a stream reference or an array of them, and the array itself may be
+    /// reached through a reference: splicing that reference in as though it
+    /// were a stream nests an array inside an array and the page draws
+    /// nothing. Returns null when the shape is not one of those.
+    /// </summary>
+    private static string? WrapPageContents(
+        PdfDocumentModel document,
+        string pageBody,
+        PdfRef open,
+        PdfRef close)
+    {
+        if (!TryReadNamedValue(Header(pageBody), "Contents", out var value, out _))
+        {
+            return $"[{open} R {close} R]";
+        }
+
+        var existing = value.Trim();
+        if (TryParseReference(existing, out var reference))
+        {
+            if (!document.Objects.TryGetValue(reference, out var target))
+            {
+                return null;
+            }
+
+            var body = target.Body.Trim();
+            if (body.StartsWith('['))
+            {
+                var end = FindMatching(body, 0, '[', ']');
+                if (end < 0)
+                {
+                    return null;
+                }
+
+                existing = body[1..end];
+            }
+            else if (!body.Contains("stream", StringComparison.Ordinal))
+            {
+                // Neither a stream nor an array: not something to splice.
+                return null;
+            }
+        }
+        else if (existing.StartsWith('['))
+        {
+            var end = FindMatching(existing, 0, '[', ']');
+            if (end < 0)
+            {
+                return null;
+            }
+
+            existing = existing[1..end];
+        }
+        else
+        {
+            return null;
+        }
+
+        return $"[{open} R {existing} {close} R]";
+    }
+
+    private static string ScalePageBoxes(string body, PdfPageBoxes boxes, double scale)
+    {
+        body = ScalePageBox(body, "MediaBox", boxes.MediaBox, scale);
+        body = ScalePageBox(body, "CropBox", boxes.CropBox, scale);
+        body = ScalePageBox(body, "BleedBox", boxes.BleedBox, scale);
+        body = ScalePageBox(body, "TrimBox", boxes.TrimBox, scale);
+        return ScalePageBox(body, "ArtBox", boxes.ArtBox, scale);
+    }
+
+    private static string ScalePageBox(string body, string name, PdfPageBox? box, double scale)
+    {
+        if (box is not { IsValid: true } value)
+        {
+            return body;
+        }
+
+        var scaled = $"[{Format(value.Left * scale)} {Format(value.Bottom * scale)} "
+            + $"{Format(value.Right * scale)} {Format(value.Top * scale)}]";
+        return ReplaceOrAddDictionaryValue(body, name, scaled);
+    }
+
+    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes)
+    {
+        Span<byte> decoded = stackalloc byte[16];
+        for (var index = 0; index < bytes.Length; index++)
+        {
+            if (bytes[index] != (byte)'/')
+            {
+                continue;
+            }
+
+            var cursor = index + 1;
+            var length = 0;
+            while (cursor < bytes.Length && !IsPdfDelimiter(bytes[cursor]))
+            {
+                var value = bytes[cursor++];
+                if (value == (byte)'#'
+                    && cursor + 1 < bytes.Length
+                    && TryHex(bytes[cursor], out var high)
+                    && TryHex(bytes[cursor + 1], out var low))
+                {
+                    value = (byte)((high << 4) | low);
+                    cursor += 2;
+                }
+
+                if (length < decoded.Length)
+                {
+                    decoded[length] = value;
+                }
+
+                length++;
+            }
+
+            if (length <= decoded.Length)
+            {
+                var name = decoded[..length];
+                if (name.SequenceEqual("PatternType"u8))
+                {
+                    return "PatternType";
+                }
+
+                if (name.SequenceEqual("ShadingType"u8))
+                {
+                    return "ShadingType";
+                }
+
+                if (name.SequenceEqual("Annots"u8))
+                {
+                    return "Annots";
+                }
+
+                if (name.SequenceEqual("ObjStm"u8))
+                {
+                    return "ObjStm";
+                }
+
+                if (name.SequenceEqual("UserUnit"u8))
+                {
+                    return "UserUnit";
+                }
+
+                if (name.SequenceEqual("ByteRange"u8))
+                {
+                    return "ByteRange";
+                }
+            }
+
+            index = cursor - 1;
+        }
+
+        return null;
+    }
+
+    private static bool IsPdfDelimiter(byte value) =>
+        value is 0 or 9 or 10 or 12 or 13 or 32
+            or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>'
+            or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}'
+            or (byte)'/' or (byte)'%';
+
+    private static bool TryHex(byte value, out int decoded)
+    {
+        if (value is >= (byte)'0' and <= (byte)'9')
+        {
+            decoded = value - (byte)'0';
+            return true;
+        }
+
+        if (value is >= (byte)'A' and <= (byte)'F')
+        {
+            decoded = value - (byte)'A' + 10;
+            return true;
+        }
+
+        if (value is >= (byte)'a' and <= (byte)'f')
+        {
+            decoded = value - (byte)'a' + 10;
+            return true;
+        }
+
+        decoded = 0;
+        return false;
     }
 
     internal static PdfPageRect MapDisplayRectToPageRectForTest(
@@ -800,7 +1071,20 @@ internal static class PdfFillSignWriter
 
     private sealed record PdfObject(PdfRef Ref, string Body, int Position);
 
-    private sealed record PdfPageInfo(PdfRef Ref, string Body, PdfPageBox Box, int Rotate);
+    private sealed record PdfPageInfo(PdfRef Ref, string Body, PdfPageBoxes Boxes, int Rotate)
+    {
+        public PdfPageBox Box => Boxes.EffectiveBox!.Value;
+    }
+
+    private readonly record struct PdfPageBoxes(
+        PdfPageBox? MediaBox,
+        PdfPageBox? CropBox,
+        PdfPageBox? BleedBox,
+        PdfPageBox? TrimBox,
+        PdfPageBox? ArtBox)
+    {
+        public PdfPageBox? EffectiveBox => CropBox ?? MediaBox;
+    }
 
     private readonly record struct PdfPageBox(double X1, double Y1, double X2, double Y2)
     {
@@ -1023,7 +1307,7 @@ internal static class PdfFillSignWriter
             }
 
             var pages = new List<PdfPageInfo>();
-            TraversePageTree(objects, pagesRoot, null, null, 0, [], pages);
+            TraversePageTree(objects, pagesRoot, default, null, 0, [], pages);
             return pages.Count > 0 ? pages : ReadPagesByObjectOrder(objects);
         }
 
@@ -1042,18 +1326,14 @@ internal static class PdfFillSignWriter
                     continue;
                 }
 
-                var box = TryReadBox(objects, obj.Body, "CropBox", out var crop)
-                    ? crop
-                    : TryReadBox(objects, obj.Body, "MediaBox", out var media)
-                        ? media
-                        : default;
-                if (!box.IsValid)
+                var boxes = ReadPageBoxes(objects, obj.Body, default, inheritPageTreeBoxes: false);
+                if (boxes.EffectiveBox is not { IsValid: true })
                 {
                     continue;
                 }
 
                 var rotate = TryReadRotate(objects, obj.Body, out var ownRotate) ? ownRotate : 0;
-                pages.Add(new PdfPageInfo(obj.Ref, obj.Body, box, rotate));
+                pages.Add(new PdfPageInfo(obj.Ref, obj.Body, boxes, rotate));
             }
 
             return pages;
@@ -1062,7 +1342,7 @@ internal static class PdfFillSignWriter
         private static void TraversePageTree(
             Dictionary<PdfRef, PdfObject> objects,
             PdfRef reference,
-            PdfPageBox? inheritedBox,
+            PdfPageBoxes inheritedBoxes,
             int? inheritedRotate,
             int depth,
             HashSet<PdfRef> seen,
@@ -1078,18 +1358,14 @@ internal static class PdfFillSignWriter
                 return;
             }
 
-            var box = TryReadBox(objects, obj.Body, "CropBox", out var crop)
-                ? crop
-                : TryReadBox(objects, obj.Body, "MediaBox", out var media)
-                    ? media
-                    : inheritedBox;
+            var boxes = ReadPageBoxes(objects, obj.Body, inheritedBoxes, inheritPageTreeBoxes: type == "Pages");
             var rotate = TryReadRotate(objects, obj.Body, out var ownRotate) ? ownRotate : inheritedRotate;
 
             if (type == "Page")
             {
-                if (box is { IsValid: true } finalBox)
+                if (boxes.EffectiveBox is { IsValid: true })
                 {
-                    pages.Add(new PdfPageInfo(reference, obj.Body, finalBox, rotate ?? 0));
+                    pages.Add(new PdfPageInfo(reference, obj.Body, boxes, rotate ?? 0));
                 }
 
                 return;
@@ -1102,8 +1378,28 @@ internal static class PdfFillSignWriter
 
             foreach (var kid in kids)
             {
-                TraversePageTree(objects, kid, box, rotate, depth + 1, seen, pages);
+                TraversePageTree(objects, kid, boxes, rotate, depth + 1, seen, pages);
             }
+        }
+
+        private static PdfPageBoxes ReadPageBoxes(
+            Dictionary<PdfRef, PdfObject> objects,
+            string body,
+            PdfPageBoxes inherited,
+            bool inheritPageTreeBoxes)
+        {
+            PdfPageBox? Read(string name) =>
+                TryReadBox(objects, body, name, out var box) ? box : null;
+
+            // MediaBox and CropBox are inheritable page-tree attributes. The
+            // print boxes are page entries whose absent value follows CropBox;
+            // inheriting a non-standard parent value would change the source.
+            return new PdfPageBoxes(
+                Read("MediaBox") ?? inherited.MediaBox,
+                Read("CropBox") ?? inherited.CropBox,
+                inheritPageTreeBoxes ? null : Read("BleedBox"),
+                inheritPageTreeBoxes ? null : Read("TrimBox"),
+                inheritPageTreeBoxes ? null : Read("ArtBox"));
         }
 
         private static bool TryReadType(string body, out string type)

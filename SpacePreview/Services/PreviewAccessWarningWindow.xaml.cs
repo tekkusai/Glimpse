@@ -6,6 +6,15 @@ using SpacePreview.Utilities;
 
 namespace SpacePreview.Services;
 
+internal enum PreviewAccessWarningDismissalReason
+{
+    Manual,
+    TimedOut,
+    Replaced,
+    Disposed,
+    Probe
+}
+
 /// <summary>
 /// A quiet app-owned fallback for warnings that Windows may suppress while
 /// Focus Assist is active. It never activates or takes keyboard focus.
@@ -14,13 +23,17 @@ public partial class PreviewAccessWarningWindow : Window
 {
     private static readonly TimeSpan InitialDismissDelay = TimeSpan.FromSeconds(9);
     private static readonly TimeSpan HoverLeaveDismissDelay = TimeSpan.FromSeconds(4);
+    private const int MaxDisplayNameLength = 48;
+    private const int MaxTrayMessageLength = 255;
     private const double WorkAreaMargin = 16;
 
     private readonly PreviewAccessWarningInfo _warning;
     private readonly DispatcherTimer _dismissTimer;
     private bool _dismissed;
 
-    internal PreviewAccessWarningWindow(PreviewAccessWarningInfo warning)
+    internal PreviewAccessWarningWindow(
+        PreviewAccessWarningInfo warning,
+        bool finalReminder)
     {
         _warning = warning;
         InitializeComponent();
@@ -28,17 +41,18 @@ public partial class PreviewAccessWarningWindow : Window
         AccentBar.Background = Theme.Brush(Theme.Current.Accent);
         HeadingText.Text = Heading;
         BodyText.Text = BuildMessage(warning);
+        FooterText.Text = BuildReminderMessage(finalReminder);
 
         _dismissTimer = new DispatcherTimer(
             InitialDismissDelay,
             DispatcherPriority.Background,
-            (_, _) => Dismiss("timeout"),
+            (_, _) => Dismiss(PreviewAccessWarningDismissalReason.TimedOut),
             Dispatcher);
         _dismissTimer.Stop();
 
         SourceInitialized += OnSourceInitialized;
         Loaded += OnLoaded;
-        CloseButton.Click += (_, _) => Dismiss("close");
+        CloseButton.Click += (_, _) => Dismiss(PreviewAccessWarningDismissalReason.Manual);
         MouseEnter += (_, _) => _dismissTimer.Stop();
         MouseLeave += (_, _) =>
         {
@@ -48,12 +62,50 @@ public partial class PreviewAccessWarningWindow : Window
     }
 
     /// <summary>One heading for this warning, wherever it appears: this window and the tray toast.</summary>
-    internal const string Heading = "Preview unavailable for this app";
+    internal const string Heading = "Preview unavailable here";
 
-    internal static string BuildMessage(PreviewAccessWarningInfo warning) =>
-        warning.Kind == PreviewAccessWarningKind.ConfirmedElevationMismatch
-            ? $"{warning.DisplayName} is running as administrator, but Glimpse isn't. Run both at the same permission level to preview files."
-            : "Glimpse couldn't access this file picker. If the app is running as administrator, run both apps at the same permission level.";
+    internal event Action<PreviewAccessWarningDismissalReason>? Dismissed;
+
+    internal static string BuildMessage(PreviewAccessWarningInfo warning)
+    {
+        var displayName = FriendlyDisplayName(warning.DisplayName);
+        return warning.Kind == PreviewAccessWarningKind.ConfirmedElevationMismatch
+            ? $"Glimpse and {displayName} are running at different permission levels. Restart {displayName} without administrator access to use previews."
+            : $"Glimpse can't access this file picker. If {displayName} is running as administrator, restart it without administrator access to use previews.";
+    }
+
+    internal static string BuildReminderMessage(bool finalReminder) =>
+        finalReminder
+            ? "Final heads-up. Glimpse won't show this notice again."
+            : "Close this notice to stop future reminders.";
+
+    internal static string BuildTrayMessage(
+        PreviewAccessWarningInfo warning,
+        bool finalReminder)
+    {
+        var reminder = BuildReminderMessage(finalReminder);
+        var body = BuildMessage(warning);
+        var maxBodyLength = MaxTrayMessageLength - reminder.Length - 1;
+        if (body.Length > maxBodyLength)
+        {
+            body = body[..Math.Max(0, maxBodyLength - 3)].TrimEnd() + "...";
+        }
+
+        return $"{body} {reminder}";
+    }
+
+    private static string FriendlyDisplayName(string? displayName)
+    {
+        var normalized = displayName?.Trim();
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            return "this app";
+        }
+
+        return normalized.Length <= MaxDisplayNameLength
+            ? normalized
+            : normalized[..(MaxDisplayNameLength - 3)].TrimEnd() + "...";
+    }
 
     internal static Point CalculatePlacement(Rect workArea, Size windowSize, double margin)
     {
@@ -68,7 +120,7 @@ public partial class PreviewAccessWarningWindow : Window
         return new Point(x, y);
     }
 
-    public void Dismiss(string reason)
+    internal void Dismiss(PreviewAccessWarningDismissalReason reason)
     {
         if (_dismissed)
         {
@@ -78,7 +130,8 @@ public partial class PreviewAccessWarningWindow : Window
         _dismissed = true;
         _dismissTimer.Stop();
         DiagnosticLog.Write(
-            $"app warning dismissed reason={reason} kind={_warning.Kind} process={_warning.DisplayName} pid={_warning.ProcessId}");
+            $"app warning dismissed reason={reason.ToString().ToLowerInvariant()} kind={_warning.Kind} process={_warning.DisplayName} pid={_warning.ProcessId}");
+        Dismissed?.Invoke(reason);
         Close();
     }
 

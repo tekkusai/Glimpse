@@ -33,6 +33,7 @@ internal sealed class SpacePreviewController : IDisposable
     ];
 
     private const int MaxPinnedPreviews = 6;
+    private const int MaxObservedAccessDialogs = 64;
     private const int OfficeNeighborPreconvertLimit = 4;
     private const int DeferredFileDialogPreviewLifetimeMilliseconds = 1200;
     private static readonly TimeSpan OfficeNeighborPreconvertDelay = TimeSpan.FromMilliseconds(900);
@@ -68,6 +69,7 @@ internal sealed class SpacePreviewController : IDisposable
     private int _openRequestGeneration;
     private readonly DeferredFileDialogPreviewIntentSlot _pendingFileDialogPreview = new();
     private readonly ConcurrentDictionary<long, byte> _elevationChecksInFlight = new();
+    private readonly HashSet<(long Hwnd, uint ProcessId)> _observedAccessDialogs = [];
     private int _idleTrimInFlight;
     private bool _inputHooksActive;
     private ExplorerSelection? _pendingOfficePreconvertSelection;
@@ -92,6 +94,7 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor = new CommonFileDialogSelectionMonitor(dispatcher);
         _commonFileDialogMonitor.SelectionChanged += OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted += OnCommonFileDialogRefreshCompleted;
+        _commonFileDialogMonitor.DialogObserved += OnCommonFileDialogObserved;
         _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
         {
             Interval = IdleTrimDelay
@@ -523,8 +526,6 @@ internal sealed class SpacePreviewController : IDisposable
                 DiagnosticLog.Write("space latch repaired before handling");
             }
 
-            DiagnosticLog.Write($"space keydown previewVisible={_previewVisible}");
-
             if (_previewVisible)
             {
                 if (!CanHandleActivePreviewShortcutFromForeground())
@@ -576,7 +577,6 @@ internal sealed class SpacePreviewController : IDisposable
             if (context is null)
             {
                 QueueForegroundElevationMismatchCheck();
-                DiagnosticLog.Write("space -> not a supported selection surface");
                 return false;
             }
 
@@ -813,7 +813,15 @@ internal sealed class SpacePreviewController : IDisposable
         _dialogOwnerTimer.Stop();
         _previewOwnerRootHwnd = GetForegroundRoot();
         DiagnosticLog.Write("welcome shown");
-        _previewWindow.ShowWelcome();
+        var presented = _previewWindow.ShowWelcome();
+        if (!presented)
+        {
+            DiagnosticLog.Write(
+                $"welcome presentation failed reason={_previewWindow.LastPresentationFailureReason} hwnd=0x{_previewWindow.Hwnd.ToInt64():X}");
+            HidePreview();
+            return;
+        }
+
         _previewVisible = true;
         SyncMouseHook();
     }
@@ -828,8 +836,28 @@ internal sealed class SpacePreviewController : IDisposable
         window.SelectionItemRequested += (sender, index) => OnSelectionItemRequested((PreviewWindow)sender!, index);
         window.SlideshowAdvanceRequested += (sender, _) => OnSlideshowAdvanceRequested((PreviewWindow)sender!);
         window.ContentReady += (sender, _) => OnPreviewContentReady((PreviewWindow)sender!);
+        window.PresentationFailed += OnPreviewPresentationFailed;
         window.SetPinLimitReached(_pinnedWindows.Count >= MaxPinnedPreviews);
         return window;
+    }
+
+    private void OnPreviewPresentationFailed(PreviewWindow window, string reason)
+    {
+        if (_disposed || window != _previewWindow || !_previewVisible)
+        {
+            return;
+        }
+
+        var owner = _previewOwnerRootHwnd;
+        var fileDialogMode = _lastSelectionSource == SelectionSource.CommonFileDialog;
+        DiagnosticLog.Write(
+            $"preview presentation failed reason={reason} hwnd=0x{window.Hwnd.ToInt64():X} owner=0x{owner.ToInt64():X}");
+        if (fileDialogMode)
+        {
+            QueueElevationMismatchCheck(owner);
+        }
+
+        HidePreview();
     }
 
     private void OnPreviewContentReady(PreviewWindow window)
@@ -1024,12 +1052,25 @@ internal sealed class SpacePreviewController : IDisposable
 
         var fileDialogMode = _lastSelectionSource == SelectionSource.CommonFileDialog;
         DiagnosticLog.Write(
-            $"show preview {selection.Path} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
-        _previewWindow.ShowPreview(
+            $"preview requested {selection.Path} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
+        var presented = _previewWindow.ShowPreview(
             selection.Path,
             selection.ExplorerHwnd,
             selection.SelectedCount,
             fileDialogMode);
+        if (!presented)
+        {
+            DiagnosticLog.Write(
+                $"preview presentation failed reason={_previewWindow.LastPresentationFailureReason} hwnd=0x{_previewWindow.Hwnd.ToInt64():X} owner=0x{selection.ExplorerHwnd.ToInt64():X}");
+            if (fileDialogMode)
+            {
+                QueueElevationMismatchCheck(selection.ExplorerHwnd);
+            }
+
+            HidePreview();
+            return;
+        }
+
         if (fileDialogMode)
         {
             ApplyCommonFileDialogContext(selection);
@@ -1399,19 +1440,60 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void QueueElevationMismatchCheck(IntPtr dialogRoot)
     {
-        if (_disposed || dialogRoot == IntPtr.Zero)
+        if (_disposed
+            || dialogRoot == IntPtr.Zero
+            || !PreviewAccessWarningPolicy.CanShowLifetime(
+                PreviewAccessWarningPolicy.FromSettings(Settings.Current),
+                DateTimeOffset.UtcNow))
         {
             return;
         }
 
-        _dispatcher.BeginInvoke(
-            () => StartElevationMismatchCheck(dialogRoot),
-            DispatcherPriority.Background);
+        // Capture identity on the hook lane, then leave immediately. The old
+        // dispatcher hop let the preview open first; its later foreground
+        // recheck could silently abandon the warning it was meant to show.
+        var processId = NativeMethods.GetWindowProcessId(dialogRoot);
+        StartElevationMismatchCheck(dialogRoot, processId);
     }
 
-    private void StartElevationMismatchCheck(IntPtr dialogRoot)
+    private void OnCommonFileDialogObserved(IntPtr dialogRoot)
     {
-        if (_disposed || !_elevationChecksInFlight.TryAdd(dialogRoot.ToInt64(), 0))
+        if (!_dispatcher.CheckAccess())
+        {
+            _dispatcher.BeginInvoke(() => OnCommonFileDialogObserved(dialogRoot));
+            return;
+        }
+
+        if (_disposed
+            || !PreviewAccessWarningPolicy.CanShowLifetime(
+                PreviewAccessWarningPolicy.FromSettings(Settings.Current),
+                DateTimeOffset.UtcNow))
+        {
+            return;
+        }
+
+        var processId = NativeMethods.GetWindowProcessId(dialogRoot);
+        if (processId == 0)
+        {
+            return;
+        }
+
+        if (_observedAccessDialogs.Count >= MaxObservedAccessDialogs)
+        {
+            _observedAccessDialogs.Clear();
+        }
+
+        if (_observedAccessDialogs.Add((dialogRoot.ToInt64(), processId)))
+        {
+            StartElevationMismatchCheck(dialogRoot, processId);
+        }
+    }
+
+    private void StartElevationMismatchCheck(IntPtr dialogRoot, uint processId)
+    {
+        if (_disposed
+            || processId == 0
+            || !_elevationChecksInFlight.TryAdd(dialogRoot.ToInt64(), 0))
         {
             return;
         }
@@ -1420,9 +1502,9 @@ internal sealed class SpacePreviewController : IDisposable
         {
             try
             {
-                var foregroundRoot = GetForegroundRoot();
                 if (_disposed
-                    || foregroundRoot != dialogRoot
+                    || !NativeMethods.IsWindow(dialogRoot)
+                    || NativeMethods.GetWindowProcessId(dialogRoot) != processId
                     || !CommonFileDialogSelectionService.HasDialogWindowClass(dialogRoot))
                 {
                     return;
@@ -1435,6 +1517,7 @@ internal sealed class SpacePreviewController : IDisposable
                 {
                     _dispatcher.BeginInvoke(() => CompletePreviewAccessCheck(
                         dialogRoot,
+                        processId,
                         warning));
                 }
             }
@@ -1452,12 +1535,16 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void CompletePreviewAccessCheck(
         IntPtr dialogRoot,
+        uint processId,
         PreviewAccessWarningInfo warning)
     {
         if (_disposed
-            || GetForegroundRoot() != dialogRoot
+            || !NativeMethods.IsWindow(dialogRoot)
+            || NativeMethods.GetWindowProcessId(dialogRoot) != processId
             || !CommonFileDialogSelectionService.HasDialogWindowClass(dialogRoot))
         {
+            DiagnosticLog.Write(
+                $"preview access warning discarded: dialog closed or handle reused hwnd=0x{dialogRoot.ToInt64():X} pid={processId}");
             return;
         }
 
@@ -2022,6 +2109,7 @@ internal sealed class SpacePreviewController : IDisposable
         CancelOfficeNeighborPreconversion();
         _commonFileDialogMonitor.SelectionChanged -= OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted -= OnCommonFileDialogRefreshCompleted;
+        _commonFileDialogMonitor.DialogObserved -= OnCommonFileDialogObserved;
         ClearPendingFileDialogPreview();
         _commonFileDialogMonitor.Dispose();
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;
@@ -2048,6 +2136,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         _pinnedWindows.Clear();
+        _observedAccessDialogs.Clear();
     }
 
     private void ScheduleIdleTrim()

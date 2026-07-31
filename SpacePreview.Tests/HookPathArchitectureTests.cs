@@ -244,4 +244,22 @@ public sealed class HookPathArchitectureTests
         Assert.DoesNotContain("SetBrowseControlsVisible(false)", hideBody, StringComparison.Ordinal);
         Assert.Contains("SetBrowseControlsVisible(false)", completeHideBody, StringComparison.Ordinal);
     }
+
+    // A hidden window gets no WM_SIZE, so no StateChanged to move the glyph.
+    [Fact]
+    public void LeavingTheStageResyncsTheMaximizeButtonItself()
+    {
+        var completeHideBody = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CompleteHide");
+
+        Assert.Contains("WindowState = WindowState.Normal;", completeHideBody, StringComparison.Ordinal);
+        Assert.Contains("UpdateMaximizeChrome();", completeHideBody, StringComparison.Ordinal);
+
+        // Order is the whole fix. Restoring after Hide moves the property
+        // without moving the window, so the stage returns maximized while
+        // everything else says normal and the next click is spent on the
+        // disagreement instead of on the user's intent.
+        var restore = completeHideBody.IndexOf("WindowState = WindowState.Normal;", StringComparison.Ordinal);
+        var hide = completeHideBody.IndexOf("Hide();", StringComparison.Ordinal);
+        Assert.True(hide > restore, "CompleteHide must restore the stage before it hides the window.");
+    }
 }

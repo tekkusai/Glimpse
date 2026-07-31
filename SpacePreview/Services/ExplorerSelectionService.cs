@@ -1,5 +1,6 @@
 using System.IO;
 using System.Collections;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using SpacePreview.Native;
 
@@ -25,10 +26,65 @@ internal sealed record ForegroundSelectionContext(IntPtr Hwnd, SelectionSource S
     public bool IsFileDialog => Source == SelectionSource.CommonFileDialog;
 }
 
+internal sealed record DesktopSelectionReaderSample(
+    int Iteration,
+    string FirstReader,
+    double AutomationMilliseconds,
+    double NativeMilliseconds,
+    string? AutomationPath,
+    string? NativePath,
+    int AutomationCount,
+    int NativeCount,
+    bool Match);
+
+internal readonly record struct DesktopSelectionSnapshot(
+    string? Path,
+    int SelectedCount);
+
+internal static class DesktopSelectionReaderPolicy
+{
+    internal static bool CanUseNativePath(
+        int selectedCount,
+        int fileSystemPathCount) =>
+        selectedCount == 1 && fileSystemPathCount == 1;
+}
+
+internal sealed record DesktopSelectionAbResult(
+    bool Success,
+    string TargetPath,
+    int Iterations,
+    bool SelectionRestored,
+    double CacheMissMilliseconds,
+    double CacheHitMedianMilliseconds,
+    double FirstAutomationMilliseconds,
+    double FirstNativeMilliseconds,
+    double AutomationMedianMilliseconds,
+    double NativeMedianMilliseconds,
+    int CacheAcquisitions,
+    int CacheHits,
+    int CacheInvalidations,
+    bool ForcedRebuildSucceeded,
+    IReadOnlyList<DesktopSelectionReaderSample> Samples,
+    string? FailureReason = null);
+
+internal sealed record DesktopCurrentSelectionAbResult(
+    bool Success,
+    string FirstReader,
+    int Iterations,
+    double CacheMissMilliseconds,
+    double CacheHitMedianMilliseconds,
+    double FirstAutomationMilliseconds,
+    double FirstNativeMilliseconds,
+    double AutomationMedianMilliseconds,
+    double NativeMedianMilliseconds,
+    IReadOnlyList<DesktopSelectionReaderSample> Samples,
+    string? FailureReason = null);
+
 internal static class ExplorerSelectionService
 {
     private const int SWC_DESKTOP = 8;
     private const int SWFO_NEEDDISPATCH = 1;
+    private static DesktopShellSessionCache? _desktopSessionCache;
 
     public static ExplorerSelection? TryGetForegroundSelection(
         bool ignoreTextEditing = true,
@@ -75,7 +131,6 @@ internal static class ExplorerSelectionService
         }
 
         var className = NativeMethods.GetClassNameString(root);
-        DiagnosticLog.Write($"foreground hwnd=0x{foreground.ToInt64():X} root=0x{root.ToInt64():X} class={className}");
 
         var fileDialogListHasFocus = className.Equals(
                 CommonFileDialogSelectionService.DialogWindowClass,
@@ -417,100 +472,617 @@ internal static class ExplorerSelectionService
         bool includeViewPosition = true,
         bool includeMultiSelectionPaths = true)
     {
-        object? shell = null;
-        object? windows = null;
-        object? desktop = null;
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            DesktopShellSession? transientSession = null;
+            try
+            {
+                DesktopShellSession? session;
+                string sessionState;
+                using (ExplorerSelectionLookupTrace.Track(diagnostics, ExplorerSelectionLookupPhase.Census))
+                {
+                    if (StaTask.IsWorkerThread)
+                    {
+                        _desktopSessionCache ??= new DesktopShellSessionCache();
+                        session = _desktopSessionCache.GetOrCreate(out sessionState);
+                    }
+                    else if (DesktopShellSession.TryCreate(
+                                 out transientSession,
+                                 out var failureReason))
+                    {
+                        session = transientSession;
+                        sessionState = "transient";
+                    }
+                    else
+                    {
+                        session = null;
+                        sessionState = $"acquire-failed-{failureReason}";
+                    }
+                }
 
+                if (session is null)
+                {
+                    diagnostics?.SetEntryCount(0);
+                    diagnostics?.SetOutcome($"desktop-{sessionState}");
+                    return null;
+                }
+
+                diagnostics?.SetEntryCount(1);
+                var snapshot = ReadPreferredDesktopSelectionSnapshot(
+                    session.Desktop,
+                    diagnostics);
+                if (snapshot.SelectedCount <= 0)
+                {
+                    diagnostics?.SetOutcome("desktop-selection-empty");
+                    return null;
+                }
+
+                if (string.IsNullOrWhiteSpace(snapshot.Path))
+                {
+                    diagnostics?.SetOutcome("desktop-path-empty");
+                    return null;
+                }
+
+                var path = Environment.ExpandEnvironmentVariables(snapshot.Path);
+                if (!File.Exists(path) && !Directory.Exists(path))
+                {
+                    diagnostics?.SetOutcome("desktop-path-nonfilesystem");
+                    return null;
+                }
+
+                var selection = WithViewPosition(
+                    new ExplorerSelection(path, session.Hwnd, snapshot.SelectedCount),
+                    session.Desktop,
+                    includeViewPosition,
+                    includeMultiSelectionPaths,
+                    diagnostics);
+                diagnostics?.SetOutcome(selection is null ? "desktop-view-empty" : "desktop");
+                return selection;
+            }
+            catch (Exception ex) when (IsRecoverableDesktopSessionFailure(ex) && attempt == 0)
+            {
+                if (StaTask.IsWorkerThread)
+                {
+                    _desktopSessionCache?.Invalidate($"read-{ex.GetType().Name}");
+                }
+
+                DiagnosticLog.Write(
+                    $"desktop shell session read failed, rebuilding once: {ex.GetType().Name}: {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                if (StaTask.IsWorkerThread)
+                {
+                    _desktopSessionCache?.Invalidate($"read-{ex.GetType().Name}");
+                }
+
+                diagnostics?.SetOutcome($"desktop-exception-{ex.GetType().Name}");
+                DiagnosticLog.Write($"desktop selection failed: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+            finally
+            {
+                transientSession?.Dispose();
+            }
+        }
+
+        diagnostics?.SetOutcome("desktop-retry-exhausted");
+        return null;
+    }
+
+    private static DesktopSelectionSnapshot ReadDesktopAutomationSnapshot(
+        object desktop,
+        ExplorerSelectionLookupTrace? diagnostics = null)
+    {
+        object? document = null;
+        object? selectedItems = null;
+        object? firstItem = null;
         try
         {
-            var shellType = Type.GetTypeFromProgID("Shell.Application");
-            if (shellType is null)
-            {
-                diagnostics?.SetOutcome("desktop-shell-unavailable");
-                return null;
-            }
-
-            shell = Activator.CreateInstance(shellType);
-            if (shell is null)
-            {
-                diagnostics?.SetOutcome("desktop-shell-activation-empty");
-                return null;
-            }
-
-            object location = 0;
-            object locationRoot = 0;
-            int hwnd = 0;
-            using (ExplorerSelectionLookupTrace.Track(diagnostics, ExplorerSelectionLookupPhase.Census))
-            {
-                windows = ((dynamic)shell).Windows();
-                desktop = ((dynamic)windows).FindWindowSW(ref location, ref locationRoot, SWC_DESKTOP, ref hwnd, SWFO_NEEDDISPATCH);
-            }
-
-            if (desktop is null)
-            {
-                diagnostics?.SetEntryCount(0);
-                diagnostics?.SetOutcome("desktop-entry-empty");
-                return null;
-            }
-
-            diagnostics?.SetEntryCount(1);
-
-            dynamic document;
-            dynamic selectedItems;
-            int count;
-            using (ExplorerSelectionLookupTrace.Track(diagnostics, ExplorerSelectionLookupPhase.Selection))
-            {
-                document = ((dynamic)desktop).Document;
-                selectedItems = document.SelectedItems();
-                count = Convert.ToInt32(selectedItems.Count);
-            }
-
+            using var selectionTiming = ExplorerSelectionLookupTrace.Track(
+                diagnostics,
+                ExplorerSelectionLookupPhase.Selection);
+            document = ((dynamic)desktop).Document
+                ?? throw new COMException("Desktop Document returned null.");
+            selectedItems = ((dynamic)document).SelectedItems()
+                ?? throw new COMException("Desktop SelectedItems returned null.");
+            var count = Convert.ToInt32(((dynamic)selectedItems).Count);
             if (count <= 0)
             {
-                diagnostics?.SetOutcome("desktop-selection-empty");
-                return null;
+                return new DesktopSelectionSnapshot(null, 0);
             }
 
-            string? path;
-            using (ExplorerSelectionLookupTrace.Track(diagnostics, ExplorerSelectionLookupPhase.Selection))
-            {
-                dynamic firstItem = selectedItems.Item(0);
-                path = firstItem.Path as string;
-            }
-            if (string.IsNullOrWhiteSpace(path))
-            {
-                diagnostics?.SetOutcome("desktop-path-empty");
-                return null;
-            }
-
-            path = Environment.ExpandEnvironmentVariables(path);
-            if (!File.Exists(path) && !Directory.Exists(path))
-            {
-                diagnostics?.SetOutcome("desktop-path-nonfilesystem");
-                return null;
-            }
-
-            var selection = WithViewPosition(
-                new ExplorerSelection(path, new IntPtr(hwnd), count),
-                desktop,
-                includeViewPosition,
-                includeMultiSelectionPaths,
-                diagnostics);
-            diagnostics?.SetOutcome(selection is null ? "desktop-view-empty" : "desktop");
-            return selection;
-        }
-        catch (Exception ex)
-        {
-            diagnostics?.SetOutcome($"desktop-exception-{ex.GetType().Name}");
-            DiagnosticLog.Write($"desktop selection failed: {ex.GetType().Name}: {ex.Message}");
-            return null;
+            firstItem = ((dynamic)selectedItems).Item(0);
+            var path = firstItem is null ? null : ((dynamic)firstItem).Path as string;
+            return new DesktopSelectionSnapshot(path, count);
         }
         finally
         {
-            ReleaseComObject(desktop);
-            ReleaseComObject(windows);
-            ReleaseComObject(shell);
+            DesktopShellSession.ReleaseComObject(firstItem);
+            DesktopShellSession.ReleaseComObject(selectedItems);
+            DesktopShellSession.ReleaseComObject(document);
         }
+    }
+
+    private static DesktopSelectionSnapshot ReadPreferredDesktopSelectionSnapshot(
+        object desktop,
+        ExplorerSelectionLookupTrace? diagnostics = null)
+    {
+        FolderViewSelectionSnapshot? native;
+        using (ExplorerSelectionLookupTrace.Track(
+                   diagnostics,
+                   ExplorerSelectionLookupPhase.Selection))
+        {
+            native = FolderViewNavigator.TryGetSelectionSnapshot(desktop);
+        }
+
+        if (native is { SelectedCount: 0 })
+        {
+            return new DesktopSelectionSnapshot(null, 0);
+        }
+
+        if (native is not null
+            && DesktopSelectionReaderPolicy.CanUseNativePath(
+                native.SelectedCount,
+                native.FileSystemPaths.Count))
+        {
+            return new DesktopSelectionSnapshot(native.FileSystemPaths[0], 1);
+        }
+
+        // Preserve the current automation semantics for multi-selection
+        // anchor order, virtual Shell items, and Windows builds where the
+        // native view service is unavailable. The fallback is still fresh.
+        return ReadDesktopAutomationSnapshot(desktop, diagnostics);
+    }
+
+    private static bool IsRecoverableDesktopSessionFailure(Exception exception) =>
+        exception is COMException
+        or InvalidComObjectException
+        or ObjectDisposedException;
+
+    internal static Task ReleaseDesktopSessionAsync()
+    {
+        // Always enqueue behind any outstanding selection work. A UI-thread
+        // null check could race a queued lookup that creates the cache later.
+        return StaTask.Run(() =>
+        {
+            _desktopSessionCache?.Dispose();
+            _desktopSessionCache = null;
+            return true;
+        });
+    }
+
+    /// <summary>
+    /// Dev-only live A/B. It selects one existing desktop file, alternates the
+    /// automation and native readers, restores the prior selection, then
+    /// forces one cache rebuild and verifies the restored state survived.
+    /// </summary>
+    internal static DesktopSelectionAbResult RunDesktopSelectionAbTest(
+        string targetPath,
+        int iterations)
+    {
+        if (!StaTask.IsWorkerThread)
+        {
+            throw new InvalidOperationException("Desktop selection A/B must run on the Shell STA.");
+        }
+
+        iterations = Math.Clamp(iterations, 2, 50);
+        targetPath = Path.GetFullPath(targetPath);
+        _desktopSessionCache?.Dispose();
+        _desktopSessionCache = new DesktopShellSessionCache();
+        var cache = _desktopSessionCache!;
+        var samples = new List<DesktopSelectionReaderSample>(iterations);
+        var cacheHitTimes = new List<double>(iterations);
+        var automationTimes = new List<double>(iterations);
+        var nativeTimes = new List<double>(iterations);
+        var selectionChanged = false;
+        var selectionRestored = false;
+        var firstAutomationMilliseconds = 0d;
+        var firstNativeMilliseconds = 0d;
+        string? failureReason = null;
+        var cacheMissTimer = Stopwatch.StartNew();
+        var session = cache.GetOrCreate(out var cacheState);
+        var cacheMissMilliseconds = cacheMissTimer.Elapsed.TotalMilliseconds;
+        if (session is null)
+        {
+            return Failure($"desktop session {cacheState}");
+        }
+
+        var viewPaths = FolderViewNavigator.TryGetViewPaths(session.Desktop, 4096);
+        if (viewPaths is null)
+        {
+            return Failure("desktop IFolderView did not expose view paths");
+        }
+
+        var targetIndex = IndexOfPath(viewPaths, targetPath);
+        if (targetIndex < 0)
+        {
+            return Failure("target path is not present in the desktop view");
+        }
+
+        var previous = FolderViewNavigator.TryGetSelectionSnapshot(session.Desktop);
+        if (previous is null)
+        {
+            return Failure("native reader could not capture the prior desktop selection");
+        }
+
+        var previousPaths = previous.FileSystemPaths.ToArray();
+        if (previous.SelectedCount != previousPaths.Length)
+        {
+            return Failure("prior selection contains virtual items and cannot be restored exactly");
+        }
+
+        try
+        {
+            if (!FolderViewNavigator.TrySelectIndex(session.Desktop, targetIndex))
+            {
+                failureReason = "could not select the benchmark target";
+            }
+            else
+            {
+                selectionChanged = true;
+                var committed = false;
+                for (var attempt = 0; attempt < 20; attempt++)
+                {
+                    var (automation, automationMilliseconds) = MeasureAutomation(session.Desktop);
+                    var (native, nativeMilliseconds) = MeasureNative(session.Desktop);
+                    if (attempt == 0)
+                    {
+                        firstAutomationMilliseconds = automationMilliseconds;
+                        firstNativeMilliseconds = nativeMilliseconds;
+                    }
+
+                    if (automation.SelectedCount == 1
+                        && PathEquals(automation.Path, targetPath)
+                        && native is { SelectedCount: 1 }
+                        && PathEquals(native.FileSystemPaths.FirstOrDefault(), targetPath))
+                    {
+                        committed = true;
+                        break;
+                    }
+
+                    Thread.Sleep(25);
+                }
+
+                if (!committed)
+                {
+                    failureReason = "desktop selection did not commit consistently to both readers";
+                }
+                else
+                {
+                    // One unmeasured warm-up per reader keeps COM activation
+                    // out of the comparison; cache-miss cost is separate.
+                    _ = ReadDesktopAutomationSnapshot(session.Desktop);
+                    _ = FolderViewNavigator.TryGetSelectionSnapshot(session.Desktop);
+
+                    for (var iteration = 0; iteration < iterations; iteration++)
+                    {
+                        var hitTimer = Stopwatch.StartNew();
+                        var cached = cache.GetOrCreate(out var hitState);
+                        cacheHitTimes.Add(hitTimer.Elapsed.TotalMilliseconds);
+                        if (!ReferenceEquals(cached, session) || hitState != "hit")
+                        {
+                            failureReason = $"cache identity changed during A/B ({hitState})";
+                            break;
+                        }
+
+                        DesktopSelectionSnapshot automation;
+                        FolderViewSelectionSnapshot? native;
+                        double automationMilliseconds;
+                        double nativeMilliseconds;
+                        var automationFirst = iteration % 2 == 0;
+                        if (automationFirst)
+                        {
+                            (automation, automationMilliseconds) = MeasureAutomation(session.Desktop);
+                            (native, nativeMilliseconds) = MeasureNative(session.Desktop);
+                        }
+                        else
+                        {
+                            (native, nativeMilliseconds) = MeasureNative(session.Desktop);
+                            (automation, automationMilliseconds) = MeasureAutomation(session.Desktop);
+                        }
+
+                        automationTimes.Add(automationMilliseconds);
+                        nativeTimes.Add(nativeMilliseconds);
+                        var nativePath = native?.FileSystemPaths.FirstOrDefault();
+                        var match = native is not null
+                            && automation.SelectedCount == native.SelectedCount
+                            && PathEquals(automation.Path, nativePath)
+                            && PathEquals(automation.Path, targetPath);
+                        samples.Add(new DesktopSelectionReaderSample(
+                            iteration,
+                            automationFirst ? "automation" : "native",
+                            automationMilliseconds,
+                            nativeMilliseconds,
+                            automation.Path,
+                            nativePath,
+                            automation.SelectedCount,
+                            native?.SelectedCount ?? -1,
+                            match));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            failureReason = $"{ex.GetType().Name}: {ex.Message}";
+        }
+        finally
+        {
+            if (selectionChanged)
+            {
+                selectionRestored = RestoreDesktopSelection(
+                    session.Desktop,
+                    viewPaths,
+                    previousPaths,
+                    targetIndex);
+            }
+        }
+
+        var forcedRebuildSucceeded = false;
+        if (selectionRestored)
+        {
+            cache.Invalidate("benchmark-forced-rebuild");
+            var rebuilt = cache.GetOrCreate(out var rebuildState);
+            if (rebuilt is not null && rebuildState == "miss")
+            {
+                var rebuiltSnapshot = FolderViewNavigator.TryGetSelectionSnapshot(rebuilt.Desktop);
+                forcedRebuildSucceeded = SelectionMatches(
+                    rebuiltSnapshot,
+                    previous.SelectedCount,
+                    previousPaths);
+            }
+        }
+
+        var allSamplesMatch = samples.Count == iterations && samples.All(sample => sample.Match);
+        var success = failureReason is null
+            && allSamplesMatch
+            && selectionRestored
+            && forcedRebuildSucceeded;
+        return new DesktopSelectionAbResult(
+            success,
+            targetPath,
+            iterations,
+            selectionRestored,
+            cacheMissMilliseconds,
+            Median(cacheHitTimes),
+            firstAutomationMilliseconds,
+            firstNativeMilliseconds,
+            Median(automationTimes),
+            Median(nativeTimes),
+            cache.AcquisitionCount,
+            cache.HitCount,
+            cache.InvalidationCount,
+            forcedRebuildSucceeded,
+            samples,
+            failureReason ?? (!allSamplesMatch ? "one or more reader samples disagreed" : null));
+
+        DesktopSelectionAbResult Failure(string reason) =>
+            new(
+                false,
+                targetPath,
+                iterations,
+                SelectionRestored: !selectionChanged || selectionRestored,
+                cacheMissMilliseconds,
+                Median(cacheHitTimes),
+                firstAutomationMilliseconds,
+                firstNativeMilliseconds,
+                Median(automationTimes),
+                Median(nativeTimes),
+                cache.AcquisitionCount,
+                cache.HitCount,
+                cache.InvalidationCount,
+                ForcedRebuildSucceeded: false,
+                samples,
+                reason);
+    }
+
+    /// <summary>
+    /// Dev-only reverse-order control. The caller prepares and restores the
+    /// desktop selection; this process acquires a cold cache and immediately
+    /// reads the already-selected item, with either reader deliberately first.
+    /// </summary>
+    internal static DesktopCurrentSelectionAbResult RunCurrentDesktopSelectionAbTest(
+        int iterations,
+        bool nativeFirst)
+    {
+        if (!StaTask.IsWorkerThread)
+        {
+            throw new InvalidOperationException("Desktop selection A/B must run on the Shell STA.");
+        }
+
+        iterations = Math.Clamp(iterations, 2, 50);
+        _desktopSessionCache?.Dispose();
+        _desktopSessionCache = new DesktopShellSessionCache();
+        var cache = _desktopSessionCache;
+        var missTimer = Stopwatch.StartNew();
+        var session = cache.GetOrCreate(out var cacheState);
+        var cacheMissMilliseconds = missTimer.Elapsed.TotalMilliseconds;
+        if (session is null)
+        {
+            return new DesktopCurrentSelectionAbResult(
+                false,
+                nativeFirst ? "native" : "automation",
+                iterations,
+                cacheMissMilliseconds,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                $"desktop session {cacheState}");
+        }
+
+        var samples = new List<DesktopSelectionReaderSample>(iterations);
+        var cacheHitTimes = new List<double>(iterations);
+        var automationTimes = new List<double>(iterations);
+        var nativeTimes = new List<double>(iterations);
+        for (var iteration = 0; iteration < iterations; iteration++)
+        {
+            var hitTimer = Stopwatch.StartNew();
+            var cached = cache.GetOrCreate(out var hitState);
+            cacheHitTimes.Add(hitTimer.Elapsed.TotalMilliseconds);
+            if (!ReferenceEquals(cached, session) || hitState != "hit")
+            {
+                return BuildResult($"cache identity changed during A/B ({hitState})");
+            }
+
+            var readNativeFirst = iteration == 0 ? nativeFirst : iteration % 2 == 0;
+            DesktopSelectionSnapshot automation;
+            FolderViewSelectionSnapshot? native;
+            double automationMilliseconds;
+            double nativeMilliseconds;
+            if (readNativeFirst)
+            {
+                (native, nativeMilliseconds) = MeasureNative(session.Desktop);
+                (automation, automationMilliseconds) = MeasureAutomation(session.Desktop);
+            }
+            else
+            {
+                (automation, automationMilliseconds) = MeasureAutomation(session.Desktop);
+                (native, nativeMilliseconds) = MeasureNative(session.Desktop);
+            }
+
+            automationTimes.Add(automationMilliseconds);
+            nativeTimes.Add(nativeMilliseconds);
+            var nativePath = native?.FileSystemPaths.FirstOrDefault();
+            var match = native is not null
+                && automation.SelectedCount > 0
+                && automation.SelectedCount == native.SelectedCount
+                && PathEquals(automation.Path, nativePath);
+            samples.Add(new DesktopSelectionReaderSample(
+                iteration,
+                readNativeFirst ? "native" : "automation",
+                automationMilliseconds,
+                nativeMilliseconds,
+                automation.Path,
+                nativePath,
+                automation.SelectedCount,
+                native?.SelectedCount ?? -1,
+                match));
+        }
+
+        return BuildResult(samples.All(sample => sample.Match) ? null : "reader mismatch");
+
+        DesktopCurrentSelectionAbResult BuildResult(string? failureReason)
+        {
+            var first = samples.FirstOrDefault();
+            return new DesktopCurrentSelectionAbResult(
+                failureReason is null && samples.Count == iterations,
+                nativeFirst ? "native" : "automation",
+                iterations,
+                cacheMissMilliseconds,
+                Median(cacheHitTimes),
+                first?.AutomationMilliseconds ?? 0,
+                first?.NativeMilliseconds ?? 0,
+                Median(automationTimes),
+                Median(nativeTimes),
+                samples,
+                failureReason);
+        }
+    }
+
+    private static (DesktopSelectionSnapshot Snapshot, double Milliseconds) MeasureAutomation(
+        object desktop)
+    {
+        var timer = Stopwatch.StartNew();
+        var snapshot = ReadDesktopAutomationSnapshot(desktop);
+        return (snapshot, timer.Elapsed.TotalMilliseconds);
+    }
+
+    private static (FolderViewSelectionSnapshot? Snapshot, double Milliseconds) MeasureNative(
+        object desktop)
+    {
+        var timer = Stopwatch.StartNew();
+        var snapshot = FolderViewNavigator.TryGetSelectionSnapshot(desktop);
+        return (snapshot, timer.Elapsed.TotalMilliseconds);
+    }
+
+    private static bool RestoreDesktopSelection(
+        object desktop,
+        IReadOnlyList<string> viewPaths,
+        IReadOnlyList<string> previousPaths,
+        int targetIndex)
+    {
+        if (previousPaths.Count == 0)
+        {
+            if (!FolderViewNavigator.TryDeselectIndex(desktop, targetIndex))
+            {
+                return false;
+            }
+
+            return FolderViewNavigator.TryGetSelectionSnapshot(desktop) is { SelectedCount: 0 };
+        }
+
+        var indexes = previousPaths.Select(path => IndexOfPath(viewPaths, path)).ToArray();
+        if (indexes.Any(index => index < 0)
+            || !FolderViewNavigator.TrySelectIndex(desktop, indexes[0]))
+        {
+            return false;
+        }
+
+        for (var i = 1; i < indexes.Length; i++)
+        {
+            if (!FolderViewNavigator.TryAddToSelection(desktop, indexes[i]))
+            {
+                return false;
+            }
+        }
+
+        return SelectionMatches(
+            FolderViewNavigator.TryGetSelectionSnapshot(desktop),
+            previousPaths.Count,
+            previousPaths);
+    }
+
+    private static bool SelectionMatches(
+        FolderViewSelectionSnapshot? snapshot,
+        int expectedCount,
+        IReadOnlyList<string> expectedPaths)
+    {
+        if (snapshot is null || snapshot.SelectedCount != expectedCount)
+        {
+            return false;
+        }
+
+        var actual = snapshot.FileSystemPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return actual.SetEquals(expectedPaths);
+    }
+
+    private static int IndexOfPath(IReadOnlyList<string> paths, string targetPath)
+    {
+        for (var index = 0; index < paths.Count; index++)
+        {
+            if (PathEquals(paths[index], targetPath))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool PathEquals(string? left, string? right) =>
+        !string.IsNullOrWhiteSpace(left)
+        && !string.IsNullOrWhiteSpace(right)
+        && string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            StringComparison.OrdinalIgnoreCase);
+
+    private static double Median(IReadOnlyList<double> values)
+    {
+        if (values.Count == 0)
+        {
+            return 0;
+        }
+
+        var ordered = values.OrderBy(value => value).ToArray();
+        var middle = ordered.Length / 2;
+        return ordered.Length % 2 == 0
+            ? (ordered[middle - 1] + ordered[middle]) / 2
+            : ordered[middle];
     }
 
     /// <summary>

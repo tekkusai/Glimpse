@@ -543,15 +543,13 @@ internal static class MeshPreviewLoader
     // ------------------------------------------------------------- STEP --
 
     /// <summary>
-    /// STEP is a B-rep exchange format; true shaded surfaces need a CAD
-    /// kernel. Its edge graph does not: EDGE_CURVE entities name their two
-    /// vertices and underlying curve, so lines, circles, and arcs resolve
-    /// into a wireframe that sketches the part honestly in the rotating
-    /// viewport. Assemblies place each component through its
-    /// SHAPE_REPRESENTATION relationships (ITEM_DEFINED_TRANSFORMATION), so
-    /// parts land where the assembly puts them instead of at their local
-    /// origins. Spline edges draw their control polygon; anything unknown
-    /// draws the straight segment between its endpoints.
+    /// STEP is a B-rep format: shaded surfaces need a CAD kernel, its edge
+    /// graph does not. EDGE_CURVE entities name their two vertices and curve,
+    /// so lines, circles, and arcs resolve into a wireframe that sketches the
+    /// part honestly. Assemblies place components through SHAPE_REPRESENTATION
+    /// relationships (ITEM_DEFINED_TRANSFORMATION), so parts land where the
+    /// assembly puts them, not at their local origins. Splines draw their
+    /// control polygon; anything unknown draws the segment between endpoints.
     /// </summary>
     public static MeshPreview? TryLoadStepOutline(string path)
     {

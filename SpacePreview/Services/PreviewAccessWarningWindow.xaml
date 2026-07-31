@@ -53,51 +53,21 @@
                                FontSize="13"
                                LineHeight="19"
                                TextWrapping="Wrap" />
-                    <TextBlock Text="Glimpse · closes automatically"
+                    <TextBlock x:Name="FooterText"
                                Margin="0,9,0,0"
                                Foreground="{DynamicResource Theme.TextTertiary}"
-                               FontSize="11.5" />
+                               FontSize="11.5"
+                               LineHeight="17"
+                               TextWrapping="Wrap" />
                 </StackPanel>
 
                 <Button x:Name="CloseButton"
                         Grid.Column="2"
-                        Width="28"
-                        Height="28"
-                        Margin="0,8,6,0"
+                        Margin="0,7,4,0"
                         VerticalAlignment="Top"
-                        Focusable="False"
+                        Style="{StaticResource DialogCloseButton}"
                         ToolTip="Dismiss"
-                        AutomationProperties.Name="Dismiss notification"
-                        Background="Transparent"
-                        BorderThickness="0"
-                        Foreground="{DynamicResource Theme.TextSecondary}"
-                        FontFamily="Segoe UI Variable, Segoe UI"
-                        FontSize="18"
-                        Content="×">
-                    <Button.Template>
-                        <ControlTemplate TargetType="Button">
-                            <Border x:Name="ButtonChrome"
-                                    Background="{TemplateBinding Background}"
-                                    CornerRadius="{x:Static u:Metrics.MenuCorner}">
-                                <ContentPresenter HorizontalAlignment="Center"
-                                                  VerticalAlignment="Center"
-                                                  Margin="0,-2,0,0" />
-                            </Border>
-                            <ControlTemplate.Triggers>
-                                <Trigger Property="IsMouseOver" Value="True">
-                                    <Setter TargetName="ButtonChrome"
-                                            Property="Background"
-                                            Value="{DynamicResource Theme.HoverBg}" />
-                                </Trigger>
-                                <Trigger Property="IsPressed" Value="True">
-                                    <Setter TargetName="ButtonChrome"
-                                            Property="Background"
-                                            Value="{DynamicResource Theme.PressedBg}" />
-                                </Trigger>
-                            </ControlTemplate.Triggers>
-                        </ControlTemplate>
-                    </Button.Template>
-                </Button>
+                        AutomationProperties.Name="Dismiss notification" />
             </Grid>
         </Border>
     </Grid>

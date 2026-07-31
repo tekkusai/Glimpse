@@ -314,8 +314,14 @@ public sealed class PreviewWindowSizingTests
         Assert.Contains("limits.ptMaxSize.X = info.rcWork.Width;", windowSource, StringComparison.Ordinal);
 
         // Closing always leaves a normal stage behind, and a native
-        // minimize restores at the next Space press.
-        Assert.Contains("WindowState = WindowState.Normal;\n        _contentDrivenMaximize = false;", windowSource.Replace("\r\n", "\n"), StringComparison.Ordinal);
+        // minimize restores at the next Space press. Asserted on the method
+        // rather than on two adjacent lines: where the restore sits inside
+        // CompleteHide is the point (HookPathArchitectureTests pins that it
+        // comes before the hide), so pinning the layout only made the real
+        // fix look like a regression.
+        var completeHide = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CompleteHide");
+        Assert.Contains("WindowState = WindowState.Normal;", completeHide, StringComparison.Ordinal);
+        Assert.Contains("_contentDrivenMaximize = false;", completeHide, StringComparison.Ordinal);
         Assert.Contains("StateChanged += (_, _) => SyncNativeWindowState()", windowSource, StringComparison.Ordinal);
         Assert.Contains("RestoreFromNativeMinimize();", windowSource, StringComparison.Ordinal);
         Assert.Contains("stage resize ignored after native snap/maximize", windowSource, StringComparison.Ordinal);

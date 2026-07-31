@@ -71,128 +71,111 @@ public sealed class ElevationMismatchNotificationTests
     {
         var source = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
 
-        Assert.Contains("PreviewAccessWarningPolicy.TryBuildPersistedKey", source, StringComparison.Ordinal);
-        Assert.Contains("PreviewAccessWarningPolicy.RecordShown", source, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningPolicy.CanShowLifetime", source, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningPolicy.RecordLifetimeShow", source, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningPolicy.DismissForever", source, StringComparison.Ordinal);
         Assert.Contains("Settings.Update", source, StringComparison.Ordinal);
-        Assert.Contains("TransientPreviewAccessWarningKey(warning)", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TryBuildPersistedKey", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("TransientPreviewAccessWarningKey", source, StringComparison.Ordinal);
         Assert.Contains("_hiddenForSession", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIF_INFO", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_NOSOUND", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", source, StringComparison.Ordinal);
         Assert.Contains("PreviewAccessWarningWindow.Heading", source, StringComparison.Ordinal);
-        Assert.Contains("ShowAppOwnedWarning(warning)", source, StringComparison.Ordinal);
-        Assert.Contains("ShowTrayWarning(warning)", source, StringComparison.Ordinal);
-    }
-
-    [Theory]
-    [InlineData(1_000, 1_999, 1_000, false)]
-    [InlineData(1_000, 2_000, 1_000, true)]
-    [InlineData(10_000, 100, 1_000, true)]
-    [InlineData(1_000, 1_001, 0, true)]
-    public void WarningCooldownAllowsLaterDialogsAndTickWrap(
-        long previous,
-        long now,
-        long interval,
-        bool expected)
-    {
-        Assert.Equal(
-            expected,
-            TrayIcon.HasWarningCooldownElapsed(previous, now, interval));
+        Assert.Contains("ShowAppOwnedWarning(warning, finalReminder)", source, StringComparison.Ordinal);
+        Assert.Contains("ShowTrayWarning(warning, finalReminder)", source, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void WarningPolicyAllowsTwoInitialShowsTenMinutesApart()
+    public void WarningPolicyAllowsOnlyOneReminderAfterSevenDays()
     {
         var now = new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
-        Assert.True(PreviewAccessWarningPolicy.CanShow(null, now));
+        var empty = new PreviewAccessWarningLifetimeState(0, null, false);
+        Assert.True(PreviewAccessWarningPolicy.CanShowLifetime(empty, now));
 
-        var first = PreviewAccessWarningPolicy.RecordShown(null, now);
-        Assert.Equal(1, first.InitialShows);
-        Assert.False(PreviewAccessWarningPolicy.CanShow(first, now.AddMinutes(9)));
-        Assert.True(PreviewAccessWarningPolicy.CanShow(first, now.AddMinutes(10)));
+        var first = PreviewAccessWarningPolicy.RecordLifetimeShow(empty, now);
+        Assert.Equal(1, first.Shows);
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(first, now.AddDays(7).AddTicks(-1)));
+        Assert.True(PreviewAccessWarningPolicy.CanShowLifetime(first, now.AddDays(7)));
 
-        var second = PreviewAccessWarningPolicy.RecordShown(first, now.AddMinutes(10));
-        Assert.Equal(2, second.InitialShows);
-        Assert.False(PreviewAccessWarningPolicy.CanShow(second, now.AddDays(29)));
-        Assert.True(PreviewAccessWarningPolicy.CanShow(second, now.AddMinutes(10).AddDays(30)));
+        var second = PreviewAccessWarningPolicy.RecordLifetimeShow(first, now.AddDays(7));
+        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, second.Shows);
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(second, now.AddYears(10)));
     }
 
     [Fact]
-    public void MonthlyReminderDoesNotRestoreInitialWarningBudget()
+    public void ManualDismissalPermanentlyCompletesTheBudget()
     {
         var now = new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
-        var entry = new PreviewAccessWarningHistoryEntry
-        {
-            InitialShows = PreviewAccessWarningPolicy.InitialShowLimit,
-            LastShownUtc = now.AddDays(-30)
-        };
+        var first = PreviewAccessWarningPolicy.RecordLifetimeShow(
+            new PreviewAccessWarningLifetimeState(0, null, false),
+            now);
 
-        var reminder = PreviewAccessWarningPolicy.RecordShown(entry, now);
-        Assert.Equal(PreviewAccessWarningPolicy.InitialShowLimit, reminder.InitialShows);
-        Assert.False(PreviewAccessWarningPolicy.CanShow(reminder, now.AddDays(29)));
-        Assert.True(PreviewAccessWarningPolicy.CanShow(reminder, now.AddDays(30)));
+        var dismissed = PreviewAccessWarningPolicy.DismissForever(first, now.AddMinutes(1));
+
+        Assert.True(dismissed.DismissedForever);
+        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, dismissed.Shows);
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(dismissed, now.AddYears(10)));
     }
 
     [Fact]
-    public void WarningPolicyResetsUnknownSchemaAndSurvivesClockRollback()
+    public void WarningPolicyFailsQuietOnPartialHistoryAndClockRollback()
     {
         var now = new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
-        var oldSchema = new PreviewAccessWarningHistoryEntry
-        {
-            SchemaVersion = PreviewAccessWarningPolicy.SchemaVersion + 1,
-            InitialShows = PreviewAccessWarningPolicy.InitialShowLimit,
-            LastShownUtc = now
-        };
-        Assert.True(PreviewAccessWarningPolicy.CanShow(oldSchema, now));
-        Assert.Equal(1, PreviewAccessWarningPolicy.RecordShown(oldSchema, now).InitialShows);
-
-        var current = PreviewAccessWarningPolicy.RecordShown(null, now);
-        Assert.True(PreviewAccessWarningPolicy.CanShow(current, now.AddHours(-1)));
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(
+            new PreviewAccessWarningLifetimeState(1, null, false),
+            now));
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(
+            new PreviewAccessWarningLifetimeState(1, now, false),
+            now.AddHours(-1)));
     }
 
     [Fact]
-    public void PersistedWarningKeysArePerAppAndWarningKind()
+    public void LegacyPerAppHistoryConsumesTheGlobalBudgetAcrossSchemas()
     {
-        var unavailable = new PreviewAccessWarningInfo(
-            "Discord",
-            "Discord",
-            42,
-            PreviewAccessWarningKind.AccessUnavailable);
-        var elevated = unavailable with
-        {
-            Kind = PreviewAccessWarningKind.ConfirmedElevationMismatch
-        };
-        var unstable = unavailable with { Key = "pid:42" };
+        var earlier = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
+        var later = earlier.AddDays(1);
+        var state = PreviewAccessWarningPolicy.NormalizeLifetimeState(
+            shows: 0,
+            lastShownUtc: null,
+            dismissedForever: false,
+            [
+                new PreviewAccessWarningHistoryEntry
+                {
+                    SchemaVersion = 1,
+                    InitialShows = 1,
+                    LastShownUtc = earlier
+                },
+                new PreviewAccessWarningHistoryEntry
+                {
+                    SchemaVersion = 999,
+                    InitialShows = 1,
+                    LastShownUtc = later
+                }
+            ]);
 
-        Assert.True(PreviewAccessWarningPolicy.TryBuildPersistedKey(unavailable, out var unavailableKey));
-        Assert.True(PreviewAccessWarningPolicy.TryBuildPersistedKey(elevated, out var elevatedKey));
-        Assert.NotEqual(unavailableKey, elevatedKey);
-        Assert.False(PreviewAccessWarningPolicy.TryBuildPersistedKey(unstable, out _));
+        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, state.Shows);
+        Assert.Equal(later, state.LastShownUtc);
+        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(state, later.AddYears(10)));
     }
 
     [Fact]
-    public void WarningHistoryRoundTripsThroughSettingsJson()
+    public void GlobalWarningLifetimeRoundTripsThroughSettingsJson()
     {
         var lastShown = new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
         var settings = new Settings
         {
-            PreviewAccessWarnings = new Dictionary<string, PreviewAccessWarningHistoryEntry>
-            {
-                ["V1|ACCESSUNAVAILABLE|DISCORD"] = new()
-                {
-                    InitialShows = 2,
-                    LastShownUtc = lastShown
-                }
-            }
+            PreviewAccessWarningLifetimeShows = 1,
+            PreviewAccessWarningLastShownUtc = lastShown,
+            PreviewAccessWarningDismissedForever = true
         };
 
         var roundTripped = JsonSerializer.Deserialize<Settings>(
             JsonSerializer.Serialize(settings));
 
-        var entry = Assert.Single(roundTripped!.PreviewAccessWarnings).Value;
-        Assert.Equal(PreviewAccessWarningPolicy.SchemaVersion, entry.SchemaVersion);
-        Assert.Equal(2, entry.InitialShows);
-        Assert.Equal(lastShown, entry.LastShownUtc);
+        Assert.Equal(1, roundTripped!.PreviewAccessWarningLifetimeShows);
+        Assert.Equal(lastShown, roundTripped.PreviewAccessWarningLastShownUtc);
+        Assert.True(roundTripped.PreviewAccessWarningDismissedForever);
     }
 
     [Fact]
@@ -212,9 +195,9 @@ public sealed class ElevationMismatchNotificationTests
         {
             PreviewAccessWarnings = new Dictionary<string, PreviewAccessWarningHistoryEntry>
             {
-                ["v1|accessunavailable|discord"] = earlier,
-                ["V1|ACCESSUNAVAILABLE|DISCORD"] = later,
-                ["V1|ACCESSUNAVAILABLE|BROKEN"] = null!
+                ["v2|accessunavailable|discord"] = earlier,
+                ["V2|ACCESSUNAVAILABLE|DISCORD"] = later,
+                ["V2|ACCESSUNAVAILABLE|BROKEN"] = null!
             }
         };
 
@@ -223,6 +206,8 @@ public sealed class ElevationMismatchNotificationTests
         var entry = Assert.Single(normalized.PreviewAccessWarnings).Value;
         Assert.Equal(2, entry.InitialShows);
         Assert.Same(later, entry);
+        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, normalized.PreviewAccessWarningLifetimeShows);
+        Assert.Equal(later.LastShownUtc.ToUniversalTime(), normalized.PreviewAccessWarningLastShownUtc);
     }
 
     [Fact]
@@ -236,9 +221,17 @@ public sealed class ElevationMismatchNotificationTests
             42,
             PreviewAccessWarningKind.AccessUnavailable);
 
-        Assert.Contains("Glimpse couldn't access this file picker.", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.Ordinal);
-        Assert.Contains("If the app is running as administrator", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.Ordinal);
-        Assert.DoesNotContain("Discord is running as administrator", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.Ordinal);
+        Assert.Contains("Glimpse can't access this file picker.", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.Ordinal);
+        Assert.Contains("If Discord is running as administrator", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.Ordinal);
+        Assert.Contains("restart it without administrator access", PreviewAccessWarningWindow.BuildMessage(warning), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(
+            "Close this notice to stop future reminders.",
+            PreviewAccessWarningWindow.BuildReminderMessage(finalReminder: false));
+        Assert.Equal(
+            "Final heads-up. Glimpse won't show this notice again.",
+            PreviewAccessWarningWindow.BuildReminderMessage(finalReminder: true));
+        Assert.DoesNotContain((char)0x2014, PreviewAccessWarningWindow.BuildReminderMessage(finalReminder: true));
+        Assert.True(PreviewAccessWarningWindow.BuildTrayMessage(warning, finalReminder: false).Length <= 255);
         Assert.Contains("WS_EX_NOACTIVATE", source, StringComparison.Ordinal);
         Assert.Contains("ApplyNoActivateStyle(hwnd)", source, StringComparison.Ordinal);
         Assert.Contains("at={Left:0},{Top:0}", source, StringComparison.Ordinal);
@@ -246,10 +239,12 @@ public sealed class ElevationMismatchNotificationTests
         Assert.Contains("ShowActivated=\"False\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Topmost=\"True\"", xaml, StringComparison.Ordinal);
         Assert.Contains("AutomationProperties.Name=\"Dismiss notification\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"FooterText\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("TextWrapping=\"Wrap\"", xaml, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ConfirmedElevationCopyRemainsDefinitive()
+    public void ConfirmedElevationCopyUsesFriendlyPermissionLanguage()
     {
         var warning = new PreviewAccessWarningInfo(
             "adminapp",
@@ -258,8 +253,31 @@ public sealed class ElevationMismatchNotificationTests
             PreviewAccessWarningKind.ConfirmedElevationMismatch);
 
         var message = PreviewAccessWarningWindow.BuildMessage(warning);
-        Assert.Contains("AdminApp is running as administrator", message, StringComparison.Ordinal);
-        Assert.Contains("Run both at the same permission level", message, StringComparison.Ordinal);
+        Assert.Equal(
+            "Glimpse and AdminApp are running at different permission levels. Restart AdminApp without administrator access to use previews.",
+            message);
+        Assert.DoesNotContain("elevation", message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("privilege", message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void WarningCopyBoundsLongAppNamesAndPreservesTheTrayReassurance()
+    {
+        var warning = new PreviewAccessWarningInfo(
+            "longapp",
+            new string('A', 300),
+            42,
+            PreviewAccessWarningKind.ConfirmedElevationMismatch);
+
+        var message = PreviewAccessWarningWindow.BuildMessage(warning);
+        var trayMessage = PreviewAccessWarningWindow.BuildTrayMessage(warning, finalReminder: true);
+
+        Assert.Contains("... are running at different permission levels.", message, StringComparison.Ordinal);
+        Assert.True(trayMessage.Length <= 255);
+        Assert.EndsWith(
+            PreviewAccessWarningWindow.BuildReminderMessage(finalReminder: true),
+            trayMessage,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -294,12 +312,12 @@ public sealed class ElevationMismatchNotificationTests
     }
 
     [Fact]
-    public void ForegroundObservationOnlyRefreshesVerifiedFileDialogs()
+    public void ForegroundObservationProbesOnlyVerifiedFileDialogsWithinTheGlobalBudget()
     {
         var monitor = TestSource.Read(@"SpacePreview\Services\CommonFileDialogSelectionMonitor.cs");
         var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
 
-        Assert.DoesNotContain("DialogObserved", monitor, StringComparison.Ordinal);
+        Assert.Contains("DialogObserved?.Invoke(root)", monitor, StringComparison.Ordinal);
         Assert.Contains("HasDialogWindowClass(root)", monitor, StringComparison.Ordinal);
         Assert.Contains("OnForegroundPoll", monitor, StringComparison.Ordinal);
         Assert.Contains("_foregroundPoll.Start()", monitor, StringComparison.Ordinal);
@@ -307,16 +325,32 @@ public sealed class ElevationMismatchNotificationTests
         Assert.Contains("_verifiedDialog == root", monitor, StringComparison.Ordinal);
         Assert.Contains("IsCommonFileDialogRoot(root)", monitor, StringComparison.Ordinal);
         Assert.Contains("RequestRefresh(root, settleMilliseconds: 0)", monitor, StringComparison.Ordinal);
+        Assert.Contains("DialogObserved += OnCommonFileDialogObserved", controller, StringComparison.Ordinal);
+        Assert.Contains("DialogObserved -= OnCommonFileDialogObserved", controller, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningPolicy.CanShowLifetime", controller, StringComparison.Ordinal);
+        Assert.Contains("_observedAccessDialogs.Add", controller, StringComparison.Ordinal);
         Assert.Contains("CompletePreviewAccessCheck", controller, StringComparison.Ordinal);
         Assert.Contains("PreviewAccessWarningDetected?.Invoke(warning)", controller, StringComparison.Ordinal);
         Assert.DoesNotContain("PollPreviewAccessAttempt", controller, StringComparison.Ordinal);
         Assert.DoesNotContain("_previewAccessAttemptTimer", controller, StringComparison.Ordinal);
-        Assert.DoesNotContain("DialogObserved", controller, StringComparison.Ordinal);
         Assert.Contains("QueueForegroundElevationMismatchCheck();", controller, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void ElevationCheckDoesNotRequireCrossIntegrityChildEnumeration()
+    public void ManualWindowDismissalPermanentlyRetiresFutureWarnings()
+    {
+        var window = TestSource.Read(@"SpacePreview\Services\PreviewAccessWarningWindow.xaml.cs");
+        var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
+
+        Assert.Contains("PreviewAccessWarningDismissalReason.Manual", window, StringComparison.Ordinal);
+        Assert.Contains("Dismissed?.Invoke(reason)", window, StringComparison.Ordinal);
+        Assert.Contains("reason == PreviewAccessWarningDismissalReason.Manual", tray, StringComparison.Ordinal);
+        Assert.Contains("PermanentlyDismissPreviewAccessWarnings", tray, StringComparison.Ordinal);
+        Assert.Contains("PreviewAccessWarningPolicy.DismissForever", tray, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ElevationCheckSurvivesForegroundChangesAndValidatesCapturedDialogIdentity()
     {
         var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
         var start = controller.IndexOf("private void StartElevationMismatchCheck", StringComparison.Ordinal);
@@ -325,7 +359,10 @@ public sealed class ElevationMismatchNotificationTests
 
         Assert.Contains("HasDialogWindowClass(dialogRoot)", check, StringComparison.Ordinal);
         Assert.DoesNotContain("IsCommonFileDialogRoot(dialogRoot)", check, StringComparison.Ordinal);
-        Assert.Contains("foregroundRoot != dialogRoot", check, StringComparison.Ordinal);
+        Assert.DoesNotContain("foregroundRoot", check, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.IsWindow(dialogRoot)", check, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.GetWindowProcessId(dialogRoot) != processId", check, StringComparison.Ordinal);
+        Assert.Contains("dialog closed or handle reused", check, StringComparison.Ordinal);
     }
 
     [Fact]

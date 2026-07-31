@@ -12,12 +12,11 @@ internal enum SignPlacementKind
 
 /// <summary>
 /// One placed element in sign mode. Coordinates are normalized 0..1 in
-/// DISPLAYED page space with a top-left origin: exactly what the sign
-/// surface shows, deliberately ignorant of PDF user space. The writer owns
-/// the translation to page boxes, bottom-left origin, and rotation.
-/// Image placements carry their pixels from the moment of placement, so
-/// replacing or removing the stored signature can never rewrite ink the
-/// user already put down.
+/// DISPLAYED page space with a top-left origin: what the sign surface shows,
+/// deliberately ignorant of PDF user space. The writer owns the translation
+/// to page boxes, bottom-left origin, and rotation. Image placements carry
+/// their pixels from the moment of placement, so replacing the stored
+/// signature can never rewrite ink the user already put down.
 /// </summary>
 internal sealed record SignPlacement(
     SignPlacementKind Kind,

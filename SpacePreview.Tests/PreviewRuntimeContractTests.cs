@@ -53,12 +53,37 @@ public sealed class PreviewRuntimeContractTests
         Assert.Contains("audit:", app, StringComparison.Ordinal);
         Assert.Contains("buttonaudit", app, StringComparison.Ordinal);
         Assert.Contains("pinnedoff", app, StringComparison.Ordinal);
+        Assert.Contains("settingsshot:", app, StringComparison.Ordinal);
+        Assert.Contains("warningshot:", app, StringComparison.Ordinal);
+        Assert.Contains("warningfinalshot:", app, StringComparison.Ordinal);
         Assert.Contains("overlayrace", app, StringComparison.Ordinal);
         Assert.Contains("string.Equals(extra, \"welcome\"", app, StringComparison.Ordinal);
         Assert.Contains("show:", app, StringComparison.Ordinal);
         Assert.Contains("ProbeAuditState", window, StringComparison.Ordinal);
         Assert.Contains("ProbeButtonAudit", window, StringComparison.Ordinal);
         Assert.Contains("ProbeLoadingOverlayRaceAsync", window, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PreviewRequestsAreNotLoggedOrTrackedAsPresentedUntilNativeChecksPass()
+    {
+        var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
+        var window = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var native = TestSource.Read(@"SpacePreview\Native\NativeMethods.cs");
+
+        Assert.Contains("preview requested", controller, StringComparison.Ordinal);
+        Assert.DoesNotContain("show preview {selection.Path}", controller, StringComparison.Ordinal);
+        Assert.Contains("var presented = _previewWindow.ShowPreview", controller, StringComparison.Ordinal);
+        Assert.Contains("if (!presented)", controller, StringComparison.Ordinal);
+        Assert.Contains("PresentationFailed += OnPreviewPresentationFailed", controller, StringComparison.Ordinal);
+        Assert.Contains("var presented = _previewWindow.ShowWelcome()", controller, StringComparison.Ordinal);
+        Assert.Contains("welcome presentation failed", controller, StringComparison.Ordinal);
+        Assert.Contains("preview presentation confirmed", window, StringComparison.Ordinal);
+        Assert.Contains("owner-remained-above-preview", window, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.IsWindowVisible(hwnd)", window, StringComparison.Ordinal);
+        Assert.Contains("Hide();", window, StringComparison.Ordinal);
+        Assert.Contains("if (!ShowPreview(finalPath, Hwnd))", window, StringComparison.Ordinal);
+        Assert.Contains("GW_HWNDPREV", native, StringComparison.Ordinal);
     }
 
     [Fact]
