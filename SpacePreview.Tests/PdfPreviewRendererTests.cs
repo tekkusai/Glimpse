@@ -367,7 +367,24 @@ public sealed class PdfPreviewRendererTests
         });
 
         Assert.NotNull(process);
-        Assert.True(process!.WaitForExit(TimeSpan.FromSeconds(60)), "the proof helper never exited");
+        if (!process!.WaitForExit(TimeSpan.FromSeconds(60)))
+        {
+            // Disposing a Process does not end it. Failing the assertion here
+            // without this would leave a Glimpse.exe holding the fixture files
+            // for the rest of the run, exactly as the app kills a proof that
+            // overruns rather than walking away from it.
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch
+            {
+                // Already gone.
+            }
+
+            throw new Xunit.Sdk.XunitException("the proof helper never exited");
+        }
+
         return process.ExitCode switch
         {
             0 => ProofOutcome.Proved,
