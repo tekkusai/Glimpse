@@ -187,8 +187,8 @@ public sealed class PdfPreviewRendererTests
         WriteBlankPdf(drawn, 1, pageWidth: 400, pageHeight: 400, inked: true);
         WriteBlankPdf(blank, 1, pageWidth: 400, pageHeight: 400);
 
-        Assert.True(PdfPreviewRenderer.RendersLike(drawn, drawn, CancellationToken.None));
-        Assert.False(PdfPreviewRenderer.RendersLike(drawn, blank, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Proved, Prove(drawn, drawn));
+        Assert.Equal(ProofOutcome.Rejected, Prove(drawn, blank));
     }
 
     [Fact]
@@ -205,7 +205,7 @@ public sealed class PdfPreviewRendererTests
             contentForPage: page => page == 1 ? "0 0 0 rg 180 180 40 40 re f\n" : string.Empty);
         WriteBlankPdf(changed, 2, pageWidth: 400, pageHeight: 400);
 
-        Assert.False(PdfPreviewRenderer.RendersLike(original, changed, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Rejected, Prove(original, changed));
     }
 
     [Fact]
@@ -227,7 +227,7 @@ public sealed class PdfPreviewRendererTests
             pageHeight: 400,
             contentForPage: _ => "0 0.5 0.5 rg 40 40 320 320 re f\n");
 
-        Assert.False(PdfPreviewRenderer.RendersLike(red, teal, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Rejected, Prove(red, teal));
     }
 
     [Fact]
@@ -244,7 +244,7 @@ public sealed class PdfPreviewRendererTests
             contentForPage: _ => "0 0 0 rg 197 197 6 6 re f\n");
         WriteBlankPdf(blank, 1, pageWidth: 400, pageHeight: 400);
 
-        Assert.False(PdfPreviewRenderer.RendersLike(marked, blank, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Rejected, Prove(marked, blank));
     }
 
     [Fact]
@@ -261,7 +261,7 @@ public sealed class PdfPreviewRendererTests
             contentForPage: _ => "Q 0 0 0 rg 11000 2000 400 400 re f\n");
 
         Assert.True(PdfFillSignWriter.TryWriteScaledCopy(source, scaled, 1400));
-        Assert.False(PdfPreviewRenderer.RendersLike(source, scaled, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Rejected, Prove(source, scaled));
     }
 
     // A page-level scale cannot move pattern space or annotation rectangles,
@@ -302,7 +302,7 @@ public sealed class PdfPreviewRendererTests
             extraPagesEntries: "/MediaBox [0 0 2000 1000] /CropBox [100 100 1900 900]");
 
         Assert.True(PdfFillSignWriter.TryWriteScaledCopy(source, scaled, 1400));
-        Assert.True(PdfPreviewRenderer.RendersLike(source, scaled, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Proved, Prove(source, scaled));
 
         var written = File.ReadAllText(scaled, Encoding.Latin1);
         var updatedPage = written[written.LastIndexOf("3 0 obj", StringComparison.Ordinal)..];
@@ -323,7 +323,7 @@ public sealed class PdfPreviewRendererTests
         WriteIndirectContentsPdf(source);
 
         Assert.True(PdfFillSignWriter.TryWriteScaledCopy(source, scaled, 1400));
-        Assert.True(PdfPreviewRenderer.RendersLike(source, scaled, CancellationToken.None));
+        Assert.Equal(ProofOutcome.Proved, Prove(source, scaled));
 
         var written = File.ReadAllText(scaled, Encoding.Latin1);
         var updatedPage = written[written.LastIndexOf("3 0 obj", StringComparison.Ordinal)..];
@@ -341,6 +341,40 @@ public sealed class PdfPreviewRendererTests
 
         Assert.False(PdfFillSignWriter.TryWriteScaledCopy(source, scaled, 1800));
         Assert.False(File.Exists(scaled));
+    }
+
+    private enum ProofOutcome
+    {
+        Proved,
+        Rejected
+    }
+
+    /// <summary>
+    /// Runs the proof exactly as the app does, in a child process. Calling
+    /// RendersLike in-process would let a pdfium fault in native teardown kill
+    /// the whole test run, which is both unlike production and a way to lose
+    /// every other result in the suite. A crash here fails this test and only
+    /// this test. Retrying instead would hide the very fault worth seeing.
+    /// </summary>
+    private static ProofOutcome Prove(string left, string right)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = Path.Combine(AppContext.BaseDirectory, "Glimpse.exe"),
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList = { "--prove-pdf-scale", left, right }
+        });
+
+        Assert.NotNull(process);
+        Assert.True(process!.WaitForExit(TimeSpan.FromSeconds(60)), "the proof helper never exited");
+        return process.ExitCode switch
+        {
+            0 => ProofOutcome.Proved,
+            2 => ProofOutcome.Rejected,
+            var other => throw new Xunit.Sdk.XunitException(
+                $"the proof helper reached no verdict (exit {other}); pdfium probably died in the child")
+        };
     }
 
     /// <summary>An ordinary page followed by one the thumbnail budget refuses.</summary>
