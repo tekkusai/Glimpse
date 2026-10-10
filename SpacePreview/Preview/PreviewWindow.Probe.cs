@@ -74,7 +74,9 @@ public partial class PreviewWindow
 
                 try
                 {
-                    var json = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}");
+                    // A view disposed mid-capture never answers; the shot goes on without it.
+                    var json = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}")
+                        .WaitAsync(TimeSpan.FromSeconds(2));
                     using var document = JsonDocument.Parse(json);
                     var bytes = Convert.FromBase64String(document.RootElement.GetProperty("data").GetString() ?? string.Empty);
                     var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
