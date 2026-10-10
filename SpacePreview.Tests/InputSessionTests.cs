@@ -1,5 +1,7 @@
+using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using System.Windows.Threading;
+using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Services;
 
@@ -137,38 +139,46 @@ public sealed class InputSessionTests
     }
 
     [Fact]
-    public void AGlanceBelongsToItsOwnerAndTheWindowsItOpens()
+    public void AGlanceBelongsToItsOwnerGlimpseAndTheBrowserItOpened()
     {
         Sta.Run(() =>
         {
             var controller = new SpacePreviewController(Dispatcher.CurrentDispatcher);
             var window = new PreviewWindow();
-            using var previewHwnd = HiddenWindow(IntPtr.Zero);
-            using var owner = HiddenWindow(IntPtr.Zero);
-            using var stranger = HiddenWindow(IntPtr.Zero);
-            using var menu = HiddenWindow(previewHwnd.Handle);
+            using var previewHwnd = HiddenWindow();
+            using var unownedDialog = HiddenWindow();
+
+            // A window of another process: the desktop window itself.
+            var foreign = GetDesktopWindow();
+            var foreignProcess = NativeMethods.GetWindowProcessId(foreign);
             try
             {
                 Fields.Set(window, "Hwnd", previewHwnd.Handle);
                 Fields.Set(window, "CurrentPath", Path.Combine(TestDataRoot.Path, "glance.png"));
                 Fields.Set(controller, "_previewWindow", window);
                 Fields.Set(controller, "_previewVisible", true);
-                Fields.Set(controller, "_previewOwnerRootHwnd", owner.Handle);
 
                 Assert.True(BelongsToGlance(controller, previewHwnd.Handle));
-                Assert.True(BelongsToGlance(controller, owner.Handle));
-                Assert.True(BelongsToGlance(controller, menu.Handle));
-                Assert.False(BelongsToGlance(controller, stranger.Handle));
+                Assert.False(BelongsToGlance(controller, foreign));
+
+                // Sign mode's stamp import shows its file dialog without an
+                // owner. A Glimpse window never ends the glance.
+                Assert.True(BelongsToGlance(controller, unownedDialog.Handle));
+
+                // The window the glance came from.
+                Fields.Set(controller, "_previewOwnerRootHwnd", foreign);
+                Assert.True(BelongsToGlance(controller, foreign));
+                Fields.Set(controller, "_previewOwnerRootHwnd", IntPtr.Zero);
 
                 // A print dialog or file chooser from the preview's browser
-                // processes is the glance's too.
-                Fields.Get<HashSet<uint>>(window, "_webViewProcessIds").Add((uint)Environment.ProcessId);
-                Assert.True(BelongsToGlance(controller, stranger.Handle));
+                // processes.
+                Fields.Get<HashSet<uint>>(window, "_webViewProcessIds").Add(foreignProcess);
+                Assert.True(BelongsToGlance(controller, foreign));
                 Fields.Get<HashSet<uint>>(window, "_webViewProcessIds").Clear();
 
                 // The welcome has no file and no owner to lose.
                 Fields.Set(window, "CurrentPath", null);
-                Assert.True(BelongsToGlance(controller, stranger.Handle));
+                Assert.True(BelongsToGlance(controller, foreign));
             }
             finally
             {
@@ -182,10 +192,12 @@ public sealed class InputSessionTests
     private static bool BelongsToGlance(SpacePreviewController controller, IntPtr root) =>
         (bool)Fields.Call(controller, "BelongsToGlance", root)!;
 
-    /// <summary>An invisible top-level window, owned by <paramref name="owner"/> when given.</summary>
-    private static HwndSource HiddenWindow(IntPtr owner) => new(new HwndSourceParameters("Glimpse input test")
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDesktopWindow();
+
+    /// <summary>An invisible, unowned top-level window in this process.</summary>
+    private static HwndSource HiddenWindow() => new(new HwndSourceParameters("Glimpse input test")
     {
-        ParentWindow = owner,
         WindowStyle = unchecked((int)0x80000000), // WS_POPUP
         Width = 1,
         Height = 1

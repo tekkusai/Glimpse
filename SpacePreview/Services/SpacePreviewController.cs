@@ -239,10 +239,12 @@ internal sealed class SpacePreviewController : IDisposable
 
     /// <summary>
     /// True when nothing needs ending: no glance (the welcome counts as
-    /// none), or the foreground is the preview, its owner, a pinned preview
-    /// or a window the preview opened (its menus and dialogs, and the
-    /// browser's print dialog or file chooser). The share sheet is covered
-    /// by the outside-dismiss grace the window sets when it opens it.
+    /// none), or the foreground is any Glimpse window, the glance's owner,
+    /// or a window the preview opened in another process (the browser's
+    /// print dialog or file chooser). Glimpse's own windows count whoever
+    /// owns them: a file dialog shown without an owner still belongs. The
+    /// share sheet is covered by the outside-dismiss grace the window sets
+    /// when it opens it.
     /// </summary>
     private bool BelongsToGlance(IntPtr root)
     {
@@ -251,7 +253,8 @@ internal sealed class SpacePreviewController : IDisposable
             return true;
         }
 
-        return TargetOf(root, FindPinnedWindow(root) is not null) != KeyTarget.Other
+        return NativeMethods.GetWindowProcessId(root) == _processId
+            || TargetOf(root, pinnedForeground: false) != KeyTarget.Other
             || window.OwnsForegroundRoot(root)
             || window.IsWebViewWindow(root);
     }
