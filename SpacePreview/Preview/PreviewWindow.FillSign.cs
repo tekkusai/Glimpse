@@ -30,8 +30,7 @@ namespace SpacePreview.Preview;
 public partial class PreviewWindow
 {
     // ---------------------------------------------------------------------
-    // Fill and sign. The pen pill appears only after the user engages a
-    // native PDF; sign mode swaps in our own page surface (the embedded
+    // Fill and sign. Sign mode swaps in our own page surface (the embedded
     // viewer is a closed world), and saving never touches the original
     // except by the user's explicit second choice.
     // ---------------------------------------------------------------------
@@ -42,9 +41,16 @@ public partial class PreviewWindow
 
     private void UpdateFillSignPill()
     {
-        if (_fillSignPill is null)
+        // Built once per palette: a theme change between files repaints it.
+        if (!ReferenceEquals(_fillSignPill?.Tag, Theme.Current))
         {
-            _fillSignPill = BuildFillSignPill();
+            ContentToolsSlot.Children.Remove(_fillSignPill);
+            _fillSignPill = HousePill.Build("Sign", () => _ = EnterFillSignModeAsync());
+            _fillSignPill.Tag = Theme.Current;
+            _fillSignPill.Margin = new Thickness(0);
+            _fillSignPill.HorizontalAlignment = HorizontalAlignment.Right;
+            _fillSignPill.ToolTip = "Fill and sign";
+            AutomationProperties.SetName(_fillSignPill, "Fill and sign");
             ContentToolsSlot.Children.Add(_fillSignPill);
         }
 
@@ -58,63 +64,6 @@ public partial class PreviewWindow
         UpdateContentToolsSlotVisibility();
     }
 
-    private Border BuildFillSignPill()
-    {
-        var palette = Theme.Current;
-        var pill = new Border
-        {
-            Height = 27,
-            Padding = new Thickness(11, 0, 12, 0),
-            CornerRadius = Metrics.PillCorner,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Center,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            ToolTip = "Fill and sign",
-            Child = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Children =
-                {
-                    new TextBlock
-                    {
-                        Text = "",
-                        FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                        FontSize = 11,
-                        Margin = new Thickness(0, 0, 6, 0),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Foreground = Theme.Brush(palette.TextSecondary)
-                    },
-                    new TextBlock
-                    {
-                        Text = "Sign",
-                        FontSize = Metrics.FontLabel,
-                        FontWeight = FontWeights.SemiBold,
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Foreground = Theme.Brush(palette.TextPrimary)
-                    }
-                }
-            }
-        };
-        pill.MouseEnter += (_, _) => pill.Background = Theme.Brush(palette.HoverBg);
-        pill.MouseLeave += (_, _) => pill.Background = Theme.Brush(palette.RaisedBg);
-        pill.MouseLeftButtonDown += (_, e) =>
-        {
-            pill.Background = Theme.Brush(palette.PressedBg);
-            e.Handled = true;
-        };
-        pill.MouseLeftButtonUp += async (_, e) =>
-        {
-            pill.Background = Theme.Brush(palette.RaisedBg);
-            e.Handled = true;
-            await EnterFillSignModeAsync();
-        };
-        return pill;
-    }
-
     private async Task EnterFillSignModeAsync()
     {
         if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))
@@ -123,8 +72,8 @@ public partial class PreviewWindow
         }
 
         var version = _loadVersion;
+        var viewerPages = _activePdfRail?.Document?.TotalPages;
         var pageIndex = Math.Max(0, (_activePdfRail?.CurrentPage ?? 1) - 1);
-        var totalPages = _activePdfRail?.Document?.TotalPages ?? pageIndex + 1;
         var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
         if (page is null)
         {
@@ -142,9 +91,9 @@ public partial class PreviewWindow
             return;
         }
 
-        var surface = new FillSignSurface(path, pageIndex, Math.Max(totalPages, pageIndex + 1), page);
+        var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
         surface.ExitRequested += ExitFillSignMode;
-        surface.SaveRequested += OnFillSignSaveRequested;
+        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, placements, overwrite);
         surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, target);
 
         _fillSignParkedContent = current;
@@ -152,6 +101,28 @@ public partial class PreviewWindow
         PreviewContent.Content = surface;
         UpdateFillSignPill();
         DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}");
+
+        // The writer reads the file exactly as a save would. A PDF it cannot
+        // update says why before any work goes onto it, and the page count
+        // is the writer's own, not whatever the rail had loaded so far.
+        var check = await Task.Run(() => PdfFillSignWriter.Preflight(path));
+        if (!ReferenceEquals(_fillSignSurface, surface))
+        {
+            return;
+        }
+
+        if (check.Problem is null && viewerPages is { } shown && shown != check.PageCount)
+        {
+            // Two readers disagree on the pages: ink could land on the wrong one.
+            check = new PdfSignCheck(check.PageCount, PdfFillSignWriter.UnsupportedStructure);
+        }
+
+        if (check.Problem is not null)
+        {
+            DiagnosticLog.Write($"fill-sign unavailable: {check.Problem}");
+        }
+
+        surface.ApplyCheck(check);
     }
 
     private async Task ShowFillSignPageAsync(FillSignSurface surface, int pageIndex)
@@ -169,7 +140,6 @@ public partial class PreviewWindow
         }
 
         surface.ShowPage(pageIndex, page);
-        DiagnosticLog.Write($"fill-sign page -> {pageIndex + 1}");
     }
 
     private void ExitFillSignMode()
@@ -180,14 +150,23 @@ public partial class PreviewWindow
         }
 
         _fillSignSurface = null;
-        if (_fillSignParkedContent is { } parked)
+        if (_fillSignParkedContent is not { } parked)
         {
-            PreviewContent.Content = parked;
-            parked.Visibility = Visibility.Visible;
-            parked.UpdateLayout();
-            _fillSignParkedContent = null;
+            // A failed replace already released the viewer to free the file:
+            // the document comes back from disk instead of a dead surface.
+            DiagnosticLog.Write("fill-sign exited, reloading the document");
+            if (_fillSignPath is { } path && !ShowPreview(path, Hwnd))
+            {
+                PresentationFailed?.Invoke(this, LastPresentationFailureReason);
+            }
+
+            return;
         }
 
+        PreviewContent.Content = parked;
+        parked.Visibility = Visibility.Visible;
+        parked.UpdateLayout();
+        _fillSignParkedContent = null;
         UpdateFillSignPill();
         DiagnosticLog.Write("fill-sign exited");
         var deferredFailure = _deferredWebFailure;
@@ -195,12 +174,12 @@ public partial class PreviewWindow
         deferredFailure?.Invoke();
     }
 
-    private async void OnFillSignSaveRequested(SignSession session, bool overwrite)
+    private async Task SaveFillSignAsync(FillSignSurface surface, IReadOnlyList<SignPlacement> placements, bool overwrite)
     {
         if (_fillSignPath is not { } path
-            || _fillSignSurface is not { } surface
+            || !ReferenceEquals(_fillSignSurface, surface)
             || !IsCurrentContentPath(path)
-            || !session.HasWork)
+            || placements.Count == 0)
         {
             return;
         }
@@ -212,56 +191,128 @@ public partial class PreviewWindow
             && IsCurrentContentPath(path);
 
         surface.SetSaving(true);
+        var finalPath = overwrite ? path : NextSignedCopyPath(path);
         try
         {
-            var placements = BuildWriterPlacements(session);
-            string finalPath;
             if (overwrite)
             {
-                var signedPath = await Task.Run(() => PdfFillSignWriter.SignPdf(path, placements));
-
-                // The embedded viewer holds the original open; release it
-                // and give Chromium a beat to let go before the swap. The
-                // user's placements survive any failure - the surface stays.
-                if (StillOwnsSurface())
+                var temp = SigningTempPath(path);
+                try
                 {
-                    _fillSignParkedContent = null;
-                    _currentDisposable?.Dispose();
-                    _currentDisposable = null;
-                }
+                    await Task.Run(() => WriteHiddenSignedCopy(path, temp, placements));
 
-                await ReplaceWithRetriesAsync(signedPath, path);
-                finalPath = path;
+                    // The embedded viewer holds the original open; release
+                    // it and give Chromium a beat to let go before the swap.
+                    // The placements survive any failure: the surface stays.
+                    if (StillOwnsSurface())
+                    {
+                        _fillSignParkedContent = null;
+                        _currentDisposable?.Dispose();
+                        _currentDisposable = null;
+                    }
+
+                    await ReplaceWithRetriesAsync(temp, path);
+                }
+                catch
+                {
+                    CleanUpSigningTemp(temp, path);
+                    throw;
+                }
             }
             else
             {
-                finalPath = NextSignedCopyPath(path);
                 await Task.Run(() => PdfFillSignWriter.WriteSignedCopy(path, finalPath, placements));
-            }
-
-            DiagnosticLog.Write($"fill-sign saved {(overwrite ? "in place" : "as copy")} placements={placements.Count}");
-            if (!StillOwnsSurface())
-            {
-                // Saving is file work and still completes; navigation is UI
-                // work and belongs only to the preview that started it.
-                DiagnosticLog.Write("fill-sign completion left current preview unchanged");
-                return;
-            }
-
-            _fillSignSurface = null;
-            _fillSignParkedContent = null;
-            UpdateFillSignPill();
-
-            // The saved file is the honest outcome: show it.
-            if (!ShowPreview(finalPath, Hwnd))
-            {
-                PresentationFailed?.Invoke(this, LastPresentationFailureReason);
             }
         }
         catch (Exception ex)
         {
             DiagnosticLog.Write($"fill-sign save failed {path}: {ex.GetType().Name}: {ex.Message}");
-            surface.SetSaving(false);
+            if (StillOwnsSurface())
+            {
+                surface.ShowSaveFailure(SaveFailureReason(ex));
+            }
+
+            return;
+        }
+
+        DiagnosticLog.Write($"fill-sign saved {(overwrite ? "in place" : "as copy")} placements={placements.Count}");
+        if (!StillOwnsSurface())
+        {
+            // Saving is file work and still completes; navigation is UI
+            // work and belongs only to the preview that started it.
+            DiagnosticLog.Write("fill-sign completion left current preview unchanged");
+            return;
+        }
+
+        _fillSignSurface = null;
+        _fillSignParkedContent = null;
+        UpdateFillSignPill();
+
+        // The saved file is the honest outcome: show it.
+        if (!ShowPreview(finalPath, Hwnd))
+        {
+            PresentationFailed?.Invoke(this, LastPresentationFailureReason);
+        }
+    }
+
+    /// <summary>What a failed save says in place of the choices it brings back.</summary>
+    internal static string SaveFailureReason(Exception ex) => ex switch
+    {
+        // The writer's own refusals are already user-facing sentences.
+        InvalidOperationException => ex.Message,
+        UnauthorizedAccessException => "The file or its folder is read-only. Save a signed copy somewhere else.",
+        IOException { HResult: unchecked((int)0x80070020) or unchecked((int)0x80070021) } =>
+            "The file is open in another app. Close it there and try again.",
+        IOException { HResult: unchecked((int)0x80070070) } => "The disk is full. Nothing was saved.",
+        _ => "The signed file couldn't be saved. Nothing was changed."
+    };
+
+    /// <summary>
+    /// One predictable, hidden file beside the original: a crash leaves at
+    /// most one behind, and the next save reuses it.
+    /// </summary>
+    internal static string SigningTempPath(string path) =>
+        Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, "." + Path.GetFileName(path) + ".signing");
+
+    private static void WriteHiddenSignedCopy(string path, string temp, IReadOnlyList<SignPlacement> placements)
+    {
+        if (File.Exists(temp))
+        {
+            File.SetAttributes(temp, FileAttributes.Normal);
+            File.Delete(temp);
+        }
+
+        PdfFillSignWriter.WriteSignedCopy(path, temp, placements);
+        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
+    }
+
+    /// <summary>
+    /// After a failed replace the temporary file normally goes. ReplaceFile
+    /// can fail after removing the original, though, and then the temporary
+    /// file is the only copy of the document: it takes the original's name.
+    /// </summary>
+    internal static void CleanUpSigningTemp(string temp, string original)
+    {
+        try
+        {
+            if (!File.Exists(temp))
+            {
+                return;
+            }
+
+            File.SetAttributes(temp, File.GetAttributes(temp) & ~FileAttributes.Hidden);
+            if (File.Exists(original))
+            {
+                File.Delete(temp);
+            }
+            else
+            {
+                File.Move(temp, original);
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"fill-sign temp cleanup failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
@@ -279,28 +330,6 @@ public partial class PreviewWindow
                 await Task.Delay(250);
             }
         }
-    }
-
-    private static List<PdfFillSignPlacement> BuildWriterPlacements(SignSession session)
-    {
-        var placements = new List<PdfFillSignPlacement>(session.Placements.Count);
-        foreach (var item in session.Placements)
-        {
-            var bounds = new PdfNormalizedRect(item.X, item.Y, item.Width, item.Height);
-            // Placements carry their pixels from placement time; nothing at
-            // save time reaches back into the store.
-            placements.Add(item.Kind switch
-            {
-                SignPlacementKind.Date => new PdfFillSignPlacement(
-                    item.PageIndex + 1, PdfFillSignPlacementKind.Date, bounds, Text: item.Text, FontSize: 0),
-                SignPlacementKind.Stamp => new PdfFillSignPlacement(
-                    item.PageIndex + 1, PdfFillSignPlacementKind.Stamp, bounds, PngBytes: item.ImagePng),
-                _ => new PdfFillSignPlacement(
-                    item.PageIndex + 1, PdfFillSignPlacementKind.Signature, bounds, PngBytes: item.ImagePng)
-            });
-        }
-
-        return placements;
     }
 
     private static string NextSignedCopyPath(string path)

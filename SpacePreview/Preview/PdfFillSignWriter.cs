@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
@@ -9,36 +10,11 @@ using SpacePreview.Services;
 
 namespace SpacePreview.Preview;
 
-internal enum PdfFillSignPlacementKind
-{
-    Text,
-    Date,
-    Signature,
-    Stamp
-}
-
-internal readonly record struct PdfNormalizedRect(double Left, double Top, double Width, double Height)
-{
-    public bool IsValid =>
-        double.IsFinite(Left)
-        && double.IsFinite(Top)
-        && double.IsFinite(Width)
-        && double.IsFinite(Height)
-        && Left >= 0
-        && Top >= 0
-        && Width > 0
-        && Height > 0
-        && Left + Width <= 1.0001
-        && Top + Height <= 1.0001;
-}
-
-internal sealed record PdfFillSignPlacement(
-    int PageNumber,
-    PdfFillSignPlacementKind Kind,
-    PdfNormalizedRect Bounds,
-    string? Text = null,
-    byte[]? PngBytes = null,
-    double FontSize = 12);
+/// <summary>
+/// What sign mode learns before the user places anything: the writer's own
+/// page count, or the sentence that explains why this file cannot be saved.
+/// </summary>
+internal readonly record struct PdfSignCheck(int PageCount, string? Problem);
 
 internal readonly record struct PdfPageRect(double Left, double Bottom, double Right, double Top)
 {
@@ -78,21 +54,47 @@ internal static class PdfFillSignWriter
         RegexOptions.Compiled | RegexOptions.CultureInvariant,
         RegexTimeout);
 
-    public static string SignPdf(string sourcePath, IReadOnlyList<PdfFillSignPlacement> placements)
+    // Every reason a PDF cannot be signed is said in one of these sentences.
+    // They reach the user unchanged, so they name no app and no parser.
+    internal const string UnsupportedStructure = "This PDF is built in a way that can't be signed here yet.";
+    internal const string UnreadableItem = "Something placed on the page couldn't be written. Nothing was saved.";
+
+    /// <summary>
+    /// Reads the document exactly as a save would, without writing. Run on
+    /// entry, so a file the writer cannot update says so before any work is
+    /// placed on it instead of after.
+    /// </summary>
+    public static PdfSignCheck Preflight(string path)
     {
-        var sourceDirectory = Path.GetDirectoryName(sourcePath);
-        var name = Path.GetFileNameWithoutExtension(sourcePath);
-        var outputDirectory = string.IsNullOrWhiteSpace(sourceDirectory) ? Path.GetTempPath() : sourceDirectory;
-        var outputPath = Path.Combine(outputDirectory, $"{name}.signed-{Guid.NewGuid():N}.pdf");
-        WriteSignedCopy(sourcePath, outputPath, placements);
-        return outputPath;
+        try
+        {
+            var document = PdfDocumentModel.Read(path);
+            foreach (var page in document.Pages)
+            {
+                ReadExistingAnnotationEntries(document, Header(page.Body));
+            }
+
+            return new PdfSignCheck(document.Pages.Count, null);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return new PdfSignCheck(0, ex.Message);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            return new PdfSignCheck(0, UnsupportedStructure);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new PdfSignCheck(0, "This PDF can't be read right now.");
+        }
     }
 
-    public static void WriteSignedCopy(string sourcePath, string outputPath, IReadOnlyList<PdfFillSignPlacement> placements)
+    public static void WriteSignedCopy(string sourcePath, string outputPath, IReadOnlyList<SignPlacement> placements)
     {
         if (placements.Count == 0)
         {
-            throw new InvalidOperationException("No PDF fill items were provided.");
+            throw new InvalidOperationException(UnreadableItem);
         }
 
         if (Path.GetFullPath(sourcePath).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
@@ -392,21 +394,25 @@ internal static class PdfFillSignWriter
     }
 
     internal static PdfPageRect MapDisplayRectToPageRectForTest(
-        PdfNormalizedRect normalized,
+        double left,
+        double top,
+        double width,
+        double height,
         double x1,
         double y1,
         double x2,
         double y2,
         int rotate)
     {
-        return MapDisplayRectToPageRect(normalized, new PdfPageBox(x1, y1, x2, y2), rotate);
+        return MapDisplayRectToPageRect(left, top, width, height, new PdfPageBox(x1, y1, x2, y2), rotate);
     }
 
-    private static List<PdfWriteObject> BuildUpdateObjects(PdfDocumentModel document, IReadOnlyList<PdfFillSignPlacement> placements)
+    private static List<PdfWriteObject> BuildUpdateObjects(PdfDocumentModel document, IReadOnlyList<SignPlacement> placements)
     {
         var nextObject = document.MaxObjectNumber + 1;
         var newObjects = new List<PdfWriteObject>();
         var annotationsByPage = new Dictionary<PdfRef, List<PdfRef>>();
+        var imagesByHash = new Dictionary<string, PdfRef>(StringComparer.Ordinal);
         PdfRef? fontRef = null;
 
         PdfRef Allocate() => new(nextObject++, 0);
@@ -426,19 +432,46 @@ internal static class PdfFillSignWriter
             return created;
         }
 
+        // A logo stamped on every page is one image in the file, drawn by
+        // as many appearances as there are placements.
+        PdfRef EnsureImage(byte[] png)
+        {
+            var hash = Convert.ToHexString(SHA256.HashData(png));
+            if (imagesByHash.TryGetValue(hash, out var existing))
+            {
+                return existing;
+            }
+
+            var image = DecodePng(png);
+            var alphaRef = image.HasAlpha ? Allocate() : (PdfRef?)null;
+            var imageRef = Allocate();
+            if (alphaRef is { } maskRef)
+            {
+                newObjects.Add(new PdfWriteObject(
+                    maskRef,
+                    ImageObject(image.Width, image.Height, "/DeviceGray", image.AlphaBytes, null)));
+            }
+
+            newObjects.Add(new PdfWriteObject(
+                imageRef,
+                ImageObject(image.Width, image.Height, "/DeviceRGB", image.RgbBytes, alphaRef)));
+            imagesByHash[hash] = imageRef;
+            return imageRef;
+        }
+
         foreach (var placement in placements)
         {
             ValidatePlacement(document, placement);
-            var page = document.Pages[placement.PageNumber - 1];
-            var rect = MapDisplayRectToPageRect(placement.Bounds, page.Box, page.Rotate);
+            var page = document.Pages[placement.PageIndex];
+            var rect = MapDisplayRectToPageRect(placement.X, placement.Y, placement.Width, placement.Height, page.Box, page.Rotate);
             if (!rect.IsValid)
             {
-                throw new InvalidOperationException("The PDF fill item is outside the page.");
+                throw new InvalidOperationException(UnreadableItem);
             }
 
-            var annotationRef = placement.Kind is PdfFillSignPlacementKind.Text or PdfFillSignPlacementKind.Date
-                ? AddTextAnnotation(newObjects, Allocate, EnsureFont(), placement, rect)
-                : AddImageAnnotation(newObjects, Allocate, placement, rect);
+            var annotationRef = placement.Kind == SignPlacementKind.Date
+                ? AddTextAnnotation(newObjects, Allocate, EnsureFont(), placement.Text!, rect, page.Rotate)
+                : AddImageAnnotation(newObjects, Allocate, EnsureImage(placement.ImagePng!), placement.Kind, rect, page.Rotate);
 
             if (!annotationsByPage.TryGetValue(page.Ref, out var list))
             {
@@ -459,94 +492,98 @@ internal static class PdfFillSignWriter
         return newObjects;
     }
 
-    private static void ValidatePlacement(PdfDocumentModel document, PdfFillSignPlacement placement)
+    private static void ValidatePlacement(PdfDocumentModel document, SignPlacement placement)
     {
-        if (placement.PageNumber < 1 || placement.PageNumber > document.Pages.Count)
+        var inside = double.IsFinite(placement.X)
+            && double.IsFinite(placement.Y)
+            && double.IsFinite(placement.Width)
+            && double.IsFinite(placement.Height)
+            && placement.X >= 0
+            && placement.Y >= 0
+            && placement.Width > 0
+            && placement.Height > 0
+            && placement.X + placement.Width <= 1.0001
+            && placement.Y + placement.Height <= 1.0001;
+        var content = placement.Kind == SignPlacementKind.Date
+            ? !string.IsNullOrWhiteSpace(placement.Text)
+            : placement.ImagePng is { Length: > 0 };
+        if (placement.PageIndex < 0 || placement.PageIndex >= document.Pages.Count || !inside || !content)
         {
-            throw new InvalidOperationException("The PDF fill item refers to a page that does not exist.");
-        }
-
-        if (!placement.Bounds.IsValid)
-        {
-            throw new InvalidOperationException("The PDF fill item has invalid bounds.");
-        }
-
-        if (placement.Kind is PdfFillSignPlacementKind.Text or PdfFillSignPlacementKind.Date)
-        {
-            if (string.IsNullOrWhiteSpace(placement.Text))
-            {
-                throw new InvalidOperationException("The PDF text item is empty.");
-            }
-        }
-        else if (placement.PngBytes is null || placement.PngBytes.Length == 0)
-        {
-            throw new InvalidOperationException("The PDF image item is empty.");
+            throw new InvalidOperationException(UnreadableItem);
         }
     }
+
+    /// <summary>
+    /// An appearance is drawn upright in the displayed page's orientation;
+    /// its matrix turns it against the page's /Rotate so the viewer's turn
+    /// brings it back upright. Width and height are in display terms.
+    /// </summary>
+    private static (double Width, double Height, string Matrix) DisplayFrame(PdfPageRect rect, int rotate) =>
+        NormalizeRotation(rotate) switch
+        {
+            90 => (rect.Height, rect.Width, $" /Matrix [0 1 -1 0 {Format(rect.Width)} 0]"),
+            180 => (rect.Width, rect.Height, $" /Matrix [-1 0 0 -1 {Format(rect.Width)} {Format(rect.Height)}]"),
+            270 => (rect.Height, rect.Width, $" /Matrix [0 -1 1 0 0 {Format(rect.Height)}]"),
+            _ => (rect.Width, rect.Height, string.Empty)
+        };
 
     private static PdfRef AddTextAnnotation(
         List<PdfWriteObject> objects,
         Func<PdfRef> allocate,
         PdfRef fontRef,
-        PdfFillSignPlacement placement,
-        PdfPageRect rect)
+        string text,
+        PdfPageRect rect,
+        int rotate)
     {
         var appearanceRef = allocate();
         var annotationRef = allocate();
-        var text = placement.Text ?? string.Empty;
-        var fontSize = ResolveFontSize(placement, rect);
-        var baseline = Math.Max(2, rect.Height - fontSize - 2);
+        var (width, height, matrix) = DisplayFrame(rect, rotate);
+
+        // The same rule the sign surface lays its label out with: the font
+        // is a fixed share of the frame height and the text is centered.
+        var fontSize = SignText.FontScale * height;
+        var left = (width - SignText.WidthEm(text) * fontSize) / 2;
+        var baseline = SignText.BaselineScale * height;
         var stream = AsLatin1(
-            $"q\nBT\n/Helv {Format(fontSize)} Tf\n0 0 0 rg\n2 {Format(baseline)} Td\n{PdfLiteral(text)} Tj\nET\nQ\n");
+            $"q\nBT\n/Helv {Format(fontSize)} Tf\n0 0 0 rg\n{Format(left)} {Format(baseline)} Td\n{WinAnsiLiteral(text)} Tj\nET\nQ\n");
         objects.Add(new PdfWriteObject(
             appearanceRef,
             StreamObject(
-                $"<< /Type /XObject /Subtype /Form /BBox [0 0 {Format(rect.Width)} {Format(rect.Height)}] /Resources << /Font << /Helv {fontRef} R >> >>",
+                $"<< /Type /XObject /Subtype /Form /BBox [0 0 {Format(width)} {Format(height)}]{matrix} /Resources << /Font << /Helv {fontRef} R >> >>",
                 stream)));
         objects.Add(new PdfWriteObject(
             annotationRef,
             AsLatin1(
                 "<< /Type /Annot /Subtype /FreeText "
-                + $"/Rect {PdfRect(rect)} /Contents {PdfLiteral(text)} /F 4 /Border [0 0 0] "
-                + $"/DA {PdfLiteral($"/Helv {Format(fontSize)} Tf 0 0 0 rg")} /AP << /N {appearanceRef} R >> >>")));
+                + $"/Rect {PdfRect(rect)} /Contents {PdfTextString(text)} /F 4 /Border [0 0 0] "
+                + $"/DA (/Helv {Format(fontSize)} Tf 0 0 0 rg) /AP << /N {appearanceRef} R >> >>")));
         return annotationRef;
     }
 
     private static PdfRef AddImageAnnotation(
         List<PdfWriteObject> objects,
         Func<PdfRef> allocate,
-        PdfFillSignPlacement placement,
-        PdfPageRect rect)
+        PdfRef imageRef,
+        SignPlacementKind kind,
+        PdfPageRect rect,
+        int rotate)
     {
-        var image = DecodePng(placement.PngBytes!);
-        var alphaRef = image.HasAlpha ? allocate() : (PdfRef?)null;
-        var imageRef = allocate();
         var appearanceRef = allocate();
         var annotationRef = allocate();
-
-        if (alphaRef is { } maskRef)
-        {
-            objects.Add(new PdfWriteObject(
-                maskRef,
-                ImageObject(image.Width, image.Height, "/DeviceGray", image.AlphaBytes, null)));
-        }
-
-        objects.Add(new PdfWriteObject(
-            imageRef,
-            ImageObject(image.Width, image.Height, "/DeviceRGB", image.RgbBytes, alphaRef)));
-        var formStream = AsLatin1($"q\n{Format(rect.Width)} 0 0 {Format(rect.Height)} 0 0 cm\n/Im1 Do\nQ\n");
+        var (width, height, matrix) = DisplayFrame(rect, rotate);
+        var formStream = AsLatin1($"q\n{Format(width)} 0 0 {Format(height)} 0 0 cm\n/Im1 Do\nQ\n");
         objects.Add(new PdfWriteObject(
             appearanceRef,
             StreamObject(
-                $"<< /Type /XObject /Subtype /Form /BBox [0 0 {Format(rect.Width)} {Format(rect.Height)}] /Resources << /XObject << /Im1 {imageRef} R >> >>",
+                $"<< /Type /XObject /Subtype /Form /BBox [0 0 {Format(width)} {Format(height)}]{matrix} /Resources << /XObject << /Im1 {imageRef} R >> >>",
                 formStream)));
 
-        var label = placement.Kind == PdfFillSignPlacementKind.Signature ? "Signature" : "Stamp";
+        var label = kind == SignPlacementKind.Signature ? "Signature" : "Stamp";
         objects.Add(new PdfWriteObject(
             annotationRef,
             AsLatin1(
                 "<< /Type /Annot /Subtype /Stamp "
-                + $"/Rect {PdfRect(rect)} /Contents {PdfLiteral(label)} /F 4 /Border [0 0 0] "
+                + $"/Rect {PdfRect(rect)} /Contents ({label}) /F 4 /Border [0 0 0] "
                 + $"/AP << /N {appearanceRef} R >> >>")));
         return annotationRef;
     }
@@ -594,7 +631,7 @@ internal static class PdfFillSignWriter
             }
         }
 
-        throw new InvalidOperationException("This PDF stores annotations in a shape Glimpse cannot safely update yet.");
+        throw new InvalidOperationException(UnsupportedStructure);
     }
 
     private static string ReplaceOrAddDictionaryValue(string body, string name, string replacementValue)
@@ -700,15 +737,21 @@ internal static class PdfFillSignWriter
         return true;
     }
 
-    private static PdfPageRect MapDisplayRectToPageRect(PdfNormalizedRect normalized, PdfPageBox box, int rotate)
+    private static PdfPageRect MapDisplayRectToPageRect(
+        double left,
+        double topEdge,
+        double width,
+        double height,
+        PdfPageBox box,
+        int rotate)
     {
         var normalizedRotate = NormalizeRotation(rotate);
         var displayWidth = normalizedRotate is 90 or 270 ? box.Height : box.Width;
         var displayHeight = normalizedRotate is 90 or 270 ? box.Width : box.Height;
-        var sx = normalized.Left * displayWidth;
-        var top = normalized.Top * displayHeight;
-        var sw = normalized.Width * displayWidth;
-        var sh = normalized.Height * displayHeight;
+        var sx = left * displayWidth;
+        var top = topEdge * displayHeight;
+        var sw = width * displayWidth;
+        var sh = height * displayHeight;
         var sy = displayHeight - top - sh;
 
         return normalizedRotate switch
@@ -813,7 +856,7 @@ internal static class PdfFillSignWriter
     private static byte[] Deflate(byte[] bytes)
     {
         using var output = new MemoryStream();
-        using (var zlib = new ZLibStream(output, CompressionLevel.SmallestSize, leaveOpen: true))
+        using (var zlib = new ZLibStream(output, CompressionLevel.Optimal, leaveOpen: true))
         {
             zlib.Write(bytes);
         }
@@ -827,7 +870,7 @@ internal static class PdfFillSignWriter
         var decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
         if (decoder.Frames.Count == 0)
         {
-            throw new InvalidOperationException("The PDF image item could not be read.");
+            throw new InvalidOperationException(UnreadableItem);
         }
 
         BitmapSource source = decoder.Frames[0];
@@ -841,7 +884,7 @@ internal static class PdfFillSignWriter
         var height = source.PixelHeight;
         if (width <= 0 || height <= 0 || (long)width * height > MaxImagePixels)
         {
-            throw new InvalidOperationException("The PDF image item is too large.");
+            throw new InvalidOperationException(UnreadableItem);
         }
 
         var stride = width * 4;
@@ -866,46 +909,41 @@ internal static class PdfFillSignWriter
     private static string PdfRect(PdfPageRect rect) =>
         $"[{Format(rect.Left)} {Format(rect.Bottom)} {Format(rect.Right)} {Format(rect.Top)}]";
 
-    private static double ResolveFontSize(PdfFillSignPlacement placement, PdfPageRect rect)
-    {
-        if (double.IsFinite(placement.FontSize) && placement.FontSize > 0)
-        {
-            return Math.Clamp(placement.FontSize, 6, 72);
-        }
-
-        return Math.Clamp(rect.Height * 0.72, 6, 72);
-    }
-
-    private static string PdfLiteral(string value)
+    /// <summary>
+    /// A string shown with the WinAnsi Helvetica font: each character is its
+    /// WinAnsi byte, so a euro sign or a curly quote prints as itself.
+    /// The surface only accepts characters that have one.
+    /// </summary>
+    private static string WinAnsiLiteral(string value)
     {
         var builder = new StringBuilder("(");
         foreach (var ch in value)
         {
-            switch (ch)
+            if (!SignText.TryEncode(ch, out var code))
             {
-                case '\\':
-                    builder.Append(@"\\");
-                    break;
-                case '(':
-                    builder.Append(@"\(");
-                    break;
-                case ')':
-                    builder.Append(@"\)");
-                    break;
-                case '\r':
-                    builder.Append(@"\r");
-                    break;
-                case '\n':
-                    builder.Append(@"\n");
-                    break;
-                default:
-                    builder.Append(ch <= 255 ? ch : '?');
-                    break;
+                continue;
             }
+
+            if (code is (byte)'\\' or (byte)'(' or (byte)')')
+            {
+                builder.Append('\\');
+            }
+
+            builder.Append((char)code);
         }
 
-        builder.Append(')');
-        return builder.ToString();
+        return builder.Append(')').ToString();
+    }
+
+    /// <summary>A text string for metadata such as /Contents: UTF-16 when it is not plain ASCII.</summary>
+    private static string PdfTextString(string value)
+    {
+        if (value.All(ch => ch is >= ' ' and <= '~'))
+        {
+            return "(" + value.Replace(@"\", @"\\").Replace("(", @"\(").Replace(")", @"\)") + ")";
+        }
+
+        return "<FEFF" + Convert.ToHexString(Encoding.BigEndianUnicode.GetBytes(value)) + ">";
     }
 
     private static string Format(double value) =>
@@ -1152,26 +1190,26 @@ internal static class PdfFillSignWriter
             var fileInfo = new FileInfo(path);
             if (fileInfo.Length > MaxPdfBytes)
             {
-                throw new InvalidOperationException("This PDF is too large to fill safely in Glimpse.");
+                throw new InvalidOperationException("This PDF is too large to sign here.");
             }
 
             var bytes = File.ReadAllBytes(path);
             if (bytes.Length < 8 || !Encoding.Latin1.GetString(bytes, 0, Math.Min(bytes.Length, 1024)).Contains("%PDF-", StringComparison.Ordinal))
             {
-                throw new InvalidOperationException("This file is not a PDF.");
+                throw new InvalidOperationException("This file isn't a PDF that can be signed here.");
             }
 
             var text = Encoding.Latin1.GetString(bytes);
             if (text.Contains("/Encrypt", StringComparison.Ordinal))
             {
-                throw new InvalidOperationException("Encrypted PDFs cannot be filled in Glimpse yet.");
+                throw new InvalidOperationException("This PDF is encrypted, so it can't be signed here.");
             }
 
             var previousXref = ReadPreviousXrefOffset(text);
             var objects = ReadObjects(text);
             if (!TryReadLastReference(text, "Root", out var root))
             {
-                throw new InvalidOperationException("This PDF has no readable document root.");
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             TryReadLastReference(text, "Info", out var info);
@@ -1182,7 +1220,7 @@ internal static class PdfFillSignWriter
             var pages = ReadPages(objects, root);
             if (pages.Count == 0)
             {
-                throw new InvalidOperationException("This PDF has no readable pages.");
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             return new PdfDocumentModel(
@@ -1203,7 +1241,7 @@ internal static class PdfFillSignWriter
             {
                 if (objects.Count > MaxObjects)
                 {
-                    throw new InvalidOperationException("This PDF has too many objects to update safely.");
+                    throw new InvalidOperationException(UnsupportedStructure);
                 }
 
                 if (!int.TryParse(match.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
@@ -1227,7 +1265,7 @@ internal static class PdfFillSignWriter
             var index = text.LastIndexOf("startxref", StringComparison.Ordinal);
             if (index < 0)
             {
-                throw new InvalidOperationException("This PDF has no readable xref pointer.");
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             var match = Regex.Match(
@@ -1238,7 +1276,7 @@ internal static class PdfFillSignWriter
             if (!match.Success
                 || !long.TryParse(match.Groups["offset"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var offset))
             {
-                throw new InvalidOperationException("This PDF has no readable xref pointer.");
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             return offset;

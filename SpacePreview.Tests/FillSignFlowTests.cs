@@ -7,9 +7,9 @@ using SpacePreview.Preview;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// The tester round's three promises: placed ink survives the stored
-/// signature changing, replacing or removing the stored signature is
-/// reachable from the sign flow, and pages turn without leaving the mode.
+/// The sign flow's wiring into the preview: the mode belongs to the load
+/// that started it, the signature library, and one save across pages.
+/// Behavior of the surface itself lives in FillSignBehaviorTests.
 /// </summary>
 [Collection(ProcessEnvironmentCollection.Name)]
 public sealed class FillSignFlowTests
@@ -47,29 +47,11 @@ public sealed class FillSignFlowTests
     {
         var entry = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "EnterFillSignModeAsync");
         var paging = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ShowFillSignPageAsync");
-        var save = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "OnFillSignSaveRequested");
+        var save = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "SaveFillSignAsync");
 
         Assert.Contains("!IsCurrentContentPath(path)", entry, StringComparison.Ordinal);
         Assert.Contains("!IsCurrentContentPath(path)", paging, StringComparison.Ordinal);
         Assert.Contains("!IsCurrentContentPath(path)", save, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PlacementsSnapshotTheirPixelsAtPlacementTime()
-    {
-        // The record carries the pixels; Clamped() must not shed them.
-        var placement = new SignPlacement(
-            SignPlacementKind.Signature, 0, 0.5, 0.5, 0.2, 0.05, null, [1, 2, 3]);
-        Assert.NotNull(placement.Clamped().ImagePng);
-        Assert.Equal(placement.ImagePng, placement.Clamped().ImagePng);
-
-        var surfaceSource = TestSource.Read(@"SpacePreview\Preview\FillSignSurface.cs");
-        Assert.Contains("imagePng = assetPath is null ? null : TryReadStoreBytes(assetPath)", surfaceSource, StringComparison.Ordinal);
-
-        // Nothing at save time reaches back into the store.
-        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        Assert.Contains("PngBytes: item.ImagePng)", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("File.ReadAllBytes(SignatureStore", windowSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -107,47 +89,6 @@ public sealed class FillSignFlowTests
     }
 
     [Fact]
-    public void SignaturePickerOwnsChoiceCreationAndDeletion()
-    {
-        var source = TestSource.Read(@"SpacePreview\Preview\FillSignSurface.cs");
-
-        // The Signature pill opens the picker; an empty library goes
-        // straight to the pad.
-        Assert.Contains("ToggleSignaturePicker();", source, StringComparison.Ordinal);
-        Assert.Contains("if (SignatureStore.ListSignatures().Count == 0)", source, StringComparison.Ordinal);
-
-        // Rows arm their signature; deletion lives on the row, and the
-        // drawing card carries no removal control.
-        Assert.Contains("ArmSignature(path);", source, StringComparison.Ordinal);
-        Assert.Contains("DeleteSignature(path);", source, StringComparison.Ordinal);
-        Assert.Contains("\"New signature\", ShowInkCapture, PillRole.Ghost", source, StringComparison.Ordinal);
-        Assert.DoesNotContain("Remove saved", source, StringComparison.Ordinal);
-
-        // Deleting the armed signature puts the tool down; placed ink is
-        // untouched by construction (snapshots).
-        Assert.Contains("_selectedSignaturePath = null;", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PlacedSignatureEditsInTheCardWithItsInkAsBase()
-    {
-        var source = TestSource.Read(@"SpacePreview\Preview\FillSignSurface.cs");
-
-        // Double-click opens the pad with the placed ink visible.
-        Assert.Contains("Kind: SignPlacementKind.Signature, ImagePng: { } png", source, StringComparison.Ordinal);
-        Assert.Contains("ShowInkCapture(placedInk, frame);", source, StringComparison.Ordinal);
-        Assert.Contains("\"Edit this signature\"", source, StringComparison.Ordinal);
-
-        // Commit re-renders base plus strokes into the placement alone.
-        Assert.Contains("SignatureStore.RenderComposite(_inkBaseImage, _inkBaseRect, strokes, Colors.Black)", source, StringComparison.Ordinal);
-        Assert.Contains("UpdatePlacementImage(frame, edited);", source, StringComparison.Ordinal);
-
-        // Ink cannot leave the pad while drawing.
-        Assert.Contains("ClampToPad(e.GetPosition(_inkCanvas))", source, StringComparison.Ordinal);
-        Assert.Contains("ClipToBounds = true", source, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void CompositeRenderCarriesBaseInkAndNewStrokes()
     {
         var pixels = new byte[] { 0, 0, 0, 255 };
@@ -169,31 +110,6 @@ public sealed class FillSignFlowTests
     }
 
     [Fact]
-    public void PagesTurnInsideSignModeWithoutLosingWork()
-    {
-        var surfaceSource = TestSource.Read(@"SpacePreview\Preview\FillSignSurface.cs");
-
-        // Arrows flank the readout, bounded at the ends, hidden for
-        // single-page documents.
-        Assert.Contains("event Action<int>? PageChangeRequested", surfaceSource, StringComparison.Ordinal);
-        Assert.Contains("pageIndex < 0 || pageIndex >= _totalPages || pageIndex == _session.PageIndex", surfaceSource, StringComparison.Ordinal);
-        Assert.Contains("SetChipEnabled(_previousPageChip, _session.PageIndex > 0)", surfaceSource, StringComparison.Ordinal);
-        Assert.Contains("SetChipEnabled(_nextPageChip, _session.PageIndex < _totalPages - 1)", surfaceSource, StringComparison.Ordinal);
-        Assert.Contains("navigable ? Visibility.Visible : Visibility.Collapsed", surfaceSource, StringComparison.Ordinal);
-
-        // ShowPage keeps the whole session and rebuilds only the visible
-        // page's frames, selecting nothing.
-        Assert.Contains("placement.PageIndex == pageIndex", surfaceSource, StringComparison.Ordinal);
-        Assert.Contains("AddPlacementVisual(placement, select: false)", surfaceSource, StringComparison.Ordinal);
-
-        // The host renders the page and hands it back to the same surface.
-        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        Assert.Contains("surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, target)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ReferenceEquals(_fillSignSurface, surface)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("surface.ShowPage(pageIndex, page)", windowSource, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void OneSaveCarriesInkAcrossPages()
     {
         using var temp = new TempDirectory();
@@ -205,12 +121,8 @@ public sealed class FillSignFlowTests
             source,
             output,
             [
-                new PdfFillSignPlacement(
-                    1, PdfFillSignPlacementKind.Date,
-                    new PdfNormalizedRect(0.1, 0.2, 0.3, 0.2), Text: "7/8/2026"),
-                new PdfFillSignPlacement(
-                    2, PdfFillSignPlacementKind.Stamp,
-                    new PdfNormalizedRect(0.25, 0.25, 0.25, 0.25), PngBytes: OpaqueBlackPng())
+                new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.2, 0.3, 0.2, "7/8/2026"),
+                new SignPlacement(SignPlacementKind.Stamp, 1, 0.25, 0.25, 0.25, 0.25, null, OpaqueBlackPng())
             ]);
 
         // Both pages render with visible ink: one save, two signed pages.

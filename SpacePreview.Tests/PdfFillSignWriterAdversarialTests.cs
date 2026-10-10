@@ -18,16 +18,17 @@ public sealed class PdfFillSignWriterAdversarialTests
         }
 
         File.WriteAllText(path, sb.ToString());
-        var before = Directory.GetFiles(Path.GetTempPath(), "glimpse-sign-bomb.signed-*.pdf").Length;
+        var output = path + ".signing";
         try
         {
             var sw = Stopwatch.StartNew();
-            Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.SignPdf(
+            Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.WriteSignedCopy(
                 path,
-                [new PdfFillSignPlacement(1, PdfFillSignPlacementKind.Date, new PdfNormalizedRect(0.1, 0.1, 0.2, 0.05), Text: "1/1/2026")]));
+                output,
+                [new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.2, 0.05, "1/1/2026")]));
             sw.Stop();
             Assert.True(sw.ElapsedMilliseconds < 5000, $"bomb took {sw.ElapsedMilliseconds}ms");
-            Assert.Equal(before, Directory.GetFiles(Path.GetTempPath(), "glimpse-sign-bomb.signed-*.pdf").Length);
+            Assert.False(File.Exists(output));
         }
         finally
         {
@@ -42,9 +43,11 @@ public sealed class PdfFillSignWriterAdversarialTests
         WriteMinimalPdf(source);
         var hashBefore = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(source)));
 
-        var output = PdfFillSignWriter.SignPdf(
+        var output = source + ".signing";
+        PdfFillSignWriter.WriteSignedCopy(
             source,
-            [new PdfFillSignPlacement(1, PdfFillSignPlacementKind.Date, new PdfNormalizedRect(0.1, 0.1, 0.3, 0.05), Text: "7/7/2026 (test) done")]);
+            output,
+            [new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.3, 0.05, "7/7/2026 (test) done")]);
         try
         {
             Assert.Equal(hashBefore, Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(source))));

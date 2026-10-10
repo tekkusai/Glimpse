@@ -123,21 +123,23 @@ internal static class SignatureStore
     /// </summary>
     public static string? SaveSignatureFromStrokes(IReadOnlyList<IReadOnlyList<Point>> strokes, Color inkColor)
     {
-        var ink = RenderStrokes(strokes, inkColor);
+        var ink = RenderComposite(baseImage: null, Rect.Empty, strokes, inkColor);
         return ink is null ? null : SaveNewSignature(ink);
     }
 
     /// <summary>Saves rendered ink as a new library entry, newest by mtime.</summary>
-    public static string? SaveNewSignature(BitmapSource ink)
+    private static string? SaveNewSignature(BitmapSource ink)
     {
         try
         {
+            if (EncodePng(ink) is not { } png)
+            {
+                return null;
+            }
+
             Directory.CreateDirectory(SignaturesDirectory);
             var path = Path.Combine(SignaturesDirectory, $"sig-{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.png");
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(ink));
-            using var stream = File.Create(path);
-            encoder.Save(stream);
+            File.WriteAllBytes(path, png);
             return path;
         }
         catch
@@ -146,22 +148,18 @@ internal static class SignatureStore
         }
     }
 
-    /// <summary>Copies a user-picked image into the stamp slot.</summary>
+    /// <summary>Copies a user-picked image into the stamp slot, no larger than a page needs.</summary>
     public static bool TryImportStamp(string sourcePath)
     {
         try
         {
-            var image = TryLoad(sourcePath);
-            if (image is null)
+            if (TryLoad(sourcePath) is not { } image || EncodePng(Bounded(image)) is not { } png)
             {
                 return false;
             }
 
             Directory.CreateDirectory(Path.GetDirectoryName(StampPath)!);
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(image));
-            using var stream = File.Create(StampPath);
-            encoder.Save(stream);
+            File.WriteAllBytes(StampPath, png);
             return true;
         }
         catch
@@ -170,8 +168,62 @@ internal static class SignatureStore
         }
     }
 
-    internal static BitmapSource? RenderStrokes(IReadOnlyList<IReadOnlyList<Point>> strokes, Color inkColor) =>
-        RenderComposite(baseImage: null, baseRect: Rect.Empty, strokes, inkColor);
+    /// <summary>
+    /// A stored image's PNG as a placement snapshot. A stamp imported before
+    /// imports were bounded is scaled down here, so no placement carries
+    /// more pixels than a printed page can use.
+    /// </summary>
+    public static byte[]? TryReadForPlacement(string path)
+    {
+        try
+        {
+            var png = File.ReadAllBytes(path);
+            if (TryLoad(png) is not { } image)
+            {
+                return null;
+            }
+
+            return Math.Max(image.PixelWidth, image.PixelHeight) <= MaxPlacedEdge ? png : EncodePng(Bounded(image));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public static byte[]? EncodePng(BitmapSource image)
+    {
+        try
+        {
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(image));
+            using var stream = new MemoryStream();
+            encoder.Save(stream);
+            return stream.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    // Two inches at 600 dpi: sharper than any printer needs for a stamp,
+    // and a fraction of what a phone photo of a logo carries.
+    private const int MaxPlacedEdge = 1200;
+
+    private static BitmapSource Bounded(BitmapSource image)
+    {
+        var longEdge = Math.Max(image.PixelWidth, image.PixelHeight);
+        if (longEdge <= MaxPlacedEdge)
+        {
+            return image;
+        }
+
+        var scale = (double)MaxPlacedEdge / longEdge;
+        var scaled = new TransformedBitmap(image, new ScaleTransform(scale, scale));
+        scaled.Freeze();
+        return scaled;
+    }
 
     /// <summary>
     /// Renders an existing signature image with new strokes drawn over it,
