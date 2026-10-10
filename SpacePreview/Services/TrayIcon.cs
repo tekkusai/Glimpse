@@ -38,7 +38,6 @@ internal sealed class TrayIcon : IDisposable
     private ushort _classAtom;
     private DateTime _menuClosedAt;
     private bool _iconVisible;
-    private bool _hiddenForSession;
     private bool _disposed;
     private bool _updateCheckRunning;
     private DateTime _lastUpdateCheckAt;
@@ -146,9 +145,6 @@ internal sealed class TrayIcon : IDisposable
         settings.Style = itemStyle;
         _updateItem.Style = itemStyle;
 
-        var hideTray = MakeItem("Hide tray icon", HideForSession);
-        hideTray.Style = itemStyle;
-
         var quit = MakeItem("Quit", () => QuitRequested?.Invoke());
         quit.Style = itemStyle;
 
@@ -158,7 +154,6 @@ internal sealed class TrayIcon : IDisposable
 
         menu.Items.Add(settings);
         menu.Items.Add(_updateItem);
-        menu.Items.Add(hideTray);
         menu.Items.Add(new Separator { Style = separatorStyle });
         menu.Items.Add(quit);
         return menu;
@@ -169,23 +164,25 @@ internal sealed class TrayIcon : IDisposable
         ThemeChanged?.Invoke(preference);
     }
 
-    private void OpenSettings()
+    /// <summary>The tray's Settings item, and launching the app while it runs.</summary>
+    public void OpenSettings()
     {
         _menu.IsOpen = false;
-        if (_settingsWindow is not null)
+        if (_settingsWindow is null)
         {
-            _settingsWindow.Activate();
-            return;
+            var window = new SettingsWindow(
+                () => _availableUpdate,
+                ShowAvailableUpdate,
+                PickTheme);
+            _settingsWindow = window;
+            window.Closed += (_, _) => _settingsWindow = null;
+            window.Show();
         }
 
-        var window = new SettingsWindow(
-            () => _availableUpdate,
-            ShowAvailableUpdate,
-            PickTheme);
-        _settingsWindow = window;
-        window.Closed += (_, _) => _settingsWindow = null;
-        window.Show();
-        window.Activate();
+        // A launch from Start gives the foreground to the second instance,
+        // which exits; take it the way a click on a preview does.
+        NativeMethods.ForceForeground(new System.Windows.Interop.WindowInteropHelper(_settingsWindow).Handle);
+        _settingsWindow.Activate();
     }
 
     private void ShowMenu()
@@ -197,23 +194,14 @@ internal sealed class TrayIcon : IDisposable
             return;
         }
 
-        // Re-apply the current palette so the flyout matches the live theme, then do
-        // the foreground dance: without it the menu will not close on outside click.
-        Theme.ApplyResources(_menu);
-        foreach (var item in _menu.Items)
-        {
-            if (item is MenuItem { HasItems: true } parent)
-            {
-                Theme.ApplyResources(parent);
-            }
-        }
-
         RefreshUpdateItem();
         if (DateTime.UtcNow - _lastUpdateCheckAt >= UpdateMenuRetryInterval)
         {
             _ = CheckForUpdatesAsync();
         }
 
+        // The foreground dance: without it the menu will not close on an
+        // outside click.
         NativeMethods.SetForegroundWindow(_hwnd);
         _menu.IsOpen = true;
     }
@@ -381,75 +369,6 @@ internal sealed class TrayIcon : IDisposable
         }
     }
 
-    private static string GetVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
-
-    internal static void CopyDiagnostics()
-    {
-        try
-        {
-            var engine = OfficeDocumentPdfConverter.EnginePath is { } enginePath
-                ? $"{OfficeDocumentPdfConverter.EngineName} ({enginePath})"
-                : "Basic previews";
-
-            Clipboard.SetText(
-                $"{Branding.Name} diagnostics" + Environment.NewLine
-                + $"Version: {GetVersion()}" + Environment.NewLine
-                + $"Documents: {engine}" + Environment.NewLine
-                + $"Log: {DiagnosticLog.Pathname}");
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"copy diagnostics failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    internal static void OpenLog()
-    {
-        try
-        {
-            var directory = System.IO.Path.GetDirectoryName(DiagnosticLog.Pathname);
-            if (!string.IsNullOrWhiteSpace(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            if (!File.Exists(DiagnosticLog.Pathname))
-            {
-                File.WriteAllText(DiagnosticLog.Pathname, string.Empty);
-            }
-
-            Process.Start(new ProcessStartInfo(DiagnosticLog.Pathname) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"open log failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private void HideForSession()
-    {
-        _hiddenForSession = true;
-        _menu.IsOpen = false;
-        RemoveIcon();
-        DiagnosticLog.Write("tray icon hidden until restart");
-    }
-
-    /// <summary>
-    /// Launching the app again while it runs brings a hidden icon back:
-    /// Relaunching for "where did it go".
-    /// </summary>
-    public void RestoreIcon()
-    {
-        if (!_hiddenForSession)
-        {
-            return;
-        }
-
-        _hiddenForSession = false;
-        AddIcon();
-        DiagnosticLog.Write("tray icon restored by relaunch");
-    }
-
     public void ShowPreviewAccessWarning(PreviewAccessWarningInfo warning)
     {
         if (_disposed)
@@ -469,7 +388,7 @@ internal sealed class TrayIcon : IDisposable
         var finalReminder = state.Shows == PreviewAccessWarningPolicy.LifetimeShowLimit - 1;
         var appWarningShown = ShowAppOwnedWarning(warning, finalReminder);
         var trayWarningShown = false;
-        if (!_hiddenForSession && _iconVisible)
+        if (_iconVisible)
         {
             trayWarningShown = ShowTrayWarning(warning, finalReminder);
         }
@@ -615,11 +534,8 @@ internal sealed class TrayIcon : IDisposable
         if (msg == _taskbarCreatedMessage && _taskbarCreatedMessage != 0)
         {
             // Explorer restarted and dropped every tray icon; re-add ours.
-            if (!_hiddenForSession)
-            {
-                DiagnosticLog.Write("taskbar recreated -> re-adding tray icon");
-                AddIcon();
-            }
+            DiagnosticLog.Write("taskbar recreated -> re-adding tray icon");
+            AddIcon();
 
             return IntPtr.Zero;
         }
@@ -631,11 +547,6 @@ internal sealed class TrayIcon : IDisposable
 
     private void AddIcon()
     {
-        if (_hiddenForSession)
-        {
-            return;
-        }
-
         var data = NewIconData();
         NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_ADD, ref data);
         _iconVisible = true;

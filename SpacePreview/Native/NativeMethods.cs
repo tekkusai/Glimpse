@@ -646,12 +646,18 @@ internal static class NativeMethods
     public static extern bool DeleteObject(IntPtr hObject);
 
     private const int ASSOCF_NOTRUNCATE = 0x00000020;
-    private const int ASSOCSTR_FRIENDLYAPPNAME = 4;
+    public const int ASSOCSTR_EXECUTABLE = 2;
+    public const int ASSOCSTR_FRIENDLYAPPNAME = 4;
+    public const int ASSOCSTR_APPID = 21;
 
     [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     private static extern int AssocQueryString(int flags, int str, string pszAssoc, string? pszExtra, StringBuilder? pszOut, ref uint pcchOut);
 
-    public static string? TryGetFriendlyAppName(string extension)
+    public static string? TryGetFriendlyAppName(string extension) =>
+        TryQueryAssociation(extension, ASSOCSTR_FRIENDLYAPPNAME);
+
+    /// <summary>One string about the app Windows opens this extension with.</summary>
+    public static string? TryQueryAssociation(string extension, int assocString)
     {
         if (string.IsNullOrWhiteSpace(extension))
         {
@@ -661,21 +667,51 @@ internal static class NativeMethods
         try
         {
             uint length = 0;
-            AssocQueryString(ASSOCF_NOTRUNCATE, ASSOCSTR_FRIENDLYAPPNAME, extension, null, null, ref length);
+            AssocQueryString(ASSOCF_NOTRUNCATE, assocString, extension, null, null, ref length);
             if (length <= 1)
             {
                 return null;
             }
 
             var builder = new StringBuilder((int)length);
-            var hr = AssocQueryString(ASSOCF_NOTRUNCATE, ASSOCSTR_FRIENDLYAPPNAME, extension, null, builder, ref length);
-            var name = hr == 0 ? builder.ToString().Trim() : null;
-            return string.IsNullOrWhiteSpace(name) ? null : name;
+            var hr = AssocQueryString(ASSOCF_NOTRUNCATE, assocString, extension, null, builder, ref length);
+            var value = hr == 0 ? builder.ToString().Trim() : null;
+            return string.IsNullOrWhiteSpace(value) ? null : value;
         }
         catch
         {
             return null;
         }
+    }
+
+    private const int OAIF_ALLOW_REGISTRATION = 0x01;
+    private const int OAIF_REGISTER_EXT = 0x02;
+    private const int OAIF_EXEC = 0x04;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct OPENASINFO
+    {
+        public string pcszFile;
+        public string? pcszClass;
+        public int oaifInFlags;
+    }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern int SHOpenWithDialog(IntPtr hwndParent, ref OPENASINFO info);
+
+    /// <summary>
+    /// The Windows "How do you want to open this file?" dialog; the pick
+    /// opens the file and may become its default. Blocks until it closes;
+    /// returns true when the user chose an app.
+    /// </summary>
+    public static bool ShowOpenWithDialog(string path)
+    {
+        var info = new OPENASINFO
+        {
+            pcszFile = path,
+            oaifInFlags = OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC
+        };
+        return SHOpenWithDialog(IntPtr.Zero, ref info) == 0;
     }
 
     public static IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex)

@@ -130,7 +130,8 @@ public partial class PreviewWindow
 
         bool ButtonOwnsCenter(System.Windows.Controls.Primitives.ButtonBase button)
         {
-            if (!button.IsVisible || button.ActualWidth <= 0 || button.ActualHeight <= 0)
+            // A disabled button takes no input by design; only live ones must own their center.
+            if (!button.IsVisible || !button.IsEnabled || button.ActualWidth <= 0 || button.ActualHeight <= 0)
             {
                 return true;
             }
@@ -163,6 +164,9 @@ public partial class PreviewWindow
             (nameof(ZoomInButton), ZoomInButton),
             (nameof(RotateLeftButton), RotateLeftButton),
             (nameof(RotateRightButton), RotateRightButton),
+            (nameof(SignButton), SignButton),
+            (nameof(OpenButton), OpenButton),
+            (nameof(OpenMenuButton), OpenMenuButton),
             (nameof(AlwaysOnTopButton), AlwaysOnTopButton),
             (nameof(PinButton), PinButton),
             (nameof(MaximizeButton), MaximizeButton),

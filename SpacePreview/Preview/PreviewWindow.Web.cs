@@ -406,13 +406,13 @@ public partial class PreviewWindow
                     return;
                 }
 
-                // The native menu (copy, save, video controls) is the unified
-                // right-click experience across every web-backed preview.
+                // Right-click shows the preview's own menu; the PDF viewer
+                // keeps Chromium's (see OnWebContextMenuRequested).
                 webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 RememberWebViewProcesses(webView.CoreWebView2);
-                webView.CoreWebView2.ContextMenuRequested += (_, _) => ArmWebContextMenu(webView.CoreWebView2);
+                webView.CoreWebView2.ContextMenuRequested += (_, args) => OnWebContextMenuRequested(webView.CoreWebView2, args);
                 webView.CoreWebView2.ProcessFailed += (_, args) =>
                     ReportFailure(new InvalidOperationException($"browser process failed ({args.ProcessFailedKind})"));
                 configure?.Invoke(webView.CoreWebView2);

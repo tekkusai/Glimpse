@@ -122,7 +122,7 @@ internal static class DiagnosticLog
         }
     }
 
-    private static string Redact(string message)
+    internal static string Redact(string message)
     {
         message = WindowsPathPattern.Replace(message, match => DescribePath(match.Value));
         return UncPathPattern.Replace(message, match => DescribePath(match.Value));

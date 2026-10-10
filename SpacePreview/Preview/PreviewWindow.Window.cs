@@ -348,11 +348,7 @@ public partial class PreviewWindow
         // interactive border resizes (never for layout or DPI changes), and
         // WM_EXITSIZEMOVE commits the final size once the user lets go.
         HwndSource.FromHwnd(hwnd)?.AddHook(WindowProc);
-
-        ApplyThemeToDwm();
-
-        var cornerPreference = NativeMethods.DWMWCP_ROUND;
-        NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_WINDOW_CORNER_PREFERENCE, ref cornerPreference, sizeof(int));
+        WindowFrame.Apply(hwnd);
     }
 
     private IntPtr WindowProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -421,18 +417,6 @@ public partial class PreviewWindow
         }
     }
 
-    private void ApplyThemeToDwm()
-    {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd == IntPtr.Zero)
-        {
-            return;
-        }
-
-        var darkMode = Theme.Current.IsDark ? 1 : 0;
-        NativeMethods.DwmSetWindowAttribute(hwnd, NativeMethods.DWMWA_USE_IMMERSIVE_DARK_MODE, ref darkMode, sizeof(int));
-    }
-
     private void PinButton_Click(object sender, RoutedEventArgs e)
     {
         if (PinToggleRequested is null)
@@ -464,7 +448,7 @@ public partial class PreviewWindow
         CloseButton.ToolTip = pinned ? "Close (Esc)" : "Close (Esc or Space)";
         if (pinned)
         {
-            PinButton.Foreground = Theme.Brush(Theme.Current.Accent);
+            PinButton.SetResourceReference(ForegroundProperty, "Theme.Accent");
         }
         else
         {

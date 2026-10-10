@@ -27,7 +27,10 @@ public partial class AppUpdateWindow : Window
         _release = release;
 
         InitializeComponent();
-        Theme.ApplyResources(this);
+        Title = $"Update {Branding.Name}";
+        TitleText.Text = Title;
+        BodyText.Text = $"{Branding.Name} will download and verify the update, then close briefly while setup finishes.";
+        WindowFrame.AttachDialog(this, TitleBar);
         VersionText.Text = $"Version {release.VersionText} is ready";
         StatusText.Text = $"Download size: {FormatSize(release.InstallerSize)}";
 

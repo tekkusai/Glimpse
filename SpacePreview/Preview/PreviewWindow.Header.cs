@@ -1,23 +1,17 @@
-using System.Buffers.Binary;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
@@ -27,111 +21,225 @@ using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// What Open does for an item: the app Windows would use and the icon that
+/// stands for it. Neither means Windows will ask the user to pick one.
+/// </summary>
+internal sealed record OpenTarget(string? AppName, string? IconSource)
+{
+    public bool AsksForApp => AppName is null && IconSource is null;
+}
+
+/// <summary>The one tool a kind of file brings to the header.</summary>
+internal enum HeaderTool
+{
+    None,
+    Zoom,
+    Rotate,
+    Sign
+}
+
 public partial class PreviewWindow
 {
+    // ---------------------------------------------------------------------
+    // Header: browse, identity, the kind's tool, Open and the window's own
+    // buttons. docs/DESIGN.md, Header.
+    // ---------------------------------------------------------------------
+
+    private const string OpenWithLabelText = "Open with…";
+
+    // App icons outlive items: stepping through one app's files never
+    // reloads its icon. UI thread only.
+    private static readonly Dictionary<string, BitmapSource?> AppIcons = new(StringComparer.OrdinalIgnoreCase);
+
+    private IReadOnlyList<(string Label, Action Action)> _openActions = [];
+    private OpenTarget _openTarget = new(null, null);
+    private HeaderTool _headerTool;
+    private int _selectedCount = 1;
+    private bool _headerShowsBrand;
+
     /// <summary>
-    /// The rotate control follows the content: visible only while the native
-    /// image viewer is up, and honest about persistence in its tooltip.
+    /// What one item leaves behind goes before the next arrives, for a
+    /// preview and for the welcome alike.
     /// </summary>
-    private void HideContentActions()
+    private void ResetForNewItem()
     {
-        RotateLeftButton.Visibility = Visibility.Collapsed;
-        RotateRightButton.Visibility = Visibility.Collapsed;
-        ContentActions.Visibility = Visibility.Collapsed;
-        UpdateContentToolsSlotVisibility();
+        // The outgoing image writes its pending rotation before anything
+        // else touches state; the new item must never inherit it.
+        _rotationSession?.Commit();
+        _rotationSession = null;
+        ReleaseZoomTarget();
+        _escapeYieldsToContent = false;
+        _lastContentClickInViewerChrome = false;
+        _userEngagedContent = false;
+        _fillSignSurface = null;
+        _fillSignParkedContent = null;
+        _deferredWebFailure = null;
+        _fillSignPath = null;
     }
 
-    private void SharePath(string path)
+    /// <summary>
+    /// The header for one item: names and registry reads only. The file and
+    /// app icons land asynchronously; until they do the previous ones stay,
+    /// so stepping through a folder never blinks.
+    /// </summary>
+    private void ShowHeader(string path, string contentPath, int selectedCount, bool fileDialogMode, long version, CancellationToken token)
     {
-        var hwnd = new WindowInteropHelper(this).Handle;
-        if (ShareService.ShareFile(path, hwnd))
+        var isDirectory = Directory.Exists(contentPath);
+        FileNameText.Text = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(FileNameText.Text))
         {
-            SuppressOutsideDismissFor(TimeSpan.FromSeconds(30));
-            DiagnosticLog.Write($"share opened {path}");
+            FileNameText.Text = path;
+        }
+
+        _selectedCount = selectedCount;
+        ApplyHeaderSubtitle(path, _shortcutTarget);
+
+        _openActions = BuildOpenActions(path, contentPath, isDirectory);
+        ShowOpenTarget(ResolveOpenTarget(contentPath, isDirectory));
+        OpenControl.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
+        PinButton.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
+        SetBrowseControlsVisible(!fileDialogMode && !IsPinned);
+        ShowTool(ToolFor(contentPath, isDirectory, fileDialogMode));
+        SyncHeaderTools();
+
+        // Only a window on screen keeps its old icon; a fresh open, or the
+        // welcome's mark, would name the wrong item.
+        if (_headerShowsBrand || !IsVisible)
+        {
+            _headerShowsBrand = false;
+            FileIconImage.Visibility = Visibility.Hidden;
+        }
+
+        _ = UpdateFileIconAsync(path, version, token);
+    }
+
+    /// <summary>The welcome's header is the brand mark; its body says the rest.</summary>
+    private void ShowWelcomeHeader()
+    {
+        FileNameText.Text = string.Empty;
+        SubtitleText.Inlines.Clear();
+        _openActions = [];
+        _openTarget = new OpenTarget(null, null);
+        FileIconImage.Source = BrandMark.CreateImage();
+        FileIconImage.Visibility = Visibility.Visible;
+        _headerShowsBrand = true;
+        OpenControl.Visibility = Visibility.Collapsed;
+        PinButton.Visibility = Visibility.Collapsed;
+        SetBrowseControlsVisible(false);
+        ShowTool(HeaderTool.None);
+    }
+
+    // ---------------------------------------------------------------------
+    // Tools. The kind decides which one shows; the content binds it.
+    // ---------------------------------------------------------------------
+
+    /// <summary>The tool a kind of file brings, known from its name before anything loads.</summary>
+    internal static HeaderTool ToolFor(string contentPath, bool isDirectory, bool fileDialogMode)
+    {
+        if (isDirectory)
+        {
+            return HeaderTool.None;
+        }
+
+        // Converted spreadsheets have no viewer chrome of their own.
+        if (FileKinds.IsSpreadsheet(contentPath))
+        {
+            return OfficeDocumentPdfConverter.IsAvailable ? HeaderTool.Zoom : HeaderTool.None;
+        }
+
+        // A picker owns commit: nothing here may write to the file.
+        if (fileDialogMode)
+        {
+            return HeaderTool.None;
+        }
+
+        if (FileKinds.IsImage(contentPath))
+        {
+            return HeaderTool.Rotate;
+        }
+
+        return Path.GetExtension(contentPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+            ? HeaderTool.Sign
+            : HeaderTool.None;
+    }
+
+    private void ShowTool(HeaderTool tool)
+    {
+        if (tool == _headerTool)
+        {
             return;
         }
 
-        DiagnosticLog.Write($"share declined {path}");
-    }
-
-    private void SetBrowseControlsVisible(bool visible)
-    {
-        BrowseControls.Visibility = visible && !_isFileDialogMode
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-    }
-
-    internal void DetachBrowseContext(bool restoreSlideshowSize = true)
-    {
-        SetBrowseControlsVisible(false);
-        _multiSelectionPaths = null;
-        _multiSelectionIndex = 0;
-        CloseGridView();
-        StopSlideshow(restoreSlideshowSize);
-        GridButton.Visibility = Visibility.Collapsed;
-        PlayButton.Visibility = Visibility.Collapsed;
-        SetBrowsePosition(-1, 0);
+        _headerTool = tool;
+        ZoomControls.Visibility = tool == HeaderTool.Zoom ? Visibility.Visible : Visibility.Collapsed;
+        ContentActions.Visibility = tool == HeaderTool.Rotate ? Visibility.Visible : Visibility.Collapsed;
+        SignButton.Visibility = tool == HeaderTool.Sign ? Visibility.Visible : Visibility.Collapsed;
+        ContentToolsSlot.Visibility = tool == HeaderTool.None ? Visibility.Collapsed : Visibility.Visible;
+        ZoomControls.IsEnabled = true;
+        ContentActions.IsEnabled = true;
+        SignButton.IsEnabled = true;
     }
 
     /// <summary>
-    /// Chevrons rest at the folder's ends. An unknown position (probe, stale
-    /// shell) keeps both live; the shell answers again on the next step.
+    /// Until the item reveals, its tool keeps its face and a click finds
+    /// nothing to act on. Once revealed, a tool the content did not bind is
+    /// disabled; content that binds a tool its kind did not predict shows it.
     /// </summary>
-    public void SetBrowsePosition(int index, int count)
+    private void SyncHeaderTools()
     {
-        var known = index >= 0 && count > 0;
-        BrowsePreviousButton.IsEnabled = !known || index > 0;
-        BrowseNextButton.IsEnabled = !known || index < count - 1;
+        var bound = _zoomWebView is not null ? HeaderTool.Zoom
+            : _isFileDialogMode ? HeaderTool.None
+            : _rotationSession is not null ? HeaderTool.Rotate
+            : _fillSignPath is not null ? HeaderTool.Sign
+            : HeaderTool.None;
+        if (bound != HeaderTool.None)
+        {
+            ShowTool(bound);
+        }
+
+        var settled = _loadFinished;
+        ZoomControls.IsEnabled = !settled || _zoomWebView is not null;
+        ContentActions.IsEnabled = !settled || _rotationSession is not null;
+        SignButton.IsEnabled = _fillSignSurface is null && (!settled || _fillSignPath is not null);
     }
 
-    // ---------------------------------------------------------------------
-    // Header: icon, open-with, maximize, drag.
-    // ---------------------------------------------------------------------
+    private void SignButton_Click(object sender, RoutedEventArgs e) => _ = EnterFillSignModeAsync();
 
     /// <summary>
-    /// Uses the header zoom controls for a document webview. It drives the
-    /// same browser zoom as Ctrl+wheel, and the label follows both.
+    /// The header zoom drives the same browser zoom as Ctrl+wheel, and the
+    /// label follows both.
     /// </summary>
     private void ShowZoomControls(WebView2 webView)
     {
         _zoomWebView = webView;
         webView.ZoomFactorChanged += OnZoomFactorChanged;
         UpdateZoomLabel();
-        ZoomControls.Visibility = Visibility.Visible;
-        UpdateContentToolsSlotVisibility();
     }
 
-    private void HideZoomControls()
+    private void ReleaseZoomTarget()
     {
         if (_zoomWebView is not null)
         {
             _zoomWebView.ZoomFactorChanged -= OnZoomFactorChanged;
             _zoomWebView = null;
         }
-
-        UpdateZoomLabel();
-        ZoomControls.Visibility = Visibility.Collapsed;
-        UpdateContentToolsSlotVisibility();
-    }
-
-    private void UpdateContentToolsSlotVisibility()
-    {
-        ContentToolsSlot.Visibility =
-            ZoomControls.Visibility == Visibility.Visible
-            || ContentActions.Visibility == Visibility.Visible
-            || _fillSignPill?.Visibility == Visibility.Visible
-                ? Visibility.Visible
-                : Visibility.Hidden;
     }
 
     private void OnZoomFactorChanged(object? sender, EventArgs e) => UpdateZoomLabel();
 
     private void UpdateZoomLabel()
     {
-        var factor = _zoomWebView?.ZoomFactor ?? 1;
+        // An unbound pill keeps its face until the next sheet binds it.
+        if (_zoomWebView is null)
+        {
+            return;
+        }
+
+        var factor = _zoomWebView.ZoomFactor;
         ZoomResetButton.Content = $"{Math.Round(factor * 100)}%";
-        ZoomOutButton.IsEnabled = _zoomWebView is not null && CanAdjustZoom(factor, -1);
-        ZoomInButton.IsEnabled = _zoomWebView is not null && CanAdjustZoom(factor, 1);
+        ZoomOutButton.IsEnabled = CanAdjustZoom(factor, -1);
+        ZoomInButton.IsEnabled = CanAdjustZoom(factor, 1);
         AutomationProperties.SetName(ZoomResetButton, $"Reset zoom, currently {Math.Round(factor * 100)} percent");
     }
 
@@ -211,6 +319,10 @@ public partial class PreviewWindow
         DiagnosticLog.Write($"zoom adjust -> {target:0.##}");
     }
 
+    // ---------------------------------------------------------------------
+    // Identity.
+    // ---------------------------------------------------------------------
+
     private async Task UpdateFileIconAsync(string path, long version, CancellationToken token)
     {
         var entered = false;
@@ -224,8 +336,9 @@ public partial class PreviewWindow
                 return;
             }
 
+            // Hidden, never Collapsed: the name must not shift sideways.
             FileIconImage.Source = icon;
-            FileIconImage.Visibility = icon is null ? Visibility.Collapsed : Visibility.Visible;
+            FileIconImage.Visibility = icon is null ? Visibility.Hidden : Visibility.Visible;
         }
         catch (OperationCanceledException)
         {
@@ -244,305 +357,47 @@ public partial class PreviewWindow
         }
     }
 
-    private static string GetOpenLabel(string path)
-    {
-        if (Directory.Exists(path))
-        {
-            return "Open";
-        }
-
-        var extension = Path.GetExtension(path);
-        if (string.IsNullOrEmpty(extension))
-        {
-            return "Open";
-        }
-
-        // Queried fresh per preview: it is one sub-millisecond registry read,
-        // and the user can change a default app while the app stays resident.
-        var name = NativeMethods.TryGetFriendlyAppName(extension);
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return "Open";
-        }
-
-        // With no association, Windows offers its app picker as the
-        // "app" - and "Open with Pick an app" is not useful. Name the
-        // action for what it is.
-        if (name.Equals("Pick an app", StringComparison.OrdinalIgnoreCase))
-        {
-            return "Pick an app";
-        }
-
-        return $"Open with {(name.Length > 26 ? name[..25].TrimEnd() + "…" : name)}";
-    }
-
-    internal void OpenCurrent()
-    {
-        if (_isFileDialogMode)
-        {
-            DiagnosticLog.Write("open suppressed while file dialog owns commit");
-            return;
-        }
-
-        var path = CurrentPath;
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return;
-        }
-
-        try
-        {
-            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"open failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return;
-        }
-
-        DismissRequested?.Invoke(this, EventArgs.Empty);
-    }
-
     /// <summary>
-    /// Clicking into the preview hands it keyboard focus, so Ctrl+C and the
-    /// viewers' own shortcuts land where the user is looking. Only a click in
-    /// the CONTENT hands the keyboard to the content: a click on header chrome
-    /// (chevron, pin, zoom) activates the window but keeps the keys, or
-    /// stepping to a video would give every arrow key to the player.
+    /// A file picker can hold several items but never browses them, so the
+    /// count lives in the details there; elsewhere the position beside the
+    /// arrows says it.
     /// </summary>
-    public void ActivateForInteraction(int screenX, int screenY)
+    internal void SetSelectionCount(int selectedCount)
     {
-        if (!IsVisible)
+        _selectedCount = Math.Max(1, selectedCount);
+        if (CurrentPath is { } path)
         {
-            return;
-        }
-
-        try
-        {
-            Activate();
-        }
-        catch
-        {
-            // Activation is best-effort; the click itself still lands.
-        }
-
-        // A click on web content lands in the browser process, so Windows may
-        // deny the host the foreground and leave it with Explorer - where the
-        // next Ctrl+C copies Explorer's selected file instead of the
-        // highlighted text. The user clicked this window; make it true.
-        var hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd != IntPtr.Zero)
-        {
-            NativeMethods.ForceForeground(hwnd);
-            var foreground = NativeMethods.GetForegroundWindow();
-            if (foreground != hwnd)
-            {
-                DiagnosticLog.Write($"activate: foreground stayed 0x{foreground.ToInt64():X} (ours 0x{hwnd.ToInt64():X})");
-            }
-        }
-
-        // Web-backed content (PDF viewer, docs) needs real keyboard focus in
-        // the browser for its own Ctrl+C/Ctrl+F/arrow handling - the PDF
-        // plugin's selection is invisible to the WPF side. Don't steal focus
-        // from a text preview the user clicked into, and only do it when the
-        // click actually landed on the content, not the header.
-        bool clickedContent;
-        double contentY;
-        try
-        {
-            var y = PointFromScreen(new Point(screenX, screenY)).Y;
-            clickedContent = y >= HeaderHeight;
-            contentY = y - HeaderHeight;
-        }
-        catch
-        {
-            // A window mid-teardown cannot transform; treat as content.
-            clickedContent = true;
-            contentY = double.MaxValue;
-        }
-
-        if (!clickedContent)
-        {
-            // The browser child can retain Win32 focus after a content click.
-            // A later header action means arrows belong to preview browsing
-            // again, even though that stale child still reports focus.
-            _userEngagedContent = false;
-            _lastContentClickInViewerChrome = false;
-            return;
-        }
-
-        // Only content clicks enable the content-specific key exceptions.
-        // A click in the embedded viewer's own toolbar strip (page box,
-        // find) is the one place typed keys are the viewer's words.
-        _userEngagedContent = true;
-        UpdateFillSignPill();
-        _lastContentClickInViewerChrome = contentY < ViewerChromeBandHeight;
-        if (Keyboard.FocusedElement is not System.Windows.Controls.Primitives.TextBoxBase
-            && FindVisualChild<WebView2>(PreviewContent) is { } webView)
-        {
-            webView.Focus();
+            ApplyHeaderSubtitle(path, _shortcutTarget);
         }
     }
 
-    private async Task CopyWebViewSelectionAsync(WebView2 webView)
+    private void ApplyHeaderSubtitle(string path, string? shortcutTarget)
     {
-        try
-        {
-            if (webView.CoreWebView2 is { } core)
-            {
-                if (IsPdfViewerSource(core.Source ?? string.Empty))
-                {
-                    // The PDF plugin's selection is invisible to the DOM, so
-                    // hand the copy to the viewer itself through the browser's
-                    // input pipe. With nothing selected Chromium copies
-                    // nothing: over a document, Ctrl+C means "copy the text".
-                    DiagnosticLog.Write("ctrl+c forwarded into pdf viewer");
-                    await ForwardCtrlCAsync(core);
-                    return;
-                }
-
-                var json = await core.ExecuteScriptAsync("window.getSelection().toString()");
-                var text = JsonSerializer.Deserialize<string>(json);
-                if (!string.IsNullOrEmpty(text))
-                {
-                    SetClipboard(() => Clipboard.SetText(text), "copy web selection");
-                    return;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"webview selection copy failed: {ex.GetType().Name}: {ex.Message}");
-        }
-
-        CopyCurrentFile();
-    }
-
-    private static Task ForwardCtrlCAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core) =>
-        DispatchModifiedKeyAsync(core, 67, "KeyC", "c", modifiers: 2);
-
-    private static async Task DispatchPlainKeyAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core, int virtualKey, string code, string key)
-    {
-        var keyDown = $"{{\"type\":\"keyDown\",\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
-        var keyUp = $"{{\"type\":\"keyUp\",\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyDown);
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyUp);
-    }
-
-    private static async Task DispatchMouseClickAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core, double x, double y)
-    {
-        var invariant = System.Globalization.CultureInfo.InvariantCulture;
-        var sx = x.ToString("0.###", invariant);
-        var sy = y.ToString("0.###", invariant);
-        var down = $"{{\"type\":\"mousePressed\",\"x\":{sx},\"y\":{sy},\"button\":\"left\",\"clickCount\":1,\"buttons\":1,\"pointerType\":\"mouse\"}}";
-        var up = $"{{\"type\":\"mouseReleased\",\"x\":{sx},\"y\":{sy},\"button\":\"left\",\"clickCount\":1,\"buttons\":0,\"pointerType\":\"mouse\"}}";
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", down);
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", up);
-    }
-
-    private static async Task DispatchModifiedKeyAsync(Microsoft.Web.WebView2.Core.CoreWebView2 core, int virtualKey, string code, string key, int modifiers)
-    {
-        var keyDown = $"{{\"type\":\"keyDown\",\"modifiers\":{modifiers},\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
-        var keyUp = $"{{\"type\":\"keyUp\",\"modifiers\":{modifiers},\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyDown);
-        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyUp);
-    }
-
-    /// <summary>
-    /// The clipboard throws transiently when another process holds it open;
-    /// for an app that supports Ctrl+C, one silent retry is the
-    /// difference between trusted and flaky.
-    /// </summary>
-    private static void SetClipboard(Action write, string diagnosticLabel)
-    {
-        for (var attempt = 0; ; attempt++)
-        {
-            try
-            {
-                write();
-                return;
-            }
-            catch (Exception ex)
-            {
-                if (attempt >= 2)
-                {
-                    DiagnosticLog.Write($"{diagnosticLabel} failed: {ex.GetType().Name}: {ex.Message}");
-                    return;
-                }
-
-                Thread.Sleep(35);
-            }
-        }
-    }
-
-    private void CopyCurrentFile()
-    {
-        var path = CurrentPath;
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return;
-        }
-
-        SetClipboard(() => Clipboard.SetFileDropList(new StringCollection { path }), $"copy file {path}");
-    }
-
-    private void CopyCurrentPath()
-    {
-        var path = CurrentPath;
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            return;
-        }
-
-        SetClipboard(() => Clipboard.SetText(path), $"copy path {path}");
-    }
-
-    private void BuildContextMenu()
-    {
-        var menu = new ContextMenu { Style = (Style)FindResource("PreviewContextMenu") };
-        Theme.ApplyResources(menu);
-        TrackOwnedPopup(menu);
-
-        MenuItem Item(string header, Action action)
-        {
-            var item = new MenuItem { Header = header, Style = (Style)FindResource("PreviewMenuItem") };
-            item.Click += (_, _) => action();
-            return item;
-        }
-
-        menu.Items.Add(Item("Open", OpenCurrent));
-        menu.Items.Add(Item("Copy", CopyCurrentFile));
-        menu.Items.Add(Item("Copy path", CopyCurrentPath));
-        _contextMenu = menu;
-        RootChrome.ContextMenu = menu;
-    }
-
-    private void ApplyHeaderSubtitle(string path, string? shortcutTarget, int selectedCount)
-    {
+        var pickerCount = _isFileDialogMode ? _selectedCount : 1;
         SubtitleText.Inlines.Clear();
         if (shortcutTarget is null)
         {
-            SubtitleText.Text = BuildHeaderSubtitle(path, null, selectedCount);
+            SubtitleText.Text = BuildHeaderSubtitle(path, null, pickerCount);
             return;
         }
 
         // The target is a link: click reveals it in its containing folder.
         var link = new Hyperlink(new Run($"Shortcut → {shortcutTarget}"))
         {
-            Foreground = Theme.Brush(Theme.Current.TextSecondary),
             TextDecorations = null,
             Cursor = Cursors.Hand,
             Focusable = false,
             ToolTip = "Show target in Explorer"
         };
+        link.SetResourceReference(TextElement.ForegroundProperty, "Theme.TextSecondary");
         link.Click += (_, _) => RevealInExplorer(shortcutTarget);
         link.MouseEnter += (_, _) => link.TextDecorations = TextDecorations.Underline;
         link.MouseLeave += (_, _) => link.TextDecorations = null;
         SubtitleText.Inlines.Add(link);
 
-        if (selectedCount > 1)
+        if (pickerCount > 1)
         {
-            SubtitleText.Inlines.Add(new Run($" · {selectedCount} selected"));
+            SubtitleText.Inlines.Add(new Run($" · {pickerCount} selected"));
         }
     }
 
@@ -645,125 +500,208 @@ public partial class PreviewWindow
         }
     }
 
-    private void UpdateOpenControl(string label, IReadOnlyList<(string Label, Action Action)> secondaryActions)
+    // ---------------------------------------------------------------------
+    // Open. One pill: the app's icon, the word and a chevron.
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// What Open does: a folder opens in File Explorer, a program or a
+    /// shortcut runs itself, a document opens in its default app. With no
+    /// default app Windows asks, and the pill says so.
+    /// </summary>
+    internal static OpenTarget ResolveOpenTarget(string contentPath, bool isDirectory)
     {
-        var palette = Theme.Current;
-        var hasMenu = secondaryActions.Count > 0;
-
-        // A Grid, not a StackPanel: when the header runs out of width the
-        // label column shrinks and ellipsizes while the divider and chevron
-        // keep their place. A StackPanel measures children unconstrained, so
-        // it clips mid-glyph and pushes the chevron out of the pill entirely.
-        var panel = new Grid();
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        panel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var container = new Border
+        if (isDirectory)
         {
-            Width = MeasureOpenPillWidth(label, hasMenu),
-            CornerRadius = Metrics.PillCorner,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Child = panel
-        };
-
-        var openHalf = new Border
-        {
-            CornerRadius = hasMenu ? Metrics.PillLeftCorner : new CornerRadius(Metrics.RadiusPill - 1),
-            Padding = new Thickness(
-                Metrics.PillPadding.Left,
-                Metrics.PillPadding.Top,
-                hasMenu ? Metrics.PillInnerPadding : Metrics.PillPadding.Right,
-                Metrics.PillPadding.Bottom),
-            Background = Brushes.Transparent,
-            Cursor = Cursors.Hand,
-            ToolTip = "Open (Enter)",
-            Child = new TextBlock
-            {
-                Text = label,
-                FontSize = Metrics.FontLabel,
-                FontWeight = FontWeights.SemiBold,
-                MaxWidth = hasMenu ? HeaderOpenLabelWithMenuMaxWidth : HeaderOpenLabelMaxWidth,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Theme.Brush(palette.TextPrimary)
-            }
-        };
-        AutomationProperties.SetName(openHalf, label);
-        AutomationProperties.SetHelpText(openHalf, "Open the previewed item");
-        openHalf.MouseEnter += (_, _) => openHalf.Background = Theme.Brush(palette.HoverBg);
-        openHalf.MouseLeave += (_, _) => openHalf.Background = Brushes.Transparent;
-        openHalf.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        openHalf.MouseLeftButtonUp += (_, e) =>
-        {
-            OpenCurrent();
-            e.Handled = true;
-        };
-        Grid.SetColumn(openHalf, 0);
-        panel.Children.Add(openHalf);
-
-        if (hasMenu)
-        {
-            var divider = new Border
-            {
-                Width = 1,
-                Margin = new Thickness(0, 5, 0, 5),
-                Background = Theme.Brush(palette.RaisedBorder)
-            };
-            Grid.SetColumn(divider, 1);
-            panel.Children.Add(divider);
-
-            var menuHalf = new Border
-            {
-                CornerRadius = Metrics.PillRightCorner,
-                Padding = new Thickness(9, Metrics.PillPadding.Top, Metrics.PillInnerPadding, Metrics.PillPadding.Bottom),
-                Background = Brushes.Transparent,
-                Cursor = Cursors.Hand,
-                ToolTip = "More ways to open",
-                Child = new TextBlock
-                {
-                    Text = "\uE70D",
-                    FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                    FontSize = 8,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Foreground = Theme.Brush(palette.TextSecondary)
-                }
-            };
-            AutomationProperties.SetName(menuHalf, "More open actions");
-            menuHalf.MouseEnter += (_, _) => menuHalf.Background = Theme.Brush(palette.HoverBg);
-            menuHalf.MouseLeave += (_, _) => menuHalf.Background = Brushes.Transparent;
-            menuHalf.MouseLeftButtonDown += (_, e) => e.Handled = true;
-            menuHalf.MouseLeftButtonUp += (_, e) =>
-            {
-                ShowOpenActionsMenu(container, secondaryActions);
-                e.Handled = true;
-            };
-            Grid.SetColumn(menuHalf, 2);
-            panel.Children.Add(menuHalf);
+            return new OpenTarget(
+                "File Explorer",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"));
         }
 
-        OpenControl.Content = container;
+        var extension = Path.GetExtension(contentPath);
+        var executable = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_EXECUTABLE);
+        if (executable == "%1" || FileKinds.IsShortcut(contentPath) || FileKinds.IsInternetShortcut(contentPath))
+        {
+            return new OpenTarget(null, contentPath);
+        }
 
-        // Swapping Content while the window is hidden (Space-close, then
-        // Space-open on another file) leaves the header Grid's cached measure
-        // for this column at the previous pill's width; the new, wider pill
-        // then renders clipped into the old slot. Explicitly dirty the
-        // control's measure so the header re-measures on the next pass.
-        OpenControl.InvalidateMeasure();
+        // Unassociated types resolve to the picker itself, and its name is
+        // localized; the program behind it is not.
+        var name = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_FRIENDLYAPPNAME);
+        if (name is null || executable?.EndsWith(@"\OpenWith.exe", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return new OpenTarget(null, null);
+        }
 
-        container.Loaded += (_, _) => DiagnosticLog.Write(
-            $"openpill label='{label}' container={container.ActualWidth:0} open={openHalf.ActualWidth:0} control={OpenControl.ActualWidth:0}");
+        // A Store app (its id names the package) shows its tile icon; a
+        // desktop app shows its program's icon.
+        var appId = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_APPID);
+        var icon = appId?.Contains('!') == true ? $@"shell:AppsFolder\{appId}" : executable;
+        return new OpenTarget(name, icon);
     }
 
-    private static double MeasureOpenPillWidth(string label, bool hasMenu)
+    private void ShowOpenTarget(OpenTarget target)
     {
-        var labelCap = hasMenu ? HeaderOpenLabelWithMenuMaxWidth : HeaderOpenLabelMaxWidth;
-        var textWidth = Math.Clamp(label.Length * 6.4, 34, labelCap);
-        var chromeWidth = hasMenu ? 54 : 28;
-        var minimum = hasMenu ? HeaderOpenMenuMinWidth : HeaderOpenMinWidth;
-        return Math.Clamp(textWidth + chromeWidth, minimum, HeaderOpenMaxWidth);
+        _openTarget = target;
+        OpenInAppLabel.Visibility = target.AsksForApp ? Visibility.Hidden : Visibility.Visible;
+        OpenWithLabel.Visibility = target.AsksForApp ? Visibility.Visible : Visibility.Hidden;
+        OpenButton.ToolTip = target.AppName is { } app ? $"Open in {app} (Enter)"
+            : target.AsksForApp ? "Choose an app to open this (Enter)"
+            : "Open (Enter)";
+        AutomationProperties.SetName(OpenButton, target.AppName is { } named ? $"Open in {named}"
+            : target.AsksForApp ? "Open with"
+            : "Open");
+
+        if (target.IconSource is not { } source)
+        {
+            OpenAppIcon.Source = null;
+            return;
+        }
+
+        if (AppIcons.TryGetValue(source, out var cached))
+        {
+            OpenAppIcon.Source = cached;
+            return;
+        }
+
+        OpenAppIcon.Source = null;
+        _ = LoadAppIconAsync(source);
+    }
+
+    private async Task LoadAppIconAsync(string source)
+    {
+        // Twice the slot's device pixels, scaled down: small icon frames are
+        // often a different, blurrier drawing.
+        var pixels = (int)Math.Ceiling(32 * VisualTreeHelper.GetDpi(this).DpiScaleX);
+        BitmapSource? icon = null;
+        try
+        {
+            icon = await Task.Run(() => ShellThumbnailProvider.TryGetIcon(source, pixels));
+        }
+        catch
+        {
+            // The pill reads without its icon.
+        }
+
+        AppIcons[source] = icon;
+        if (string.Equals(_openTarget.IconSource, source, StringComparison.OrdinalIgnoreCase))
+        {
+            OpenAppIcon.Source = icon;
+        }
+    }
+
+    /// <summary>
+    /// The chevron's menu: another app first, then where the item lives,
+    /// then what only this kind can do.
+    /// </summary>
+    private List<(string Label, Action Action)> BuildOpenActions(string path, string contentPath, bool isDirectory)
+    {
+        var actions = new List<(string Label, Action Action)>();
+        var contentIsFile = !isDirectory && File.Exists(contentPath);
+        if (contentIsFile && !FileKinds.IsExecutableLike(contentPath))
+        {
+            actions.Add((OpenWithLabelText, () => ShowOpenWithDialog(contentPath)));
+        }
+
+        // Not every preview was reached through an Explorer selection (file
+        // dialogs, folder browsing), so every preview answers "where is it".
+        if (File.Exists(path) || Directory.Exists(path))
+        {
+            actions.Add(("Show in Explorer", () => RevealInExplorer(path)));
+        }
+
+        if (contentIsFile && LooksLikeLocalDrivePath(contentPath))
+        {
+            actions.Add(("Share", () => SharePath(contentPath)));
+        }
+
+        if (_shortcutTarget is { } target)
+        {
+            actions.Add(("Show target in Explorer", () => RevealInExplorer(target)));
+        }
+
+        if (FileKinds.IsExecutableLike(contentPath))
+        {
+            actions.Add(("Run as administrator", () => RunAsAdministrator(contentPath)));
+        }
+
+        if (isDirectory)
+        {
+            actions.Add(("Open in Terminal", () => OpenInTerminal(contentPath)));
+        }
+
+        return actions;
+    }
+
+    private void OpenButton_Click(object sender, RoutedEventArgs e) => OpenCurrent();
+
+    private void OpenMenuButton_Click(object sender, RoutedEventArgs e) => ShowOpenActionsMenu(OpenControl, _openActions);
+
+    internal void OpenCurrent()
+    {
+        if (_isFileDialogMode)
+        {
+            DiagnosticLog.Write("open suppressed while file dialog owns commit");
+            return;
+        }
+
+        var path = CurrentPath;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"open failed {path}: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        DismissRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Windows' own Open With dialog, on a thread of its own: it is modal
+    /// and may wait on another process, and this thread carries the
+    /// keyboard hook, which Windows drops if it stalls. The preview steps
+    /// aside the way Open does.
+    /// </summary>
+    private void ShowOpenWithDialog(string path)
+    {
+        if (_isFileDialogMode)
+        {
+            return;
+        }
+
+        var thread = new Thread(() =>
+        {
+            var chosen = NativeMethods.ShowOpenWithDialog(path);
+            DiagnosticLog.Write($"open with {(chosen ? "chosen" : "cancelled")} {path}");
+        })
+        {
+            IsBackground = true,
+            Name = "Open with"
+        };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        DismissRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SharePath(string path)
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (ShareService.ShareFile(path, hwnd))
+        {
+            SuppressOutsideDismissFor(TimeSpan.FromSeconds(30));
+            DiagnosticLog.Write($"share opened {path}");
+            return;
+        }
+
+        DiagnosticLog.Write($"share declined {path}");
     }
 
     private void ShowOpenActionsMenu(FrameworkElement anchor, IReadOnlyList<(string Label, Action Action)> actions)
@@ -771,7 +709,7 @@ public partial class PreviewWindow
         // The outside-click dismissal closes the menu on mouse DOWN; without
         // this guard the mouse UP on the chevron instantly reopens it, so
         // clicking the chevron a second time could fail to collapse the flyout.
-        if (DateTime.UtcNow - _flyoutClosedAt < TimeSpan.FromMilliseconds(300))
+        if (actions.Count == 0 || DateTime.UtcNow - _flyoutClosedAt < TimeSpan.FromMilliseconds(300))
         {
             return;
         }
@@ -780,7 +718,7 @@ public partial class PreviewWindow
         {
             Style = (Style)FindResource("PreviewContextMenu"),
             PlacementTarget = anchor,
-            Placement = System.Windows.Controls.Primitives.PlacementMode.Custom
+            Placement = PlacementMode.Custom
         };
 
         // Own the placement outright: right edge flush with the pill, one gap
@@ -788,23 +726,101 @@ public partial class PreviewWindow
         // adjustment and loses.
         menu.CustomPopupPlacementCallback = (popupSize, targetSize, _) =>
         [
-            new System.Windows.Controls.Primitives.CustomPopupPlacement(
+            new CustomPopupPlacement(
                 new Point(targetSize.Width - popupSize.Width, targetSize.Height + Metrics.FlyoutGap),
-                System.Windows.Controls.Primitives.PopupPrimaryAxis.Horizontal)
+                PopupPrimaryAxis.Horizontal)
         ];
-
-        Theme.ApplyResources(menu);
 
         foreach (var (label, action) in actions)
         {
-            var item = new MenuItem { Header = label, Style = (Style)FindResource("PreviewMenuItem") };
-            item.Click += (_, _) => action();
-            menu.Items.Add(item);
+            menu.Items.Add(MenuItemFor(label, action));
         }
 
         TrackOwnedPopup(menu);
         menu.Closed += (_, _) => _flyoutClosedAt = DateTime.UtcNow;
         menu.IsOpen = true;
+    }
+
+    // An action runs after its menu has closed, so a dialog it opens never
+    // fights the closing popup for the foreground.
+    private MenuItem MenuItemFor(string label, Action action)
+    {
+        var item = new MenuItem { Header = label, Style = (Style)FindResource("PreviewMenuItem") };
+        item.Click += (_, _) => Dispatcher.BeginInvoke(action, DispatcherPriority.Input);
+        return item;
+    }
+
+    // ---------------------------------------------------------------------
+    // The right-click menu: one menu wherever the preview is ours. The PDF
+    // viewer keeps its own; its selection lives inside the plugin.
+    // ---------------------------------------------------------------------
+
+    private void BuildContextMenu()
+    {
+        var menu = new ContextMenu { Style = (Style)FindResource("PreviewContextMenu") };
+        TrackOwnedPopup(menu);
+        RootChrome.ContextMenuOpening += (_, e) =>
+        {
+            // The welcome has no item to act on.
+            if (CurrentPath is null)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            FillContextMenu(menu, selectedText: null);
+        };
+        _contextMenu = menu;
+        RootChrome.ContextMenu = menu;
+    }
+
+    internal void FillContextMenu(ContextMenu menu, string? selectedText)
+    {
+        menu.Items.Clear();
+        var separator = (Style)FindResource("PreviewMenuSeparator");
+        if (!string.IsNullOrEmpty(selectedText))
+        {
+            menu.Items.Add(MenuItemFor("Copy", () => SetClipboard(() => Clipboard.SetText(selectedText), "copy selection")));
+            menu.Items.Add(new Separator { Style = separator });
+        }
+
+        if (!_openTarget.AsksForApp)
+        {
+            menu.Items.Add(MenuItemFor(_openTarget.AppName is { } app ? $"Open in {app}" : "Open", OpenCurrent));
+        }
+
+        foreach (var (label, action) in _openActions)
+        {
+            menu.Items.Add(MenuItemFor(label, action));
+        }
+
+        menu.Items.Add(new Separator { Style = separator });
+        menu.Items.Add(MenuItemFor(string.IsNullOrEmpty(selectedText) ? "Copy" : "Copy file", CopyCurrentFile));
+        menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
+    }
+
+    private void OnWebContextMenuRequested(CoreWebView2 core, CoreWebView2ContextMenuRequestedEventArgs args)
+    {
+        if (_contextMenu is not { } menu
+            || RootChrome.ContextMenu is null
+            || IsPdfViewerSource(core.Source ?? string.Empty))
+        {
+            ArmWebContextMenu(core);
+            return;
+        }
+
+        args.Handled = true;
+        var target = args.ContextMenuTarget;
+        FillContextMenu(menu, target.HasSelection ? target.SelectionText : null);
+        menu.PlacementTarget = RootChrome;
+        menu.Placement = PlacementMode.MousePoint;
+        menu.IsOpen = true;
+    }
+
+    private void ArmWebContextMenu(CoreWebView2 core)
+    {
+        RememberWebViewProcesses(core);
+        Interlocked.Exchange(ref _webContextMenuArmedUntilTicks, DateTime.UtcNow.AddSeconds(20).Ticks);
     }
 
     private void TrackOwnedPopup(ContextMenu menu)
@@ -841,7 +857,7 @@ public partial class PreviewWindow
         }
     }
 
-    private void RememberWebViewProcesses(Microsoft.Web.WebView2.Core.CoreWebView2 core)
+    private void RememberWebViewProcesses(CoreWebView2 core)
     {
         var processIds = new List<uint>();
         if (core.BrowserProcessId != 0)
@@ -878,10 +894,236 @@ public partial class PreviewWindow
         }
     }
 
-    private void ArmWebContextMenu(Microsoft.Web.WebView2.Core.CoreWebView2 core)
+    // ---------------------------------------------------------------------
+    // Clipboard and focus.
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Clicking into the preview hands it keyboard focus, so Ctrl+C and the
+    /// viewers' own shortcuts land where the user is looking. Only a click in
+    /// the CONTENT hands the keyboard to the content: a click on header chrome
+    /// (chevron, pin, zoom) activates the window but keeps the keys, or
+    /// stepping to a video would give every arrow key to the player.
+    /// </summary>
+    public void ActivateForInteraction(int screenX, int screenY)
     {
-        RememberWebViewProcesses(core);
-        Interlocked.Exchange(ref _webContextMenuArmedUntilTicks, DateTime.UtcNow.AddSeconds(20).Ticks);
+        if (!IsVisible)
+        {
+            return;
+        }
+
+        try
+        {
+            Activate();
+        }
+        catch
+        {
+            // Activation is best-effort; the click itself still lands.
+        }
+
+        // A click on web content lands in the browser process, so Windows may
+        // deny the host the foreground and leave it with Explorer - where the
+        // next Ctrl+C copies Explorer's selected file instead of the
+        // highlighted text. The user clicked this window; make it true.
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            NativeMethods.ForceForeground(hwnd);
+            var foreground = NativeMethods.GetForegroundWindow();
+            if (foreground != hwnd)
+            {
+                DiagnosticLog.Write($"activate: foreground stayed 0x{foreground.ToInt64():X} (ours 0x{hwnd.ToInt64():X})");
+            }
+        }
+
+        // Web-backed content (PDF viewer, docs) needs real keyboard focus in
+        // the browser for its own Ctrl+C/Ctrl+F/arrow handling - the PDF
+        // plugin's selection is invisible to the WPF side. Don't steal focus
+        // from a text preview the user clicked into, and only do it when the
+        // click actually landed on the content, not the header.
+        bool clickedContent;
+        double contentY;
+        try
+        {
+            var y = PointFromScreen(new Point(screenX, screenY)).Y;
+            clickedContent = y >= HeaderHeight;
+            contentY = y - HeaderHeight;
+        }
+        catch
+        {
+            // A window mid-teardown cannot transform; treat as content.
+            clickedContent = true;
+            contentY = double.MaxValue;
+        }
+
+        if (!clickedContent)
+        {
+            // The browser child can retain Win32 focus after a content click.
+            // A later header action means arrows belong to preview browsing
+            // again, even though that stale child still reports focus.
+            _userEngagedContent = false;
+            _lastContentClickInViewerChrome = false;
+            return;
+        }
+
+        // Only content clicks enable the content-specific key exceptions.
+        // A click in the embedded viewer's own toolbar strip (page box,
+        // find) is the one place typed keys are the viewer's words.
+        _userEngagedContent = true;
+        _lastContentClickInViewerChrome = contentY < ViewerChromeBandHeight;
+        if (Keyboard.FocusedElement is not TextBoxBase
+            && FindVisualChild<WebView2>(PreviewContent) is { } webView)
+        {
+            webView.Focus();
+        }
+    }
+
+    private async Task CopyWebViewSelectionAsync(WebView2 webView)
+    {
+        try
+        {
+            if (webView.CoreWebView2 is { } core)
+            {
+                if (IsPdfViewerSource(core.Source ?? string.Empty))
+                {
+                    // The PDF plugin's selection is invisible to the DOM, so
+                    // hand the copy to the viewer itself through the browser's
+                    // input pipe. With nothing selected Chromium copies
+                    // nothing: over a document, Ctrl+C means "copy the text".
+                    DiagnosticLog.Write("ctrl+c forwarded into pdf viewer");
+                    await ForwardCtrlCAsync(core);
+                    return;
+                }
+
+                var json = await core.ExecuteScriptAsync("window.getSelection().toString()");
+                var text = JsonSerializer.Deserialize<string>(json);
+                if (!string.IsNullOrEmpty(text))
+                {
+                    SetClipboard(() => Clipboard.SetText(text), "copy web selection");
+                    return;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"webview selection copy failed: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        CopyCurrentFile();
+    }
+
+    private static Task ForwardCtrlCAsync(CoreWebView2 core) =>
+        DispatchModifiedKeyAsync(core, 67, "KeyC", "c", modifiers: 2);
+
+    private static async Task DispatchPlainKeyAsync(CoreWebView2 core, int virtualKey, string code, string key)
+    {
+        var keyDown = $"{{\"type\":\"keyDown\",\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
+        var keyUp = $"{{\"type\":\"keyUp\",\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyDown);
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyUp);
+    }
+
+    private static async Task DispatchMouseClickAsync(CoreWebView2 core, double x, double y)
+    {
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        var sx = x.ToString("0.###", invariant);
+        var sy = y.ToString("0.###", invariant);
+        var down = $"{{\"type\":\"mousePressed\",\"x\":{sx},\"y\":{sy},\"button\":\"left\",\"clickCount\":1,\"buttons\":1,\"pointerType\":\"mouse\"}}";
+        var up = $"{{\"type\":\"mouseReleased\",\"x\":{sx},\"y\":{sy},\"button\":\"left\",\"clickCount\":1,\"buttons\":0,\"pointerType\":\"mouse\"}}";
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", down);
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchMouseEvent", up);
+    }
+
+    private static async Task DispatchModifiedKeyAsync(CoreWebView2 core, int virtualKey, string code, string key, int modifiers)
+    {
+        var keyDown = $"{{\"type\":\"keyDown\",\"modifiers\":{modifiers},\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
+        var keyUp = $"{{\"type\":\"keyUp\",\"modifiers\":{modifiers},\"windowsVirtualKeyCode\":{virtualKey},\"nativeVirtualKeyCode\":{virtualKey},\"code\":\"{code}\",\"key\":\"{key}\"}}";
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyDown);
+        await core.CallDevToolsProtocolMethodAsync("Input.dispatchKeyEvent", keyUp);
+    }
+
+    /// <summary>
+    /// The clipboard throws transiently when another process holds it open;
+    /// for an app that supports Ctrl+C, one silent retry is the
+    /// difference between trusted and flaky.
+    /// </summary>
+    private static void SetClipboard(Action write, string diagnosticLabel)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                write();
+                return;
+            }
+            catch (Exception ex)
+            {
+                if (attempt >= 2)
+                {
+                    DiagnosticLog.Write($"{diagnosticLabel} failed: {ex.GetType().Name}: {ex.Message}");
+                    return;
+                }
+
+                Thread.Sleep(35);
+            }
+        }
+    }
+
+    private void CopyCurrentFile()
+    {
+        var path = CurrentPath;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        SetClipboard(() => Clipboard.SetFileDropList(new StringCollection { path }), $"copy file {path}");
+    }
+
+    private void CopyCurrentPath()
+    {
+        var path = CurrentPath;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        SetClipboard(() => Clipboard.SetText(path), $"copy path {path}");
+    }
+
+    // ---------------------------------------------------------------------
+    // Browse lane and window buttons.
+    // ---------------------------------------------------------------------
+
+    private void SetBrowseControlsVisible(bool visible)
+    {
+        BrowseControls.Visibility = visible && !_isFileDialogMode
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    internal void DetachBrowseContext(bool restoreSlideshowSize = true)
+    {
+        SetBrowseControlsVisible(false);
+        _multiSelectionPaths = null;
+        _multiSelectionIndex = 0;
+        CloseGridView();
+        StopSlideshow(restoreSlideshowSize);
+        GridButton.Visibility = Visibility.Collapsed;
+        PlayButton.Visibility = Visibility.Collapsed;
+        UpdateSelectionPosition();
+        SetBrowsePosition(-1, 0);
+    }
+
+    /// <summary>
+    /// Chevrons rest at the folder's ends. An unknown position (probe, stale
+    /// shell) keeps both live; the shell answers again on the next step.
+    /// </summary>
+    public void SetBrowsePosition(int index, int count)
+    {
+        var known = index >= 0 && count > 0;
+        BrowsePreviousButton.IsEnabled = !known || index > 0;
+        BrowseNextButton.IsEnabled = !known || index < count - 1;
     }
 
     private void CloseButton_Click(object sender, RoutedEventArgs e)
@@ -920,5 +1162,17 @@ public partial class PreviewWindow
         PinButton.ToolTip = reached
             ? "Up to 6 previews can stay pinned. Unpin one to pin this."
             : "Pin (stays open)";
+    }
+
+    // ---------------------------------------------------------------------
+    // Theme. Brushes follow the application's resources by themselves; the
+    // frame's dark mode is the one thing to re-apply.
+    // ---------------------------------------------------------------------
+
+    private void FollowTheme()
+    {
+        Action repaint = () => WindowFrame.ApplyThemeMode(Hwnd);
+        Theme.Changed += repaint;
+        Closed += (_, _) => Theme.Changed -= repaint;
     }
 }

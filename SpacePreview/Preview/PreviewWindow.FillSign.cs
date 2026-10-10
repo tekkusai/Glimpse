@@ -30,90 +30,15 @@ namespace SpacePreview.Preview;
 public partial class PreviewWindow
 {
     // ---------------------------------------------------------------------
-    // Fill and sign. The pen pill appears only after the user engages a
-    // native PDF; sign mode swaps in our own page surface (the embedded
-    // viewer is a closed world), and saving never touches the original
-    // except by the user's explicit second choice.
+    // Fill and sign. The header's Sign pill comes with every native PDF;
+    // sign mode swaps in our own page surface (the embedded viewer is a
+    // closed world), and saving never touches the original except by the
+    // user's explicit second choice.
     // ---------------------------------------------------------------------
 
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
     internal void RequestFillSignEscape() => _fillSignSurface?.HandleEscape();
-
-    private void UpdateFillSignPill()
-    {
-        if (_fillSignPill is null)
-        {
-            _fillSignPill = BuildFillSignPill();
-            ContentToolsSlot.Children.Add(_fillSignPill);
-        }
-
-        // Visible from the moment a native PDF loads: discoverability beat
-        // the engagement gate in tester hands, and the reserved slot means
-        // no reflow either way.
-        _fillSignPill.Visibility =
-            !_isFileDialogMode && _fillSignPath is not null && _fillSignSurface is null
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        UpdateContentToolsSlotVisibility();
-    }
-
-    private Border BuildFillSignPill()
-    {
-        var palette = Theme.Current;
-        var pill = new Border
-        {
-            Height = 27,
-            Padding = new Thickness(11, 0, 12, 0),
-            CornerRadius = Metrics.PillCorner,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Center,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            ToolTip = "Fill and sign",
-            Child = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center,
-                Children =
-                {
-                    new TextBlock
-                    {
-                        Text = "",
-                        FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                        FontSize = 11,
-                        Margin = new Thickness(0, 0, 6, 0),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Foreground = Theme.Brush(palette.TextSecondary)
-                    },
-                    new TextBlock
-                    {
-                        Text = "Sign",
-                        FontSize = Metrics.FontLabel,
-                        FontWeight = FontWeights.SemiBold,
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Foreground = Theme.Brush(palette.TextPrimary)
-                    }
-                }
-            }
-        };
-        pill.MouseEnter += (_, _) => pill.Background = Theme.Brush(palette.HoverBg);
-        pill.MouseLeave += (_, _) => pill.Background = Theme.Brush(palette.RaisedBg);
-        pill.MouseLeftButtonDown += (_, e) =>
-        {
-            pill.Background = Theme.Brush(palette.PressedBg);
-            e.Handled = true;
-        };
-        pill.MouseLeftButtonUp += async (_, e) =>
-        {
-            pill.Background = Theme.Brush(palette.RaisedBg);
-            e.Handled = true;
-            await EnterFillSignModeAsync();
-        };
-        return pill;
-    }
 
     private async Task EnterFillSignModeAsync()
     {
@@ -150,7 +75,7 @@ public partial class PreviewWindow
         _fillSignParkedContent = current;
         _fillSignSurface = surface;
         PreviewContent.Content = surface;
-        UpdateFillSignPill();
+        SyncHeaderTools();
         DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}");
     }
 
@@ -188,7 +113,7 @@ public partial class PreviewWindow
             _fillSignParkedContent = null;
         }
 
-        UpdateFillSignPill();
+        SyncHeaderTools();
         DiagnosticLog.Write("fill-sign exited");
         var deferredFailure = _deferredWebFailure;
         _deferredWebFailure = null;
@@ -250,7 +175,7 @@ public partial class PreviewWindow
 
             _fillSignSurface = null;
             _fillSignParkedContent = null;
-            UpdateFillSignPill();
+            SyncHeaderTools();
 
             // The saved file is the honest outcome: show it.
             if (!ShowPreview(finalPath, Hwnd))

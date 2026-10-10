@@ -77,7 +77,6 @@ public sealed class ElevationMismatchNotificationTests
         Assert.Contains("Settings.Update", source, StringComparison.Ordinal);
         Assert.DoesNotContain("TryBuildPersistedKey", source, StringComparison.Ordinal);
         Assert.DoesNotContain("TransientPreviewAccessWarningKey", source, StringComparison.Ordinal);
-        Assert.Contains("_hiddenForSession", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIF_INFO", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_NOSOUND", source, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", source, StringComparison.Ordinal);

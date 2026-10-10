@@ -43,11 +43,6 @@ public partial class PreviewWindow : Window
     // beautiful: header chrome intact, content with room to breathe.
     internal const double StageMinWidth = 640;
     internal const double StageMinHeight = 480;
-    private const double HeaderOpenMaxWidth = 190;
-    private const double HeaderOpenMinWidth = 78;
-    private const double HeaderOpenMenuMinWidth = 104;
-    private const double HeaderOpenLabelMaxWidth = 162;
-    private const double HeaderOpenLabelWithMenuMaxWidth = 136;
     private const double FileCardWidth = 600;
     private const double FileCardVisualSlotWidth = 560;
     private const double FileCardVisualSlotHeight = 220;
@@ -94,12 +89,10 @@ public partial class PreviewWindow : Window
     private StageFitHint? _stageFitHint;
     private long _stageFitVersion;
 
-    private Border? _fillSignPill;
     private FillSignSurface? _fillSignSurface;
     private FrameworkElement? _fillSignParkedContent;
     private Action? _deferredWebFailure;
     private string? _fillSignPath;
-    private ThemePalette? _appliedResources;
     private DateTime _flyoutClosedAt;
     private string? _shortcutTarget;
     private ContextMenu? _contextMenu;
@@ -137,9 +130,7 @@ public partial class PreviewWindow : Window
     {
         InitializeComponent();
         ApplyTopmost();
-        Theme.Refresh();
-        Theme.ApplyResources(this);
-        _appliedResources = Theme.Current;
+        FollowTheme();
         BuildContextMenu();
         ZoomInButton.Click += (_, _) => AdjustZoom(1);
         ZoomOutButton.Click += (_, _) => AdjustZoom(-1);
@@ -212,12 +203,7 @@ public partial class PreviewWindow : Window
         _isFileDialogMode = fileDialogMode;
         _placementOwnerHwnd = fileDialogMode ? explorerHwnd : IntPtr.Zero;
         RootChrome.ContextMenu = fileDialogMode ? null : _contextMenu;
-        // The outgoing image writes its pending rotation before anything
-        // else touches state; the new file must never inherit it.
-        _rotationSession?.Commit();
-        _rotationSession = null;
-        HideZoomControls();
-        HideContentActions();
+        ResetForNewItem();
 
         var version = Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
@@ -227,89 +213,13 @@ public partial class PreviewWindow : Window
         _loadFinished = false;
         RestoreFromNativeMinimize();
 
-        // Compare against the palette these resources were actually built
-        // from: the tray may already have refreshed Theme.Current, making
-        // Refresh() report "no change" while this window is still stale.
-        Theme.Refresh();
-        if (!ReferenceEquals(_appliedResources, Theme.Current))
-        {
-            _appliedResources = Theme.Current;
-            Theme.ApplyResources(this);
-            if (_contextMenu is not null)
-            {
-                Theme.ApplyResources(_contextMenu);
-            }
-
-            ApplyThemeToDwm();
-        }
-
         CurrentPath = path;
         // Previewing a shortcut should preview what it points at, like Quick
         // Look does for aliases. Opening still goes through the .lnk itself.
         _shortcutTarget = FileKinds.IsShortcut(path) ? TryResolveShortcutTarget(path) : null;
         var contentPath = _shortcutTarget ?? path;
 
-        FileNameText.Text = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (string.IsNullOrWhiteSpace(FileNameText.Text))
-        {
-            FileNameText.Text = path;
-        }
-
-        ApplyHeaderSubtitle(path, _shortcutTarget, selectedCount);
-
-        var secondaryActions = new List<(string Label, Action Action)>();
-        if (FileKinds.IsExecutableLike(contentPath))
-        {
-            var exePath = contentPath;
-            secondaryActions.Add(("Run as administrator", () => RunAsAdministrator(exePath)));
-        }
-
-        if (Directory.Exists(contentPath))
-        {
-            var folderPath = contentPath;
-            secondaryActions.Add(("Open in Terminal", () => OpenInTerminal(folderPath)));
-        }
-
-        if (_shortcutTarget is not null)
-        {
-            var target = _shortcutTarget;
-            secondaryActions.Add(("Show target in Explorer", () => RevealInExplorer(target)));
-        }
-
-        if (File.Exists(contentPath) && LooksLikeLocalDrivePath(contentPath))
-        {
-            var sharePath = contentPath;
-            secondaryActions.Add(("Share", () => SharePath(sharePath)));
-        }
-
-        // Not every previewed item was reached through an Explorer selection
-        // (file dialogs, folder browsing), so every preview answers "where is
-        // this file".
-        if (File.Exists(path) || Directory.Exists(path))
-        {
-            var revealPath = path;
-            secondaryActions.Add(("Show in Explorer", () => RevealInExplorer(revealPath)));
-        }
-
-        UpdateOpenControl(GetOpenLabel(contentPath), secondaryActions);
-        OpenControl.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
-        PinButton.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
-        SetBrowseControlsVisible(!fileDialogMode && !IsPinned);
-        // The next icon owns this slot. Keeping the lane reserved prevents a
-        // late shell lookup from shifting the title, while clearing the source
-        // prevents the previous item's glyph from impersonating the new one.
-        FileIconImage.Source = null;
-        FileIconImage.Visibility = Visibility.Hidden;
-        _ = UpdateFileIconAsync(path, version, token);
-
-        _escapeYieldsToContent = false;
-        _lastContentClickInViewerChrome = false;
-        _userEngagedContent = false;
-        _fillSignSurface = null;
-        _fillSignParkedContent = null;
-        _deferredWebFailure = null;
-        _fillSignPath = null;
-        UpdateFillSignPill();
+        ShowHeader(path, contentPath, selectedCount, fileDialogMode, version, token);
 
         // A dragged size is local intent: it lives exactly as long as the
         // item under it. The next item's content rules again, and it
@@ -420,30 +330,10 @@ public partial class PreviewWindow : Window
         _isFileDialogMode = false;
         _placementOwnerHwnd = IntPtr.Zero;
         RootChrome.ContextMenu = _contextMenu;
+        ResetForNewItem();
         CurrentPath = null;
         _shortcutTarget = null;
-        SetBrowseControlsVisible(false);
-
-        Theme.Refresh();
-        if (!ReferenceEquals(_appliedResources, Theme.Current))
-        {
-            _appliedResources = Theme.Current;
-            Theme.ApplyResources(this);
-            if (_contextMenu is not null)
-            {
-                Theme.ApplyResources(_contextMenu);
-            }
-
-            ApplyThemeToDwm();
-        }
-
-        FileNameText.Text = Branding.Name;
-        SubtitleText.Text = Branding.Tagline;
-        FileIconImage.Source = null;
-        FileIconImage.Visibility = Visibility.Hidden;
-        OpenControl.Content = null;
-        OpenControl.Visibility = Visibility.Visible;
-        PinButton.Visibility = Visibility.Collapsed;
+        ShowWelcomeHeader();
 
         // The welcome uses the same stage geometry as normal previews.
         ApplyStageGeometry(IntPtr.Zero);
@@ -457,99 +347,98 @@ public partial class PreviewWindow : Window
 
     private static FrameworkElement BuildWelcomeContent()
     {
-        var palette = Theme.Current;
+        static T Themed<T>(T element, DependencyProperty property, string token) where T : FrameworkElement
+        {
+            element.SetResourceReference(property, token);
+            return element;
+        }
 
-        var mark = BrandMark.Create(56);
+        var mark = BrandMark.Create(64);
         mark.HorizontalAlignment = HorizontalAlignment.Center;
 
-        var title = new TextBlock
+        var title = Themed(new TextBlock
         {
             Text = Branding.Name,
             FontSize = Metrics.FontDisplay,
             FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(0, 18, 0, 0),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextPrimary)
-        };
+            Margin = new Thickness(0, 20, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Center
+        }, TextBlock.ForegroundProperty, "Theme.TextPrimary");
 
-        var tagline = new TextBlock
+        var tagline = Themed(new TextBlock
         {
             Text = Branding.Tagline,
-            FontSize = 15,
-            Margin = new Thickness(0, 8, 0, 0),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextSecondary)
-        };
+            FontSize = Metrics.FontBody,
+            Margin = new Thickness(0, 4, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Center
+        }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
-        // Animated keycap used by the welcome screen.
+        // The one key to learn, breathing; still when animations are off.
         var keycapGlow = new DropShadowEffect
         {
-            Color = palette.Accent,
-            BlurRadius = 26,
+            Color = Theme.Current.Accent,
+            BlurRadius = 24,
             ShadowDepth = 0,
-            Opacity = 0.22
+            Opacity = 0.3
         };
-        var keycap = new Border
+        var keycap = Themed(Themed(new Border
         {
-            Width = 190,
-            Height = 52,
-            CornerRadius = new CornerRadius(11),
-            Margin = new Thickness(0, 44, 0, 0),
+            Width = 136,
+            Height = 44,
+            CornerRadius = Metrics.SurfaceCorner,
+            Margin = new Thickness(0, 40, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1.5),
+            BorderThickness = new Thickness(1),
             Effect = keycapGlow,
-            Child = new TextBlock
+            Child = Themed(new TextBlock
             {
                 Text = "Space",
-                FontSize = 15,
+                FontSize = Metrics.FontLabel,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Theme.Brush(palette.TextSecondary)
-            }
-        };
-        keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.22, 0.55, TimeSpan.FromSeconds(2.4))
+                VerticalAlignment = VerticalAlignment.Center
+            }, TextBlock.ForegroundProperty, "Theme.TextPrimary")
+        }, Border.BackgroundProperty, "Theme.RaisedBg"), Border.BorderBrushProperty, "Theme.RaisedBorder");
+        if (SystemParameters.ClientAreaAnimation)
         {
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever,
-            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-        });
+            keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.2, 0.5, TimeSpan.FromSeconds(2.4))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            });
+        }
 
-        var lesson = new TextBlock
+        var lesson = Themed(new TextBlock
         {
             Text = "Select a file in Explorer or a file picker, then press Space.\nPress it again to close.",
-            FontSize = 14,
-            LineHeight = 23,
+            FontSize = Metrics.FontBody,
+            LineHeight = 20,
             Margin = new Thickness(0, 20, 0, 0),
             TextAlignment = TextAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextSecondary)
-        };
+            HorizontalAlignment = HorizontalAlignment.Center
+        }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
-        var hints = new TextBlock
+        var hints = Themed(new TextBlock
         {
             Text = "Arrow keys browse · Enter opens · Pin keeps a preview open",
-            FontSize = 12.5,
-            Margin = new Thickness(0, 52, 0, 0),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextTertiary)
-        };
+            FontSize = Metrics.FontCaption,
+            Margin = new Thickness(0, 48, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Center
+        }, TextBlock.ForegroundProperty, "Theme.TextTertiary");
 
-        return new Grid
+        return Themed(new Grid
         {
-            Background = Theme.Brush(palette.CanvasBg),
             Children =
             {
                 new StackPanel
                 {
                     VerticalAlignment = VerticalAlignment.Center,
-                    Margin = new Thickness(0, 0, 0, 26),
+                    Margin = new Thickness(0, 0, 0, 24),
                     Children = { mark, title, tagline, keycap, lesson, hints }
                 }
             }
-        };
+        }, Panel.BackgroundProperty, "Theme.CanvasBg");
     }
 
     private async Task LoadPreviewAsync(string path, string contentPath, long version, CancellationToken token)
@@ -645,7 +534,7 @@ public partial class PreviewWindow : Window
             }
 
             _fillSignPath = fillSignPath;
-            UpdateFillSignPill();
+            SyncHeaderTools();
             SetPreviewContent(content, disposable);
         }
         catch (OperationCanceledException)
@@ -657,7 +546,7 @@ public partial class PreviewWindow : Window
             if (!token.IsCancellationRequested && version == _loadVersion)
             {
                 _fillSignPath = null;
-                UpdateFillSignPill();
+                SyncHeaderTools();
                 SetPreviewContent(BuildErrorPreview("Glimpse can't preview this file", "Something went wrong while reading it."), null);
             }
         }

@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -43,8 +44,8 @@ internal sealed class FillSignSurface : Grid
     private TextBlock? _pageLabel;
     private Border? _previousPageChip;
     private Border? _nextPageChip;
-    private Border? _signaturePill;
-    private Border? _newStampPill;
+    private ButtonBase? _signaturePill;
+    private ButtonBase? _newStampPill;
     private TextBlock? _inkTitle;
     private StackPanel? _saveChoiceRow;
     private TextBlock? _saveStatusLabel;
@@ -338,7 +339,7 @@ internal sealed class FillSignSurface : Grid
     /// The house pill (see <see cref="HousePill"/>), with its refresher
     /// enrolled so armed-tool state can repaint every pill at once.
     /// </summary>
-    private Border BuildPill(string label, Action onClick, PillRole role = PillRole.Surface, Func<bool>? isSelected = null)
+    private ButtonBase BuildPill(string label, Action onClick, PillRole role = PillRole.Surface, Func<bool>? isSelected = null)
     {
         var pill = HousePill.Build(label, onClick, out var refresh, role, isSelected);
         _pillRefreshers.Add(refresh);

@@ -2,7 +2,7 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:u="clr-namespace:SpacePreview.Utilities"
-        Title="Glimpse"
+        Title="{x:Static u:Branding.Name}"
         Width="900" Height="650"
         MinWidth="640" MinHeight="480"
         WindowStyle="None"
@@ -22,204 +22,6 @@
                       NonClientFrameEdges="None"
                       UseAeroCaptionButtons="False" />
     </WindowChrome.WindowChrome>
-    <Window.Resources>
-        <!-- PreviewContextMenu and PreviewMenuItem now live in Themes\Menus.xaml
-             (merged at application level); FindResource here resolves them there. -->
-        <Style x:Key="HeaderIconButton" TargetType="{x:Type Button}">
-            <Setter Property="Width" Value="30" />
-            <Setter Property="Height" Value="30" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.TextSecondary}" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type Button}">
-                        <Border x:Name="Chrome" CornerRadius="{x:Static u:Metrics.IconCorner}" Background="Transparent">
-                            <TextBlock Text="{TemplateBinding Content}"
-                                       FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                       FontSize="10"
-                                       Foreground="{TemplateBinding Foreground}"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Chrome" Property="Opacity" Value="0.35" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <!-- The pinned-only "Always on top" toggle: HeaderIconButton chrome,
-             but the mark is drawn, not a glyph (the icon font has no topmost
-             symbol, and a second pin next to Unpin would lie). Two windows,
-             the raised one solid. Checked follows the pin convention:
-             accent means on. -->
-        <Style x:Key="HeaderToggleIconButton" TargetType="{x:Type ToggleButton}">
-            <Setter Property="Width" Value="30" />
-            <Setter Property="Height" Value="30" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.TextSecondary}" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type ToggleButton}">
-                        <Border x:Name="Chrome" CornerRadius="{x:Static u:Metrics.IconCorner}" Background="Transparent">
-                            <Grid Width="12" Height="12">
-                                <Rectangle Width="8" Height="8"
-                                           HorizontalAlignment="Left"
-                                           VerticalAlignment="Bottom"
-                                           Stroke="{TemplateBinding Foreground}"
-                                           StrokeThickness="1"
-                                           RadiusX="1.5" RadiusY="1.5" />
-                                <Rectangle Width="8" Height="8"
-                                           HorizontalAlignment="Right"
-                                           VerticalAlignment="Top"
-                                           Fill="{TemplateBinding Foreground}"
-                                           RadiusX="1.5" RadiusY="1.5" />
-                            </Grid>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                            </Trigger>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Setter Property="Foreground" Value="{DynamicResource Theme.Accent}" />
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Chrome" Property="Opacity" Value="0.35" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <!-- A segment of the zoom pill: same vocabulary as the split Open
-             pill (idle by default, HoverBg fill shaped to its place in the
-             pill, foreground steady). Each instance carries its place in the
-             pill as a CornerRadius in Tag: outer segments hug the pill
-             curve, the middle one stays square. -->
-        <Style x:Key="ZoomSegmentButton" TargetType="{x:Type Button}">
-            <Setter Property="Width" Value="28" />
-            <Setter Property="Height" Value="27" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.TextSecondary}" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type Button}">
-                        <Border x:Name="Chrome"
-                                CornerRadius="{TemplateBinding Tag}"
-                                Background="Transparent">
-                            <TextBlock Text="{TemplateBinding Content}"
-                                       FontFamily="Segoe UI Variable, Segoe UI"
-                                       FontSize="16"
-                                       FontWeight="SemiBold"
-                                       Foreground="{TemplateBinding Foreground}"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       Margin="0,-1,0,0" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Chrome" Property="Opacity" Value="0.35" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <Style x:Key="PillIconButton" TargetType="{x:Type Button}">
-            <Setter Property="Width" Value="30" />
-            <Setter Property="Height" Value="27" />
-            <Setter Property="Padding" Value="0" />
-            <Setter Property="Focusable" Value="False" />
-            <Setter Property="VerticalAlignment" Value="Center" />
-            <Setter Property="Foreground" Value="{DynamicResource Theme.TextSecondary}" />
-            <Setter Property="FontFamily" Value="Segoe UI Symbol, Segoe UI" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type Button}">
-                        <Border x:Name="Chrome"
-                                CornerRadius="{TemplateBinding Tag}"
-                                Background="Transparent">
-                            <TextBlock Text="{TemplateBinding Content}"
-                                       FontFamily="{TemplateBinding FontFamily}"
-                                       FontSize="{TemplateBinding FontSize}"
-                                       Foreground="{TemplateBinding Foreground}"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center" />
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-
-        <!-- PillIconButton with the glyph mirrored horizontally. Only the
-             glyph flips; the chrome keeps its own corner shape, so a
-             left-of-pill button stays rounded on the correct side. -->
-        <Style x:Key="MirroredPillIconButton" TargetType="{x:Type Button}" BasedOn="{StaticResource PillIconButton}">
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="{x:Type Button}">
-                        <Border x:Name="Chrome"
-                                CornerRadius="{TemplateBinding Tag}"
-                                Background="Transparent">
-                            <TextBlock Text="{TemplateBinding Content}"
-                                       FontFamily="{TemplateBinding FontFamily}"
-                                       FontSize="{TemplateBinding FontSize}"
-                                       Foreground="{TemplateBinding Foreground}"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       RenderTransformOrigin="0.5,0.5">
-                                <TextBlock.RenderTransform>
-                                    <ScaleTransform ScaleX="-1" />
-                                </TextBlock.RenderTransform>
-                            </TextBlock>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-    </Window.Resources>
     <Border x:Name="RootChrome"
             Background="{DynamicResource Theme.CanvasBg}"
             BorderBrush="{DynamicResource Theme.Border}"
@@ -234,6 +36,9 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
+            <!-- docs/DESIGN.md, Header. Left to right: browse, identity,
+                 the kind's tools, Open, the window's own buttons. Only the
+                 identity column stretches, so it is the one that yields. -->
             <Border x:Name="HeaderBar"
                     Grid.Row="0"
                     Background="{DynamicResource Theme.ChromeBg}"
@@ -248,42 +53,45 @@
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
-                        <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
 
-                    <!-- Browsing the folder from the preview, Quick Look
-                         style: the arrows change WHICH file, so they sit
-                         before the file's identity. -->
+                    <!-- The arrows change WHICH file, so they sit before its
+                         identity; a multi-selection shows its place beside them. -->
                     <StackPanel x:Name="BrowseControls"
                                 Grid.Column="0"
                                 Orientation="Horizontal"
                                 VerticalAlignment="Center"
-                                Margin="0,0,10,0"
+                                Margin="0,0,8,0"
                                 Visibility="Collapsed">
                         <Button x:Name="BrowsePreviousButton"
-                                Style="{StaticResource HeaderIconButton}"
+                                Style="{StaticResource IconButton}"
                                 Content="&#xE76B;"
                                 Click="BrowsePreviousButton_Click"
                                 AutomationProperties.Name="Previous item"
                                 ToolTipService.ShowOnDisabled="True"
                                 ToolTip="Previous item (Left arrow)" />
                         <Button x:Name="BrowseNextButton"
-                                Style="{StaticResource HeaderIconButton}"
+                                Style="{StaticResource IconButton}"
                                 Content="&#xE76C;"
                                 Click="BrowseNextButton_Click"
                                 AutomationProperties.Name="Next item"
                                 ToolTipService.ShowOnDisabled="True"
                                 ToolTip="Next item (Right arrow)" />
+                        <TextBlock x:Name="SelectionPositionText"
+                                   Margin="4,0,6,0"
+                                   VerticalAlignment="Center"
+                                   FontSize="{x:Static u:Metrics.FontCaption}"
+                                   Foreground="{DynamicResource Theme.TextTertiary}"
+                                   Visibility="Collapsed" />
                         <Button x:Name="GridButton"
-                                Style="{StaticResource HeaderIconButton}"
-                                Margin="6,0,0,0"
+                                Style="{StaticResource IconButton}"
                                 Content="&#xF0E2;"
                                 Click="GridButton_Click"
                                 AutomationProperties.Name="All selected items"
                                 Visibility="Collapsed"
                                 ToolTip="All selected items (Ctrl+Enter)" />
                         <Button x:Name="PlayButton"
-                                Style="{StaticResource HeaderIconButton}"
+                                Style="{StaticResource IconButton}"
                                 Content="&#xE768;"
                                 Click="PlayButton_Click"
                                 AutomationProperties.Name="Slideshow"
@@ -295,171 +103,197 @@
                            Grid.Column="1"
                            Width="22"
                            Height="22"
-                           Margin="0,0,11,0"
+                           Margin="0,0,8,0"
                            VerticalAlignment="Center"
                            Visibility="Hidden"
                            RenderOptions.BitmapScalingMode="HighQuality" />
 
                     <StackPanel x:Name="IdentityPanel" Grid.Column="2" VerticalAlignment="Center">
                         <TextBlock x:Name="FileNameText"
-                                   FontSize="14"
+                                   FontSize="{x:Static u:Metrics.FontName}"
                                    FontWeight="SemiBold"
                                    Foreground="{DynamicResource Theme.TextPrimary}"
                                    TextTrimming="CharacterEllipsis" />
                         <TextBlock x:Name="SubtitleText"
-                                   Margin="0,2,0,0"
-                                   FontSize="11"
+                                   Margin="0,1,0,0"
+                                   FontSize="{x:Static u:Metrics.FontCaption}"
                                    Foreground="{DynamicResource Theme.TextSecondary}"
                                    TextTrimming="CharacterEllipsis" />
                     </StackPanel>
 
-                    <!-- Split open control: click opens, the chevron lists the
-                         other ways to open this kind of thing. Built in code
-                         per file so the pill shape adapts to its halves. -->
-                    <ContentControl x:Name="OpenControl"
-                                    Grid.Column="4"
-                                    Margin="0,0,8,0"
-                                    VerticalAlignment="Center"
-                                    HorizontalAlignment="Right"
-                                    Focusable="False" />
-
-                    <!-- One reserved tool slot keeps the right side still.
-                         Converted documents use it for zoom; images use it
-                         for rotate. Empty means hidden, not reflowed. -->
+                    <!-- Tools belong to the file's kind: chosen when the item
+                         opens and inert until its content binds, so browsing
+                         one kind never moves them. No kind, no slot. -->
                     <Grid x:Name="ContentToolsSlot"
                           Grid.Column="3"
-                          Width="104"
-                          Margin="12,0,8,0"
+                          Margin="8,0,0,0"
                           VerticalAlignment="Center"
-                          Visibility="Hidden">
-                        <Border x:Name="ZoomControls"
-                                HorizontalAlignment="Stretch"
-                                VerticalAlignment="Center"
-                                Background="{DynamicResource Theme.RaisedBg}"
-                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
-                                BorderThickness="1"
-                                CornerRadius="{x:Static u:Metrics.PillCorner}"
-                                Visibility="Collapsed">
+                          Visibility="Collapsed">
+                        <Border x:Name="ZoomControls" Style="{StaticResource PillFrame}" Visibility="Collapsed">
                             <StackPanel Orientation="Horizontal">
                                 <Button x:Name="ZoomOutButton"
-                                        Style="{StaticResource ZoomSegmentButton}"
-                                        Tag="{x:Static u:Metrics.PillLeftCorner}"
-                                        Content="-"
+                                        Style="{StaticResource PillGlyphSegment}"
+                                        Content="&#xE738;"
                                         AutomationProperties.Name="Zoom out"
                                         ToolTip="Zoom out (Ctrl+Minus)" />
                                 <Button x:Name="ZoomResetButton"
-                                        Width="46"
-                                        Height="27"
-                                         Padding="0"
-                                         Focusable="False"
-                                         VerticalAlignment="Center"
-                                         AutomationProperties.Name="Reset zoom"
-                                         ToolTip="Reset zoom (Ctrl+0)">
-                                    <Button.Template>
-                                        <ControlTemplate TargetType="{x:Type Button}">
-                                            <Border x:Name="Chrome" Background="Transparent">
-                                                <TextBlock Text="{TemplateBinding Content}"
-                                                           FontSize="11"
-                                                           FontWeight="SemiBold"
-                                                           Foreground="{DynamicResource Theme.TextSecondary}"
-                                                           HorizontalAlignment="Center"
-                                                           VerticalAlignment="Center" />
-                                            </Border>
-                                            <ControlTemplate.Triggers>
-                                                <Trigger Property="IsMouseOver" Value="True">
-                                                    <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
-                                                </Trigger>
-                                                <Trigger Property="IsPressed" Value="True">
-                                                    <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource Theme.PressedBg}" />
-                                                </Trigger>
-                                            </ControlTemplate.Triggers>
-                                        </ControlTemplate>
-                                    </Button.Template>
-                                </Button>
+                                        Style="{StaticResource PillSegment}"
+                                        Width="52"
+                                        Padding="0"
+                                        Content="100%"
+                                        AutomationProperties.Name="Reset zoom"
+                                        ToolTip="Reset zoom (Ctrl+0)" />
                                 <Button x:Name="ZoomInButton"
-                                        Style="{StaticResource ZoomSegmentButton}"
-                                        Tag="{x:Static u:Metrics.PillRightCorner}"
-                                        Content="+"
+                                        Style="{StaticResource PillGlyphSegment}"
+                                        Content="&#xE710;"
                                         AutomationProperties.Name="Zoom in"
                                         ToolTip="Zoom in (Ctrl+Plus)" />
                             </StackPanel>
                         </Border>
 
-                        <Border x:Name="ContentActions"
-                                Width="60"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                Background="{DynamicResource Theme.RaisedBg}"
-                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
-                                BorderThickness="1"
-                                CornerRadius="{x:Static u:Metrics.PillCorner}"
-                                Visibility="Collapsed">
+                        <Border x:Name="ContentActions" Style="{StaticResource PillFrame}" Visibility="Collapsed">
                             <StackPanel Orientation="Horizontal">
-                                <!-- One proven Fluent glyph, mirrored for the
-                                     opposite direction: the icon family stays
-                                     consistent and the pair reads as a pair. -->
+                                <!-- One Fluent rotate glyph, mirrored for the
+                                     other way: the pair stays in the icon family. -->
                                 <Button x:Name="RotateLeftButton"
-                                        Style="{StaticResource MirroredPillIconButton}"
-                                        Tag="{x:Static u:Metrics.PillLeftCorner}"
-                                        Content="&#xE7AD;"
-                                        FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                         FontSize="11"
-                                         Click="RotateLeftButton_Click"
-                                         AutomationProperties.Name="Rotate left"
-                                         Visibility="Collapsed"
-                                         ToolTip="Rotate left (Ctrl+Shift+R)" />
+                                        Style="{StaticResource PillGlyphSegment}"
+                                        Click="RotateLeftButton_Click"
+                                        AutomationProperties.Name="Rotate left"
+                                        ToolTip="Rotate left (Ctrl+Shift+R)">
+                                    <TextBlock Text="&#xE7AD;" RenderTransformOrigin="0.5,0.5">
+                                        <TextBlock.RenderTransform>
+                                            <ScaleTransform ScaleX="-1" />
+                                        </TextBlock.RenderTransform>
+                                    </TextBlock>
+                                </Button>
                                 <Button x:Name="RotateRightButton"
-                                        Style="{StaticResource PillIconButton}"
-                                        Tag="{x:Static u:Metrics.PillRightCorner}"
+                                        Style="{StaticResource PillGlyphSegment}"
                                         Content="&#xE7AD;"
-                                        FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                         FontSize="11"
-                                         Click="RotateRightButton_Click"
-                                         AutomationProperties.Name="Rotate right"
-                                         Visibility="Collapsed"
-                                         ToolTip="Rotate right (Ctrl+R)" />
+                                        Click="RotateRightButton_Click"
+                                        AutomationProperties.Name="Rotate right"
+                                        ToolTip="Rotate right (Ctrl+R)" />
                             </StackPanel>
                         </Border>
+
+                        <Button x:Name="SignButton"
+                                Style="{StaticResource Pill}"
+                                Visibility="Collapsed"
+                                Click="SignButton_Click"
+                                AutomationProperties.Name="Fill and sign"
+                                ToolTip="Fill and sign">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="&#xE70F;"
+                                           Margin="0,0,6,0"
+                                           VerticalAlignment="Center"
+                                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                           FontSize="12"
+                                           FontWeight="Normal" />
+                                <TextBlock Text="Sign" VerticalAlignment="Center" />
+                            </StackPanel>
+                        </Button>
                     </Grid>
 
+                    <!-- Open: the default app's icon, the word and a chevron
+                         for the other ways. The other label is laid out
+                         hidden, so the pill keeps one width for every file. -->
+                    <Border x:Name="OpenControl"
+                            Grid.Column="4"
+                            Margin="8,0,0,0"
+                            Style="{StaticResource PillFrame}">
+                        <StackPanel Orientation="Horizontal">
+                            <Button x:Name="OpenButton"
+                                    Style="{StaticResource PillSegment}"
+                                    Padding="6,0"
+                                    Click="OpenButton_Click"
+                                    AutomationProperties.Name="Open"
+                                    ToolTip="Open (Enter)">
+                                <Grid>
+                                    <StackPanel x:Name="OpenInAppLabel"
+                                                Orientation="Horizontal"
+                                                HorizontalAlignment="Center">
+                                        <Image x:Name="OpenAppIcon"
+                                               Width="16"
+                                               Height="16"
+                                               Margin="0,0,6,0"
+                                               VerticalAlignment="Center"
+                                               RenderOptions.BitmapScalingMode="HighQuality" />
+                                        <TextBlock Text="Open" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="OpenWithLabel"
+                                               Text="Open with&#x2026;"
+                                               HorizontalAlignment="Center"
+                                               VerticalAlignment="Center"
+                                               Visibility="Hidden" />
+                                </Grid>
+                            </Button>
+                            <Border Width="1"
+                                    Margin="0,8,0,8"
+                                    Background="{DynamicResource Theme.RaisedBorder}" />
+                            <Button x:Name="OpenMenuButton"
+                                    Style="{StaticResource PillGlyphSegment}"
+                                    Width="28"
+                                    FontSize="10"
+                                    Content="&#xE70D;"
+                                    Click="OpenMenuButton_Click"
+                                    AutomationProperties.Name="More ways to open"
+                                    ToolTip="More ways to open" />
+                        </StackPanel>
+                    </Border>
+
                     <StackPanel x:Name="WindowActions"
-                                Grid.Column="6"
+                                Grid.Column="5"
+                                Margin="8,0,0,0"
                                 Orientation="Horizontal"
                                 VerticalAlignment="Center">
+                        <!-- The icon font has no topmost symbol, and a second
+                             pin beside Unpin would lie: two windows, the
+                             raised one solid. -->
                         <ToggleButton x:Name="AlwaysOnTopButton"
-                                 Style="{StaticResource HeaderToggleIconButton}"
-                                 Visibility="Collapsed"
-                                 Opacity="0"
-                                 IsChecked="True"
-                                 Checked="AlwaysOnTopButton_CheckedChanged"
-                                 Unchecked="AlwaysOnTopButton_CheckedChanged"
-                                 AutomationProperties.Name="Always on top"
-                                 ToolTip="Always on top" />
-
+                                      Style="{StaticResource IconToggleButton}"
+                                      Visibility="Collapsed"
+                                      Opacity="0"
+                                      IsChecked="True"
+                                      Checked="AlwaysOnTopButton_CheckedChanged"
+                                      Unchecked="AlwaysOnTopButton_CheckedChanged"
+                                      AutomationProperties.Name="Always on top"
+                                      ToolTip="Always on top">
+                            <Grid Width="12" Height="12">
+                                <Rectangle Width="8"
+                                           Height="8"
+                                           HorizontalAlignment="Left"
+                                           VerticalAlignment="Bottom"
+                                           Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
+                                           StrokeThickness="1"
+                                           RadiusX="1.5"
+                                           RadiusY="1.5" />
+                                <Rectangle Width="8"
+                                           Height="8"
+                                           HorizontalAlignment="Right"
+                                           VerticalAlignment="Top"
+                                           Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}"
+                                           RadiusX="1.5"
+                                           RadiusY="1.5" />
+                            </Grid>
+                        </ToggleButton>
                         <Button x:Name="PinButton"
-                                 Margin="2,0,0,0"
-                                 Style="{StaticResource HeaderIconButton}"
-                                 Content="&#xE718;"
-                                 Click="PinButton_Click"
-                                 AutomationProperties.Name="Pin preview"
-                                 ToolTipService.ShowOnDisabled="True"
-                                 ToolTip="Pin (stays open)" />
-
+                                Style="{StaticResource IconButton}"
+                                Content="&#xE718;"
+                                Click="PinButton_Click"
+                                AutomationProperties.Name="Pin preview"
+                                ToolTipService.ShowOnDisabled="True"
+                                ToolTip="Pin (stays open)" />
                         <Button x:Name="MaximizeButton"
-                                Margin="2,0,0,0"
-                                 Style="{StaticResource HeaderIconButton}"
-                                 Content="&#xE922;"
-                                 Click="MaximizeButton_Click"
-                                 AutomationProperties.Name="Fill screen"
-                                 ToolTip="Fill screen (F11)" />
-
+                                Style="{StaticResource IconButton}"
+                                Content="&#xE922;"
+                                Click="MaximizeButton_Click"
+                                AutomationProperties.Name="Fill screen"
+                                ToolTip="Fill screen (F11)" />
                         <Button x:Name="CloseButton"
-                                Margin="2,0,0,0"
-                                 Style="{StaticResource HeaderIconButton}"
-                                 Content="&#xE8BB;"
-                                 Click="CloseButton_Click"
-                                 AutomationProperties.Name="Close preview"
-                                 ToolTip="Close (Esc or Space)" />
+                                Style="{StaticResource IconButton}"
+                                Content="&#xE8BB;"
+                                Click="CloseButton_Click"
+                                AutomationProperties.Name="Close preview"
+                                ToolTip="Close (Esc or Space)" />
                     </StackPanel>
                 </Grid>
             </Border>

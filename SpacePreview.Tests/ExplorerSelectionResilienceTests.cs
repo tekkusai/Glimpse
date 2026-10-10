@@ -113,7 +113,6 @@ public sealed class ExplorerSelectionResilienceTests
         Assert.Contains("_previewWindow.SetSelectionCount(selection.SelectedCount)", controller, StringComparison.Ordinal);
         Assert.Contains("_previewWindow.SetSelectionCount(1)", controller, StringComparison.Ordinal);
         Assert.Contains("internal void SetSelectionCount(int selectedCount)", previewWindow, StringComparison.Ordinal);
-        Assert.Contains("ApplyHeaderSubtitle(path, _shortcutTarget, Math.Max(1, selectedCount))", previewWindow, StringComparison.Ordinal);
 
         // Empty/virtual Shell selections still need their existing view-based
         // path fallback; ordinary navigation reads at most its first member

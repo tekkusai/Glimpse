@@ -1,3 +1,4 @@
+using SpacePreview.Preview;
 using SpacePreview.Services;
 
 namespace SpacePreview.Tests;
@@ -179,7 +180,8 @@ public sealed class CommonFileDialogSelectionTests
         Assert.Contains("SetBrowseControlsVisible(!fileDialogMode && !IsPinned)", window, StringComparison.Ordinal);
         Assert.Contains("open suppressed while file dialog owns commit", window, StringComparison.Ordinal);
         Assert.Contains("if (_isFileDialogMode || _rotationSession is not", window, StringComparison.Ordinal);
-        Assert.Contains("!_isFileDialogMode && _fillSignPath is not null", window, StringComparison.Ordinal);
+        Assert.Equal(HeaderTool.None, PreviewWindow.ToolFor(@"C:\docs\form.pdf", isDirectory: false, fileDialogMode: true));
+        Assert.Equal(HeaderTool.None, PreviewWindow.ToolFor(@"C:\docs\photo.jpg", isDirectory: false, fileDialogMode: true));
         Assert.Contains("file dialog lost foreground -> hide", controller, StringComparison.Ordinal);
         Assert.Contains("file dialog closed -> hide", controller, StringComparison.Ordinal);
         Assert.Contains("_lastSelectionSource != source", controller, StringComparison.Ordinal);

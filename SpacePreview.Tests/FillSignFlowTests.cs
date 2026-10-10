@@ -33,7 +33,7 @@ public sealed class FillSignFlowTests
         var load = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "LoadPreviewAsync");
         var failureLog = load.IndexOf("preview load failed", StringComparison.Ordinal);
         var clear = load.IndexOf("_fillSignPath = null", failureLog, StringComparison.Ordinal);
-        var pill = load.IndexOf("UpdateFillSignPill()", clear, StringComparison.Ordinal);
+        var pill = load.IndexOf("SyncHeaderTools()", clear, StringComparison.Ordinal);
         var error = load.IndexOf("SetPreviewContent(BuildErrorPreview", pill, StringComparison.Ordinal);
 
         Assert.True(failureLog >= 0);

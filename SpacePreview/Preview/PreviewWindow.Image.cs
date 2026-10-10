@@ -368,21 +368,12 @@ public partial class PreviewWindow
 
     private void UpdateRotateButtons()
     {
-        if (_isFileDialogMode || _rotationSession is not { } session)
-        {
-            HideContentActions();
-            return;
-        }
-
-        var suffix = session.Persistence == RotationPersistence.ViewOnly
+        var suffix = _rotationSession?.Persistence == RotationPersistence.ViewOnly
             ? ". Not saved for this file type."
             : string.Empty;
         RotateLeftButton.ToolTip = $"Rotate left (Ctrl+Shift+R){suffix}";
         RotateRightButton.ToolTip = $"Rotate right (Ctrl+R){suffix}";
-        RotateLeftButton.Visibility = Visibility.Visible;
-        RotateRightButton.Visibility = Visibility.Visible;
-        ContentActions.Visibility = Visibility.Visible;
-        UpdateContentToolsSlotVisibility();
+        SyncHeaderTools();
     }
 
     private void RotateLeftButton_Click(object sender, RoutedEventArgs e)

@@ -125,7 +125,7 @@ public partial class PreviewWindow
             return true;
         }
 
-        if (vk is NativeMethods.VK_0 or NativeMethods.VK_NUMPAD0)
+        if (IsZoomResetKey(vk))
         {
             ResetZoom();
             return true;

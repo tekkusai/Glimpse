@@ -5,7 +5,7 @@ using Microsoft.Win32;
 
 namespace SpacePreview.Utilities;
 
-/// <summary>How <see cref="Theme.Refresh"/> resolves the palette.</summary>
+/// <summary>How <see cref="Theme.Use"/> resolves the palette.</summary>
 internal enum ThemePreference
 {
     FollowSystem,
@@ -14,9 +14,11 @@ internal enum ThemePreference
 }
 
 /// <summary>
-/// Two fixed palettes that track the Windows app theme, resolved once per preview open.
-/// XAML consumes them through "Theme.*" dynamic resources; code-built content reads
-/// <see cref="Theme.Current"/> directly. docs/DESIGN.md names each token's job.
+/// Two fixed palettes that track the Windows app theme. The brushes live once,
+/// in the application's resources, so every window and popup that reads a
+/// "Theme.*" dynamic resource repaints the moment the palette changes.
+/// Code-built content reads <see cref="Theme.Current"/> directly and catches
+/// up on its next build. docs/DESIGN.md names each token's job.
 /// </summary>
 internal sealed record ThemePalette(
     bool IsDark,
@@ -83,32 +85,64 @@ internal static class Theme
 
     public static ThemePalette Current { get; private set; } = Dark;
 
-    /// <summary>The user's tray preference; a forced value skips the registry read.</summary>
-    public static ThemePreference Preference { get; set; } = ThemePreference.FollowSystem;
+    /// <summary>The user's preference; a forced value skips the registry read.</summary>
+    public static ThemePreference Preference { get; private set; } = ThemePreference.FollowSystem;
 
-    /// <summary>Resolves the palette against <see cref="Preference"/>. Returns true when it changed.</summary>
-    public static bool Refresh()
+    /// <summary>
+    /// Raised on the UI thread after a new palette reached the application's
+    /// resources. Windows re-apply what resources cannot carry: the DWM
+    /// title bar mode and brushes built in code.
+    /// </summary>
+    public static event Action? Changed;
+
+    private static ThemePalette? _published;
+    private static bool _followingSystem;
+
+    /// <summary>
+    /// Sets the preference and publishes the resolved palette app-wide. The
+    /// Windows setting is followed live from the first call on.
+    /// </summary>
+    public static void Use(ThemePreference preference)
     {
-        var prefersLight = Preference switch
+        Preference = preference;
+        Publish();
+        if (!_followingSystem)
         {
-            ThemePreference.Light => true,
-            ThemePreference.Dark => false,
-            _ => ReadSystemPrefersLight()
-        };
-
-        var palette = prefersLight ? Light : Dark;
-        if (ReferenceEquals(palette, Current))
-        {
-            return false;
+            _followingSystem = true;
+            SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged;
         }
-
-        Current = palette;
-        return true;
     }
 
-    public static void ApplyResources(FrameworkElement target) => ApplyResources(target.Resources);
+    // Light or dark arrives as a General preference change, on a thread
+    // of its own.
+    private static void OnSystemPreferenceChanged(object? sender, UserPreferenceChangedEventArgs args)
+    {
+        if (args.Category == UserPreferenceCategory.General && Preference == ThemePreference.FollowSystem)
+        {
+            Application.Current?.Dispatcher.InvokeAsync(Publish);
+        }
+    }
 
-    public static void ApplyResources(ResourceDictionary resources)
+    private static void Publish()
+    {
+        Current = Preference switch
+        {
+            ThemePreference.Light => Light,
+            ThemePreference.Dark => Dark,
+            _ => ReadSystemPrefersLight() ? Light : Dark
+        };
+
+        if (ReferenceEquals(_published, Current) || Application.Current is not { } app)
+        {
+            return;
+        }
+
+        _published = Current;
+        ApplyResources(app.Resources);
+        Changed?.Invoke();
+    }
+
+    internal static void ApplyResources(ResourceDictionary resources)
     {
         var p = Current;
         resources["Theme.ChromeBg"] = Brush(p.ChromeBg);
