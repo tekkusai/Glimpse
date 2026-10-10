@@ -11,7 +11,8 @@
 #endif
 #define MyAppName "Glimpse"
 #define MyAppExeName "Glimpse.exe"
-#define MyOldAppExeName "SpacePreview.exe"
+; The mutex keeps its pre-release name: it is how this installer finds and
+; quits a running 2.x before replacing it.
 #define MyMutexName "Local\SpacePreview.Instance"
 
 [Setup]
@@ -51,13 +52,6 @@ Name: "fullpreviews"; Description: "Full Word, Excel and PowerPoint previews (Li
 Source: "..\artifacts\publish\win-x64-standalone\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "assets\MicrosoftEdgeWebView2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: WebView2Missing
 
-[InstallDelete]
-Type: filesandordirs; Name: "{localappdata}\Programs\SpacePreview"
-Type: files; Name: "{app}\SpacePreview.exe"
-Type: files; Name: "{app}\SpacePreview.dll"
-Type: files; Name: "{app}\SpacePreview.deps.json"
-Type: files; Name: "{app}\SpacePreview.runtimeconfig.json"
-
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
@@ -73,7 +67,6 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--updated"; Check: AutoUpdateReq
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{localappdata}\Glimpse"
-Type: filesandordirs; Name: "{localappdata}\SpacePreview"
 
 #define LibreOfficeUrl "https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.4.2/win/x86_64/LibreOffice_26.2.4.2_Win_x86-64.msi"
 #define LibreOfficeSha256 "202f26cda071c5aa4996a5a28412fddceb3891dceb0366982c62650456c0730f"
@@ -316,7 +309,6 @@ begin
   if CheckForMutexes('{#MyMutexName}') then
   begin
     Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyOldAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     Sleep(500);
   end;
 end;
@@ -324,7 +316,6 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   QuitResident(ExpandConstant('{app}\{#MyAppExeName}'));
-  QuitResident(ExpandConstant('{app}\{#MyOldAppExeName}'));
   Result := '';
 end;
 
@@ -336,9 +327,7 @@ begin
   begin
     QuitResident(ExpandConstant('{app}\{#MyAppExeName}'));
     if FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
-      Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--uninstall-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
-    else
-      Exec(ExpandConstant('{app}\{#MyOldAppExeName}'), '--uninstall-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--uninstall-startup', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
     RemoveBundledOfficeEngine();
   end;
 end;
