@@ -481,13 +481,13 @@ public partial class PreviewWindow : Window
         var tagline = new TextBlock
         {
             Text = Branding.Tagline,
-            FontSize = 15,
+            FontSize = Metrics.FontName,
             Margin = new Thickness(0, 8, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
             Foreground = Theme.Brush(palette.TextSecondary)
         };
 
-        // Animated keycap used by the welcome screen.
+        // The keycap breathes, unless Windows animations are off.
         var keycapGlow = new DropShadowEffect
         {
             Color = palette.Accent,
@@ -499,35 +499,38 @@ public partial class PreviewWindow : Window
         {
             Width = 190,
             Height = 52,
-            CornerRadius = new CornerRadius(11),
+            CornerRadius = new CornerRadius(Metrics.RadiusCard),
             Margin = new Thickness(0, 44, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
             Background = Theme.Brush(palette.RaisedBg),
             BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1.5),
+            BorderThickness = new Thickness(1),
             Effect = keycapGlow,
             Child = new TextBlock
             {
                 Text = "Space",
-                FontSize = 15,
+                FontSize = Metrics.FontName,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = Theme.Brush(palette.TextSecondary)
             }
         };
-        keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.22, 0.55, TimeSpan.FromSeconds(2.4))
+        if (Motion.Enabled)
         {
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever,
-            EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-        });
+            keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.22, 0.55, TimeSpan.FromSeconds(2.4))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            });
+        }
 
         var lesson = new TextBlock
         {
             Text = "Select a file in Explorer or a file picker, then press Space.\nPress it again to close.",
-            FontSize = 14,
-            LineHeight = 23,
+            FontSize = Metrics.FontBody,
+            LineHeight = 21,
             Margin = new Thickness(0, 20, 0, 0),
             TextAlignment = TextAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center,
@@ -537,7 +540,7 @@ public partial class PreviewWindow : Window
         var hints = new TextBlock
         {
             Text = "Arrow keys browse · Enter opens · Pin keeps a preview open",
-            FontSize = 12.5,
+            FontSize = Metrics.FontCaption,
             Margin = new Thickness(0, 52, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
             Foreground = Theme.Brush(palette.TextTertiary)
