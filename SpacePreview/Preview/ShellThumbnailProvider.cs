@@ -78,11 +78,22 @@ internal static class ShellThumbnailProvider
                 : null;
     }
 
+    /// <summary>
+    /// Album art for the audio player: a PNG already on disk is the answer,
+    /// and only a real thumbnail is worth extracting; an icon never is.
+    /// </summary>
     public static Uri? TryWriteThumbnailPng(string path, string cacheKey, int size = 512)
     {
-        var shellImage = TryGetThumbnail(path, size);
         var directory = AppPaths.InDataRoot("MediaArtwork");
-        return TryWriteThumbnailPng(shellImage, directory, cacheKey);
+        var existing = Path.Combine(directory, $"{HashCacheKey(cacheKey)}.png");
+        if (File.Exists(existing))
+        {
+            return new Uri(existing, UriKind.Absolute);
+        }
+
+        return TryGetImage(path, size, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, out var art) && art is not null
+            ? TryWriteThumbnailPng(new ShellImage(art, IsThumbnail: true), directory, cacheKey)
+            : null;
     }
 
     internal static Uri? TryWriteThumbnailPng(ShellImage? shellImage, string directory, string cacheKey)
@@ -92,16 +103,24 @@ internal static class ShellThumbnailProvider
             return null;
         }
 
+        var tempPath = string.Empty;
         try
         {
             Directory.CreateDirectory(directory);
             var path = Path.Combine(directory, $"{HashCacheKey(cacheKey)}.png");
             if (!File.Exists(path))
             {
+                // Temp then move: a torn write never becomes the art.
+                tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
                 var encoder = new PngBitmapEncoder();
                 encoder.Frames.Add(BitmapFrame.Create(shellImage.Bitmap));
-                using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
-                encoder.Save(stream);
+                using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    encoder.Save(stream);
+                }
+
+                File.Move(tempPath, path, overwrite: true);
+                tempPath = string.Empty;
             }
 
             return new Uri(path, UriKind.Absolute);
@@ -109,6 +128,20 @@ internal static class ShellThumbnailProvider
         catch
         {
             return null;
+        }
+        finally
+        {
+            if (tempPath.Length > 0)
+            {
+                try
+                {
+                    File.Delete(tempPath);
+                }
+                catch
+                {
+                    // A stranded temp ages out with the folder.
+                }
+            }
         }
     }
 

@@ -672,7 +672,7 @@ public partial class PreviewWindow : Window
     {
         if (FileKinds.IsMedia(path))
         {
-            return BuildMediaPreview(path, version, token);
+            return await BuildMediaPreviewAsync(path, version, token);
         }
 
         if (FileKinds.IsGif(path) || (useSignatureRouting && signature == FileSignatureKind.Gif))
