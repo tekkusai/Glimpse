@@ -147,25 +147,18 @@ public sealed class CommonFileDialogSelectionTests
         Assert.Equal([nested], resolved, StringComparer.OrdinalIgnoreCase);
     }
 
+    // UI Automation into another process can hang during teardown. The
+    // picker is read off the hook and off the shell STA, with one bounded
+    // wait per dialog; the hook only ever looks at the finished cache (the
+    // keymap table covers the fail-open press, the hook theory the ban).
     [Fact]
-    public void HookUsesOnlyThePrevalidatedCacheAndFailsOpenWhenItIsMissing()
+    public void PickerReadsAreBoundedAndOffTheHook()
     {
-        var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
-        var hookStart = controller.IndexOf("private bool OnKeyDown", StringComparison.Ordinal);
-        var hookEnd = controller.IndexOf("private void OnKeyUp", hookStart, StringComparison.Ordinal);
-        var hook = controller[hookStart..hookEnd];
-
-        Assert.Contains("TryGetCachedSelection", hook, StringComparison.Ordinal);
-        Assert.Contains("ArmPendingFileDialogPreview", hook, StringComparison.Ordinal);
-        Assert.Contains("file dialog selection not ready, deferred and passed through", hook, StringComparison.Ordinal);
-        Assert.DoesNotContain("CommonFileDialogSelectionService.TryGetSelection", hook, StringComparison.Ordinal);
         var monitor = TestSource.Read(@"SpacePreview\Services\CommonFileDialogSelectionMonitor.cs");
+
         Assert.Contains("Task.Run", monitor, StringComparison.Ordinal);
         Assert.Contains("WaitAsync(TimeSpan.FromSeconds(2))", monitor, StringComparison.Ordinal);
         Assert.Contains("RefreshCompleted?.Invoke(dialogRoot, selection)", monitor, StringComparison.Ordinal);
-        Assert.Contains("&& _inputHooksActive", controller, StringComparison.Ordinal);
-        Assert.Contains("ShouldPassThroughInput()", controller, StringComparison.Ordinal);
-        Assert.Contains("ClearPendingFileDialogPreview();", controller, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -180,8 +173,6 @@ public sealed class CommonFileDialogSelectionTests
         Assert.Contains("open suppressed while file dialog owns commit", window, StringComparison.Ordinal);
         Assert.Contains("if (_isFileDialogMode || _rotationSession is not", window, StringComparison.Ordinal);
         Assert.Contains("!_isFileDialogMode && _fillSignPath is not null", window, StringComparison.Ordinal);
-        Assert.Contains("file dialog lost foreground -> hide", controller, StringComparison.Ordinal);
-        Assert.Contains("file dialog closed -> hide", controller, StringComparison.Ordinal);
         Assert.Contains("_lastSelectionSource != source", controller, StringComparison.Ordinal);
         Assert.Contains("_previewOwnerRootHwnd != ownerRoot", controller, StringComparison.Ordinal);
     }

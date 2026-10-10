@@ -447,7 +447,7 @@ internal sealed class FillSignSurface : Grid
         chip.Opacity = enabled ? 1 : 0.35;
     }
 
-    private void ShowSaveChoice()
+    internal void ShowSaveChoice()
     {
         if (!_session.HasWork)
         {

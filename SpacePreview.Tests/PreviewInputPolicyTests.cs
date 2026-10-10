@@ -90,50 +90,23 @@ public sealed class PreviewInputPolicyTests
         Assert.Null(context);
     }
 
-    [Fact]
-    public void PreviewShortcutsDoNotBelongToUnrelatedForegroundApps()
+    [Theory]
+    [InlineData("CabinetWClass", true)]
+    [InlineData("ExploreWClass", true)]
+    [InlineData("XamlExplorerHostIslandWindow", true)]
+    [InlineData("Progman", true)]
+    [InlineData("WorkerW", true)]
+    [InlineData("#32770", true)]
+    [InlineData("Chrome_WidgetWin_1", false)]
+    [InlineData("Notepad", false)]
+    [InlineData("UnrealWindow", false)]
+    [InlineData("Shell_TrayWnd", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void TheKeyboardHookServesOnlySurfacesThatOfferASelection(string? className, bool served)
     {
-        var allowed = PreviewInputPolicy.IsPreviewShortcutForeground(
-            foregroundRoot: new IntPtr(0x3000),
-            previewHwnd: new IntPtr(0x1000),
-            ownerRootHwnd: new IntPtr(0x2000));
-
-        Assert.False(allowed);
-    }
-
-    [Fact]
-    public void PreviewShortcutsBelongToPreviewOrOriginalExplorerRootOnly()
-    {
-        Assert.True(PreviewInputPolicy.IsPreviewShortcutForeground(
-            foregroundRoot: new IntPtr(0x1000),
-            previewHwnd: new IntPtr(0x1000),
-            ownerRootHwnd: new IntPtr(0x2000)));
-
-        Assert.True(PreviewInputPolicy.IsPreviewShortcutForeground(
-            foregroundRoot: new IntPtr(0x2000),
-            previewHwnd: new IntPtr(0x1000),
-            ownerRootHwnd: new IntPtr(0x2000)));
-    }
-
-    [Fact]
-    public void SpaceYieldsToRenameOnlyInThePreviewOwnerWindow()
-    {
-        var owner = new IntPtr(0x2000);
-
-        Assert.True(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(owner, owner, ownerIsTextEditing: true));
-        Assert.False(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(owner, owner, ownerIsTextEditing: false));
-        Assert.False(PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(new IntPtr(0x3000), owner, ownerIsTextEditing: true));
-    }
-
-    [Fact]
-    public void ControllerChecksRenameBeforeTakingTheSpaceLatch()
-    {
-        var method = TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown");
-        var spaceBranch = method[method.LastIndexOf("if (vk == NativeMethods.VK_SPACE", StringComparison.Ordinal)..];
-
-        Assert.True(
-            spaceBranch.IndexOf("ShouldYieldSpaceToOwnerTextEditing", StringComparison.Ordinal)
-            < spaceBranch.IndexOf("_spaceKey.TryPress", StringComparison.Ordinal));
+        // Everywhere else Glimpse removes its hook and leaves the input path.
+        Assert.Equal(served, PreviewInputPolicy.IsServedSurfaceClass(className));
     }
 
     [Fact]
