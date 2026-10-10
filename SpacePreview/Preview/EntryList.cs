@@ -107,7 +107,7 @@ internal sealed class EntryList
     private Row AddRow(Panel host, EntryNode node, int depth)
     {
         var palette = Theme.Current;
-        var grid = new Grid { Height = RowHeight, Margin = new Thickness(8 + (Math.Min(depth, 12) * Indent), 0, 10, 0) };
+        var grid = new Grid { Height = RowHeight, Margin = new Thickness(8 + (Math.Min(depth, 12) * Indent), 0, 8, 0) };
         if (Expandable)
         {
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ChevronColumn) });
@@ -142,7 +142,9 @@ internal sealed class EntryList
             Text = node.IsLink ? "\uE71B" : node.IsDirectory ? "\uE8B7" : "\uE7C3",
             FontFamily = GlyphFont,
             FontSize = 14,
-            Margin = new Thickness(0, 0, 10, 0),
+            Width = 16,
+            TextAlignment = TextAlignment.Center,
+            Margin = new Thickness(0, 0, 8, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Foreground = Theme.Brush(node.IsDirectory && !node.IsLink ? palette.Accent : palette.TextTertiary)
         };

@@ -383,7 +383,7 @@ public partial class PreviewWindow
     private static TextBlock FactLine(string text, int index) => new()
     {
         Text = text,
-        Margin = new Thickness(0, index == 0 ? 6 : 2, 0, 0),
+        Margin = new Thickness(0, 4, 0, 0),
         FontSize = Metrics.FontBody,
         Foreground = Theme.Brush(index == 0 ? Theme.Current.TextSecondary : Theme.Current.TextTertiary),
         TextAlignment = TextAlignment.Center,
@@ -546,7 +546,7 @@ public partial class PreviewWindow
                 TextAlignment = TextAlignment.Center
             });
 
-            var chips = new WrapPanel
+            var chips = new CenteredWrapPanel
             {
                 MaxWidth = 480,
                 Margin = new Thickness(0, 6, 0, 0),
@@ -570,7 +570,6 @@ public partial class PreviewWindow
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             CanContentScroll = false,
-            MinHeight = 60,
             Content = footer
         };
         StyleScrollViewer(scroll);
@@ -687,4 +686,64 @@ public partial class PreviewWindow
             Foreground = Theme.Brush(foreground)
         }
     };
+
+    /// <summary>A wrap panel whose rows are centered, so a short last row sits under the middle.</summary>
+    private sealed class CenteredWrapPanel : Panel
+    {
+        protected override Size MeasureOverride(Size availableSize)
+        {
+            double width = 0, height = 0, rowWidth = 0, rowHeight = 0;
+            foreach (UIElement child in InternalChildren)
+            {
+                child.Measure(availableSize);
+                var size = child.DesiredSize;
+                if (rowWidth > 0 && rowWidth + size.Width > availableSize.Width)
+                {
+                    width = Math.Max(width, rowWidth);
+                    height += rowHeight;
+                    rowWidth = rowHeight = 0;
+                }
+
+                rowWidth += size.Width;
+                rowHeight = Math.Max(rowHeight, size.Height);
+            }
+
+            return new Size(Math.Max(width, rowWidth), height + rowHeight);
+        }
+
+        protected override Size ArrangeOverride(Size finalSize)
+        {
+            var row = new List<UIElement>();
+            double top = 0, rowWidth = 0, rowHeight = 0;
+
+            void Place()
+            {
+                var x = (finalSize.Width - rowWidth) / 2;
+                foreach (var child in row)
+                {
+                    child.Arrange(new Rect(x, top, child.DesiredSize.Width, rowHeight));
+                    x += child.DesiredSize.Width;
+                }
+
+                top += rowHeight;
+                row.Clear();
+                rowWidth = rowHeight = 0;
+            }
+
+            foreach (UIElement child in InternalChildren)
+            {
+                if (row.Count > 0 && rowWidth + child.DesiredSize.Width > finalSize.Width)
+                {
+                    Place();
+                }
+
+                row.Add(child);
+                rowWidth += child.DesiredSize.Width;
+                rowHeight = Math.Max(rowHeight, child.DesiredSize.Height);
+            }
+
+            Place();
+            return finalSize;
+        }
+    }
 }

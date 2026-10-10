@@ -7,8 +7,9 @@ namespace SpacePreview.Preview;
 /// The one card geometry (docs/DESIGN.md, Cards). The visual's slot is
 /// centered at 38% of the canvas height and the title sits a fixed step
 /// under that slot, so neither moves between kinds. Facts follow the title;
-/// the footer takes what is left. Only a footer that cannot get its
-/// MinHeight lifts the whole card, and never past the top margin.
+/// the footer takes what is left. Only a footer that would not fit (a
+/// list states its floor as MinHeight) lifts the card, never past the top
+/// margin.
 /// </summary>
 internal sealed class FileCardLayout : Panel
 {
