@@ -186,10 +186,10 @@ public sealed class PreviewWindowSizingTests
     {
         var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
 
-        // Both thin rail loaders share this core, so page truth is applied
-        // exactly once before the reveal gate opens.
-        var railCore = TestSource.MethodFrom(windowSource, "private async Task LoadPdfPageRailCoreAsync");
-        var railHintCalls = railCore.Split("HintStageFromRailTruth(state, firstPages)").Length - 1;
+        // Every PDF rail loads through this one method, so page truth is
+        // applied exactly once before the reveal gate opens.
+        var railCore = TestSource.MethodFrom(windowSource, "private async Task LoadPdfPageRailOutOfProcessAsync");
+        var railHintCalls = railCore.Split("HintStageFromRailTruth(state, rendered)").Length - 1;
         Assert.Equal(1, railHintCalls);
         Assert.Contains("SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height), state.Version)", windowSource, StringComparison.Ordinal);
     }
@@ -357,7 +357,7 @@ public sealed class PreviewWindowSizingTests
     {
         var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
 
-        Assert.Contains("PdfPageSizeProbe.TryReadFirstPageSize(contentPath", windowSource, StringComparison.Ordinal);
+        Assert.Contains("TryHintPdfStage(contentPath, version)", windowSource, StringComparison.Ordinal);
         Assert.Contains("PdfPageSizeProbe.TryReadFirstPageSize(initialPath", windowSource, StringComparison.Ordinal);
         Assert.Contains("OfficePageSizeProbe.TryReadFirstPageAspect(contentPath", windowSource, StringComparison.Ordinal);
         Assert.Contains("Mp4CodecSniffer.TryRead(contentPath)", windowSource, StringComparison.Ordinal);

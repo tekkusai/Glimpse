@@ -31,6 +31,40 @@ public sealed class PdfLaneRailTests
         Assert.Equal(30, Directory.EnumerateFiles(output, "page-*.png").Count());
     }
 
+    // The plan the rail follows on an 81-page datasheet, run through the
+    // helper: every page arrives, and no single call renders more than the
+    // per-call cap.
+    [Fact]
+    public void TheRailPlanRendersEveryPageOfALongDocument()
+    {
+        using var temp = new TempDirectory();
+        var pdfPath = Path.Combine(temp.Path, "datasheet.pdf");
+        WriteTextPdf(pdfPath, 81, 612, 792);
+
+        var total = 0;
+        var numbers = new List<int>();
+        foreach (var (start, limit) in PreviewWindow.PdfRailRanges(() => total))
+        {
+            Assert.True(limit <= PdfPreviewRenderer.MaxThumbnailPagesPerCall);
+            var output = Path.Combine(temp.Path, $"range-{start}");
+            Assert.Equal(0, RunHelper(temp.Path, "--render-pdf-thumbnails", pdfPath, output, $"{limit}", $"{start}"));
+            var manifest = ReadManifest(output);
+            total = manifest.TotalPages;
+            numbers.AddRange(manifest.Pages.Select(page => page.Number));
+        }
+
+        Assert.Equal(Enumerable.Range(1, 81), numbers);
+    }
+
+    [Fact]
+    public void TheRailPlanStartsSmallAndStopsAtTheCap()
+    {
+        Assert.Equal(new[] { (0, 10) }, PreviewWindow.PdfRailRanges(() => 0));
+        Assert.Equal(new[] { (0, 10) }, PreviewWindow.PdfRailRanges(() => 7));
+        Assert.Equal(new[] { (0, 10), (10, 60), (70, 11) }, PreviewWindow.PdfRailRanges(() => 81));
+        Assert.Equal(new[] { (0, 10), (10, 60), (70, 50) }, PreviewWindow.PdfRailRanges(() => 300));
+    }
+
     // A helper is a rasterizer, not the app: it must not run the resident
     // app's shutdown, which wrote "app exiting" into the shared log hundreds
     // of times and started the shell thread only to stop it.
@@ -48,6 +82,30 @@ public sealed class PdfLaneRailTests
         var text = File.Exists(log) ? File.ReadAllText(log) : string.Empty;
         Assert.DoesNotContain("app exiting", text, StringComparison.Ordinal);
         Assert.DoesNotContain("app starting", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ACachedRangeCannotPointOutsideItsFolder()
+    {
+        using var temp = new TempDirectory();
+        var pdfPath = Path.Combine(temp.Path, "two-pages.pdf");
+        var range = Path.Combine(temp.Path, "range");
+        WriteTextPdf(pdfPath, 2, 612, 792);
+        Assert.Equal(0, RunHelper(temp.Path, "--render-pdf-thumbnails", pdfPath, range, "10", "0"));
+
+        var honest = PreviewWindow.TryReadPdfThumbnailManifest(range);
+        Assert.NotNull(honest);
+        Assert.Equal(2, honest!.Pages.Count);
+
+        File.Copy(Path.Combine(range, "page-0001.png"), Path.Combine(temp.Path, "outside.png"));
+        var manifest = ReadManifest(range);
+        var tampered = manifest with
+        {
+            Pages = [manifest.Pages[0] with { File = Path.Combine("..", "outside.png") }, manifest.Pages[1]]
+        };
+        File.WriteAllText(Path.Combine(range, "manifest.json"), JsonSerializer.Serialize(tampered));
+
+        Assert.Null(PreviewWindow.TryReadPdfThumbnailManifest(range));
     }
 
     /// <summary>

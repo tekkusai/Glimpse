@@ -1178,10 +1178,8 @@ public partial class PreviewWindow : Window
                 return;
             }
 
-            if (FileKinds.IsPdf(contentPath)
-                && PdfPageSizeProbe.TryReadFirstPageSize(contentPath, out var pageWidth, out var pageHeight))
+            if (FileKinds.IsPdf(contentPath) && TryHintPdfStage(contentPath, version))
             {
-                SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
                 return;
             }
 
@@ -1197,9 +1195,8 @@ public partial class PreviewWindow : Window
                 }
 
                 if (OfficeDocumentPdfConverter.TryGetCachedPdfConversion(contentPath) is { } cached
-                    && PdfPageSizeProbe.TryReadFirstPageSize(cached.DocumentPath, out pageWidth, out pageHeight))
+                    && TryHintPdfStage(cached.DocumentPath, version))
                 {
-                    SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
                     return;
                 }
 

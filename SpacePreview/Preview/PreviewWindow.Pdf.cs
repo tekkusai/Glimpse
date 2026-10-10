@@ -1,23 +1,14 @@
-using System.Buffers.Binary;
-using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
 using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
@@ -29,6 +20,17 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
+    // How long the dispatcher may wait on the page-index probe, which reads
+    // in about a millisecond once warm. A browse swap is on screen, so it
+    // waits only a few milliseconds and a later hint lands in its blank
+    // beat. A fresh open has nothing on screen yet: waiting for the page's
+    // shape beats opening at the default size and jumping.
+    private static readonly TimeSpan PdfProbeWait = TimeSpan.FromMilliseconds(8);
+    private static readonly TimeSpan PdfProbeFirstFrameWait = TimeSpan.FromMilliseconds(60);
+
+    // A page in the rail: the sheet is this wide, its height follows the page.
+    private const double PdfRailSheetWidth = 92;
+
     internal enum PdfNavigationAction
     {
         Allow,
@@ -165,8 +167,91 @@ public partial class PreviewWindow
         var railState = new PdfPageRailState(railHost, railColumn, webView, path, version, token) { Surface = grid };
         grid.Tag = railState;
         TrackPdfRailLifetime(grid, railState);
-        _ = LoadPdfPageRailAsync(railState);
+        _ = LoadPdfPageRailOutOfProcessAsync(railState);
         return grid;
+    }
+
+    /// <summary>
+    /// What a document the viewer cannot show gets. pdfium never renders a
+    /// user's document in this process: it can die in native code, and here
+    /// it would take every later preview with it.
+    /// </summary>
+    private static FrameworkElement BuildPdfErrorPreview(string path)
+    {
+        var kind = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : "file";
+        var extension = Path.GetExtension(path);
+        var app = string.IsNullOrEmpty(extension) ? null : NativeMethods.TryGetFriendlyAppName(extension);
+        var next = string.IsNullOrWhiteSpace(app) || app.Equals("Pick an app", StringComparison.OrdinalIgnoreCase)
+            ? "Open it in another app instead."
+            : $"Open it with {app} instead.";
+        return BuildErrorPreview($"{Branding.Name} can't preview this {kind}", next);
+    }
+
+    /// <summary>
+    /// The stage takes page one's shape before anything renders. A probe
+    /// that misses its wait hints when it lands, and a hint still retakes
+    /// the stage while the document is unseen. The rail cache answers for
+    /// documents the probe cannot read.
+    /// </summary>
+    private bool TryHintPdfStage(string pdfPath, long version)
+    {
+        var probe = PdfPageSizeProbe.ReadAsync(pdfPath);
+        if (probe.Wait(IsVisible ? PdfProbeWait : PdfProbeFirstFrameWait))
+        {
+            return HintPdfStage(pdfPath, probe.Result, version);
+        }
+
+        _ = probe.ContinueWith(
+            done => Dispatcher.BeginInvoke(new Action(() => HintPdfStage(pdfPath, done.Result, version))),
+            TaskScheduler.Default);
+        return true;
+    }
+
+    private bool HintPdfStage(string pdfPath, PdfOutline? probed, long version)
+    {
+        if ((probed is { WidthPoints: > 0, HeightPoints: > 0 } ? probed : CachedPdfOutline(pdfPath))
+            is not { WidthPoints: > 0, HeightPoints: > 0 } page)
+        {
+            return false;
+        }
+
+        SetStageFitHint(StageFitHint.PageAspect(page.WidthPoints / page.HeightPoints), version);
+        return true;
+    }
+
+    /// <summary>
+    /// The page count and page one's shape when they are already known: the
+    /// probe the stage fit started, or the rail cache of an earlier open,
+    /// which also covers documents the probe cannot read.
+    /// </summary>
+    private static PdfOutline? KnownPdfOutline(string path)
+    {
+        var probe = PdfPageSizeProbe.ReadAsync(path);
+        return probe.Wait(PdfProbeWait) && probe.Result is { PageCount: > 0 } outline
+            ? outline
+            : CachedPdfOutline(path);
+    }
+
+    /// <summary>The first rail range's manifest: a few hundred bytes of JSON, no images.</summary>
+    private static PdfOutline? CachedPdfOutline(string path)
+    {
+        try
+        {
+            var manifestPath = Path.Combine(PdfRailCacheDirectory(path, PdfPageRailInitialPages, 0), "manifest.json");
+            if (!File.Exists(manifestPath)
+                || JsonSerializer.Deserialize<PdfThumbnailManifest>(File.ReadAllText(manifestPath)) is not { TotalPages: > 0 } manifest)
+            {
+                return null;
+            }
+
+            return manifest.Pages.Count > 0
+                ? new PdfOutline(manifest.Pages[0].Width, manifest.Pages[0].Height, manifest.TotalPages)
+                : new PdfOutline(0, 0, manifest.TotalPages);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -213,18 +298,31 @@ public partial class PreviewWindow
         public long Version { get; } = version;
         public CancellationToken Token { get; } = token;
         public bool IsVisible { get; set; } = true;
+
+        /// <summary>
+        /// The page count, and the thumbnails rendered so far from page one
+        /// on. Null until the count is known; set to null to load anew.
+        /// </summary>
         public PdfPreviewDocument? Document { get; set; }
+
+        /// <summary>Page one's width over height: the shape of every page not yet rendered.</summary>
+        public double PageAspect { get; set; } = 612.0 / 792.0;
+
+        /// <summary>Each load bumps this, so ranges from an older load are dropped.</summary>
+        public long LoadGeneration { get; set; }
+
         public Func<PdfPageRailState, int, bool>? TryHandleJump { get; set; }
         public double RailVerticalOffset { get; set; }
         public bool RailNeedsSelectedPageScroll { get; set; }
         public Dictionary<int, Border> PageTiles { get; } = [];
+        public Dictionary<int, Border> PageSheets { get; } = [];
         public Border? SelectedPageTile { get; set; }
         public ScrollViewer? PageRailScrollViewer { get; set; }
         public DispatcherTimer? PageSyncTimer { get; set; }
-        public Task<PdfPageAutomationProbeResult>? PageSyncProbeTask { get; set; }
         public bool PageSyncInFlight { get; set; }
         public bool PageSyncDisabled { get; set; }
         public long PageSyncGeneration { get; set; }
+
         public string? LastPageSource { get; set; }
         public System.Windows.Automation.AutomationElement? PageAutomationElement { get; set; }
         public TaskCompletionSource<bool> FirstRailReady { get; } =
@@ -234,18 +332,6 @@ public partial class PreviewWindow
     private readonly record struct PdfPageAutomationProbeResult(
         int Page,
         System.Windows.Automation.AutomationElement? PageElement);
-
-    private static ContentControl BuildPdfPageRailHost()
-    {
-        return new ContentControl
-        {
-            Width = 0,
-            ClipToBounds = true,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            VerticalContentAlignment = VerticalAlignment.Stretch
-        };
-    }
 
     /// <summary>
     /// The rail is the truth the parser cannot always reach: the first page
@@ -271,84 +357,74 @@ public partial class PreviewWindow
         SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height), state.Version);
     }
 
-    // Direct PDFs use the same short-lived helper as converted Office PDFs.
-    // A malformed or incompatible document can crash native PDFium, but it
-    // must never take the resident preview process down with it.
-    private Task LoadPdfPageRailAsync(PdfPageRailState state) =>
-        LoadPdfPageRailOutOfProcessAsync(state);
-
-    private Task LoadPdfPageRailOutOfProcessAsync(PdfPageRailState state) =>
-        LoadPdfPageRailCoreAsync(
-            state,
-            (pageLimit, startPage) => TryRenderPdfThumbnailsOutOfProcessAsync(
-                state.Path,
-                pageLimit,
-                state.Token,
-                startPage),
-            () => TryRenderPdfThumbnailsOutOfProcessAsync(
-                state.Path,
-                PdfPageRailMaxPages,
-                state.Token),
-            "pdf page rail helper");
-
-    private async Task LoadPdfPageRailCoreAsync(
-        PdfPageRailState state,
-        Func<int, int, Task<PdfPreviewDocument?>> renderRange,
-        Func<Task<PdfPreviewDocument?>> renderFallback,
-        string diagnosticName)
+    /// <summary>
+    /// The page rail. Thumbnails render in short helper processes: pdfium
+    /// can crash in native code on an ordinary document, and only the helper
+    /// dies. When the page count is already known the rail is built here,
+    /// before the viewer lays out, so its column never reflows the page and
+    /// the reveal never waits on it; the ranges then fill it in place. A
+    /// document nothing has counted yet waits for its first range instead.
+    /// </summary>
+    private async Task LoadPdfPageRailOutOfProcessAsync(PdfPageRailState state)
     {
+        var generation = ++state.LoadGeneration;
+        var path = state.Path;
+        bool Current() =>
+            generation == state.LoadGeneration
+            && state.Version == _loadVersion
+            && !state.Token.IsCancellationRequested;
+
+        if (KnownPdfOutline(path) is { } outline)
+        {
+            ApplyPdfPageCount(state, outline.PageCount, outline.WidthPoints / outline.HeightPoints);
+            if (outline.PageCount <= 1)
+            {
+                return;
+            }
+        }
+
         try
         {
-            var firstPages = await renderRange(PdfPageRailInitialPages, 0);
-            if (state.Version != _loadVersion || state.Token.IsCancellationRequested)
+            foreach (var (start, limit) in PdfRailRanges(() => state.Document?.TotalPages ?? 0))
             {
-                return;
-            }
-
-            if (firstPages is null || firstPages.TotalPages <= 1)
-            {
-                state.FirstRailReady.TrySetResult(true);
-                HidePdfPageRail(state);
-                return;
-            }
-
-            state.Document = firstPages;
-            HintStageFromRailTruth(state, firstPages);
-            RenderPdfPageRail(state);
-            state.FirstRailReady.TrySetResult(true);
-
-            if (firstPages.TotalPages <= firstPages.Pages.Count)
-            {
-                return;
-            }
-
-            var remainingPages = await renderRange(
-                PdfPageRailMaxPages - firstPages.Pages.Count,
-                firstPages.Pages.Count);
-            if (state.Version != _loadVersion || state.Token.IsCancellationRequested)
-            {
-                return;
-            }
-
-            if (remainingPages is null || remainingPages.TotalPages <= 1)
-            {
-                var allPages = await renderFallback();
-                if (state.Version != _loadVersion
-                    || state.Token.IsCancellationRequested
-                    || allPages is null
-                    || allPages.TotalPages <= 1)
+                var rendered = await TryRenderPdfThumbnailsOutOfProcessAsync(path, limit, state.Token, start);
+                if (!Current())
                 {
                     return;
                 }
 
-                state.Document = allPages;
-            }
-            else
-            {
-                state.Document = CombinePdfPreviewDocuments(firstPages, remainingPages);
-            }
+                if (rendered is null)
+                {
+                    // Pages a helper could not render stay as ghost pages.
+                    if (state.Document is null)
+                    {
+                        HidePdfPageRail(state);
+                        state.FirstRailReady.TrySetResult(true);
+                    }
 
-            RenderPdfPageRail(state);
+                    return;
+                }
+
+                if (start == 0)
+                {
+                    HintStageFromRailTruth(state, rendered);
+                }
+
+                if (state.Document?.TotalPages != rendered.TotalPages)
+                {
+                    var first = rendered.Pages.Count > 0 ? rendered.Pages[0] : null;
+                    ApplyPdfPageCount(
+                        state,
+                        rendered.TotalPages,
+                        first is null ? state.PageAspect : (double)first.Width / first.Height);
+                    if (rendered.TotalPages <= 1)
+                    {
+                        return;
+                    }
+                }
+
+                FillPdfPageRail(state, start, rendered.Pages);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -357,21 +433,82 @@ public partial class PreviewWindow
         catch (Exception ex)
         {
             state.FirstRailReady.TrySetResult(true);
-            DiagnosticLog.Write(
-                $"{diagnosticName} failed {state.Path}: {ex.GetType().Name}: {ex.Message}");
-            if (state.Version == _loadVersion)
+            DiagnosticLog.Write($"pdf page rail failed {path}: {ex.GetType().Name}: {ex.Message}");
+            if (Current() && state.Document is null)
             {
                 HidePdfPageRail(state);
             }
         }
     }
 
-    private static PdfPreviewDocument CombinePdfPreviewDocuments(PdfPreviewDocument first, PdfPreviewDocument remaining)
+    /// <summary>
+    /// The helper calls for one document: ten pages first so the visible
+    /// tiles fill fast, then ranges of at most a helper call each, up to the
+    /// rail's cap. Each range is cached on its own, so a reopen renders
+    /// nothing it already has. The plan reads the count as each range lands.
+    /// </summary>
+    internal static IEnumerable<(int Start, int Limit)> PdfRailRanges(Func<int> totalPages)
     {
-        var pages = new List<PdfPreviewPage>(first.Pages.Count + remaining.Pages.Count);
-        pages.AddRange(first.Pages);
-        pages.AddRange(remaining.Pages);
-        return new PdfPreviewDocument(pages, Math.Max(first.TotalPages, remaining.TotalPages));
+        var start = 0;
+        var limit = PdfPageRailInitialPages;
+        while (true)
+        {
+            yield return (start, limit);
+            start += limit;
+            var end = Math.Min(totalPages(), PdfPageRailMaxPages);
+            if (start >= end)
+            {
+                yield break;
+            }
+
+            limit = Math.Min(PdfPreviewRenderer.MaxThumbnailPagesPerCall, end - start);
+        }
+    }
+
+    /// <summary>
+    /// Decides the rail for a known page count: none for one page, otherwise
+    /// every page up to the cap, as ghost pages at page one's shape until
+    /// their thumbnails land. A rail that arrives after the reveal cloaks
+    /// the viewer while its column takes the room.
+    /// </summary>
+    private void ApplyPdfPageCount(PdfPageRailState state, int totalPages, double pageAspect)
+    {
+        state.Document = new PdfPreviewDocument([], totalPages);
+        if (double.IsFinite(pageAspect) && pageAspect > 0)
+        {
+            state.PageAspect = Math.Clamp(pageAspect, 0.2, 5);
+        }
+
+        if (totalPages <= 1)
+        {
+            HidePdfPageRail(state);
+        }
+        else
+        {
+            var width = state.IsVisible ? PdfPageRailWidth : PdfPageRailCollapsedWidth;
+            var widthChanges = Math.Abs(state.RailColumn.Width.Value - width) > 0.5;
+            RenderPdfPageRail(state, cloakViewer: widthChanges && _loadFinished && state.Version == _loadVersion);
+        }
+
+        state.FirstRailReady.TrySetResult(true);
+    }
+
+    /// <summary>A landed range turns its ghost pages into thumbnails, in place.</summary>
+    private void FillPdfPageRail(PdfPageRailState state, int start, IReadOnlyList<PdfPreviewPage> pages)
+    {
+        if (state.Document is not { } document || start != document.Pages.Count)
+        {
+            return;
+        }
+
+        state.Document = document with { Pages = [.. document.Pages, .. pages] };
+        for (var i = 0; i < pages.Count; i++)
+        {
+            if (state.PageSheets.TryGetValue(start + i + 1, out var sheet))
+            {
+                ShowPdfThumbnail(sheet, pages[i], animate: true);
+            }
+        }
     }
 
     private static async Task<PdfPreviewDocument?> TryRenderPdfThumbnailsOutOfProcessAsync(
@@ -419,10 +556,9 @@ public partial class PreviewWindow
                 return null;
             }
 
-            // The helper rasters every page while Chromium is loading the
-            // same document and the entrance is animating. It has until the
-            // reveal gate; it must never win CPU from the frames the user is
-            // watching.
+            // The helper rasters pages while Chromium is loading the same
+            // document and the entrance is animating. It must never win CPU
+            // from the frames the user is watching.
             try
             {
                 process.PriorityClass = ProcessPriorityClass.BelowNormal;
@@ -442,13 +578,17 @@ public partial class PreviewWindow
                 throw;
             }
 
+            // A manifest is written last, so one that exists is complete even
+            // when the helper died on its way out.
+            var rendered = await Task.Run(() => TryReadPdfThumbnailManifest(tempDir), token);
             if (process.ExitCode != 0)
             {
-                DiagnosticLog.Write($"pdf thumbnail helper exit {process.ExitCode} for {path}");
-                return null;
+                var written = Directory.EnumerateFiles(tempDir, "page-*.png").Count();
+                DiagnosticLog.Write(
+                    $"pdf thumbnail helper exit {process.ExitCode} for {path}: pages {startPage + 1}-{startPage + pageLimit}, "
+                    + (rendered is null ? $"stopped at page {startPage + written + 1}" : "manifest complete"));
             }
 
-            var rendered = await Task.Run(() => TryReadPdfThumbnailManifest(tempDir), token);
             if (rendered is null)
             {
                 return null;
@@ -487,7 +627,12 @@ public partial class PreviewWindow
             hash);
     }
 
-    private static PdfPreviewDocument? TryReadPdfThumbnailManifest(string directory)
+    /// <summary>
+    /// Reads a rendered range. Every page file must sit inside the range's own
+    /// folder: a tampered or half-written manifest never points the rail
+    /// anywhere else.
+    /// </summary>
+    internal static PdfPreviewDocument? TryReadPdfThumbnailManifest(string directory)
     {
         try
         {
@@ -587,45 +732,12 @@ public partial class PreviewWindow
         var targetWidth = state.IsVisible ? PdfPageRailWidth : PdfPageRailCollapsedWidth;
         state.RailColumn.Width = new GridLength(targetWidth);
         state.PageTiles.Clear();
+        state.PageSheets.Clear();
         state.SelectedPageTile = null;
         state.PageRailScrollViewer = null;
 
         var content = state.IsVisible
-            ? BuildPdfPageRail(
-                document,
-                state.CurrentPage,
-                state.RailVerticalOffset,
-                offset => state.RailVerticalOffset = offset,
-                page =>
-                {
-                    SetPdfCurrentPageFromViewer(state, page, logChange: false);
-                    if (state.TryHandleJump?.Invoke(state, page) == true)
-                    {
-                        return;
-                    }
-
-                    JumpPdfToPage(state, page);
-                },
-                (page, tile, selected) =>
-                {
-                    state.PageTiles[page] = tile;
-                    if (selected)
-                    {
-                        state.SelectedPageTile = tile;
-                    }
-                },
-                scroll => state.PageRailScrollViewer = scroll,
-                state.RailNeedsSelectedPageScroll,
-                tile =>
-                {
-                    BringPdfPageTileIntoView(state, tile);
-                    state.RailNeedsSelectedPageScroll = false;
-                },
-                () =>
-                {
-                    state.IsVisible = false;
-                    RenderPdfPageRail(state, cloakViewer: true);
-                })
+            ? BuildPdfPageRail(state, document)
             : BuildCollapsedRail(document.TotalPages, "Show pages", () =>
             {
                 state.IsVisible = true;
@@ -640,71 +752,187 @@ public partial class PreviewWindow
         AnimateRail(state.Host, targetWidth, content);
     }
 
-    private static void AnimateRail(ContentControl host, double targetWidth, FrameworkElement? content)
-    {
-        host.BeginAnimation(FrameworkElement.WidthProperty, null);
-        if (content is not null)
-        {
-            content.Opacity = 0;
-            host.Content = content;
-            content.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(100))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
-        }
-        else if (targetWidth < 1)
-        {
-            host.Content = null;
-        }
-
-        host.Width = targetWidth;
-    }
-
-    private void CloakViewerForRailResize(WebView2 webView, long version)
-    {
-        if (webView.CoreWebView2 is not { } core)
-        {
-            return;
-        }
-
-        try
-        {
-            _ = core.ExecuteScriptAsync(
-                "document.documentElement.style.transition='none';"
-                + "document.documentElement.style.opacity='0';");
-        }
-        catch
-        {
-            return;
-        }
-
-        RunAfter(TimeSpan.FromMilliseconds(90), () =>
-        {
-            if (version != _loadVersion || webView.CoreWebView2 is not { } currentCore)
-            {
-                return;
-            }
-
-            try
-            {
-                _ = currentCore.ExecuteScriptAsync(
-                    "document.documentElement.style.transition='opacity 120ms ease-out';"
-                    + "document.documentElement.style.opacity='1';");
-            }
-            catch
-            {
-                // The resize itself is still valid; the script is just polish.
-            }
-        });
-    }
-
     private void HidePdfPageRail(PdfPageRailState state)
     {
         state.PageTiles.Clear();
+        state.PageSheets.Clear();
         state.SelectedPageTile = null;
         state.PageRailScrollViewer = null;
         state.RailColumn.Width = new GridLength(0);
         AnimateRail(state.Host, 0, null);
+    }
+
+    /// <summary>
+    /// Every page up to the cap, built once. A page whose thumbnail has not
+    /// landed is a ghost at page one's shape; it keeps its place and fills
+    /// in where it stands, so the strip never rebuilds while it loads.
+    /// </summary>
+    private FrameworkElement BuildPdfPageRail(PdfPageRailState state, PdfPreviewDocument document)
+    {
+        var palette = Theme.Current;
+        // 131 px inside the hairline, less the 7 px scrollbar column, less
+        // these margins and a tile's 1 px border and 6 px padding, leaves 98:
+        // room for a 92 px sheet. A wider sheet is clipped at its sides.
+        var stack = new StackPanel { Margin = new Thickness(8, 0, 4, 12) };
+        FrameworkElement? pageToRevealOnLoad = null;
+
+        var header = new Grid { Margin = new Thickness(18, 12, 11, 8) };
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        header.Children.Add(new TextBlock
+        {
+            Text = "Pages",
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = Theme.Brush(palette.TextTertiary),
+            FontSize = Metrics.FontCaption
+        });
+        var hideButton = BuildRailChromeButton("", "Hide pages", () =>
+        {
+            state.IsVisible = false;
+            RenderPdfPageRail(state, cloakViewer: true);
+        });
+        Grid.SetColumn(hideButton, 1);
+        header.Children.Add(hideButton);
+
+        var shown = Math.Min(document.TotalPages, PdfPageRailMaxPages);
+        for (var pageNumber = 1; pageNumber <= shown; pageNumber++)
+        {
+            var sheet = new Border
+            {
+                Width = PdfRailSheetWidth,
+                Height = PdfRailSheetWidth / state.PageAspect,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                CornerRadius = Metrics.SurfaceCorner,
+                BorderThickness = new Thickness(1),
+                BorderBrush = Theme.Brush(palette.RaisedBorder),
+                Background = Theme.Brush(palette.RaisedBg),
+                Child = new Image { Stretch = Stretch.Fill, SnapsToDevicePixels = true }
+            };
+            RenderOptions.SetBitmapScalingMode(sheet.Child, BitmapScalingMode.HighQuality);
+            if (pageNumber <= document.Pages.Count)
+            {
+                ShowPdfThumbnail(sheet, document.Pages[pageNumber - 1], animate: false);
+            }
+
+            var tile = new Border
+            {
+                CornerRadius = Metrics.RowCorner,
+                Padding = new Thickness(6, 6, 6, 4),
+                Margin = new Thickness(0, 0, 0, 4),
+                Background = Brushes.Transparent,
+                BorderBrush = Brushes.Transparent,
+                BorderThickness = new Thickness(1),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Child = new StackPanel
+                {
+                    Children =
+                    {
+                        sheet,
+                        new TextBlock
+                        {
+                            Text = pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            Margin = new Thickness(0, 4, 0, 0),
+                            HorizontalAlignment = HorizontalAlignment.Center,
+                            Foreground = Theme.Brush(palette.TextSecondary),
+                            FontSize = Metrics.FontCaption
+                        }
+                    }
+                }
+            };
+            System.Windows.Automation.AutomationProperties.SetName(tile, $"Page {pageNumber}");
+
+            var selected = pageNumber == state.CurrentPage;
+            ConfigureRailTile(
+                tile,
+                pageNumber,
+                selected,
+                palette,
+                page =>
+                {
+                    SetPdfCurrentPageFromViewer(state, page, logChange: false);
+                    if (state.TryHandleJump?.Invoke(state, page) == true)
+                    {
+                        return;
+                    }
+
+                    JumpPdfToPage(state, page);
+                },
+                (page, registered, isSelected) =>
+                {
+                    state.PageTiles[page] = registered;
+                    if (isSelected)
+                    {
+                        state.SelectedPageTile = registered;
+                    }
+                });
+            state.PageSheets[pageNumber] = sheet;
+            if (selected)
+            {
+                pageToRevealOnLoad = tile;
+            }
+
+            stack.Children.Add(tile);
+        }
+
+        if (document.TotalPages > shown)
+        {
+            stack.Children.Add(new TextBlock
+            {
+                Text = $"First {shown} of {document.TotalPages} pages",
+                TextAlignment = TextAlignment.Center,
+                FontSize = Metrics.FontCaption,
+                Foreground = Theme.Brush(palette.TextTertiary),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 4, 4, 0)
+            });
+        }
+
+        var surface = BuildRailSurface(
+            header,
+            stack,
+            state.RailVerticalOffset,
+            offset => state.RailVerticalOffset = offset,
+            scroll => state.PageRailScrollViewer = scroll,
+            scroll =>
+            {
+                if (!state.RailNeedsSelectedPageScroll || pageToRevealOnLoad is not { } tile)
+                {
+                    scroll.ScrollToVerticalOffset(state.RailVerticalOffset);
+                    return;
+                }
+
+                // The saved offset is stale when the viewer moved while the
+                // rail was hidden; reopen around the current page instead.
+                _ = scroll.Dispatcher.BeginInvoke(
+                    DispatcherPriority.Loaded,
+                    new Action(() =>
+                    {
+                        BringPdfPageTileIntoView(state, tile);
+                        state.RailNeedsSelectedPageScroll = false;
+                    }));
+            });
+        return surface;
+    }
+
+    /// <summary>A sheet takes its thumbnail and that page's own shape; ghosts dissolve into pages.</summary>
+    private static void ShowPdfThumbnail(Border sheet, PdfPreviewPage page, bool animate)
+    {
+        if (sheet.Child is not Image image || page.Width < 1 || page.Height < 1)
+        {
+            return;
+        }
+
+        sheet.Height = Math.Round(PdfRailSheetWidth * page.Height / page.Width);
+        var inner = new Rect(0, 0, sheet.Width - 2, sheet.Height - 2);
+        image.Clip = new RectangleGeometry(inner, Metrics.RadiusSurface - 1, Metrics.RadiusSurface - 1);
+        image.Source = page.Bitmap;
+        if (animate && SystemParameters.ClientAreaAnimation)
+        {
+            image.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
+        }
     }
 
     private void StartPdfPageSync(PdfPageRailState state)
@@ -746,7 +974,6 @@ public partial class PreviewWindow
             return;
         }
 
-        var ownsProbe = false;
         try
         {
             if (!string.Equals(core.Source, state.LastPageSource, StringComparison.Ordinal))
@@ -759,84 +986,90 @@ public partial class PreviewWindow
                 }
             }
 
-            if (state.PageSyncInFlight
-                || state.PageSyncDisabled
-                || state.PageSyncProbeTask is { IsCompleted: false })
-            {
-                return;
-            }
-
-            var totalPages = state.Document?.TotalPages ?? 0;
-            var hwnd = TryGetPdfAutomationHwnd(state.WebView);
-            if (totalPages <= 1 || hwnd == IntPtr.Zero)
+            if (state.PageSyncInFlight || state.PageSyncDisabled)
             {
                 return;
             }
 
             var generation = state.PageSyncGeneration;
-            var cachedElement = state.PageAutomationElement;
             state.PageSyncInFlight = true;
-            ownsProbe = true;
-
-            // UI Automation crosses into Chromium's PDF provider and can
-            // block while a large document is scrolling or zooming. Never
-            // let that provider own the WPF dispatcher.
-            var probeTask = Task.Run(() =>
+            try
             {
-                try
+                var result = await ProbePdfPageAsync(state);
+                if (generation != state.PageSyncGeneration
+                    || state.Version != _loadVersion
+                    || state.Token.IsCancellationRequested)
                 {
-                    return TryReadPdfPageFromAutomation(hwnd, totalPages, cachedElement);
+                    return;
                 }
-                catch
-                {
-                    return default;
-                }
-            });
-            state.PageSyncProbeTask = probeTask;
 
-            var timeoutTask = Task.Delay(PdfPageAutomationTimeout);
-            if (await Task.WhenAny(probeTask, timeoutTask) != probeTask)
-            {
-                // UIA calls cannot be cancelled safely. Keep the single
-                // worker isolated and stop polling this viewer rather than
-                // stacking more blocked probes behind it.
-                if (generation == state.PageSyncGeneration
-                    && state.Version == _loadVersion
-                    && !state.Token.IsCancellationRequested)
+                if (result is null)
                 {
+                    // UIA calls cannot be cancelled safely. Keep the single
+                    // worker isolated and stop polling this viewer rather than
+                    // stacking more blocked probes behind it.
                     state.PageSyncDisabled = true;
                     DiagnosticLog.Write(
                         $"pdf page sync disabled after {PdfPageAutomationTimeout.TotalSeconds:0}s timeout");
+                    return;
                 }
 
-                return;
+                if (result.Value.Page > 0)
+                {
+                    SetPdfCurrentPageFromViewer(state, result.Value.Page);
+                }
             }
-
-            var result = await probeTask;
-            if (generation != state.PageSyncGeneration
-                || state.Version != _loadVersion
-                || state.Token.IsCancellationRequested)
+            finally
             {
-                return;
-            }
-
-            state.PageAutomationElement = result.PageElement;
-            if (result.Page > 0)
-            {
-                SetPdfCurrentPageFromViewer(state, result.Page);
+                state.PageSyncInFlight = false;
             }
         }
         catch
         {
             state.PageAutomationElement = null;
         }
-        finally
+    }
+
+    /// <summary>
+    /// Asks the viewer's own page box which page is showing. UI Automation
+    /// crosses into Chromium's PDF provider and can block, so the question
+    /// runs off the dispatcher and an answer that takes longer than the
+    /// timeout is null. Page 0 means the viewer answered without a page.
+    /// </summary>
+    private async Task<PdfPageAutomationProbeResult?> ProbePdfPageAsync(PdfPageRailState state)
+    {
+        var totalPages = state.Document?.TotalPages ?? 0;
+        var hwnd = TryGetPdfAutomationHwnd(state.WebView);
+        if (totalPages <= 1 || hwnd == IntPtr.Zero)
         {
-            if (ownsProbe)
-            {
-                state.PageSyncInFlight = false;
-            }
+            return default(PdfPageAutomationProbeResult);
         }
+
+        var element = state.PageAutomationElement;
+        var probe = Task.Run(() =>
+        {
+            try
+            {
+                return TryReadPdfPageFromAutomation(hwnd, totalPages, element);
+            }
+            catch
+            {
+                return default;
+            }
+        });
+
+        if (await Task.WhenAny(probe, Task.Delay(PdfPageAutomationTimeout)) != probe)
+        {
+            return null;
+        }
+
+        var result = await probe;
+        if (result.PageElement is not null)
+        {
+            state.PageAutomationElement = result.PageElement;
+        }
+
+        return result;
     }
 
     private void SetPdfCurrentPageFromViewer(
@@ -1098,127 +1331,6 @@ public partial class PreviewWindow
         return false;
     }
 
-    private static FrameworkElement BuildPdfPageRail(
-        PdfPreviewDocument document,
-        int selectedPage,
-        double verticalOffset,
-        Action<double> rememberScroll,
-        Action<int> navigate,
-        Action<int, Border, bool> registerTile,
-        Action<ScrollViewer> registerScroll,
-        bool alignSelectedOnLoad,
-        Action<FrameworkElement> alignLoadedSelection,
-        Action hide)
-    {
-        var palette = Theme.Current;
-        var stack = new StackPanel { Margin = new Thickness(10, 0, 10, 12) };
-        FrameworkElement? pageToRevealOnLoad = null;
-
-        var header = new Grid { Margin = new Thickness(10, 10, 10, 8) };
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        header.Children.Add(new TextBlock
-        {
-            Text = "Pages",
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextTertiary),
-            FontSize = 11,
-            FontWeight = FontWeights.SemiBold
-        });
-        var hideButton = BuildRailChromeButton("\uE76B", "Hide pages", hide);
-        Grid.SetColumn(hideButton, 1);
-        header.Children.Add(hideButton);
-
-        for (var i = 0; i < document.Pages.Count; i++)
-        {
-            var pageNumber = i + 1;
-            var page = document.Pages[i];
-            var thumbnail = new Image
-            {
-                Source = page.Bitmap,
-                Width = Math.Min(92, page.Width),
-                Stretch = Stretch.Uniform,
-                SnapsToDevicePixels = true
-            };
-            RenderOptions.SetBitmapScalingMode(thumbnail, BitmapScalingMode.HighQuality);
-
-            var imageFrame = new Border
-            {
-                Background = Brushes.White,
-                BorderBrush = Theme.Brush(Color.FromArgb(90, palette.Border.R, palette.Border.G, palette.Border.B)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(5),
-                Padding = new Thickness(2),
-                Child = thumbnail
-            };
-
-            var label = new TextBlock
-            {
-                Text = pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                Margin = new Thickness(0, 5, 0, 0),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                Foreground = Theme.Brush(palette.TextSecondary),
-                FontSize = 11
-            };
-
-            var tile = new Border
-            {
-                CornerRadius = Metrics.RowCorner,
-                Padding = new Thickness(7),
-                Margin = new Thickness(0, 0, 0, 8),
-                Background = Brushes.Transparent,
-                BorderBrush = Brushes.Transparent,
-                BorderThickness = new Thickness(1),
-                Cursor = Cursors.Hand,
-                ToolTip = $"Go to page {pageNumber}",
-                Child = new StackPanel { Children = { imageFrame, label } }
-            };
-
-            var selected = pageNumber == selectedPage;
-            ConfigureRailTile(tile, pageNumber, selected, palette, navigate, registerTile);
-            if (selected)
-            {
-                pageToRevealOnLoad = tile;
-            }
-
-            stack.Children.Add(tile);
-        }
-
-        if (document.TotalPages > document.Pages.Count)
-        {
-            stack.Children.Add(new TextBlock
-            {
-                Text = $"First {document.Pages.Count} of {document.TotalPages}",
-                TextAlignment = TextAlignment.Center,
-                FontSize = 11,
-                Foreground = Theme.Brush(palette.TextTertiary),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(4, 4, 4, 0)
-            });
-        }
-
-        return BuildRailSurface(
-            header,
-            stack,
-            verticalOffset,
-            rememberScroll,
-            registerScroll,
-            scroll =>
-            {
-                if (!alignSelectedOnLoad || pageToRevealOnLoad is not { } tile)
-                {
-                    scroll.ScrollToVerticalOffset(verticalOffset);
-                    return;
-                }
-
-                // The saved offset is stale when the viewer moved while the
-                // rail was hidden; reopen around the current page instead.
-                _ = scroll.Dispatcher.BeginInvoke(
-                    DispatcherPriority.Loaded,
-                    new Action(() => alignLoadedSelection(tile)));
-            });
-    }
-
     private void JumpPdfToPage(PdfPageRailState state, int page) =>
         _ = JumpPdfToPageAsync(state, page);
 
@@ -1293,49 +1405,10 @@ public partial class PreviewWindow
     /// Asks the viewer, through its own page control, whether the jump landed.
     /// Unknown counts as landed: the probe is a check on the jump, not a
     /// second gate, and a viewer that will not answer must not cost the user a
-    /// document reload. UI Automation reaches into Chromium's PDF provider and
-    /// can block, so it runs off the dispatcher under the same timeout the
-    /// page sync uses.
+    /// document reload.
     /// </summary>
-    private async Task<bool> LandedOnPdfPageAsync(PdfPageRailState state, int target)
-    {
-        if (state.Document is not { TotalPages: > 1 } document)
-        {
-            return true;
-        }
-
-        var hwnd = TryGetPdfAutomationHwnd(state.WebView);
-        if (hwnd == IntPtr.Zero)
-        {
-            return true;
-        }
-
-        var element = state.PageAutomationElement;
-        var probe = Task.Run(() =>
-        {
-            try
-            {
-                return TryReadPdfPageFromAutomation(hwnd, document.TotalPages, element);
-            }
-            catch
-            {
-                return default;
-            }
-        });
-
-        if (await Task.WhenAny(probe, Task.Delay(PdfPageAutomationTimeout)) != probe)
-        {
-            return true;
-        }
-
-        var result = await probe;
-        if (result.PageElement is not null)
-        {
-            state.PageAutomationElement = result.PageElement;
-        }
-
-        return result.Page <= 0 || result.Page == target;
-    }
+    private async Task<bool> LandedOnPdfPageAsync(PdfPageRailState state, int target) =>
+        await ProbePdfPageAsync(state) is not { Page: > 0 } result || result.Page == target;
 
     /// <summary>
     /// Clicks the viewer's own page box and types the target. The offset is
@@ -1359,7 +1432,9 @@ public partial class PreviewWindow
 
     /// <summary>
     /// Fallback only. It is slower, but it never leaves a blank page behind:
-    /// the old viewer stays visible until the new one has loaded.
+    /// the old viewer stays visible until the new one has loaded. The viewer
+    /// honours #page only at document load, so this is a real load with a
+    /// cache-busting query, never a runtime hash change.
     /// </summary>
     private void StagePdfViewerJump(PdfPageRailState state, int target)
     {
@@ -1454,6 +1529,8 @@ public partial class PreviewWindow
             onSwapped?.Invoke();
         }
 
+        // Navigation and the 4 s escape share one owner: only one of them
+        // may start the paint wait, and the escape stands down once it has.
         var paintAttemptStarted = false;
         fresh.NavigationCompleted += async (_, args) =>
         {
@@ -1498,21 +1575,5 @@ public partial class PreviewWindow
                 Swap();
             }
         });
-    }
-
-    /// <summary>
-    /// What a document the viewer cannot show gets. pdfium never renders a
-    /// user's document in this process: it can die in native code, and here
-    /// it would take every later preview with it.
-    /// </summary>
-    private static FrameworkElement BuildPdfErrorPreview(string path)
-    {
-        var kind = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : "file";
-        var extension = Path.GetExtension(path);
-        var app = string.IsNullOrEmpty(extension) ? null : NativeMethods.TryGetFriendlyAppName(extension);
-        var next = string.IsNullOrWhiteSpace(app) || app.Equals("Pick an app", StringComparison.OrdinalIgnoreCase)
-            ? "Open it in another app instead."
-            : $"Open it with {app} instead.";
-        return BuildErrorPreview($"{Branding.Name} can't preview this {kind}", next);
     }
 }

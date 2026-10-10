@@ -1,34 +1,94 @@
-using System.Buffers.Binary;
-using System.Collections.Specialized;
-using System.Diagnostics;
-using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
-using System.Windows.Threading;
-using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
-using SpacePreview.Native;
-using SpacePreview.Services;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// The side rail a document carries (PDF pages, EPUB chapters): a column of
+/// chrome beside the viewer, with the window header's surface and the
+/// app's row states.
+/// </summary>
 public partial class PreviewWindow
 {
+    private static ContentControl BuildPdfPageRailHost()
+    {
+        return new ContentControl
+        {
+            Width = 0,
+            ClipToBounds = true,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Stretch
+        };
+    }
+
+    private static void AnimateRail(ContentControl host, double targetWidth, FrameworkElement? content)
+    {
+        host.BeginAnimation(FrameworkElement.WidthProperty, null);
+        if (content is not null)
+        {
+            content.Opacity = 0;
+            host.Content = content;
+            content.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(100))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            });
+        }
+        else if (targetWidth < 1)
+        {
+            host.Content = null;
+        }
+
+        host.Width = targetWidth;
+    }
+
+    /// <summary>
+    /// The viewer refits when the rail's column changes width; hide that
+    /// refit behind a short fade of the document itself.
+    /// </summary>
+    private void CloakViewerForRailResize(WebView2 webView, long version)
+    {
+        if (webView.CoreWebView2 is not { } core)
+        {
+            return;
+        }
+
+        try
+        {
+            _ = core.ExecuteScriptAsync(
+                "document.documentElement.style.transition='none';"
+                + "document.documentElement.style.opacity='0';");
+        }
+        catch
+        {
+            return;
+        }
+
+        RunAfter(TimeSpan.FromMilliseconds(90), () =>
+        {
+            if (version != _loadVersion || webView.CoreWebView2 is not { } currentCore)
+            {
+                return;
+            }
+
+            try
+            {
+                _ = currentCore.ExecuteScriptAsync(
+                    "document.documentElement.style.transition='opacity 120ms ease-out';"
+                    + "document.documentElement.style.opacity='1';");
+            }
+            catch
+            {
+                // The resize itself is still valid; the script is just polish.
+            }
+        });
+    }
+
     private static void ConfigureRailTile(
         Border tile,
         int index,
@@ -104,17 +164,13 @@ public partial class PreviewWindow
         var surface = new Grid();
         surface.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         surface.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        surface.Children.Add(new Border
-        {
-            Background = Theme.Brush(Color.FromArgb(238, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
-            Child = header
-        });
+        surface.Children.Add(header);
         Grid.SetRow(scroll, 1);
         surface.Children.Add(scroll);
 
         return new Border
         {
-            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
+            Background = Theme.Brush(palette.ChromeBg),
             BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = surface
@@ -124,25 +180,25 @@ public partial class PreviewWindow
     private static FrameworkElement BuildCollapsedRail(int count, string tooltip, Action show)
     {
         var palette = Theme.Current;
-        var button = BuildRailChromeButton("\uE76C", tooltip, show);
+        var button = BuildRailChromeButton("", tooltip, show);
         return new Border
         {
-            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
+            Background = Theme.Brush(palette.ChromeBg),
             BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = new StackPanel
             {
-                Margin = new Thickness(4, 12, 4, 0),
+                Margin = new Thickness(4, 10, 4, 0),
                 Children =
                 {
                     button,
                     new TextBlock
                     {
                         Text = count.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                        Margin = new Thickness(0, 8, 0, 0),
+                        Margin = new Thickness(0, 6, 0, 0),
                         HorizontalAlignment = HorizontalAlignment.Center,
                         Foreground = Theme.Brush(palette.TextTertiary),
-                        FontSize = 10
+                        FontSize = Metrics.FontCaption
                     }
                 }
             }
@@ -154,8 +210,8 @@ public partial class PreviewWindow
         var palette = Theme.Current;
         var button = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 24,
+            Height = 24,
             CornerRadius = Metrics.IconCorner,
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
@@ -164,31 +220,35 @@ public partial class PreviewWindow
             {
                 Text = glyph,
                 FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                FontSize = 11,
+                FontSize = 10,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = Theme.Brush(palette.TextSecondary)
             }
         };
+        System.Windows.Automation.AutomationProperties.SetName(button, tooltip);
         button.MouseEnter += (_, _) => button.Background = Theme.Brush(palette.HoverBg);
         button.MouseLeave += (_, _) => button.Background = Brushes.Transparent;
+        button.MouseLeftButtonDown += (_, e) =>
+        {
+            button.Background = Theme.Brush(palette.PressedBg);
+            e.Handled = true;
+        };
         button.MouseLeftButtonUp += (_, e) =>
         {
+            button.Background = button.IsMouseOver ? Theme.Brush(palette.HoverBg) : Brushes.Transparent;
             action();
             e.Handled = true;
         };
         return button;
     }
 
+    /// <summary>The selected row: the hover surface, ringed in the accent.</summary>
     private static void ApplyRailTileState(Border tile, ThemePalette palette, bool selected)
     {
         tile.Tag = selected;
-        tile.Background = selected
-            ? Theme.Brush(Color.FromArgb(60, palette.Accent.R, palette.Accent.G, palette.Accent.B))
-            : Brushes.Transparent;
-        tile.BorderBrush = selected
-            ? Theme.Brush(Color.FromArgb(160, palette.Accent.R, palette.Accent.G, palette.Accent.B))
-            : Brushes.Transparent;
+        tile.Background = selected ? Theme.Brush(palette.HoverBg) : Brushes.Transparent;
+        tile.BorderBrush = selected ? Theme.Brush(palette.Accent) : Brushes.Transparent;
     }
 
     private static bool IsRailTileSelected(Border tile) => tile.Tag is true;
