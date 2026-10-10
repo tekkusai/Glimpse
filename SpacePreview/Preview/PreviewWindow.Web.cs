@@ -412,7 +412,7 @@ public partial class PreviewWindow
                 webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
                 RememberWebViewProcesses(webView.CoreWebView2);
-                webView.CoreWebView2.ContextMenuRequested += (_, args) => OnWebContextMenuRequested(webView.CoreWebView2, args);
+                webView.CoreWebView2.ContextMenuRequested += (_, args) => OnWebContextMenuRequested(webView, args);
                 webView.CoreWebView2.ProcessFailed += (_, args) =>
                     ReportFailure(new InvalidOperationException($"browser process failed ({args.ProcessFailedKind})"));
                 configure?.Invoke(webView.CoreWebView2);

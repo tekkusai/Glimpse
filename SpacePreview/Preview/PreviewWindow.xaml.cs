@@ -369,7 +369,7 @@ public partial class PreviewWindow : Window
         {
             Text = Branding.Tagline,
             FontSize = Metrics.FontBody,
-            Margin = new Thickness(0, 4, 0, 0),
+            Margin = new Thickness(0, 6, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center
         }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 

@@ -768,6 +768,11 @@ public partial class PreviewWindow
                 return;
             }
 
+            // A web right-click may have left the menu placed on the page.
+            menu.ClearValue(ContextMenu.PlacementProperty);
+            menu.ClearValue(ContextMenu.PlacementTargetProperty);
+            menu.ClearValue(ContextMenu.HorizontalOffsetProperty);
+            menu.ClearValue(ContextMenu.VerticalOffsetProperty);
             FillContextMenu(menu, selectedText: null);
         };
         _contextMenu = menu;
@@ -799,8 +804,9 @@ public partial class PreviewWindow
         menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
     }
 
-    private void OnWebContextMenuRequested(CoreWebView2 core, CoreWebView2ContextMenuRequestedEventArgs args)
+    private void OnWebContextMenuRequested(WebView2 webView, CoreWebView2ContextMenuRequestedEventArgs args)
     {
+        var core = webView.CoreWebView2;
         if (_contextMenu is not { } menu
             || RootChrome.ContextMenu is null
             || IsPdfViewerSource(core.Source ?? string.Empty))
@@ -812,9 +818,16 @@ public partial class PreviewWindow
         args.Handled = true;
         var target = args.ContextMenuTarget;
         FillContextMenu(menu, target.HasSelection ? target.SelectionText : null);
-        menu.PlacementTarget = RootChrome;
-        menu.Placement = PlacementMode.MousePoint;
+
+        // Where the page asked, not where the mouse is: Shift+F10 and the
+        // menu key ask at the caret. The browser reports device pixels.
+        var dpi = VisualTreeHelper.GetDpi(webView);
+        menu.PlacementTarget = webView;
+        menu.Placement = PlacementMode.RelativePoint;
+        menu.HorizontalOffset = args.Location.X / dpi.DpiScaleX;
+        menu.VerticalOffset = args.Location.Y / dpi.DpiScaleY;
         menu.IsOpen = true;
+        DiagnosticLog.Write($"web context menu -> preview menu at {args.Location.X},{args.Location.Y} selection={target.HasSelection}");
     }
 
     private void ArmWebContextMenu(CoreWebView2 core)
