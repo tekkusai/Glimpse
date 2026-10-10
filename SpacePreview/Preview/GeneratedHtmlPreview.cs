@@ -547,7 +547,7 @@ internal static partial class GeneratedHtmlPreview
 
     private static System.Drawing.Color BackgroundForTheme()
     {
-        var color = Theme.Current.ContentBg;
+        var color = Theme.Current.CanvasBg;
         return System.Drawing.Color.FromArgb(color.R, color.G, color.B);
     }
 

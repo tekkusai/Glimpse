@@ -230,7 +230,7 @@ internal sealed class FillSignSurface : Grid
 
     private Grid BuildToolBar(ThemePalette palette, int pageIndex, int totalPages)
     {
-        var bar = new Grid { Background = Theme.Brush(palette.HeaderBg) };
+        var bar = new Grid { Background = Theme.Brush(palette.ChromeBg) };
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -307,7 +307,7 @@ internal sealed class FillSignSurface : Grid
 
     private Grid BuildSaveBar(ThemePalette palette)
     {
-        var bar = new Grid { Background = Theme.Brush(palette.HeaderBg) };
+        var bar = new Grid { Background = Theme.Brush(palette.ChromeBg) };
         var row = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -567,8 +567,8 @@ internal sealed class FillSignSurface : Grid
         var palette = Theme.Current;
         var card = new Border
         {
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             CornerRadius = Metrics.SurfaceCorner,
             Padding = new Thickness(8),
@@ -666,7 +666,7 @@ internal sealed class FillSignSurface : Grid
             Margin = new Thickness(0, 0, 0, 6),
             CornerRadius = Metrics.RowCorner,
             BorderThickness = new Thickness(1),
-            BorderBrush = selected ? Theme.Brush(palette.Accent) : Theme.Brush(palette.SurfaceBorder),
+            BorderBrush = selected ? Theme.Brush(palette.Accent) : Theme.Brush(palette.RaisedBorder),
             Cursor = Cursors.Hand,
             Child = row
         };
@@ -688,8 +688,8 @@ internal sealed class FillSignSurface : Grid
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Top,
             Margin = new Thickness(0, 2, 2, 0),
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
             Visibility = Visibility.Collapsed,
@@ -911,8 +911,8 @@ internal sealed class FillSignSurface : Grid
             // never covers the placed ink. Safe outside the frame because
             // selection holds the chrome; no hover gap can hide it.
             Margin = new Thickness(0, -28, -2, 0),
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
             Visibility = Visibility.Collapsed,
@@ -925,7 +925,7 @@ internal sealed class FillSignSurface : Grid
         };
         remove.MouseLeave += (_, _) =>
         {
-            remove.Background = Theme.Brush(palette.SurfaceBg);
+            remove.Background = Theme.Brush(palette.RaisedBg);
             removeGlyph.Foreground = Theme.Brush(palette.TextSecondary);
         };
         remove.MouseLeftButtonDown += (_, e) => e.Handled = true;
@@ -1149,8 +1149,8 @@ internal sealed class FillSignSurface : Grid
 
         var card = new Border
         {
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             CornerRadius = Metrics.SurfaceCorner,
             Padding = new Thickness(18),
@@ -1172,7 +1172,7 @@ internal sealed class FillSignSurface : Grid
         var inkFrame = new Border
         {
             Background = Brushes.White,
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             CornerRadius = Metrics.RowCorner,
             Height = 170,

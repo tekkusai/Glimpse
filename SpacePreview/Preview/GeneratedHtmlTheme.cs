@@ -14,7 +14,7 @@ internal static class GeneratedHtmlTheme
   color-scheme: light;
 
   /* Surface tokens (Theme.cs Light) */
-  --bg: #FFFFFF;              /* ContentBg */
+  --bg: #FFFFFF;              /* CanvasBg */
   --text: #1D1E22;            /* TextPrimary */
   --text-2: #5C6270;          /* TextSecondary */
   --text-3: #878D99;          /* TextTertiary */
@@ -27,8 +27,8 @@ internal static class GeneratedHtmlTheme
   --code-border: #E4E6EB;
   --code-text: #23252B;
   --inline-code-bg: #EFF0F4;
-  --kbd-bg: #F5F5F8;          /* BadgeBg */
-  --kbd-border: #D9DBE2;      /* BadgeBorder */
+  --kbd-bg: #F5F5F8;          /* RaisedBg */
+  --kbd-border: #D9DBE2;      /* RaisedBorder */
   --ln: #B3B8C2;
 
   /* Code tokens, light */
@@ -51,7 +51,7 @@ internal static class GeneratedHtmlTheme
   color-scheme: dark;
 
   /* Surface tokens (Theme.cs Dark) */
-  --bg: #18191D;              /* ContentBg */
+  --bg: #18191D;              /* CanvasBg */
   --text: #F4F4F5;            /* TextPrimary */
   --text-2: #A9ADB8;          /* TextSecondary */
   --text-3: #8F95A0;          /* TextTertiary */
@@ -60,12 +60,12 @@ internal static class GeneratedHtmlTheme
   --thumb: #5C616E;           /* ScrollThumb */
 
   /* Code surfaces */
-  --code-bg: #121316;         /* DeepBg: blocks recede below the page */
+  --code-bg: #121316;         /* CanvasBg: blocks recede below the page */
   --code-border: #23252C;
   --code-text: #DFE2E8;
-  --inline-code-bg: #26282F;  /* BadgeBg */
-  --kbd-bg: #26282F;          /* BadgeBg */
-  --kbd-border: #4B4E58;      /* BadgeBorder */
+  --inline-code-bg: #26282F;  /* RaisedBg */
+  --kbd-bg: #26282F;          /* RaisedBg */
+  --kbd-border: #4B4E58;      /* RaisedBorder */
   --ln: #565B66;
 
   /* Code tokens, dark */

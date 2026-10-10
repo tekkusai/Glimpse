@@ -822,8 +822,8 @@ public partial class PreviewWindow : Window
             CornerRadius = new CornerRadius(11),
             Margin = new Thickness(0, 44, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1.5),
             Effect = keycapGlow,
             Child = new TextBlock
@@ -865,7 +865,7 @@ public partial class PreviewWindow : Window
 
         return new Grid
         {
-            Background = Theme.Brush(palette.WindowBg),
+            Background = Theme.Brush(palette.CanvasBg),
             Children =
             {
                 new StackPanel
@@ -2025,7 +2025,7 @@ public partial class PreviewWindow : Window
         {
             var on = getState();
             var accent = palette.Accent;
-            track.Background = on ? Theme.Brush(accent) : Theme.Brush(palette.SurfaceBg);
+            track.Background = on ? Theme.Brush(accent) : Theme.Brush(palette.RaisedBg);
             track.BorderBrush = on
                 ? Theme.Brush(accent)
                 : Theme.Brush(palette.ScrollThumb);
@@ -2986,7 +2986,7 @@ public partial class PreviewWindow : Window
     private FrameworkElement BuildGeneratedHtmlPreview(GeneratedHtmlDocument document, string label)
     {
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.ContentBg) };
+        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
         grid.Children.Add(CreateWebView(
             document.Background,
             () => document.Source,
@@ -3330,12 +3330,12 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     private FrameworkElement BuildPdfWebPreview(string path, long version, CancellationToken token)
     {
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.DeepBg) };
+        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
 
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var background = System.Drawing.Color.FromArgb(palette.DeepBg.R, palette.DeepBg.G, palette.DeepBg.B);
+        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
         // FitH = fit the page to the window's width, the way PDF apps open
         // documents. The viewer's default fits the whole page instead, which
         // renders portrait documents at ~two-thirds size.
@@ -4316,7 +4316,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
     private FrameworkElement BuildEpubWebPreview(GeneratedHtmlDocument document, string path, CancellationToken token)
     {
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.ContentBg) };
+        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -4619,7 +4619,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         surface.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         surface.Children.Add(new Border
         {
-            Background = Theme.Brush(Color.FromArgb(238, palette.HeaderBg.R, palette.HeaderBg.G, palette.HeaderBg.B)),
+            Background = Theme.Brush(Color.FromArgb(238, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
             Child = header
         });
         Grid.SetRow(scroll, 1);
@@ -4627,7 +4627,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
         return new Border
         {
-            Background = Theme.Brush(Color.FromArgb(180, palette.HeaderBg.R, palette.HeaderBg.G, palette.HeaderBg.B)),
+            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
             BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = surface
@@ -4640,7 +4640,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         var button = BuildRailChromeButton("\uE76C", tooltip, show);
         return new Border
         {
-            Background = Theme.Brush(Color.FromArgb(180, palette.HeaderBg.R, palette.HeaderBg.G, palette.HeaderBg.B)),
+            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
             BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = new StackPanel
@@ -5070,9 +5070,9 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
         var palette = Theme.Current;
         var background = System.Drawing.Color.FromArgb(
-            palette.DeepBg.R,
-            palette.DeepBg.G,
-            palette.DeepBg.B);
+            palette.CanvasBg.R,
+            palette.CanvasBg.G,
+            palette.CanvasBg.B);
         var fresh = CreateWebView(
             background,
             source,
@@ -5233,7 +5233,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
         // matching canvas in its stylesheet.
         var isHtml = document.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.DeepBg) };
+        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
         ColumnDefinition? railColumn = null;
         if (!isHtml)
         {
@@ -5241,7 +5241,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             grid.ColumnDefinitions.Add(railColumn);
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         }
-        var background = System.Drawing.Color.FromArgb(palette.DeepBg.R, palette.DeepBg.G, palette.DeepBg.B);
+        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
         var initialPath = isHtml && document.Sheets is { Count: > 1 } tabbedSheets
             ? tabbedSheets[0].Path
             : document.DocumentPath;
@@ -5373,8 +5373,8 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
             for (var i = 0; i < tabs.Count; i++)
             {
                 var active = i == activeIndex;
-                tabs[i].Chrome.Background = active ? Theme.Brush(palette.SurfaceBg) : Brushes.Transparent;
-                tabs[i].Chrome.BorderBrush = active ? Theme.Brush(palette.SurfaceBorder) : Brushes.Transparent;
+                tabs[i].Chrome.Background = active ? Theme.Brush(palette.RaisedBg) : Brushes.Transparent;
+                tabs[i].Chrome.BorderBrush = active ? Theme.Brush(palette.RaisedBorder) : Brushes.Transparent;
                 tabs[i].Label.Foreground = Theme.Brush(active ? palette.TextPrimary : palette.TextSecondary);
                 tabs[i].Label.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
             }
@@ -5441,7 +5441,7 @@ window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor 
 
         return new Border
         {
-            Background = Theme.Brush(palette.HeaderBg),
+            Background = Theme.Brush(palette.ChromeBg),
             BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 1, 0, 0),
             Child = scroller
@@ -6098,7 +6098,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             });
         }
 
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.DeepBg);
+        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
     }
 
     private static FrameworkElement BuildFontPreview(string path)
@@ -6134,8 +6134,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Margin = new Thickness(0, 18, 0, 0),
             Padding = new Thickness(32, 30, 32, 34),
             CornerRadius = Metrics.CardCorner,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Child = new StackPanel
             {
@@ -6162,7 +6162,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             }
         });
 
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.ContentBg);
+        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
     }
 
     // ---------------------------------------------------------------------
@@ -6689,7 +6689,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             });
         }
 
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.ContentBg);
+        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
     }
 
     private static void AddArchiveNode(StackPanel host, ArchiveNode node, int depth, ThemePalette palette, FontFamily glyphFont)
@@ -6985,8 +6985,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 Height = 120,
                 CornerRadius = Metrics.CardCorner,
                 BorderThickness = new Thickness(1),
-                BorderBrush = Theme.Brush(palette.BadgeBorder),
-                Background = Theme.Brush(palette.BadgeBg),
+                BorderBrush = Theme.Brush(palette.RaisedBorder),
+                Background = Theme.Brush(palette.RaisedBg),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Child = new TextBlock
                 {
@@ -7264,7 +7264,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             card.Children.Add(footerHost);
         }
 
-        var surface = (ScrollViewer)BuildScrollSurface(card, new Thickness(0), horizontal: false, palette.ContentBg);
+        var surface = (ScrollViewer)BuildScrollSurface(card, new Thickness(0), horizontal: false, palette.CanvasBg);
         // A ScrollViewer aligns content to the top by default, which makes a
         // short generic card look visibly high even though the card itself
         // requests centered alignment. Center while there is spare room;
@@ -7452,12 +7452,12 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             if (info.CapabilityOverflow > 0)
             {
                 chips.Children.Add(BuildAppChip($"{info.CapabilityOverflow:N0} more", palette,
-                    Theme.Brush(palette.TextTertiary), Theme.Brush(palette.BadgeBorder)));
+                    Theme.Brush(palette.TextTertiary), Theme.Brush(palette.RaisedBorder)));
             }
             stack.Children.Add(chips);
         }
 
-        var surface = (ScrollViewer)BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.ContentBg);
+        var surface = (ScrollViewer)BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
         StyleScrollViewer(surface);
         return surface;
     }
@@ -7470,8 +7470,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Height = 96,
             CornerRadius = Metrics.CardCorner,
             HorizontalAlignment = HorizontalAlignment.Center,
-            Background = Theme.Brush(palette.BadgeBg),
-            BorderBrush = Theme.Brush(palette.BadgeBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1)
         };
 
@@ -7572,7 +7572,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             : Theme.Brush(known ? palette.TextSecondary : palette.TextTertiary);
         var border = warning
             ? warningBrush
-            : Theme.Brush(palette.BadgeBorder);
+            : Theme.Brush(palette.RaisedBorder);
         return BuildAppChip(label, palette, foreground, border);
     }
 
@@ -7581,7 +7581,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         return new Border
         {
             CornerRadius = Metrics.RowCorner,
-            Background = Theme.Brush(palette.BadgeBg),
+            Background = Theme.Brush(palette.RaisedBg),
             BorderBrush = border,
             BorderThickness = new Thickness(1),
             Padding = Metrics.ChipPadding,
@@ -7637,11 +7637,11 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             fontSize: 13,
             wrap: true,
             new Thickness(32, 22, 32, 32),
-            palette.ContentBg);
+            palette.CanvasBg);
 
         var grid = new Grid
         {
-            Background = Theme.Brush(palette.ContentBg)
+            Background = Theme.Brush(palette.CanvasBg)
         };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -7733,7 +7733,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             fontSize: 13,
             wrap,
             new Thickness(24, 20, 24, 24),
-            Theme.Current.ContentBg);
+            Theme.Current.CanvasBg);
     }
 
     private static string TryFormatJson(string text)
@@ -7790,7 +7790,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
 
         var grid = new Grid
         {
-            Background = Theme.Brush(palette.ContentBg)
+            Background = Theme.Brush(palette.CanvasBg)
         };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -7803,7 +7803,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                 fontSize: 12.5,
                 wrap: false,
                 new Thickness(24, 16, 24, 24),
-                palette.ContentBg)
+                palette.CanvasBg)
             : BuildOfficeDocumentPreview(preview, fontFamily, accent);
 
         Grid.SetRow(body, 1);
@@ -7817,7 +7817,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         var palette = Theme.Current;
         var document = new FlowDocument
         {
-            Background = Theme.Brush(palette.ContentBg),
+            Background = Theme.Brush(palette.CanvasBg),
             Foreground = Theme.Brush(palette.TextPrimary),
             FontFamily = fontFamily,
             FontSize = 14,
@@ -7879,8 +7879,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
                         Margin = new Thickness(0, 0, 12, 12),
                         CornerRadius = new CornerRadius(12),
                         ClipToBounds = true,
-                        Background = Theme.Brush(palette.SurfaceBg),
-                        BorderBrush = Theme.Brush(palette.SurfaceBorder),
+                        Background = Theme.Brush(palette.RaisedBg),
+                        BorderBrush = Theme.Brush(palette.RaisedBorder),
                         BorderThickness = new Thickness(1),
                         Child = new Image
                         {
@@ -7905,7 +7905,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             IsReadOnly = true,
             BorderThickness = new Thickness(0),
-            Background = Theme.Brush(palette.ContentBg),
+            Background = Theme.Brush(palette.CanvasBg),
             Foreground = Theme.Brush(palette.TextPrimary),
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
@@ -7922,7 +7922,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     {
         var grid = new Grid
         {
-            Background = Theme.Brush(Theme.Current.DeepBg),
+            Background = Theme.Brush(Theme.Current.CanvasBg),
             ClipToBounds = true
         };
 
@@ -8101,11 +8101,11 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             fontSize,
             wrap,
             new Thickness(24, 16, 24, 24),
-            palette.ContentBg);
+            palette.CanvasBg);
 
         var grid = new Grid
         {
-            Background = Theme.Brush(palette.ContentBg)
+            Background = Theme.Brush(palette.CanvasBg)
         };
         grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -8221,8 +8221,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Height = 144,
             CornerRadius = Metrics.CardCorner,
             BorderThickness = new Thickness(1),
-            BorderBrush = Theme.Brush(palette.BadgeBorder),
-            Background = Theme.Brush(palette.BadgeBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
+            Background = Theme.Brush(palette.RaisedBg),
             Child = new TextBlock
             {
                 Text = badgeText,
@@ -8271,14 +8271,14 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Text = path,
             Margin = new Thickness(0, action is null ? 20 : 16, 0, 0),
             FontSize = 12,
-            Foreground = Theme.Brush(palette.TextFaint),
+            Foreground = Theme.Brush(palette.TextTertiary),
             TextAlignment = TextAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
         });
 
         return new Grid
         {
-            Background = Theme.Brush(palette.ContentBg),
+            Background = Theme.Brush(palette.CanvasBg),
             Children = { stack }
         };
     }
@@ -8315,8 +8315,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Padding = new Thickness(16, 10, 15, 11),
             CornerRadius = Metrics.PillCorner,
             HorizontalAlignment = HorizontalAlignment.Center,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
             ToolTip = action.Tooltip,
@@ -8338,7 +8338,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         };
         pill.MouseLeave += (_, _) =>
         {
-            pill.Background = Theme.Brush(palette.SurfaceBg);
+            pill.Background = Theme.Brush(palette.RaisedBg);
             detail.Foreground = Theme.Brush(palette.TextSecondary);
             arrow.Foreground = Theme.Brush(palette.TextSecondary);
         };
@@ -9416,8 +9416,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             CornerRadius = Metrics.PillCorner,
             HorizontalAlignment = HorizontalAlignment.Right,
             VerticalAlignment = VerticalAlignment.Center,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
             ToolTip = "Fill and sign",
@@ -9448,7 +9448,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             }
         };
         pill.MouseEnter += (_, _) => pill.Background = Theme.Brush(palette.HoverBg);
-        pill.MouseLeave += (_, _) => pill.Background = Theme.Brush(palette.SurfaceBg);
+        pill.MouseLeave += (_, _) => pill.Background = Theme.Brush(palette.RaisedBg);
         pill.MouseLeftButtonDown += (_, e) =>
         {
             pill.Background = Theme.Brush(palette.PressedBg);
@@ -9456,7 +9456,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         };
         pill.MouseLeftButtonUp += async (_, e) =>
         {
-            pill.Background = Theme.Brush(palette.SurfaceBg);
+            pill.Background = Theme.Brush(palette.RaisedBg);
             e.Handled = true;
             await EnterFillSignModeAsync();
         };
@@ -10040,8 +10040,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             Margin = new Thickness(0, 0, 0, 20),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Bottom,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             Cursor = Cursors.Hand,
             ToolTip = "Opens libreoffice.org in your browser",
@@ -10058,7 +10058,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         };
         pill.MouseLeave += (_, _) =>
         {
-            pill.Background = Theme.Brush(palette.SurfaceBg);
+            pill.Background = Theme.Brush(palette.RaisedBg);
             text.Foreground = Theme.Brush(palette.TextSecondary);
         };
         pill.MouseLeftButtonDown += (_, e) => e.Handled = true;
@@ -10492,8 +10492,8 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
         {
             Width = MeasureOpenPillWidth(label, hasMenu),
             CornerRadius = Metrics.PillCorner,
-            Background = Theme.Brush(palette.SurfaceBg),
-            BorderBrush = Theme.Brush(palette.SurfaceBorder),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
             BorderThickness = new Thickness(1),
             HorizontalAlignment = HorizontalAlignment.Right,
             Child = panel
@@ -10540,7 +10540,7 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
             {
                 Width = 1,
                 Margin = new Thickness(0, 5, 0, 5),
-                Background = Theme.Brush(palette.SurfaceBorder)
+                Background = Theme.Brush(palette.RaisedBorder)
             };
             Grid.SetColumn(divider, 1);
             panel.Children.Add(divider);

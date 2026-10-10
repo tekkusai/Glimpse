@@ -16,86 +16,70 @@ internal enum ThemePreference
 /// <summary>
 /// Two fixed palettes that track the Windows app theme, resolved once per preview open.
 /// XAML consumes them through "Theme.*" dynamic resources; code-built content reads
-/// <see cref="Theme.Current"/> directly.
+/// <see cref="Theme.Current"/> directly. docs/DESIGN.md names each token's job.
 /// </summary>
 internal sealed record ThemePalette(
     bool IsDark,
-    Color WindowBg,
-    Color HeaderBg,
-    Color ContentBg,
+    Color ChromeBg,
     Color CanvasBg,
-    Color DeepBg,
+    Color RaisedBg,
+    Color RaisedBorder,
     Color Border,
-    Color SurfaceBg,
-    Color SurfaceBorder,
     Color TextPrimary,
     Color TextSecondary,
     Color TextTertiary,
-    Color TextFaint,
     Color Accent,
     Color Warning,
     Color ScrollThumb,
     Color HoverBg,
-    Color PressedBg,
-    Color BadgeBg,
-    Color BadgeBorder);
+    Color PressedBg);
 
 internal static class Theme
 {
     private static readonly ConcurrentDictionary<Color, SolidColorBrush> BrushCache = new();
 
+    // Neutral grays, one hue. The canvas is the calmest surface in each
+    // theme: deepest in dark, brightest in light.
     public static readonly ThemePalette Dark = new(
         IsDark: true,
-        WindowBg: Rgb(0x20, 0x21, 0x26),
-        HeaderBg: Rgb(0x25, 0x26, 0x2B),
-        ContentBg: Rgb(0x18, 0x19, 0x1D),
-        CanvasBg: Rgb(0x16, 0x17, 0x1B),
-        DeepBg: Rgb(0x12, 0x13, 0x16),
-        Border: Rgb(0x34, 0x37, 0x41),
-        SurfaceBg: Rgb(0x23, 0x25, 0x2B),
-        SurfaceBorder: Rgb(0x37, 0x3A, 0x44),
-        TextPrimary: Rgb(0xF4, 0xF4, 0xF5),
-        TextSecondary: Rgb(0xA9, 0xAD, 0xB8),
-        TextTertiary: Rgb(0x8F, 0x95, 0xA0),
-        TextFaint: Rgb(0x7E, 0x84, 0x90),
+        ChromeBg: Rgb(0x20, 0x20, 0x20),
+        CanvasBg: Rgb(0x19, 0x19, 0x19),
+        RaisedBg: Rgb(0x2C, 0x2C, 0x2C),
+        RaisedBorder: Rgb(0x3A, 0x3A, 0x3A),
+        Border: Rgb(0x2E, 0x2E, 0x2E),
+        TextPrimary: Rgb(0xF2, 0xF2, 0xF2),
+        TextSecondary: Rgb(0xB4, 0xB4, 0xB4),
+        TextTertiary: Rgb(0x8C, 0x8C, 0x8C),
         Accent: Rgb(0x4E, 0x80, 0xF5),
         Warning: Rgb(0xD9, 0xA6, 0x6A),
-        ScrollThumb: Rgb(0x5C, 0x61, 0x6E),
-        HoverBg: Rgb(0x39, 0x3B, 0x44),
-        PressedBg: Rgb(0x47, 0x4A, 0x55),
-        BadgeBg: Rgb(0x26, 0x28, 0x2F),
-        BadgeBorder: Rgb(0x4B, 0x4E, 0x58));
+        ScrollThumb: Rgb(0x5A, 0x5A, 0x5A),
+        HoverBg: Color.FromArgb(0x0F, 0xFF, 0xFF, 0xFF),
+        PressedBg: Color.FromArgb(0x0A, 0xFF, 0xFF, 0xFF));
 
     public static readonly ThemePalette Light = new(
         IsDark: false,
-        WindowBg: Rgb(0xF2, 0xF2, 0xF5),
-        HeaderBg: Rgb(0xFA, 0xFA, 0xFC),
-        ContentBg: Rgb(0xFF, 0xFF, 0xFF),
-        CanvasBg: Rgb(0xEF, 0xEF, 0xF3),
-        DeepBg: Rgb(0xE7, 0xE8, 0xEC),
-        Border: Rgb(0xD8, 0xDA, 0xDF),
-        SurfaceBg: Rgb(0xF3, 0xF3, 0xF6),
-        SurfaceBorder: Rgb(0xE0, 0xE2, 0xE7),
-        TextPrimary: Rgb(0x1D, 0x1E, 0x22),
-        TextSecondary: Rgb(0x5C, 0x62, 0x70),
-        TextTertiary: Rgb(0x87, 0x8D, 0x99),
-        TextFaint: Rgb(0x9A, 0xA0, 0xAB),
+        ChromeBg: Rgb(0xF3, 0xF3, 0xF3),
+        CanvasBg: Rgb(0xFA, 0xFA, 0xFA),
+        RaisedBg: Rgb(0xFF, 0xFF, 0xFF),
+        RaisedBorder: Rgb(0xDC, 0xDC, 0xDC),
+        Border: Rgb(0xE3, 0xE3, 0xE3),
+        TextPrimary: Rgb(0x1A, 0x1A, 0x1A),
+        TextSecondary: Rgb(0x5C, 0x5C, 0x5C),
+        TextTertiary: Rgb(0x70, 0x70, 0x70),
         Accent: Rgb(0x3B, 0x72, 0xE8),
         Warning: Rgb(0x9A, 0x6B, 0x24),
-        ScrollThumb: Rgb(0xB4, 0xB8, 0xC2),
-        HoverBg: Rgb(0xE7, 0xE8, 0xED),
-        PressedBg: Rgb(0xDC, 0xDE, 0xE5),
-        BadgeBg: Rgb(0xF5, 0xF5, 0xF8),
-        BadgeBorder: Rgb(0xD9, 0xDB, 0xE2));
+        ScrollThumb: Rgb(0xB8, 0xB8, 0xB8),
+        HoverBg: Color.FromArgb(0x0A, 0x00, 0x00, 0x00),
+        PressedBg: Color.FromArgb(0x10, 0x00, 0x00, 0x00));
 
     // Canvas HUDs (zoom readout, mesh overlay, ink-capture backdrop) float
     // dark glass over content in both themes, so these live beside the
     // palette rather than on it: they deliberately never change with it.
-    public static readonly Color OverlayScrim = Color.FromArgb(0xB8, 0x0F, 0x10, 0x14);
+    public static readonly Color OverlayScrim = Color.FromArgb(0xB8, 0x12, 0x12, 0x12);
     public static readonly Color OverlayBorder = Color.FromArgb(0x5A, 0xFF, 0xFF, 0xFF);
-    public static readonly Color OverlayText = Color.FromRgb(0xF1, 0xF4, 0xF8);
-    public static readonly Color OverlayTextSecondary = Color.FromRgb(0xB4, 0xBB, 0xC7);
-    public static readonly Color OverlayTextTertiary = Color.FromRgb(0x87, 0x8F, 0x9C);
+    public static readonly Color OverlayText = Color.FromRgb(0xF2, 0xF2, 0xF2);
+    public static readonly Color OverlayTextSecondary = Color.FromRgb(0xB8, 0xB8, 0xB8);
+    public static readonly Color OverlayTextTertiary = Color.FromRgb(0x8C, 0x8C, 0x8C);
 
     public static ThemePalette Current { get; private set; } = Dark;
 
@@ -127,19 +111,19 @@ internal static class Theme
     public static void ApplyResources(ResourceDictionary resources)
     {
         var p = Current;
-        resources["Theme.WindowBg"] = Brush(p.WindowBg);
-        resources["Theme.HeaderBg"] = Brush(p.HeaderBg);
+        resources["Theme.ChromeBg"] = Brush(p.ChromeBg);
+        resources["Theme.CanvasBg"] = Brush(p.CanvasBg);
+        resources["Theme.RaisedBg"] = Brush(p.RaisedBg);
+        resources["Theme.RaisedBorder"] = Brush(p.RaisedBorder);
         resources["Theme.Border"] = Brush(p.Border);
         resources["Theme.TextPrimary"] = Brush(p.TextPrimary);
         resources["Theme.TextSecondary"] = Brush(p.TextSecondary);
         resources["Theme.TextTertiary"] = Brush(p.TextTertiary);
+        resources["Theme.Accent"] = Brush(p.Accent);
+        resources["Theme.Warning"] = Brush(p.Warning);
         resources["Theme.ScrollThumb"] = Brush(p.ScrollThumb);
         resources["Theme.HoverBg"] = Brush(p.HoverBg);
         resources["Theme.PressedBg"] = Brush(p.PressedBg);
-        resources["Theme.SurfaceBg"] = Brush(p.SurfaceBg);
-        resources["Theme.SurfaceBorder"] = Brush(p.SurfaceBorder);
-        resources["Theme.Accent"] = Brush(p.Accent);
-        resources["Theme.Warning"] = Brush(p.Warning);
     }
 
     public static SolidColorBrush Brush(Color color)

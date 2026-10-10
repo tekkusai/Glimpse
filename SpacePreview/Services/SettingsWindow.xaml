@@ -72,8 +72,8 @@
                                 <Setter TargetName="Chip" Property="Background" Value="{DynamicResource Theme.HoverBg}" />
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="Chip" Property="Background" Value="{DynamicResource Theme.WindowBg}" />
-                                <Setter TargetName="Chip" Property="BorderBrush" Value="{DynamicResource Theme.SurfaceBorder}" />
+                                <Setter TargetName="Chip" Property="Background" Value="{DynamicResource Theme.CanvasBg}" />
+                                <Setter TargetName="Chip" Property="BorderBrush" Value="{DynamicResource Theme.RaisedBorder}" />
                                 <Setter Property="Foreground" Value="{DynamicResource Theme.TextPrimary}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
@@ -84,8 +84,8 @@
     </Window.Resources>
 
     <Grid Margin="14">
-        <Border Background="{DynamicResource Theme.HeaderBg}"
-                BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+        <Border Background="{DynamicResource Theme.ChromeBg}"
+                BorderBrush="{DynamicResource Theme.RaisedBorder}"
                 BorderThickness="1"
                 CornerRadius="{x:Static u:Metrics.CardCorner}">
             <Border.Effect>
@@ -141,8 +141,8 @@
                         </Grid.ColumnDefinitions>
                         <TextBlock Text="Theme" Style="{StaticResource RowLabel}" />
                         <Border Grid.Column="1"
-                                Background="{DynamicResource Theme.SurfaceBg}"
-                                BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+                                Background="{DynamicResource Theme.RaisedBg}"
+                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
                                 BorderThickness="1"
                                 CornerRadius="{x:Static u:Metrics.MenuCorner}"
                                 Padding="2">
@@ -189,7 +189,7 @@
 
                 <Border Height="1"
                         Margin="10,22,10,0"
-                        Background="{DynamicResource Theme.SurfaceBorder}" />
+                        Background="{DynamicResource Theme.RaisedBorder}" />
 
                 <Grid Margin="10,16,10,2">
                     <Grid.ColumnDefinitions>

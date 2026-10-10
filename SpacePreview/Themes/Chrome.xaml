@@ -49,8 +49,8 @@
         <Setter Property="Height" Value="34" />
         <Setter Property="Padding" Value="16,0" />
         <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="BorderBrush" Value="{DynamicResource Theme.SurfaceBorder}" />
-        <Setter Property="Background" Value="{DynamicResource Theme.SurfaceBg}" />
+        <Setter Property="BorderBrush" Value="{DynamicResource Theme.RaisedBorder}" />
+        <Setter Property="Background" Value="{DynamicResource Theme.RaisedBg}" />
         <Setter Property="Foreground" Value="{DynamicResource Theme.TextPrimary}" />
         <Setter Property="FontSize" Value="12.5" />
         <Setter Property="FontWeight" Value="SemiBold" />
@@ -103,8 +103,8 @@
                 <ControlTemplate TargetType="{x:Type ToggleButton}">
                     <Border x:Name="Track"
                             CornerRadius="10"
-                            Background="{DynamicResource Theme.SurfaceBg}"
-                            BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+                            Background="{DynamicResource Theme.RaisedBg}"
+                            BorderBrush="{DynamicResource Theme.RaisedBorder}"
                             BorderThickness="1">
                         <Ellipse x:Name="Thumb"
                                  Width="14"

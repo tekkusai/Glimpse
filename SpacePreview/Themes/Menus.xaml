@@ -61,7 +61,7 @@
                                    Focusable="False"
                                    PopupAnimation="Fade"
                                    IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}">
-                                <Border Background="{DynamicResource Theme.HeaderBg}"
+                                <Border Background="{DynamicResource Theme.ChromeBg}"
                                         BorderBrush="{DynamicResource Theme.Border}"
                                         BorderThickness="1"
                                         CornerRadius="{x:Static u:Metrics.MenuCorner}"
@@ -109,7 +109,7 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="{x:Type ContextMenu}">
-                    <Border Background="{DynamicResource Theme.HeaderBg}"
+                    <Border Background="{DynamicResource Theme.ChromeBg}"
                             BorderBrush="{DynamicResource Theme.Border}"
                             BorderThickness="1"
                             CornerRadius="{x:Static u:Metrics.MenuCorner}"
@@ -147,7 +147,7 @@
                 <ControlTemplate TargetType="{x:Type ToolTip}">
                     <Border Margin="6"
                             Padding="10,6,10,7"
-                            Background="{DynamicResource Theme.HeaderBg}"
+                            Background="{DynamicResource Theme.ChromeBg}"
                             BorderBrush="{DynamicResource Theme.Border}"
                             BorderThickness="1"
                             CornerRadius="{x:Static u:Metrics.MenuCorner}">

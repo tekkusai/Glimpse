@@ -18,8 +18,8 @@
         UseLayoutRounding="True">
     <Grid Margin="10">
         <Border x:Name="Chrome"
-                Background="{DynamicResource Theme.HeaderBg}"
-                BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+                Background="{DynamicResource Theme.ChromeBg}"
+                BorderBrush="{DynamicResource Theme.RaisedBorder}"
                 BorderThickness="1"
                 CornerRadius="{x:Static u:Metrics.PillCorner}"
                 Padding="0">

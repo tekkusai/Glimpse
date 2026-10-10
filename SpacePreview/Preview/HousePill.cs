@@ -67,10 +67,10 @@ internal static class HousePill
             var selected = isSelected?.Invoke() == true;
             pill.Background = selected
                 ? Theme.Brush(palette.PressedBg)
-                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.SurfaceBg);
+                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.RaisedBg);
             pill.BorderBrush = selected
                 ? Theme.Brush(palette.Accent)
-                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.SurfaceBorder);
+                : role == PillRole.Ghost ? Brushes.Transparent : Theme.Brush(palette.RaisedBorder);
             text.Foreground = selected || role != PillRole.Ghost
                 ? Theme.Brush(palette.TextPrimary)
                 : Theme.Brush(palette.TextSecondary);

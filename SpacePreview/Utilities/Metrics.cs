@@ -10,13 +10,14 @@ namespace SpacePreview.Utilities;
 /// </summary>
 internal static class Metrics
 {
-    // Corner radius ladder, one step per surface role.
-    public const double RadiusRow = 6;      // hover rows: menu items, breakdown entries, toggle rows
-    public const double RadiusIcon = 7;     // square icon buttons in the header
-    public const double RadiusMenu = 8;     // flyout surfaces
-    public const double RadiusSurface = 10; // embedded surfaces: thumbnails, framed content
-    public const double RadiusPill = 14;    // pill controls and floating HUDs
-    public const double RadiusCard = 16;    // large framed tiles: state badges, icon tiles, specimens
+    // Corner radius ladder (docs/DESIGN.md, Shape). Pills are capsules: half
+    // their 30 px height.
+    public const double RadiusRow = 6;      // icon buttons, menu items, list rows
+    public const double RadiusIcon = 6;     // square icon buttons in the header
+    public const double RadiusMenu = 8;     // menus and flyouts
+    public const double RadiusSurface = 8;  // thumbnails, HUDs, framed content
+    public const double RadiusPill = 15;    // pills: 30 px capsules
+    public const double RadiusCard = 12;    // card tiles, specimens, raised panels
 
     public static readonly CornerRadius RowCorner = new(RadiusRow);
     public static readonly CornerRadius IconCorner = new(RadiusIcon);
@@ -41,12 +42,13 @@ internal static class Metrics
     // The gap between an anchor and its flyout.
     public const double FlyoutGap = 6;
 
-    // Type ramp for chrome text. Glyph fonts size to their icon, and content
-    // rendering (documents, font specimens) keeps its own scale; everything
-    // that reads as the app's own words draws from here.
-    public const double FontCaption = 11.5; // detail lines, tile captions, tooltips
+    // Type ramp (docs/DESIGN.md, Type). Glyph fonts size to their icon, and
+    // content rendering (documents, font specimens) keeps its own scale;
+    // everything that reads as the app's own words draws from here.
+    public const double FontCaption = 11.5; // header details, captions, tooltips
     public const double FontLabel = 12.5;   // pill and control labels
-    public const double FontBody = 13;      // card body text and info lines
-    public const double FontTitle = 20;     // card and sheet titles
+    public const double FontBody = 13;      // card body text, info lines, menus
+    public const double FontName = 14;      // the header file name
+    public const double FontTitle = 20;     // card titles
     public const double FontDisplay = 34;   // the welcome title
 }

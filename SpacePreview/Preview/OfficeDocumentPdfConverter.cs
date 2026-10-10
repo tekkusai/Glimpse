@@ -589,7 +589,7 @@ internal static class OfficeDocumentPdfConverter
     /// markup only, so the export stays script-free. The sheet's own fonts
     /// arrive as inline attributes and are left alone.
     /// </summary>
-    // Canvas colours mirror Theme.DeepBg (light E7E8EC / dark 121316);
+    // Canvas colours mirror Theme.CanvasBg (light E7E8EC / dark 121316);
     // header chrome mirrors the badge palette.
     private const string SheetStyle = "<style>"
                 + ":root{color-scheme:light}"

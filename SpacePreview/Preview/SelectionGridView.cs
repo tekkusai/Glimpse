@@ -127,7 +127,7 @@ internal sealed class SelectionGridView
         var thumbHost = new Border
         {
             Height = ThumbArea + 8,
-            Background = Theme.Brush(Color.FromArgb(palette.IsDark ? (byte)36 : (byte)80, palette.SurfaceBg.R, palette.SurfaceBg.G, palette.SurfaceBg.B)),
+            Background = Theme.Brush(Color.FromArgb(palette.IsDark ? (byte)36 : (byte)80, palette.RaisedBg.R, palette.RaisedBg.G, palette.RaisedBg.B)),
             CornerRadius = new CornerRadius(6),
             Margin = new Thickness(0, 0, 0, 7),
             Child = image

@@ -9,7 +9,7 @@
         ResizeMode="CanResize"
         ShowActivated="False"
         ShowInTaskbar="False"
-        Background="{DynamicResource Theme.WindowBg}"
+        Background="{DynamicResource Theme.CanvasBg}"
         Foreground="{DynamicResource Theme.TextPrimary}"
         FontFamily="Segoe UI Variable, Segoe UI"
         SnapsToDevicePixels="True"
@@ -221,7 +221,7 @@
         </Style>
     </Window.Resources>
     <Border x:Name="RootChrome"
-            Background="{DynamicResource Theme.WindowBg}"
+            Background="{DynamicResource Theme.CanvasBg}"
             BorderBrush="{DynamicResource Theme.Border}"
             BorderThickness="1"
             RenderTransformOrigin="0.5,0.5">
@@ -236,7 +236,7 @@
 
             <Border x:Name="HeaderBar"
                     Grid.Row="0"
-                    Background="{DynamicResource Theme.HeaderBg}"
+                    Background="{DynamicResource Theme.ChromeBg}"
                     BorderBrush="{DynamicResource Theme.Border}"
                     BorderThickness="0,0,0,1"
                     MouseLeftButtonDown="HeaderBar_MouseLeftButtonDown">
@@ -335,8 +335,8 @@
                         <Border x:Name="ZoomControls"
                                 HorizontalAlignment="Stretch"
                                 VerticalAlignment="Center"
-                                Background="{DynamicResource Theme.SurfaceBg}"
-                                BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+                                Background="{DynamicResource Theme.RaisedBg}"
+                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
                                 BorderThickness="1"
                                 CornerRadius="{x:Static u:Metrics.PillCorner}"
                                 Visibility="Collapsed">
@@ -389,8 +389,8 @@
                                 Width="60"
                                 HorizontalAlignment="Right"
                                 VerticalAlignment="Center"
-                                Background="{DynamicResource Theme.SurfaceBg}"
-                                BorderBrush="{DynamicResource Theme.SurfaceBorder}"
+                                Background="{DynamicResource Theme.RaisedBg}"
+                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
                                 BorderThickness="1"
                                 CornerRadius="{x:Static u:Metrics.PillCorner}"
                                 Visibility="Collapsed">
@@ -467,12 +467,12 @@
             <Grid Grid.Row="1">
                 <ContentControl x:Name="PreviewContent" />
                 <Border x:Name="ContentSwapScrim"
-                        Background="{DynamicResource Theme.WindowBg}"
+                        Background="{DynamicResource Theme.CanvasBg}"
                         Visibility="Collapsed"
                         Opacity="0"
                         IsHitTestVisible="True" />
                 <Border x:Name="LoadingOverlay"
-                        Background="{DynamicResource Theme.WindowBg}"
+                        Background="{DynamicResource Theme.CanvasBg}"
                         Visibility="Collapsed">
                     <Grid ClipToBounds="True">
                         <!-- Subtle shimmer shown during longer waits. -->
