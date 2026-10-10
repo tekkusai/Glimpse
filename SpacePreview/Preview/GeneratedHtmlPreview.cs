@@ -197,7 +197,7 @@ internal static partial class GeneratedHtmlPreview
             var theme = Theme.Current.IsDark ? "dark" : "light";
             var htmlPath = PreviewWindow.TempHtmlPath(
                 "EpubHtml",
-                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{Theme.Current.IsDark}|epub-v3");
+                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{Theme.Current.IsDark}|epub-v4");
             if (HasCachedHtml(htmlPath))
             {
                 return new GeneratedHtmlDocument(

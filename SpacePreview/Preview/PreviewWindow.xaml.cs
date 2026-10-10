@@ -124,7 +124,6 @@ public partial class PreviewWindow : Window
     private ImageRotationSession? _rotationSession;
     private FolderHoverThumbnail? _folderHover;
     private PdfPageRailState? _activePdfRail;
-    private EpubRailState? _activeEpubRail;
     private IReadOnlyList<string>? _multiSelectionPaths;
     private int _multiSelectionIndex;
     private SelectionGridView? _gridView;

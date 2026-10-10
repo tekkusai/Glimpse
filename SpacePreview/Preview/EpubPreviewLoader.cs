@@ -14,58 +14,16 @@ internal static partial class EpubPreviewLoader
 {
     private const int MaxBookCharacters = 500_000;
     private const long MaxImageBytes = 2 * 1024 * 1024;
-    private const long MaxEmbeddedImageBytes = 8 * 1024 * 1024;
 
-    public static IReadOnlyList<EpubChapterEntry>? TryGetChapters(string path)
-    {
-        try
-        {
-            using var archive = ZipFile.OpenRead(path);
-            if (archive.GetEntry("META-INF/encryption.xml") is not null)
-            {
-                return Array.Empty<EpubChapterEntry>();
-            }
+    // One budget for the whole book, cover included: a comic must not
+    // become a page of hundreds of megabytes.
+    private const long MaxBookImageBytes = 24 * 1024 * 1024;
 
-            var packagePath = FindPackagePath(archive);
-            if (packagePath is null)
-            {
-                return null;
-            }
+    /// <summary>A section the page really contains: its anchor is ch-{SpineIndex}.</summary>
+    internal sealed record EpubSection(int SpineIndex, string Title);
 
-            var package = LoadXml(archive, packagePath);
-            if (package is null)
-            {
-                return null;
-            }
-
-            var packageBase = PathPrefix(packagePath);
-            var manifest = LoadManifest(package, packageBase);
-            var spine = LoadSpine(package);
-            var titles = LoadNavigationTitles(archive, package, manifest);
-            var chapters = new List<EpubChapterEntry>();
-
-            for (var spineIndex = 0; spineIndex < spine.Count; spineIndex++)
-            {
-                if (!manifest.TryGetValue(spine[spineIndex], out var item) || !IsDocumentMedia(item.MediaType))
-                {
-                    continue;
-                }
-
-                chapters.Add(new EpubChapterEntry(
-                    path,
-                    spineIndex,
-                    TitleFor(item.Path, titles),
-                    item.Path));
-            }
-
-            return chapters;
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"epub chapter model failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return null;
-        }
-    }
+    /// <summary>What the rail lists: the page's own titled sections, and whether the book goes on.</summary>
+    internal sealed record EpubContents(IReadOnlyList<EpubSection> Sections, bool Truncated);
 
     public static string? TryBuildBody(string path, CancellationToken cancellationToken = default)
     {
@@ -89,15 +47,10 @@ internal static partial class EpubPreviewLoader
             var manifest = LoadManifest(package, packageBase);
             var spine = LoadSpine(package);
             var titles = LoadNavigationTitles(archive, package, manifest, cancellationToken);
-            var chapters = spine
-                .Select(id => manifest.TryGetValue(id, out var item) ? item : null)
-                .Where(item => item is not null && IsDocumentMedia(item.MediaType))
-                .Select(item => item!)
-                .ToList();
-
             var title = MetadataValue(package, "title") ?? Path.GetFileNameWithoutExtension(path);
             var creator = MetadataValue(package, "creator");
-            var cover = FindCoverDataUri(archive, package, manifest, cancellationToken);
+            var budget = new BookBudget(MaxBookCharacters, MaxBookImageBytes);
+            var cover = FindCoverDataUri(archive, package, manifest, budget, cancellationToken);
             var protectedBook = archive.GetEntry("META-INF/encryption.xml") is not null;
 
             var builder = new StringBuilder(32_000);
@@ -123,57 +76,43 @@ internal static partial class EpubPreviewLoader
             {
                 builder.Append("<p><strong>Protected book.</strong></p>");
             }
-            else if (chapters.Count > 0)
+            else
             {
-                builder.Append("<h2>Contents</h2><ol>");
-                foreach (var chapter in chapters.Take(60))
+                // The rail is the contents: a section is listed when the
+                // book's own navigation names it, or every section when the
+                // book has no navigation at all.
+                for (var spineIndex = 0; spineIndex < spine.Count && budget.HasText; spineIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    builder.Append("<li>");
-                    builder.Append(WebUtility.HtmlEncode(TitleFor(chapter.Path, titles)));
-                    builder.Append("</li>");
-                }
-
-                if (chapters.Count > 60)
-                {
-                    builder.Append("<li>");
-                    builder.Append(WebUtility.HtmlEncode($"{chapters.Count - 60:N0} more chapters"));
-                    builder.Append("</li>");
-                }
-
-                builder.Append("</ol>");
-
-                var remaining = MaxBookCharacters;
-                for (var spineIndex = 0; spineIndex < spine.Count; spineIndex++)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    if (remaining <= 0)
-                    {
-                        break;
-                    }
-
                     if (!manifest.TryGetValue(spine[spineIndex], out var chapter) || !IsDocumentMedia(chapter.MediaType))
                     {
                         continue;
                     }
 
-                    var preview = BuildChapterPreview(archive, chapter, titles, ref remaining, cancellationToken);
-                    if (!string.IsNullOrWhiteSpace(preview))
+                    var preview = BuildChapterPreview(archive, chapter, titles, budget, cancellationToken);
+                    if (string.IsNullOrWhiteSpace(preview))
                     {
-                        // The id matches EpubChapterEntry.SpineIndex so the
-                        // chapter rail can scroll straight to the section.
-                        builder.Append("<section id=\"ch-");
-                        builder.Append(spineIndex);
-                        builder.Append("\">");
-                        builder.Append("<hr>");
-                        builder.Append(preview);
-                        builder.Append("</section>");
+                        continue;
                     }
+
+                    builder.Append("<section id=\"ch-");
+                    builder.Append(spineIndex);
+                    builder.Append('"');
+                    if (titles.Count == 0 || titles.ContainsKey(chapter.Path))
+                    {
+                        builder.Append(" data-title=\"");
+                        builder.Append(WebUtility.HtmlEncode(TitleFor(chapter.Path, titles)));
+                        builder.Append('"');
+                    }
+
+                    builder.Append("><hr>");
+                    builder.Append(preview);
+                    builder.Append("</section>");
                 }
 
-                if (remaining <= 0)
+                if (!budget.HasText)
                 {
-                    builder.Append("<p><em>Showing the beginning of this book. Open the book for the rest.</em></p>");
+                    builder.Append("<p id=\"epub-rest\"><em>Showing the beginning of this book. Open the book for the rest.</em></p>");
                 }
             }
 
@@ -188,6 +127,29 @@ internal static partial class EpubPreviewLoader
         {
             DiagnosticLog.Write($"epub preview failed {path}: {ex.GetType().Name}: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// The rail's contents, read from the very page it navigates, so a tile
+    /// can never point at an anchor the page does not have.
+    /// </summary>
+    public static EpubContents ReadContents(string htmlPath)
+    {
+        try
+        {
+            var html = File.ReadAllText(htmlPath);
+            var sections = SectionRegex().Matches(html)
+                .Select(match => new EpubSection(
+                    int.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture),
+                    WebUtility.HtmlDecode(match.Groups[2].Value)))
+                .ToList();
+            return new EpubContents(sections, html.Contains("<p id=\"epub-rest\">", StringComparison.Ordinal));
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"epub contents failed {htmlPath}: {ex.GetType().Name}: {ex.Message}");
+            return new EpubContents([], false);
         }
     }
 
@@ -287,8 +249,8 @@ internal static partial class EpubPreviewLoader
         ZipArchive archive,
         ManifestItem chapter,
         IReadOnlyDictionary<string, string> titles,
-        ref int remainingCharacters,
-        CancellationToken cancellationToken = default)
+        BookBudget budget,
+        CancellationToken cancellationToken)
     {
         var xml = LoadXml(archive, chapter.Path, cancellationToken);
         if (xml is null)
@@ -302,7 +264,7 @@ internal static partial class EpubPreviewLoader
             return null;
         }
 
-        var context = new ChapterContext(archive, chapter.Path, remainingCharacters, cancellationToken);
+        var context = new ChapterContext(archive, chapter.Path, budget, cancellationToken);
         var builder = new StringBuilder(32_000);
         var hasHeading = body.Descendants().Any(element => IsHeading(element.Name.LocalName));
         if (!hasHeading)
@@ -323,37 +285,7 @@ internal static partial class EpubPreviewLoader
             AppendSanitizedNode(builder, node, context);
         }
 
-        remainingCharacters = context.RemainingCharacters;
         return builder.ToString();
-    }
-
-    private static string? TryRenderChapterBody(string sourcePath, string entryPath, string title)
-    {
-        try
-        {
-            using var archive = ZipFile.OpenRead(sourcePath);
-            if (archive.GetEntry("META-INF/encryption.xml") is not null)
-            {
-                return null;
-            }
-
-            var chapter = new ManifestItem(
-                string.Empty,
-                NormalizeEntryPath(entryPath),
-                "application/xhtml+xml",
-                string.Empty);
-            var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-            {
-                [chapter.Path] = title
-            };
-            var remaining = MaxBookCharacters;
-            return BuildChapterPreview(archive, chapter, titles, ref remaining);
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"epub chapter render failed {sourcePath}: {ex.GetType().Name}: {ex.Message}");
-            return null;
-        }
     }
 
     private static void AppendSanitizedNode(StringBuilder builder, XNode node, ChapterContext context)
@@ -428,7 +360,8 @@ internal static partial class EpubPreviewLoader
         ZipArchive archive,
         XDocument package,
         IReadOnlyDictionary<string, ManifestItem> manifest,
-        CancellationToken cancellationToken = default)
+        BookBudget budget,
+        CancellationToken cancellationToken)
     {
         var cover = manifest.Values.FirstOrDefault(item =>
             item.Properties.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("cover-image", StringComparer.OrdinalIgnoreCase));
@@ -446,20 +379,18 @@ internal static partial class EpubPreviewLoader
             }
         }
 
-        return cover is null ? null : ReadImageDataUri(archive, cover.Path, 0, out _, cancellationToken);
+        return cover is null ? null : ReadImageDataUri(archive, cover.Path, budget, cancellationToken);
     }
 
     private static string? ReadImageDataUri(
         ZipArchive archive,
         string entryPath,
-        long alreadyEmbedded,
-        out long bytesRead,
-        CancellationToken cancellationToken = default)
+        BookBudget budget,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        bytesRead = 0;
         var entry = archive.GetEntry(NormalizeEntryPath(entryPath));
-        if (entry is null || entry.Length <= 0 || entry.Length > MaxImageBytes || alreadyEmbedded + entry.Length > MaxEmbeddedImageBytes)
+        if (entry is null || entry.Length <= 0 || entry.Length > MaxImageBytes || entry.Length > budget.ImageBytes)
         {
             return null;
         }
@@ -480,8 +411,8 @@ internal static partial class EpubPreviewLoader
             memory.Write(buffer, 0, read);
         }
 
-        bytesRead = memory.Length;
-        return $"data:{contentType};base64,{Convert.ToBase64String(memory.ToArray())}";
+        budget.ImageBytes -= memory.Length;
+        return $"data:{contentType};base64,{Convert.ToBase64String(memory.GetBuffer(), 0, (int)memory.Length)}";
     }
 
     private static XDocument? LoadXml(
@@ -636,47 +567,39 @@ internal static partial class EpubPreviewLoader
     [GeneratedRegex(@"\s+")]
     private static partial Regex WhitespaceRegex();
 
+    [GeneratedRegex("<section id=\"ch-(\\d+)\" data-title=\"([^\"]*)\">")]
+    private static partial Regex SectionRegex();
+
     private sealed record ManifestItem(string Id, string Path, string MediaType, string Properties);
 
-    internal sealed record EpubChapterEntry(
-        string SourcePath,
-        int SpineIndex,
-        string Title,
-        string EntryPath)
+    /// <summary>What is left of the book's text and picture allowance.</summary>
+    private sealed class BookBudget(int characters, long imageBytes)
     {
-        public string? TryRenderBody() => TryRenderChapterBody(SourcePath, EntryPath, Title);
+        public int Characters { get; set; } = characters;
+        public long ImageBytes { get; set; } = imageBytes;
+        public bool HasText => Characters > 0;
     }
 
     private sealed class ChapterContext(
         ZipArchive archive,
         string chapterPath,
-        int remainingCharacters,
+        BookBudget budget,
         CancellationToken cancellationToken)
     {
-        private long _embeddedBytes;
-
-        public int RemainingCharacters { get; private set; } = remainingCharacters;
-
-        public bool HasTextBudget => RemainingCharacters > 0;
+        public bool HasTextBudget => budget.HasText;
 
         public void ThrowIfCancellationRequested() => cancellationToken.ThrowIfCancellationRequested();
 
         public string TakeText(string text)
         {
-            if (RemainingCharacters <= 0 || text.Length == 0)
+            if (budget.Characters <= 0 || text.Length == 0)
             {
                 return string.Empty;
             }
 
-            if (text.Length <= RemainingCharacters)
-            {
-                RemainingCharacters -= text.Length;
-                return text;
-            }
-
-            var result = text[..RemainingCharacters];
-            RemainingCharacters = 0;
-            return result;
+            var taken = text.Length <= budget.Characters ? text : text[..budget.Characters];
+            budget.Characters -= taken.Length;
+            return taken;
         }
 
         public string? TryReadImageDataUri(string? source)
@@ -691,9 +614,7 @@ internal static partial class EpubPreviewLoader
             }
 
             var entryPath = NormalizeEntryPath(CombineEntryPath(PathPrefix(chapterPath), source));
-            var data = ReadImageDataUri(archive, entryPath, _embeddedBytes, out var bytesRead, cancellationToken);
-            _embeddedBytes += bytesRead;
-            return data;
+            return ReadImageDataUri(archive, entryPath, budget, cancellationToken);
         }
     }
 }

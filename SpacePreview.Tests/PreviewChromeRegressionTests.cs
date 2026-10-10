@@ -175,9 +175,7 @@ public sealed class PreviewChromeRegressionTests
         // The book stays one continuous document; the rail scrolls to anchors.
         Assert.Contains("<section id=\\\"ch-", epubSource, StringComparison.Ordinal);
         Assert.Contains("return BuildEpubWebPreview(epub, path, token);", windowSource, StringComparison.Ordinal);
-        Assert.Contains("private const double EpubChapterRailWidth = 168;", windowSource, StringComparison.Ordinal);
         Assert.Contains("getElementById('ch-{spineIndex}')?.scrollIntoView", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TrackEpubRailLifetime(grid, railState);", windowSource, StringComparison.Ordinal);
 
         // Rail resizes reuse the shared viewer cloak so hide/show never flashes.
         Assert.Contains("CloakViewerForRailResize(state.WebView, state.Version);", windowSource, StringComparison.Ordinal);

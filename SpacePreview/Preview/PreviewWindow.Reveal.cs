@@ -1063,7 +1063,6 @@ public partial class PreviewWindow
         _folderHover?.Reset();
         _folderHover = null;
         _activePdfRail = null;
-        _activeEpubRail = null;
         PreviewContent.Content = null;
         _currentDisposable?.Dispose();
         _currentDisposable = null;
