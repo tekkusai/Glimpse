@@ -401,18 +401,17 @@ internal static partial class EpubPreviewLoader
             return null;
         }
 
+        // The zip's length is a claim: read one byte past it to catch a lie.
         using var stream = entry.Open();
-        using var memory = new MemoryStream();
-        var buffer = new byte[81920];
-        int read;
-        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        var bytes = new byte[entry.Length + 1];
+        var length = stream.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
+        if (length != entry.Length)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            memory.Write(buffer, 0, read);
+            return null;
         }
 
-        budget.ImageBytes -= memory.Length;
-        return $"data:{contentType};base64,{Convert.ToBase64String(memory.GetBuffer(), 0, (int)memory.Length)}";
+        budget.ImageBytes -= length;
+        return $"data:{contentType};base64,{Convert.ToBase64String(bytes, 0, length)}";
     }
 
     private static XDocument? LoadXml(

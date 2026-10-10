@@ -603,11 +603,17 @@ internal static class OfficeOpenXmlPreview
             return;
         }
 
+        // The zip's length is a claim: read one byte past it to catch a lie.
         using var stream = entry.Open();
-        using var memory = new MemoryStream((int)entry.Length);
-        stream.CopyTo(memory);
+        var bytes = new byte[entry.Length + 1];
+        var length = stream.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
+        if (length != entry.Length)
+        {
+            return;
+        }
+
         html.Append("<img alt=\"\" src=\"data:").Append(type).Append(";base64,")
-            .Append(System.Convert.ToBase64String(memory.GetBuffer(), 0, (int)memory.Length))
+            .Append(System.Convert.ToBase64String(bytes, 0, length))
             .Append("\">");
     }
 

@@ -286,10 +286,10 @@ public partial class PreviewWindow
                 return;
             }
 
-            if (rendered is not { Pages.Count: > 0 } || state.Document is not null)
+            if (rendered is not { Pages.Count: > 0 }
+                || !string.Equals(state.Path, partial.DocumentPath, StringComparison.OrdinalIgnoreCase))
             {
-                // No thumbnails, or the whole document already replaced them.
-                state.FirstRailReady.TrySetResult(true);
+                // No thumbnails, or the viewer already moved to the whole document.
                 return;
             }
 
