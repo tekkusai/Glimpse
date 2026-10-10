@@ -220,16 +220,28 @@ internal sealed class FillSignSurface : Grid
         }
     }
 
-    /// <summary>With work on the page, leaving asks first; without, it just leaves.</summary>
-    public void LeaveOrAsk()
+    /// <summary>
+    /// True when leaving loses nothing: no work, or work this file could
+    /// never save. Otherwise the save choice opens, Discard included, and
+    /// the caller stays. Every way out of sign mode asks this first.
+    /// </summary>
+    public bool TryLeave()
     {
-        if (HasWork && _problem is null)
+        if (!HasWork || _problem is not null)
         {
-            ShowSaveChoice();
-            return;
+            return true;
         }
 
-        ExitRequested?.Invoke();
+        ShowSaveChoice();
+        return false;
+    }
+
+    private void LeaveOrAsk()
+    {
+        if (TryLeave())
+        {
+            ExitRequested?.Invoke();
+        }
     }
 
     /// <summary>Offers the save choice: a copy, the original, or discarding the work.</summary>

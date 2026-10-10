@@ -278,6 +278,27 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void EveryExitAsksTheSameQuestion()
+    {
+        OnSta(() =>
+        {
+            var empty = new FillSignSurface(0, 1, BlankPage());
+            Assert.True(empty.TryLeave());
+
+            var working = new FillSignSurface(0, 1, BlankPage());
+            working.Place(SignPlacementKind.Date, 0.5, 0.5);
+            Assert.False(working.TryLeave());
+            Assert.True(Shown(Pill(working, "Discard")));
+
+            // Work this file could never save is not held hostage.
+            var unsignable = new FillSignSurface(0, 1, BlankPage());
+            unsignable.Place(SignPlacementKind.Date, 0.5, 0.5);
+            unsignable.ApplyCheck(new PdfSignCheck(0, PdfFillSignWriter.UnsupportedStructure));
+            Assert.True(unsignable.TryLeave());
+        });
+    }
+
+    [Fact]
     public void LeavingWithoutWorkJustLeaves()
     {
         OnSta(() =>
