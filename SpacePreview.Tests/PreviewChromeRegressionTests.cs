@@ -238,8 +238,6 @@ public sealed class PreviewChromeRegressionTests
         // user does not see the PDF surface appear and then slide sideways
         // when thumbnails arrive.
         Assert.Contains("FirstRailReady", windowSource, StringComparison.Ordinal);
-        Assert.Contains("WaitForDocumentRevealGateAsync(content)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("WaitForWebPaintReadyAsync(", windowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("WebRevealSettleDelay", windowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("NavigationCompleted += (_, _) => RunAfter(TimeSpan.FromMilliseconds(220)", windowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("NavigationCompleted += (_, _) => RunAfter(TimeSpan.FromMilliseconds(240)", windowSource, StringComparison.Ordinal);
@@ -249,10 +247,10 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("paintAttemptStarted = true;", stagedReplacementBody, StringComparison.Ordinal);
         Assert.Contains("if (!paintAttemptStarted)", stagedReplacementBody, StringComparison.Ordinal);
         Assert.Contains("DiscardFresh();", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.Contains("await WaitForWebPaintReadyAsync", stagedReplacementBody, StringComparison.Ordinal);
+        Assert.Contains("await WaitForDocumentPaintAsync", stagedReplacementBody, StringComparison.Ordinal);
         Assert.True(
             stagedReplacementBody.IndexOf("paintAttemptStarted = true;", StringComparison.Ordinal)
-            < stagedReplacementBody.IndexOf("await WaitForWebPaintReadyAsync", StringComparison.Ordinal));
+            < stagedReplacementBody.IndexOf("await WaitForDocumentPaintAsync", StringComparison.Ordinal));
 
         // The Chromium PDF viewer honors #page= only at document load, so a
         // jump must be a REAL load: cache-busting query, never a runtime
@@ -425,9 +423,6 @@ public sealed class PreviewChromeRegressionTests
     {
         var xaml = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml");
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var stageBody = ReadMethod(windowSource, "private void StagePreviewContent");
-        var revealBody = ReadMethod(windowSource, "private void RevealStagedWebContent");
-        var paintBody = ReadMethod(windowSource, "private static async Task<bool> WaitForWebPaintReadyAsync");
         var geometryBody = ReadMethod(windowSource, "private void ApplyStageGeometry");
 
         Assert.DoesNotContain("Width=\"216\"", xaml, StringComparison.Ordinal);
@@ -454,127 +449,6 @@ public sealed class PreviewChromeRegressionTests
         Assert.DoesNotContain("SetGeometryNative", windowSource, StringComparison.Ordinal);
         Assert.Contains("TrySetWindowRect", windowSource, StringComparison.Ordinal);
         Assert.Contains("NativeMethods.SetWindowPos", windowSource, StringComparison.Ordinal);
-        Assert.Contains("opacity 180ms ease-out", paintBody, StringComparison.Ordinal);
-        Assert.Contains("requestAnimationFrame(() => requestAnimationFrame(report))", paintBody, StringComparison.Ordinal);
-        Assert.Contains("timeout.CancelAfter(fallback)", paintBody, StringComparison.Ordinal);
-        Assert.Contains("if (Date.now() >", paintBody, StringComparison.Ordinal);
-        Assert.Contains("var attached = false;", paintBody, StringComparison.Ordinal);
-        Assert.Contains("if (attached)", paintBody, StringComparison.Ordinal);
-        var subscription = paintBody.IndexOf("core.WebMessageReceived += handler;", StringComparison.Ordinal);
-        var attached = paintBody.IndexOf("var attached = false;", StringComparison.Ordinal);
-        var deadline = paintBody.IndexOf("var deadlineUnixMilliseconds", StringComparison.Ordinal);
-        var cancellationCheck = paintBody.IndexOf(
-            "timeout.Token.ThrowIfCancellationRequested();",
-            subscription,
-            StringComparison.Ordinal);
-        var executeScript = paintBody.IndexOf(
-            "await core.ExecuteScriptAsync",
-            subscription,
-            StringComparison.Ordinal);
-        Assert.True(attached >= 0 && subscription > attached);
-        Assert.True(deadline >= 0 && deadline < subscription);
-        Assert.True(cancellationCheck > subscription && cancellationCheck < executeScript);
-        Assert.Contains("try", paintBody[attached..subscription], StringComparison.Ordinal);
-        Assert.DoesNotContain("WaitAsync(TimeSpan.FromMilliseconds(180))", revealBody, StringComparison.Ordinal);
-        Assert.Contains("var revealAttemptStarted = false;", stageBody, StringComparison.Ordinal);
-        Assert.Contains("if (!StillOwnsContent() || revealAttemptStarted)", stageBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("navigationRevealStarted", stageBody, StringComparison.Ordinal);
-        Assert.True(
-            stageBody.IndexOf("revealAttemptStarted = true;", StringComparison.Ordinal)
-            < stageBody.IndexOf("await WaitForDocumentRevealGateAsync", StringComparison.Ordinal));
-        Assert.True(
-            stageBody.IndexOf("revealAttemptStarted = true;", StringComparison.Ordinal)
-            < stageBody.IndexOf("await WaitForWebPaintReadyAsync", StringComparison.Ordinal));
-        Assert.Contains("ShowWithEntrance(useScale: ShouldScaleEntrance())", windowSource, StringComparison.Ordinal);
-        Assert.Contains("StageFitHint.FitKind.PageAspect", ReadMethod(windowSource, "private bool ShouldScaleEntrance"), StringComparison.Ordinal);
-        Assert.DoesNotContain("ShowZoomControls", stageBody, StringComparison.Ordinal);
-        Assert.Contains("ShowZoomControls(webView)", revealBody, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void WebContentUsesRendererSpecificPaintReadiness()
-    {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var createBody = ReadMethod(windowSource, "private WebView2 CreateWebView");
-        var browserImageBody = ReadMethod(windowSource, "private FrameworkElement BuildBrowserImagePreview");
-        var htmlBody = ReadMethod(windowSource, "private FrameworkElement BuildHtmlPreview");
-        var generatedBody = ReadMethod(windowSource, "private FrameworkElement BuildGeneratedHtmlPreview");
-        var epubBody = ReadMethod(windowSource, "private FrameworkElement BuildEpubWebPreview");
-        var pdfBody = ReadMethod(windowSource, "private FrameworkElement BuildPdfWebPreview");
-        var convertedBody = ReadMethod(windowSource, "private FrameworkElement BuildConvertedOfficePreview");
-        var mediaBody = ReadMethod(windowSource, "private FrameworkElement BuildMediaPreview");
-        var stagedPdfBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
-        var paintBody = ReadMethod(windowSource, "private static async Task<bool> WaitForWebPaintReadyAsync");
-        var revealBody = ReadMethod(windowSource, "private void RevealStagedWebContent");
-        var stageBody = ReadMethod(windowSource, "private void StagePreviewContent");
-
-        // The readiness contract is explicit. Saved HTML queues host-side
-        // scrolling normalization after navigation, then acknowledges the
-        // resulting static layout without waiting on page animation frames.
-        Assert.Contains(
-            "WebPaintReadinessMode readinessMode = WebPaintReadinessMode.AnimationFrames",
-            windowSource,
-            StringComparison.Ordinal);
-        Assert.Contains("Tag = readinessMode", createBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: WebPaintReadinessMode.StaticLayout", generatedBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: WebPaintReadinessMode.StaticLayout", epubBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: isHtml", convertedBody, StringComparison.Ordinal);
-        Assert.Contains("? WebPaintReadinessMode.StaticLayout", convertedBody, StringComparison.Ordinal);
-        Assert.Contains(": WebPaintReadinessMode.PdfPlugin", convertedBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("WebPaintReadinessMode.StaticLayout", browserImageBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: WebPaintReadinessMode.StaticLayout", htmlBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("WebPaintReadinessMode.StaticLayout", mediaBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: WebPaintReadinessMode.PdfPlugin", pdfBody, StringComparison.Ordinal);
-        Assert.Contains("readinessMode: WebPaintReadinessMode.PdfPlugin", stagedPdfBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("RevealPrimedWebDocument", stagedPdfBody, StringComparison.Ordinal);
-        Assert.Contains("PdfPluginSettleDelay = TimeSpan.FromMilliseconds(180)", windowSource, StringComparison.Ordinal);
-
-        var pdfBranch = paintBody.IndexOf("if (mode == WebPaintReadinessMode.PdfPlugin)", StringComparison.Ordinal);
-        var staticBranch = paintBody.IndexOf("if (mode == WebPaintReadinessMode.StaticLayout)", StringComparison.Ordinal);
-        Assert.True(pdfBranch >= 0 && staticBranch > pdfBranch);
-        var pdfLane = paintBody[pdfBranch..staticBranch];
-        Assert.Contains("await Task.Delay(fallback, token);", pdfLane, StringComparison.Ordinal);
-        Assert.DoesNotContain("ExecuteScriptAsync", pdfLane, StringComparison.Ordinal);
-        Assert.DoesNotContain("opacity", pdfLane, StringComparison.OrdinalIgnoreCase);
-
-        Assert.Contains("if (mode == WebPaintReadinessMode.StaticLayout)", paintBody, StringComparison.Ordinal);
-        Assert.Contains("root.getBoundingClientRect()", paintBody, StringComparison.Ordinal);
-        Assert.Contains("body.getBoundingClientRect()", paintBody, StringComparison.Ordinal);
-        Assert.Contains("root.scrollWidth", paintBody, StringComparison.Ordinal);
-        Assert.Contains("body.scrollWidth", paintBody, StringComparison.Ordinal);
-        Assert.Contains("const computedDisplay = getComputedStyle(root).display;", paintBody, StringComparison.Ordinal);
-        Assert.Contains("return computedDisplay.length > 0", paintBody, StringComparison.Ordinal);
-        Assert.Contains("layout.every(Number.isFinite)", paintBody, StringComparison.Ordinal);
-        Assert.Contains("var layoutReady = await core.ExecuteScriptAsync(layoutScript).WaitAsync(timeout.Token);", paintBody, StringComparison.Ordinal);
-        Assert.Contains("return string.Equals(layoutReady, \"true\", StringComparison.Ordinal);", paintBody, StringComparison.Ordinal);
-
-        var deadlineCheck = paintBody.IndexOf("if (Date.now() >", staticBranch, StringComparison.Ordinal);
-        var styleFlush = paintBody.IndexOf(
-            "const computedDisplay = getComputedStyle(root).display;",
-            staticBranch,
-            StringComparison.Ordinal);
-        var layoutFlush = paintBody.IndexOf("root.getBoundingClientRect()", staticBranch, StringComparison.Ordinal);
-        var layoutAck = paintBody.IndexOf("return computedDisplay.length > 0", staticBranch, StringComparison.Ordinal);
-        var staticAck = paintBody.IndexOf("return string.Equals(layoutReady", staticBranch, StringComparison.Ordinal);
-        var frameSignal = paintBody.IndexOf("glimpse-paint-ready:", staticBranch, StringComparison.Ordinal);
-        Assert.True(staticBranch >= 0 && deadlineCheck > staticBranch);
-        Assert.True(deadlineCheck < styleFlush && styleFlush < layoutFlush);
-        Assert.True(layoutFlush < layoutAck);
-        Assert.True(layoutAck < staticAck && staticAck < frameSignal);
-        var staticLane = paintBody[staticBranch..frameSignal];
-        Assert.DoesNotContain("opacity", staticLane, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("transition", staticLane, StringComparison.OrdinalIgnoreCase);
-
-        Assert.Contains(
-            "if (PaintReadinessMode(webView) == WebPaintReadinessMode.AnimationFrames)",
-            revealBody,
-            StringComparison.Ordinal);
-        Assert.True(
-            revealBody.IndexOf("WebPaintReadinessMode.AnimationFrames", StringComparison.Ordinal)
-            < revealBody.IndexOf("RevealPrimedWebDocument(webView);", StringComparison.Ordinal));
-
-        Assert.Contains("mode={PaintReadinessModeName(readinessMode)}", stageBody, StringComparison.Ordinal);
-        Assert.Contains("WebPaintReadinessMode.PdfPlugin => \"pdf-plugin\"", windowSource, StringComparison.Ordinal);
     }
 
     [Fact]

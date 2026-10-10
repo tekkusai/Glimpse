@@ -29,12 +29,6 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
-    private static readonly (string Title, string Subtitle) FirstOfficeRunMessage =
-        ("Preparing document previews", "Just this once. After this, they open instantly.");
-
-    private static readonly (string Title, string Subtitle) SlowConversionMessage =
-        ("Preparing this document", "Next time it opens instantly.");
-
     private static bool TryMapOpenXmlPackage(ZipPackageKind packageKind, out OfficePreviewType previewType)
     {
         previewType = packageKind switch
@@ -131,7 +125,7 @@ public partial class PreviewWindow
         // matching canvas in its stylesheet.
         var isHtml = document.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        var grid = new Grid { Background = isHtml ? Brushes.Transparent : Theme.Brush(palette.CanvasBg) };
         ColumnDefinition? railColumn = null;
         if (!isHtml)
         {
@@ -139,7 +133,6 @@ public partial class PreviewWindow
             grid.ColumnDefinitions.Add(railColumn);
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         }
-        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
         var initialPath = isHtml && document.Sheets is { Count: > 1 } tabbedSheets
             ? tabbedSheets[0].Path
             : document.DocumentPath;
@@ -150,14 +143,14 @@ public partial class PreviewWindow
         }
 
         var webView = CreateWebView(
-            background,
+            isHtml ? WebSurfaceKind.Page : WebSurfaceKind.PdfViewer,
             () => isHtml ? new Uri(initialPath, UriKind.Absolute) : PdfViewerSource(initialPath),
             $"converted document {document.DocumentPath}",
             _ =>
             {
                 if (version == _loadVersion)
                 {
-                    SetPreviewContent(BuildErrorPreview("Glimpse can't preview this document", "The converted document could not be displayed."), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Glimpse can't preview this document", "The converted document could not be displayed."), null);
                 }
             },
             configure: core =>
@@ -170,10 +163,7 @@ public partial class PreviewWindow
                 {
                     ConfigurePdfViewer(core, initialPath);
                 }
-            },
-            readinessMode: isHtml
-                ? WebPaintReadinessMode.StaticLayout
-                : WebPaintReadinessMode.PdfPlugin);
+            });
 
         // Multi-sheet workbooks get a bottom tab strip - the native language
         // of spreadsheets - one page per sheet, instead of the export's

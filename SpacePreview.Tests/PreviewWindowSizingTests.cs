@@ -341,18 +341,6 @@ public sealed class PreviewWindowSizingTests
     }
 
     [Fact]
-    public void DefaultStageContentRetargetsBeforeSlowCardBuilds()
-    {
-        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-
-        Assert.Contains("UsesDefaultStageWithoutProbe(contentPath)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("RetargetDefaultStageDuringBlankBeat(version)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("var stageMoved = defaultStageWithoutProbe && !outgoingIsWeb && RetargetStageToFit()", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ShowContentSwapScrim(instant: stageMoved)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("Directory.Exists(path)", windowSource, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void PdfAndConvertedDocumentsFeedPageShapeHints()
     {
         var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");

@@ -1,7 +1,7 @@
 # Off-screen UI stress and runtime audit for Glimpse.
 #
 # Unlike the fast unit suite, this launches the real Release WPF window and
-# checks arranged geometry, button hit targets, rendered pixels, async overlay
+# checks arranged geometry, button hit targets, rendered pixels, stand-in
 # ownership, rapid A->B->A cancellation, resize behavior, and invalid-content
 # recovery. It never installs hooks or drives the user's desktop.
 #
@@ -232,16 +232,16 @@ try {
 
     Write-Settings 'Dark'
 
-    # A5/A6: outgoing content must be blocked immediately; an old loading
-    # fade must not collapse a newer load's overlay.
+    # A5/A6: outgoing content stops taking clicks at once; a reveal that
+    # finishes late must not take down a newer load's stand-in.
     $raceShot = Join-Path $work 'overlay-race.png'
     Run-Probe @('--probe', $longText, $raceShot, "show:$html", 'audit:swap-immediate', 'overlayrace', 'delay:600', 'audit:swap-settled')
     $swapAudit = Read-ProbeJson 'probe audit ' 'swap-immediate'
     $overlayLine = @(Get-Content -LiteralPath $log | Where-Object { $_ -like '*probe overlay-race*' })[-1]
     Report 'A5 outgoing content cannot receive swap clicks' (
-        $swapAudit.Scrim -eq 'Visible' -and $swapAudit.ScrimBlocksInput
-    ) ("scrim={0} blocks={1}" -f $swapAudit.Scrim, $swapAudit.ScrimBlocksInput)
-    Report 'A6 loading overlay generation ownership' ($overlayLine -like '*pass=True*') $overlayLine
+        $swapAudit.ShownTakesInput -eq $false
+    ) ("takesInput={0}" -f $swapAudit.ShownTakesInput)
+    Report 'A6 stand-in ownership' ($overlayLine -like '*pass=True*') $overlayLine
 
     # A7: rapid, mixed-lane A->B->A switching. The final JSON must own the
     # header, content, and paint after every earlier async task has completed.
@@ -261,9 +261,9 @@ try {
     $rapidPainted = $null -ne $rapidPixels -and $rapidPixels.Range -gt 180 -and $rapidPixels.Dark -gt 20 -and $rapidPixels.Max -gt 350
     Report 'A7 rapid mixed-content final ownership' (
         $rapidAudit.CurrentName -eq (Split-Path -Leaf $json) -and $rapidAudit.LoadFinished -and
-        $rapidAudit.Loading -eq 'Collapsed' -and $rapidAudit.Scrim -eq 'Collapsed' -and $rapidPainted
-    ) ("name={0} finished={1} loading={2} scrim={3} painted={4}" -f
-        $rapidAudit.CurrentName, $rapidAudit.LoadFinished, $rapidAudit.Loading, $rapidAudit.Scrim, $rapidPainted)
+        $rapidAudit.StandIn -eq 'Collapsed' -and $rapidPainted
+    ) ("name={0} finished={1} standIn={2} painted={3}" -f
+        $rapidAudit.CurrentName, $rapidAudit.LoadFinished, $rapidAudit.StandIn, $rapidPainted)
 
     # A8: corrupt/unsupported/folder lanes must recover to a valid preview.
     $recoveryPass = $true
@@ -274,7 +274,7 @@ try {
         Run-Probe @('--probe', $fixture, $shot, "show:$longText", 'delay:900', "audit:recover-$name")
         $audit = Read-ProbeJson 'probe audit ' "recover-$name"
         $ok = $audit.CurrentName -eq (Split-Path -Leaf $longText) -and $audit.LoadFinished -and
-            $audit.Loading -eq 'Collapsed' -and $audit.Scrim -eq 'Collapsed' -and $null -ne $audit.ContentType
+            $audit.StandIn -eq 'Collapsed' -and $null -ne $audit.ContentType
         $recoveryPass = $recoveryPass -and $ok
         $recoveryDetails.Add("$name=$ok")
     }

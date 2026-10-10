@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
@@ -9,14 +10,15 @@ namespace SpacePreview.Preview;
 
 /// <summary>
 /// How a web preview arrives. A page Glimpse writes paints its own canvas
-/// and dissolves itself in over whatever stands under it, so it attaches
-/// visible on a transparent view. A document (the PDF viewer, a saved web
-/// page) is opaque: it stages hidden at its real size and appears in one cut.
+/// and dissolves itself in over whatever stands under it, so it shows at
+/// once on a transparent view. The PDF viewer and a saved web page are
+/// opaque: they stage hidden at their real size and appear in one cut.
 /// </summary>
 internal enum WebSurfaceKind
 {
     Page,
-    Document
+    PdfViewer,
+    SavedPage
 }
 
 /// <summary>
@@ -28,8 +30,19 @@ internal enum WebSurfaceKind
 /// </summary>
 internal sealed class StagedWebView : WebView2
 {
-    public StagedWebView()
+    private readonly TaskCompletionSource _mayNavigate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public StagedWebView(WebSurfaceKind kind)
     {
+        Kind = kind;
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+        VerticalAlignment = VerticalAlignment.Stretch;
+        // A saved page with no background of its own reads as a white page.
+        // Everything else paints its own, and shows what stands under it
+        // until it does.
+        DefaultBackgroundColor = kind == WebSurfaceKind.SavedPage
+            ? System.Drawing.Color.White
+            : System.Drawing.Color.Transparent;
         CoreWebView2InitializationCompleted += (_, args) =>
         {
             if (args.IsSuccess)
@@ -38,7 +51,29 @@ internal sealed class StagedWebView : WebView2
             }
         };
         SizeChanged += (_, _) => PushBoundsWhileHidden();
+        NavigationCompleted += (_, _) => NavigationCompletedAt = Stopwatch.GetTimestamp();
     }
+
+    public WebSurfaceKind Kind { get; }
+
+    /// <summary>
+    /// Completes when the view may load its source. A page staged while the
+    /// old item leaves starts its engine but waits for this, so its own
+    /// fade-in plays where it can be seen.
+    /// </summary>
+    public Task MayNavigate => _mayNavigate.Task;
+
+    public void AllowNavigation() => _mayNavigate.TrySetResult();
+
+    /// <summary>Whether the host already watches this view's navigation for its reveal.</summary>
+    public bool RevealWatched { get; set; }
+
+    /// <summary>Stopwatch timestamps for the load breakdown.</summary>
+    public long? EngineReady { get; set; }
+
+    public long? NavigationStarted { get; set; }
+
+    public long? NavigationCompletedAt { get; private set; }
 
     /// <summary>
     /// The same rectangle HwndHost computes when visible: the element's

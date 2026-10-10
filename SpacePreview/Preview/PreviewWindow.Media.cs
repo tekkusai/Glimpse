@@ -124,7 +124,7 @@ public partial class PreviewWindow
 
     private FrameworkElement BuildMediaPreview(string path, long version, CancellationToken token)
     {
-        var grid = new Grid { Background = Brushes.Black };
+        var grid = new Grid { Background = Brushes.Transparent };
         if (!FileKinds.IsAudio(path))
         {
             var dimensionsKnown = _stageFitVersion == version
@@ -132,14 +132,14 @@ public partial class PreviewWindow
             grid.Tag = new MediaStageState(dimensionsKnown);
         }
         var webView = CreateWebView(
-            System.Drawing.Color.Black,
+            WebSurfaceKind.Page,
             () => WriteMediaHtml(path),
             $"web media {path}",
             _ =>
             {
                 if (IsCurrentContentPath(path))
                 {
-                    SetPreviewContent(BuildErrorPreview("Glimpse can't play this file", MediaOpenInsteadText(path)), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Glimpse can't play this file", MediaOpenInsteadText(path)), null);
                 }
             },
             configure: core =>
@@ -237,8 +237,7 @@ public partial class PreviewWindow
                 {
                     SetPreviewContent(
                         BuildMediaFailurePreview(path, codecs),
-                        null,
-                        animate: false);
+                        null);
                 }
 
                 return;

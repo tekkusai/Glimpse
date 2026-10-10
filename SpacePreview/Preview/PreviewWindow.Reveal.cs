@@ -29,6 +29,976 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
+    // ---------------------------------------------------------------------
+    // Presentation. Every load runs on one clock, started by the input that
+    // asked for it. The window fades in once, the old item makes way once,
+    // the stand-in waits where the content will land, and every lane
+    // arrives with the same dissolve (docs/DESIGN.md, Motion and Waiting).
+    // ---------------------------------------------------------------------
+
+    private Presentation? _presentation;
+    private StandIn? _standIn;
+    private Presentation? _standInOwner;
+    private IDisposable? _outgoingDisposable;
+    private IDisposable? _incomingDisposable;
+    private byte _windowAlpha = 255;
+
+    /// <summary>The window side of one load: its decisions, its clock, and what waits on its beat.</summary>
+    private sealed class Presentation(RevealPlan plan, long inputTimestamp, string? contentPath)
+    {
+        public RevealPlan Plan { get; } = plan;
+
+        public long InputTimestamp { get; } = inputTimestamp;
+
+        public string? ContentPath { get; } = contentPath;
+
+        public Task<BitmapSource?>? Poster { get; set; }
+
+        /// <summary>WPF content that arrived before the old item finished leaving.</summary>
+        public (FrameworkElement Content, IDisposable? Owned)? Held { get; set; }
+
+        /// <summary>The old item, staying put until this one dissolves over it.</summary>
+        public FrameworkElement? Holding { get; set; }
+
+        public StagedWebView? WebView { get; set; }
+
+        // Milliseconds since the input; -1 for a step this load never took.
+        public double Entered { get; set; }
+        public double Headed { get; set; }
+        public double Probed { get; set; }
+        public double BeatEnd { get; set; } = -1;
+        public double Built { get; set; } = -1;
+        public double Attached { get; set; } = -1;
+        public double Navigated { get; set; } = -1;
+        public double Shown { get; set; } = -1;
+
+        public double Since() => Plan.Elapsed.TotalMilliseconds;
+    }
+
+    private bool IsCurrent(Presentation p) =>
+        ReferenceEquals(_presentation, p) && !p.Plan.Superseded && p.Plan.Version == _loadVersion;
+
+    private bool Shows(Presentation p, FrameworkElement content) =>
+        IsCurrent(p) && ReferenceEquals(PreviewContent.Content, content);
+
+    /// <summary>
+    /// Starts a load's presentation. Input older than two seconds is not this
+    /// load's input (a file dialog selection, the welcome), so the clock then
+    /// starts here.
+    /// </summary>
+    private Presentation BeginPresentation(long version, bool freshOpen, long inputTimestamp, long entered, string? contentPath)
+    {
+        _presentation?.Plan.Supersede();
+        var start = inputTimestamp > 0 && Stopwatch.GetElapsedTime(inputTimestamp, entered) < TimeSpan.FromSeconds(2)
+            ? inputTimestamp
+            : entered;
+        var plan = new RevealPlan(version, freshOpen, () => Stopwatch.GetElapsedTime(start), Motion.Enabled);
+        var p = new Presentation(plan, start, contentPath)
+        {
+            Entered = Stopwatch.GetElapsedTime(start, entered).TotalMilliseconds
+        };
+        _presentation = p;
+        DiagnosticLog.Write($"load start {(freshOpen ? "open" : "browse")} +{p.Entered:0}ms");
+        return p;
+    }
+
+    /// <summary>
+    /// The wait, on the load's clock: at 120 ms the window shows with a
+    /// stand-in if the content is not ready, a sheen after a second, the
+    /// reason after 1.2 s. The poster lookup starts now, off the UI thread,
+    /// so it is ready when the wait is over.
+    /// </summary>
+    private void ScheduleWait(Presentation p)
+    {
+        if (p.ContentPath is { } path && StandIn.KnowsShape(ShapeOf(p)) && LooksLikeLocalDrivePath(path))
+        {
+            p.Poster = Task.Run(() => FindPoster(path));
+        }
+
+        RunAt(p, RevealPlan.StandInAt, () => OnWait(p, RevealPlan.StandInAt));
+        RunAt(p, RevealPlan.SheenAt, () => OnWait(p, RevealPlan.SheenAt));
+        RunAt(p, RevealPlan.ReasonAt, () => OnWait(p, RevealPlan.ReasonAt));
+    }
+
+    private void RunAt(Presentation p, TimeSpan at, Action action) =>
+        RunAfter(at - p.Plan.Elapsed, () =>
+        {
+            if (IsCurrent(p))
+            {
+                action();
+            }
+        });
+
+    /// <summary>The content's shape, once this load knows it.</summary>
+    private StageFitHint? ShapeOf(Presentation p) => _stageFitVersion == p.Plan.Version ? _stageFitHint : null;
+
+    private void OnWait(Presentation p, TimeSpan moment)
+    {
+        var view = p.Plan.WaitAtMoment(moment, StandIn.KnowsShape(ShapeOf(p)));
+        if (view == WaitView.Nothing)
+        {
+            return;
+        }
+
+        // A fresh open's wait is over: the window shows what there is.
+        var withWindow = p.Plan.TryShowWindow();
+        ShowStandIn(p, withWindow);
+        if (withWindow)
+        {
+            FadeWindowIn(p);
+        }
+
+        if (view.HasFlag(WaitView.Sheen))
+        {
+            _standIn?.StartSheen();
+        }
+
+        if (view.HasFlag(WaitView.Reason) && p.Plan.Reason is { } reason)
+        {
+            _standIn?.ShowReason(reason);
+        }
+    }
+
+    /// <summary>The one reason line a slow wait may carry; shown now if its moment has passed.</summary>
+    private void SetWaitReason(long version, string reason)
+    {
+        if (_presentation is not { } p || p.Plan.Version != version || !IsCurrent(p))
+        {
+            return;
+        }
+
+        p.Plan.Reason = reason;
+        if (ReferenceEquals(_standInOwner, p)
+            && p.Plan.WaitAtMoment(TimeSpan.Zero, StandIn.KnowsShape(ShapeOf(p))).HasFlag(WaitView.Reason))
+        {
+            _standIn?.ShowReason(reason);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Stand-in: the best image of the content while it is not ready.
+    // ---------------------------------------------------------------------
+
+    private void ShowStandIn(Presentation p, bool withWindow)
+    {
+        if (ReferenceEquals(_standInOwner, p))
+        {
+            return;
+        }
+
+        var poster = p.Poster is { IsCompletedSuccessfully: true } lookup ? lookup.Result : null;
+        var standIn = StandIn.Create(
+            ShapeOf(p),
+            DpiScaleFor(Hwnd),
+            KnownSinglePage(p.ContentPath) ? 0 : PdfPageRailWidth,
+            ViewerChromeBandHeight,
+            poster);
+        _standIn?.Stop();
+        _standIn = standIn;
+        _standInOwner = p;
+        StandInLayer.Content = standIn;
+        if (withWindow)
+        {
+            Motion.Settle(StandInLayer, 1);
+        }
+        else
+        {
+            // One stand-in replaces another where it stands; a new one
+            // dissolves in over what shows.
+            if (StandInLayer.Visibility != Visibility.Visible)
+            {
+                Motion.Settle(StandInLayer, 0);
+            }
+
+            Motion.Fade(StandInLayer, 1, Motion.Browse);
+        }
+
+        StandInLayer.Visibility = Visibility.Visible;
+        DiagnosticLog.Write($"stand-in +{p.Since():0}ms {standIn.Description}");
+    }
+
+    private void HideStandIn()
+    {
+        _standIn?.Stop();
+        _standIn = null;
+        _standInOwner = null;
+        Motion.Settle(StandInLayer, 1);
+        StandInLayer.Content = null;
+        StandInLayer.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// Where a stand-in's poster may come from, in order of honesty; the
+    /// first that answers wins. The Office file's embedded thumbnail belongs
+    /// between the rail cache and Explorer (docs/DESIGN.md, Waiting).
+    /// </summary>
+    private static readonly Func<string, BitmapSource?>[] PosterSources =
+    [
+        PdfRailFirstPage,
+        ExplorerCachedThumbnail
+    ];
+
+    private static BitmapSource? FindPoster(string path)
+    {
+        foreach (var source in PosterSources)
+        {
+            try
+            {
+                if (source(path) is { } poster)
+                {
+                    return poster;
+                }
+            }
+            catch
+            {
+                // A source that fails just has no poster.
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>Page one from the rail cache of a document opened before.</summary>
+    private static BitmapSource? PdfRailFirstPage(string path)
+    {
+        var pdf = RailDocumentPath(path);
+        return pdf is null
+            ? null
+            : TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { Pages.Count: > 0 } rail
+                ? rail.Pages[0].Bitmap
+                : null;
+    }
+
+    private static BitmapSource? ExplorerCachedThumbnail(string path) =>
+        ShellThumbnailProvider.TryGetCachedThumbnail(path, 1024)?.Bitmap;
+
+    private static string? RailDocumentPath(string path)
+    {
+        if (FileKinds.IsPdf(path))
+        {
+            return File.Exists(path) ? path : null;
+        }
+
+        return OfficeOpenXmlPreviewLoader.IsSupported(path)
+            ? OfficeDocumentPdfConverter.TryGetCachedPdfConversion(path)?.DocumentPath
+            : null;
+    }
+
+    /// <summary>A document the rail cache knows has one page shows no rail, so its page lands further left.</summary>
+    private static bool KnownSinglePage(string? path)
+    {
+        try
+        {
+            return path is not null
+                && RailDocumentPath(path) is { } pdf
+                && TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { TotalPages: 1 };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The beat: how the item on screen makes way for the next one.
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Whether the next item needs a new stage: false when its shape is known
+    /// and matches (or the stage is held), true when it differs, null when it
+    /// is not known yet.
+    /// </summary>
+    private bool? WillStageChange(long version, string contentPath)
+    {
+        if (_stageFrozenForProbe || IsStageMaximized || _itemStageSize is not null)
+        {
+            return false;
+        }
+
+        if (_stageFitVersion != version && !UsesDefaultStageWithoutProbe(contentPath))
+        {
+            return null;
+        }
+
+        if (_recenterStage)
+        {
+            return true;
+        }
+
+        var target = ComputeStageTarget(GetWorkAreaDips(Hwnd), Hwnd);
+        return Math.Abs(target.Width - Width) > StageFit.Hysteresis
+            || Math.Abs(target.Height - Height) > StageFit.Hysteresis;
+    }
+
+    /// <summary>
+    /// The item on screen makes way. WPF content of the same shape holds
+    /// while the next item dissolves over it; anything else fades out (a
+    /// browser view fades inside its page, since nothing can be drawn over
+    /// it), then the stage takes the new shape in one step. When nothing of
+    /// the old item shows, it leaves at once.
+    /// </summary>
+    private void BeginSwap(Presentation p, bool? stageChanges)
+    {
+        ReleaseIncoming();
+
+        // A view the user never saw (still staging) has nothing to hand over.
+        if (PreviewContent.Content is FrameworkElement unseen && !PreviewShows)
+        {
+            unseen.Visibility = Visibility.Collapsed;
+            ClearPreviewContent();
+        }
+
+        var shown = PreviewContent.Content as FrameworkElement;
+        var standInShows = StandInLayer.Visibility == Visibility.Visible;
+        var shownIsWeb = shown is not null && FindVisualChild<WebView2>(shown) is not null;
+        var style = RevealPlan.ChooseSwap(
+            outgoingVisible: shown is not null || standInShows,
+            outgoingIsWeb: shownIsWeb,
+            stageChanges);
+        p.Plan.Swap = style;
+        p.Plan.BeginBeat();
+
+        switch (style)
+        {
+            case SwapStyle.Clear:
+                EndBeat(p);
+                break;
+
+            case SwapStyle.Hold:
+                // It is leaving: clicks belong to the next item.
+                if (shown is not null)
+                {
+                    shown.IsHitTestVisible = false;
+                }
+
+                p.Holding = shown;
+                p.BeatEnd = p.Since();
+                p.Plan.EndBeat();
+                break;
+
+            default:
+                if (shown is not null)
+                {
+                    shown.IsHitTestVisible = false;
+                    if (shownIsWeb)
+                    {
+                        FadeOutWebContent(shown);
+                    }
+                    else
+                    {
+                        Motion.Fade(shown, 0, Motion.Leave, easeIn: true);
+                    }
+                }
+
+                if (standInShows)
+                {
+                    Motion.Fade(StandInLayer, 0, Motion.Leave, easeIn: true);
+                }
+
+                RunAfter(Motion.Leave, () => EndBeat(p));
+                break;
+        }
+
+        DiagnosticLog.Write($"swap {style.ToString().ToLowerInvariant()} +{p.Since():0}ms");
+    }
+
+    /// <summary>
+    /// The old item is gone; the stage takes the new shape in one step, and
+    /// whatever arrived meanwhile takes its place.
+    /// </summary>
+    private void EndBeat(Presentation p)
+    {
+        if (!IsCurrent(p) || p.Plan.BeatDone)
+        {
+            return;
+        }
+
+        ReleaseShown();
+        p.BeatEnd = p.Since();
+        p.Plan.EndBeat();
+        RetargetStageToFit();
+
+        if (IncomingContent.Content is FrameworkElement staged)
+        {
+            var owned = _incomingDisposable;
+            _incomingDisposable = null;
+            IncomingContent.Content = null;
+            IncomingContent.ClearValue(WidthProperty);
+            IncomingContent.ClearValue(HeightProperty);
+            PlaceContent(p, staged, owned);
+        }
+        else if (p.Held is { } held)
+        {
+            p.Held = null;
+            PlaceContent(p, held.Content, held.Owned);
+        }
+
+        // A wait that passed its moment while the old item left shows now.
+        OnWait(p, TimeSpan.Zero);
+    }
+
+    /// <summary>Everything of the old item leaves now: content, the item under it, and its stand-in.</summary>
+    private void ReleaseShown()
+    {
+        // A browser view being disposed paints a black frame on its way out;
+        // hide it in the same tick.
+        if (PreviewContent.Content is UIElement shown)
+        {
+            shown.Visibility = Visibility.Collapsed;
+        }
+
+        ClearPreviewContent();
+        ClearOutgoing();
+        HideStandIn();
+    }
+
+    /// <summary>Moves held WPF content under the next item; it leaves when that one has dissolved in.</summary>
+    private void MoveShownToOutgoing()
+    {
+        if (PreviewContent.Content is not FrameworkElement shown)
+        {
+            return;
+        }
+
+        ClearOutgoing();
+        var owned = _currentDisposable;
+        _currentDisposable = null;
+        ResetContentState();
+        PreviewContent.Content = null;
+        OutgoingContent.Content = shown;
+        _outgoingDisposable = owned;
+    }
+
+    private void ClearOutgoing()
+    {
+        OutgoingContent.Content = null;
+        _outgoingDisposable?.Dispose();
+        _outgoingDisposable = null;
+    }
+
+    private void ReleaseIncoming()
+    {
+        if (IncomingContent.Content is UIElement staged)
+        {
+            staged.Visibility = Visibility.Collapsed;
+        }
+
+        IncomingContent.Content = null;
+        IncomingContent.ClearValue(WidthProperty);
+        IncomingContent.ClearValue(HeightProperty);
+        _incomingDisposable?.Dispose();
+        _incomingDisposable = null;
+    }
+
+    /// <summary>Content the user can see: attached and not staged.</summary>
+    private bool PreviewShows => PreviewContent.Content is UIElement { Visibility: Visibility.Visible };
+
+    /// <summary>
+    /// Nothing WPF can be drawn over a webview (the browser hwnd paints over
+    /// every sibling), so web content fades itself out: an in-page fade on a
+    /// transparent view, which shows the canvas under it. ExecuteScriptAsync
+    /// runs even on hardened script-off pages. A page that refuses keeps its
+    /// last frame until the beat ends.
+    /// </summary>
+    private static void FadeOutWebContent(FrameworkElement shown)
+    {
+        if (FindVisualChild<WebView2>(shown) is not { CoreWebView2: { } core } webView || !Motion.Enabled)
+        {
+            return;
+        }
+
+        try
+        {
+            webView.DefaultBackgroundColor = System.Drawing.Color.Transparent;
+            _ = core.ExecuteScriptAsync(
+                "document.documentElement.style.transition='opacity 90ms cubic-bezier(.4,0,1,1)';"
+                + "document.documentElement.style.opacity='0';");
+        }
+        catch
+        {
+            // Best-effort only.
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Content arrives.
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Every lane hands its content here, first presentation or fallback.
+    /// WPF content that arrives while the old item is still leaving waits
+    /// for the beat; a browser view stages at once, hidden, so its engine
+    /// starts during the beat instead of after it.
+    /// </summary>
+    private void SetPreviewContent(FrameworkElement content, IDisposable? disposable)
+    {
+        var p = _presentation;
+        if (p is null || !IsCurrent(p))
+        {
+            disposable?.Dispose();
+            return;
+        }
+
+        if (p.Built < 0)
+        {
+            p.Built = p.Since();
+        }
+
+        // A second presentation in a revealed load (a fallback or error
+        // card) makes way like a browse step of the same shape.
+        if (p.Plan.Revealed
+            && p.Plan.BeatDone
+            && PreviewContent.Content is FrameworkElement { Visibility: Visibility.Visible } shown
+            && !ReferenceEquals(shown, content))
+        {
+            BeginSwap(p, stageChanges: false);
+        }
+
+        if (p.Plan.BeatDone)
+        {
+            PlaceContent(p, content, disposable);
+            return;
+        }
+
+        if (WebViewIn(content) is not { } view)
+        {
+            if (p.Held is { } superseded)
+            {
+                superseded.Owned?.Dispose();
+            }
+
+            p.Held = (content, disposable);
+            return;
+        }
+
+        ReleaseIncoming();
+        var target = WillStageChange(p.Plan.Version, p.ContentPath ?? string.Empty) == true
+            ? ComputeStageTarget(GetWorkAreaDips(Hwnd), Hwnd)
+            : (Size?)null;
+        if (target is { } window)
+        {
+            // Staged at the size the stage is about to take, so a document
+            // lays out once.
+            IncomingContent.Width = Math.Max(1, window.Width - StageFit.ChromeWidth);
+            IncomingContent.Height = Math.Max(1, window.Height - StageFit.ChromeHeight);
+        }
+
+        IncomingContent.Content = content;
+        _incomingDisposable = disposable;
+        p.Attached = p.Since();
+        WatchWebReveal(p, content, view);
+        if (view.Kind != WebSurfaceKind.Page)
+        {
+            view.AllowNavigation();
+        }
+
+        DiagnosticLog.Write($"stage +{p.Since():0}ms (during the beat)");
+    }
+
+    private static StagedWebView? WebViewIn(FrameworkElement content) =>
+        content as StagedWebView ?? FindVisualChild<StagedWebView>(content);
+
+    private void PlaceContent(Presentation p, FrameworkElement content, IDisposable? owned)
+    {
+        if (PreviewContent.Content is FrameworkElement shown && !ReferenceEquals(shown, content))
+        {
+            if (ReferenceEquals(shown, p.Holding))
+            {
+                p.Holding = null;
+                MoveShownToOutgoing();
+            }
+            else
+            {
+                shown.Visibility = Visibility.Collapsed;
+                ClearPreviewContent();
+            }
+        }
+
+        PreviewContent.Content = content;
+        _currentDisposable = owned;
+        if (p.Attached < 0)
+        {
+            p.Attached = p.Since();
+        }
+
+        SetBrowseControlsVisible(CurrentPath is not null && !IsPinned);
+
+        // A shape learned while the content was building applies now, while
+        // nothing of this item is on screen. A held item stays put.
+        if (p.Plan.Swap != SwapStyle.Hold)
+        {
+            RetargetStageToFit();
+        }
+
+        DiagnosticLog.Write($"stage +{p.Since():0}ms");
+        if (WebViewIn(content) is { } view)
+        {
+            AttachWeb(p, content, view);
+            return;
+        }
+
+        RevealNative(p, content);
+    }
+
+    /// <summary>
+    /// A page shows at once on its transparent view and dissolves itself in
+    /// over whatever stands under it. A document (and a video still waiting
+    /// for its shape) stages hidden and appears in one cut.
+    /// </summary>
+    private void AttachWeb(Presentation p, FrameworkElement content, StagedWebView view)
+    {
+        p.WebView = view;
+        var staged = view.Kind != WebSurfaceKind.Page || content.Tag is MediaStageState { DimensionsKnown: false };
+        content.Visibility = staged ? Visibility.Hidden : Visibility.Visible;
+        if (!view.RevealWatched)
+        {
+            WatchWebReveal(p, content, view);
+        }
+
+        view.AllowNavigation();
+    }
+
+    private void WatchWebReveal(Presentation p, FrameworkElement content, StagedWebView view)
+    {
+        view.RevealWatched = true;
+        p.WebView = view;
+        var token = _loadCancellation?.Token ?? CancellationToken.None;
+        var ticket = new RevealTicket(() =>
+            IsCurrent(p)
+            && (ReferenceEquals(PreviewContent.Content, content) || ReferenceEquals(IncomingContent.Content, content)));
+
+        view.NavigationCompleted += async (_, args) =>
+        {
+            if (ticket.Taken || !IsCurrent(p))
+            {
+                return;
+            }
+
+            p.Navigated = p.Since();
+            DiagnosticLog.Write($"web navigation +{p.Navigated:0}ms success={args.IsSuccess}");
+            if (args.IsSuccess)
+            {
+                await RevealWebAsync(p, content, view, ticket, gated: true, "navigation", token);
+            }
+        };
+
+        // A view that never finishes must not leave the wait up forever.
+        RunAfter(RevealPlan.EscapeAfter, () =>
+            _ = RevealWebAsync(p, content, view, ticket, gated: false, "timeout", token));
+    }
+
+    /// <summary>
+    /// Navigation and the escape hatch share one owner: whoever starts first
+    /// reveals, once. A view staged during the beat waits for the beat; a
+    /// document then waits for its gates (the PDF rail decision and load
+    /// allowance, a saved page's layout), each capped.
+    /// </summary>
+    private async Task RevealWebAsync(
+        Presentation p,
+        FrameworkElement content,
+        StagedWebView view,
+        RevealTicket ticket,
+        bool gated,
+        string reason,
+        CancellationToken token)
+    {
+        if (!ticket.TryTake())
+        {
+            return;
+        }
+
+        await p.Plan.BeatEnded;
+        if (!Shows(p, content))
+        {
+            return;
+        }
+
+        var gateClock = Stopwatch.StartNew();
+        var ready = true;
+        if (gated)
+        {
+            if (content.Tag is PdfPageRailState rail)
+            {
+                await RevealPlan.WaitCappedAsync(rail.FirstRailReady.Task, RevealPlan.RailGateCap, Task.Delay);
+            }
+            else if (content.Tag is MediaStageState { DimensionsKnown: false } media)
+            {
+                await RevealPlan.WaitCappedAsync(media.DimsReady.Task, RevealPlan.MediaShapeCap, Task.Delay);
+            }
+
+            if (!Shows(p, content))
+            {
+                return;
+            }
+
+            ready = await WaitForDocumentPaintAsync(view, token);
+            if (!Shows(p, content))
+            {
+                return;
+            }
+        }
+
+        DiagnosticLog.Write(
+            $"web gate +{p.Since():0}ms wait={gateClock.Elapsed.TotalMilliseconds:0}ms kind={view.Kind.ToString().ToLowerInvariant()} ready={ready} reason={reason}");
+        RevealWeb(p, content, view);
+    }
+
+    /// <summary>
+    /// A staged document appears in one cut at the size it laid out at; a
+    /// page has been showing all along and only the bookkeeping is left.
+    /// Either way the stand-in goes once nothing can still show through.
+    /// </summary>
+    private void RevealWeb(Presentation p, FrameworkElement content, StagedWebView view)
+    {
+        MarkRevealed(p, "web");
+        if (Equals(content.Tag, ZoomableContentTag))
+        {
+            ShowZoomControls(view);
+        }
+
+        UpdateRotateButtons();
+        if (content.Visibility != Visibility.Visible)
+        {
+            content.Visibility = Visibility.Visible;
+
+            // The arrange syncs the browser's bounds in the same tick as the
+            // show; they already match, so nothing refits.
+            content.UpdateLayout();
+        }
+
+        // A page finishes its own dissolve over the stand-in; an opaque view
+        // covers it at once.
+        var linger = view.Kind == WebSurfaceKind.Page
+            ? Motion.Reveal + TimeSpan.FromMilliseconds(60)
+            : TimeSpan.FromMilliseconds(100);
+        RunAfter(linger, () => FinishReveal(p, content));
+        ContentReady?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// What stood under revealed content leaves: its stand-in and the item it
+    /// dissolved over. Only while that content still shows, so a reveal that
+    /// finishes after the user moved on cannot take down the next stand-in.
+    /// </summary>
+    private void FinishReveal(Presentation p, FrameworkElement content)
+    {
+        if (!Shows(p, content))
+        {
+            return;
+        }
+
+        HideStandIn();
+        ClearOutgoing();
+    }
+
+    /// <summary>
+    /// Dev probe only: a load's reveal finishing after the next load showed
+    /// its stand-in must leave that stand-in up. Synchronous, and restores
+    /// the real load, so the probe sequence around it is undisturbed.
+    /// </summary>
+    internal bool ProbeStandInRace()
+    {
+        var real = _presentation;
+        var content = PreviewContent.Content as FrameworkElement ?? new Grid();
+        var older = new Presentation(new RevealPlan(_loadVersion, false, () => TimeSpan.Zero, Motion.Enabled), Stopwatch.GetTimestamp(), CurrentPath);
+        var newer = new Presentation(new RevealPlan(_loadVersion, false, () => TimeSpan.Zero, Motion.Enabled), Stopwatch.GetTimestamp(), CurrentPath);
+        _presentation = older;
+        ShowStandIn(older, withWindow: true);
+        older.Plan.Supersede();
+        _presentation = newer;
+        ShowStandIn(newer, withWindow: true);
+        FinishReveal(older, content);
+        var pass = ReferenceEquals(_standInOwner, newer) && StandInLayer.Visibility == Visibility.Visible;
+        DiagnosticLog.Write($"probe overlay-race -> owner={(ReferenceEquals(_standInOwner, newer) ? "newer" : "other")} visible={StandInLayer.Visibility} pass={pass}");
+        HideStandIn();
+        _presentation = real;
+        return pass;
+    }
+
+    /// <summary>
+    /// WPF content dissolves in over its stand-in, or over the item it is
+    /// replacing. Before the window has shown, it arrives with the window in
+    /// one motion instead.
+    /// </summary>
+    private void RevealNative(Presentation p, FrameworkElement content)
+    {
+        var holding = OutgoingContent.Content is not null;
+        var withWindow = MarkRevealed(p, null);
+        UpdateRotateButtons();
+        content.Visibility = Visibility.Visible;
+        if (withWindow)
+        {
+            Motion.Settle(content, 1);
+            FinishReveal(p, content);
+        }
+        else
+        {
+            Motion.Settle(content, 0);
+            Motion.Fade(content, 1, holding ? Motion.Browse : Motion.Reveal, completed: () => FinishReveal(p, content));
+        }
+
+        ContentReady?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// A reveal's bookkeeping: stage hints die, the first reveal of the load
+    /// is logged with its breakdown, and the window fades in if it has not.
+    /// True when the window fades in with this reveal.
+    /// </summary>
+    private bool MarkRevealed(Presentation p, string? lane)
+    {
+        _loadFinished = true;
+        if (p.Plan.TryReveal())
+        {
+            p.Shown = p.Since();
+            DiagnosticLog.Write($"reveal{(lane is null ? string.Empty : " " + lane)} +{p.Shown:0}ms");
+            DiagnosticLog.Write(DescribeBreakdown(p));
+        }
+
+        if (!p.Plan.TryShowWindow())
+        {
+            return false;
+        }
+
+        FadeWindowIn(p);
+        return true;
+    }
+
+    private static string DescribeBreakdown(Presentation p)
+    {
+        static string Span(double from, double to) => from >= 0 && to >= 0 ? $"{Math.Max(0, to - from):0}ms" : "-";
+
+        var view = p.WebView;
+        var engine = view?.EngineReady is { } ready ? Stopwatch.GetElapsedTime(p.InputTimestamp, ready).TotalMilliseconds : -1;
+        var navigation = view?.NavigationStarted is { } started ? Stopwatch.GetElapsedTime(p.InputTimestamp, started).TotalMilliseconds : -1;
+        return "load breakdown"
+            + $" lookup={p.Entered:0}ms"
+            + $" header={Span(p.Entered, p.Headed)}"
+            + $" probe={Span(p.Headed, p.Probed)}"
+            + $" beat={(p.BeatEnd >= 0 ? Span(p.Probed, p.BeatEnd) : "0ms")}"
+            + $" build={Span(p.Probed, p.Built)}"
+            + $" engine={Span(p.Attached, engine)}"
+            + $" navigation={Span(navigation, p.Navigated)}"
+            + $" gate={Span(p.Navigated >= 0 ? p.Navigated : -1, p.Shown)}"
+            + $" reveal={p.Shown:0}ms";
+    }
+
+    // ---------------------------------------------------------------------
+    // Readiness for opaque documents.
+    // ---------------------------------------------------------------------
+
+    private const string ZoomableContentTag = "zoomable";
+
+    private static readonly TimeSpan SavedPageLayoutCap = TimeSpan.FromMilliseconds(120);
+
+    /// <summary>
+    /// How long the PDF viewer takes to load a document after navigation:
+    /// 84 to 293 ms over the fixtures, 170 to 180 for an 81-page PDF. Its
+    /// document loads while it is hidden, but it lays out and paints only on
+    /// screen (hidden, clipped, at opacity 0.01 or under an overlay, it
+    /// stalls; measured), so no signal says when it is done.
+    /// </summary>
+    private static readonly TimeSpan PdfLoadAllowance = TimeSpan.FromMilliseconds(180);
+
+    /// <summary>
+    /// The narrowest readiness signal each opaque renderer can give. The PDF
+    /// viewer stays staged until its document has had time to load, counted
+    /// from navigation so the wait overlaps the rail decision and the beat:
+    /// shown sooner it shows its bare background, much later its page refits
+    /// on screen. A saved page cannot run its own script, so a host script
+    /// flushes style and layout while the view is hidden and the page shows
+    /// laid out. Pages Glimpse writes need no gate: they dissolve in
+    /// themselves. Every lane is bounded.
+    /// </summary>
+    private static async Task<bool> WaitForDocumentPaintAsync(StagedWebView webView, CancellationToken token)
+    {
+        if (webView.CoreWebView2 is not { } core)
+        {
+            return false;
+        }
+
+        if (webView.Kind == WebSurfaceKind.PdfViewer)
+        {
+            var loading = webView.NavigationCompletedAt is { } done
+                ? PdfLoadAllowance - Stopwatch.GetElapsedTime(done)
+                : PdfLoadAllowance;
+            try
+            {
+                if (loading > TimeSpan.Zero)
+                {
+                    await Task.Delay(loading, token);
+                }
+
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+        }
+
+        if (webView.Kind != WebSurfaceKind.SavedPage)
+        {
+            return true;
+        }
+
+        // One deadline governs script dispatch and the wait. A late script
+        // must not get a fresh window after the host gave up on it.
+        var deadlineUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            + Math.Max(1L, (long)Math.Ceiling(SavedPageLayoutCap.TotalMilliseconds));
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(SavedPageLayoutCap);
+        try
+        {
+            var layoutScript = $$"""
+                (() => {
+                  // ExecuteScriptAsync itself is not cancelable. If the
+                  // renderer services this command after the host gave up,
+                  // it reports nothing.
+                  if (Date.now() > {{deadlineUnixMilliseconds}}) return false;
+
+                  const root = document.documentElement;
+                  if (!root) return false;
+
+                  // These reads synchronously flush computed style and
+                  // layout. The view itself is still hidden, so this lane
+                  // never mutates page presentation just to acknowledge it.
+                  const computedDisplay = getComputedStyle(root).display;
+                  const body = document.body;
+                  const rootBounds = root.getBoundingClientRect();
+                  const bodyBounds = body ? body.getBoundingClientRect() : null;
+                  const layout = [
+                    rootBounds.width,
+                    rootBounds.height,
+                    root.scrollWidth,
+                    root.scrollHeight,
+                    bodyBounds ? bodyBounds.width : 0,
+                    bodyBounds ? bodyBounds.height : 0,
+                    body ? body.scrollWidth : 0,
+                    body ? body.scrollHeight : 0
+                  ];
+                  return computedDisplay.length > 0
+                    && layout.every(Number.isFinite);
+                })();
+                """;
+
+            var layoutReady = await core.ExecuteScriptAsync(layoutScript).WaitAsync(timeout.Token);
+            return string.Equals(layoutReady, "true", StringComparison.Ordinal);
+        }
+        catch
+        {
+            // A document that refuses the probe still reveals when its cap
+            // runs out, fully laid out as far as it got.
+            return false;
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // The window. It fades via a temporary layered style (child windows
+    // composite too on Win8+), then drops the layered bit so normal
+    // rendering costs nothing.
+    // ---------------------------------------------------------------------
+
     public void HidePreview()
     {
         _rotationSession?.Commit();
@@ -37,29 +1007,31 @@ public partial class PreviewWindow
         StopSlideshow(restoreSize: false);
         Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
+        _presentation?.Plan.Supersede();
         CurrentPath = null;
         _shortcutTarget = null;
         _escapeYieldsToContent = false;
         _lastContentClickInViewerChrome = false;
         _userEngagedContent = false;
-        HideLoadingOverlay();
-        HideContentSwapScrim();
+        _standIn?.Stop();
 
         if (!IsVisible)
         {
-            ClearPreviewContent();
+            ReleaseShown();
+            ReleaseIncoming();
             return;
         }
 
         var generation = ++_fadeGeneration;
         var hwnd = new WindowInteropHelper(this).Handle;
-        if (hwnd == IntPtr.Zero)
+        if (hwnd == IntPtr.Zero || _windowAlpha == 0)
         {
+            // Never faded in: nothing to fade out.
             CompleteHide();
             return;
         }
 
-        AnimateWindowFade(hwnd, from: 255, to: 0, TimeSpan.FromMilliseconds(90), easeOut: false, () =>
+        AnimateWindowAlpha(hwnd, 0, Motion.Leave, easeIn: true, () =>
         {
             if (generation == _fadeGeneration)
             {
@@ -79,7 +1051,8 @@ public partial class PreviewWindow
         // already faded out here, so the restore is not visible.
         WindowState = WindowState.Normal;
         Hide();
-        ClearPreviewContent();
+        ReleaseShown();
+        ReleaseIncoming();
         SetBrowseControlsVisible(false);
         EnsureOpaque();
         // The user's dragged size dies with the open; content rules again.
@@ -91,17 +1064,11 @@ public partial class PreviewWindow
         UpdateMaximizeChrome();
     }
 
-    // ---------------------------------------------------------------------
-    // Entrance/exit animation. The window fades via a temporary layered
-    // style (children composite too on Win8+) plus a subtle scale pop, then
-    // drops the layered bit so normal rendering has zero overhead.
-    // ---------------------------------------------------------------------
-
-    private bool ShouldScaleEntrance() =>
-        _stageFitVersion != _loadVersion
-        || _stageFitHint is not { Kind: StageFitHint.FitKind.PageAspect };
-
-    private bool ShowWithEntrance(bool useScale = true)
+    /// <summary>
+    /// Shows the window fully transparent: WebView2 needs the hwnd, and the
+    /// content gets its 120 ms to arrive with the window in one motion.
+    /// </summary>
+    private bool ShowTransparent()
     {
         var hwnd = new WindowInteropHelper(this).EnsureHandle();
         SetWindowAlpha(hwnd, 0);
@@ -115,12 +1082,24 @@ public partial class PreviewWindow
             // window that Windows refused to place where the user expects it.
             Hide();
             RemoveLayeredStyle(hwnd);
+            _windowAlpha = 255;
             return false;
         }
 
         LastPresentationFailureReason = string.Empty;
+        return true;
+    }
 
-        AnimateWindowFade(hwnd, from: 0, to: 255, TimeSpan.FromMilliseconds(140), easeOut: true, () =>
+    private void FadeWindowIn(Presentation p)
+    {
+        var hwnd = Hwnd != IntPtr.Zero ? Hwnd : new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        DiagnosticLog.Write($"window in +{p.Since():0}ms");
+        AnimateWindowAlpha(hwnd, 255, Motion.Open, easeIn: false, () =>
         {
             RemoveLayeredStyle(hwnd);
             if (!TryConfirmNativePresentation(out var completionFailure))
@@ -133,25 +1112,6 @@ public partial class PreviewWindow
             DiagnosticLog.Write(
                 $"preview presentation confirmed hwnd=0x{hwnd.ToInt64():X} owner=0x{_placementOwnerHwnd.ToInt64():X}");
         });
-
-        RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
-        RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
-        if (!useScale)
-        {
-            RootScale.ScaleX = 1;
-            RootScale.ScaleY = 1;
-            return true;
-        }
-
-        RootScale.ScaleX = 0.965;
-        RootScale.ScaleY = 0.965;
-        var pop = new DoubleAnimation(0.965, 1.0, TimeSpan.FromMilliseconds(170))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        };
-        RootScale.BeginAnimation(ScaleTransform.ScaleXProperty, pop);
-        RootScale.BeginAnimation(ScaleTransform.ScaleYProperty, pop);
-        return true;
     }
 
     private bool TryConfirmNativePresentation(out string failureReason)
@@ -208,12 +1168,20 @@ public partial class PreviewWindow
         return false;
     }
 
-    private void AnimateWindowFade(IntPtr hwnd, byte from, byte to, TimeSpan duration, bool easeOut, Action onDone)
+    /// <summary>Fades the window's layered alpha from wherever it is now.</summary>
+    private void AnimateWindowAlpha(IntPtr hwnd, byte to, TimeSpan duration, bool easeIn, Action onDone)
     {
         _fadeTimer?.Stop();
         var generation = _fadeGeneration;
-        SetWindowAlpha(hwnd, from);
+        var from = _windowAlpha;
+        if (!Motion.Enabled || from == to)
+        {
+            SetWindowAlpha(hwnd, to);
+            onDone();
+            return;
+        }
 
+        SetWindowAlpha(hwnd, from);
         var stopwatch = Stopwatch.StartNew();
         var timer = new DispatcherTimer(DispatcherPriority.Render)
         {
@@ -228,11 +1196,9 @@ public partial class PreviewWindow
                 return;
             }
 
-            var progress = Math.Clamp(stopwatch.Elapsed.TotalMilliseconds / duration.TotalMilliseconds, 0, 1);
-            var eased = easeOut ? 1 - (1 - progress) * (1 - progress) : progress * progress;
-            var alpha = (byte)Math.Round(from + (to - from) * eased);
+            var progress = stopwatch.Elapsed.TotalMilliseconds / duration.TotalMilliseconds;
+            var alpha = (byte)Math.Round(from + (to - from) * Motion.Ease(progress, easeIn));
             SetWindowAlpha(hwnd, alpha);
-
             if (progress >= 1)
             {
                 timer.Stop();
@@ -245,6 +1211,7 @@ public partial class PreviewWindow
     private void EnsureOpaque()
     {
         var hwnd = new WindowInteropHelper(this).Handle;
+        _windowAlpha = 255;
         if (hwnd == IntPtr.Zero)
         {
             return;
@@ -260,8 +1227,9 @@ public partial class PreviewWindow
         RemoveLayeredStyle(hwnd);
     }
 
-    private static void SetWindowAlpha(IntPtr hwnd, byte alpha)
+    private void SetWindowAlpha(IntPtr hwnd, byte alpha)
     {
+        _windowAlpha = alpha;
         var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
         if ((exStyle & NativeMethods.WS_EX_LAYERED) == 0)
         {
@@ -278,229 +1246,6 @@ public partial class PreviewWindow
         {
             NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE, new IntPtr(exStyle & ~NativeMethods.WS_EX_LAYERED));
         }
-    }
-
-    // ---------------------------------------------------------------------
-    // Loading overlay: the previous preview stays put while the next one
-    // loads; the spinner only appears when a load is actually slow.
-    // ---------------------------------------------------------------------
-
-    private async Task ShowLoadingOverlayLaterAsync(long version, int delayMilliseconds, CancellationToken token, (string Title, string Subtitle)? message = null)
-    {
-        try
-        {
-            await Task.Delay(delayMilliseconds, token);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
-
-        if (version != _loadVersion || _loadFinished)
-        {
-            return;
-        }
-
-        if (message is { } copy)
-        {
-            LoadingTitle.Text = copy.Title;
-            LoadingSubtitle.Text = copy.Subtitle;
-            LoadingMessagePanel.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            LoadingMessagePanel.Visibility = Visibility.Collapsed;
-        }
-
-        ShowLoadingOverlayNow();
-    }
-
-    private void ShowLoadingOverlayNow()
-    {
-        // A reveal from the previous load may still be fading this same
-        // element. Retake ownership and stop that animation before showing
-        // the new load's state; its Completed callback is generation-guarded.
-        _loadingOverlayGeneration++;
-        LoadingOverlay.BeginAnimation(OpacityProperty, null);
-        if (LoadingOverlay.Visibility != Visibility.Visible)
-        {
-            LoadingOverlay.Opacity = 0;
-            LoadingOverlay.Visibility = Visibility.Visible;
-            LoadingOverlay.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
-        }
-        else
-        {
-            LoadingOverlay.Opacity = 1;
-        }
-        if (ShimmerBand.Visibility == Visibility.Visible)
-        {
-            return;
-        }
-
-        // A faint band of light sweeps the canvas, stays a beat, sweeps
-        // again. Alive without machinery, and identical for every file.
-        // The band scales with the stage: a fixed sliver that read well on
-        // the old capped window disappears on a deck-shaped canvas.
-        ShimmerPeak.Color = Theme.Current.IsDark
-            ? Color.FromArgb(0x20, 0xFF, 0xFF, 0xFF)
-            : Color.FromArgb(0x16, 0x1B, 0x1E, 0x26);
-        ShimmerBand.Width = Math.Clamp(ActualWidth * 0.4, 420, 980);
-        ShimmerBand.Visibility = Visibility.Visible;
-
-        var travel = Math.Max(ActualWidth, 600) + ShimmerBand.Width;
-        var sweep = new DoubleAnimationUsingKeyFrames
-        {
-            Duration = TimeSpan.FromMilliseconds(2400),
-            RepeatBehavior = RepeatBehavior.Forever
-        };
-        sweep.KeyFrames.Add(new EasingDoubleKeyFrame(
-            -ShimmerBand.Width,
-            KeyTime.FromTimeSpan(TimeSpan.Zero)));
-        sweep.KeyFrames.Add(new EasingDoubleKeyFrame(
-            travel - ShimmerBand.Width,
-            KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(1500)),
-            new SineEase { EasingMode = EasingMode.EaseInOut }));
-        sweep.KeyFrames.Add(new DiscreteDoubleKeyFrame(
-            -ShimmerBand.Width,
-            KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(2400))));
-        ShimmerTranslate.BeginAnimation(TranslateTransform.XProperty, sweep);
-    }
-
-    private void HideLoadingOverlay()
-    {
-        _loadingOverlayGeneration++;
-        LoadingOverlay.BeginAnimation(OpacityProperty, null);
-        ShimmerTranslate.BeginAnimation(TranslateTransform.XProperty, null);
-        LoadingOverlay.Visibility = Visibility.Collapsed;
-        LoadingMessagePanel.Visibility = Visibility.Collapsed;
-        ShimmerBand.Visibility = Visibility.Collapsed;
-    }
-
-    /// <summary>
-    /// The reveal-time exit: the ghost hands off to the real preview with a
-    /// short dissolve instead of vanishing between frames.
-    /// </summary>
-    private void FadeOutLoadingOverlay()
-    {
-        if (LoadingOverlay.Visibility != Visibility.Visible)
-        {
-            HideLoadingOverlay();
-            return;
-        }
-
-        var generation = ++_loadingOverlayGeneration;
-        var fade = new DoubleAnimation(LoadingOverlay.Opacity, 0, TimeSpan.FromMilliseconds(160))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        };
-        fade.Completed += (_, _) =>
-        {
-            if (generation == _loadingOverlayGeneration)
-            {
-                HideLoadingOverlay();
-            }
-        };
-        LoadingOverlay.BeginAnimation(OpacityProperty, fade);
-    }
-
-    private void ShowContentSwapScrim(bool instant = false)
-    {
-        ContentSwapScrim.BeginAnimation(OpacityProperty, null);
-        if (ContentSwapScrim.Visibility != Visibility.Visible)
-        {
-            ContentSwapScrim.Opacity = 0;
-            ContentSwapScrim.Visibility = Visibility.Visible;
-        }
-
-        if (instant)
-        {
-            ContentSwapScrim.Opacity = 1;
-            return;
-        }
-
-        ContentSwapScrim.BeginAnimation(OpacityProperty, new DoubleAnimation(ContentSwapScrim.Opacity, 1, TimeSpan.FromMilliseconds(70))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        });
-    }
-
-    private void RevealContentSwapScrim(bool animate)
-    {
-        ContentSwapScrim.BeginAnimation(OpacityProperty, null);
-        if (ContentSwapScrim.Visibility != Visibility.Visible)
-        {
-            return;
-        }
-
-        if (!animate)
-        {
-            HideContentSwapScrim();
-            return;
-        }
-
-        var fade = new DoubleAnimation(ContentSwapScrim.Opacity, 0, TimeSpan.FromMilliseconds(140))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        };
-        fade.Completed += (_, _) =>
-        {
-            ContentSwapScrim.Visibility = Visibility.Collapsed;
-            ContentSwapScrim.Opacity = 0;
-        };
-        ContentSwapScrim.BeginAnimation(OpacityProperty, fade);
-    }
-
-    private void HideContentSwapScrim()
-    {
-        ContentSwapScrim.BeginAnimation(OpacityProperty, null);
-        ContentSwapScrim.Opacity = 0;
-        ContentSwapScrim.Visibility = Visibility.Collapsed;
-    }
-
-    /// <summary>
-    /// Once the outgoing content has finished dissolving (in-page fade for
-    /// web content, the scrim for WPF content), take it out of layout
-    /// entirely. Geometry changes happen while the canvas is blank, so the
-    /// user sees stable states instead of a relayout in motion.
-    /// </summary>
-    private void CollapseOutgoingContentSoon()
-    {
-        if (PreviewContent.Content is not UIElement outgoing)
-        {
-            return;
-        }
-
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(110) };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            // Only if it is still the same content: a fast load may have
-            // already swapped the incoming preview into this slot.
-            if (ReferenceEquals(PreviewContent.Content, outgoing))
-            {
-                outgoing.Visibility = Visibility.Collapsed;
-            }
-        };
-        timer.Start();
-    }
-
-    private void RetargetDefaultStageDuringBlankBeat(long version)
-    {
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(112) };
-        timer.Tick += (_, _) =>
-        {
-            timer.Stop();
-            if (version != _loadVersion || !IsVisible || _stageFitVersion == version)
-            {
-                return;
-            }
-
-            RetargetStageToFit();
-        };
-        timer.Start();
     }
 
     private static bool UsesDefaultStageWithoutProbe(string path)
@@ -525,478 +1270,7 @@ public partial class PreviewWindow
             && !OfficeOpenXmlPreviewLoader.IsSupported(path);
     }
 
-    /// <summary>
-    /// The scrim cannot cover a webview (the browser hwnd paints over every
-    /// WPF sibling), so web content dissolves itself: an in-page fade to the
-    /// view's own background color, which the templates and converted pages
-    /// keep matched to the app canvas. ExecuteScriptAsync runs even on
-    /// hardened script-off pages. A page that refuses keeps its last frame.
-    /// </summary>
-    private void FadeOutWebContent()
-    {
-        if (FindVisualChild<WebView2>(PreviewContent) is not { CoreWebView2: { } core })
-        {
-            return;
-        }
-
-        try
-        {
-            _ = core.ExecuteScriptAsync(
-                "document.documentElement.style.transition='opacity 90ms ease-out';"
-                + "document.documentElement.style.opacity='0';");
-        }
-        catch
-        {
-            // Best-effort only.
-        }
-    }
-
-    private const string ZoomableContentTag = "zoomable";
-
-    private static readonly TimeSpan HtmlWebPaintReadyFallback = TimeSpan.FromMilliseconds(120);
-    private static readonly TimeSpan PdfPluginSettleDelay = TimeSpan.FromMilliseconds(180);
-
-    private static TimeSpan WebPaintReadyFallback(FrameworkElement content) =>
-        content.Tag is PdfPageRailState
-            ? PdfPluginSettleDelay
-            : HtmlWebPaintReadyFallback;
-
-    /// <summary>
-    /// Resolves through the narrowest readiness signal each renderer can give.
-    /// Hardened static HTML cannot run page script, so a host script flushes
-    /// style and layout while the WebView is hidden, then the host shows the
-    /// laid-out page. Interactive pages are primed transparent, cross two
-    /// animation frames, and report a nonce through WebMessage. The PDF plugin
-    /// gets a short DOM-free settle: outer frames cannot observe its embedded
-    /// raster. Every lane is bounded.
-    /// </summary>
-    private static async Task<bool> WaitForWebPaintReadyAsync(
-        WebView2 webView,
-        TimeSpan fallback,
-        CancellationToken token,
-        WebPaintReadinessMode mode)
-    {
-        if (webView.CoreWebView2 is not { } core)
-        {
-            return false;
-        }
-
-        if (mode == WebPaintReadinessMode.PdfPlugin)
-        {
-            try
-            {
-                await Task.Delay(fallback, token);
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                return false;
-            }
-        }
-
-        // One deadline governs event hookup, script dispatch, and frame wait.
-        // A slow COM subscription must not grant a late script a fresh window
-        // in which it can hide content after the host fallback revealed it.
-        var deadlineUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
-            + Math.Max(1L, (long)Math.Ceiling(fallback.TotalMilliseconds));
-        var attached = false;
-        EventHandler<CoreWebView2WebMessageReceivedEventArgs>? handler = null;
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-        timeout.CancelAfter(fallback);
-        try
-        {
-            timeout.Token.ThrowIfCancellationRequested();
-            if (mode == WebPaintReadinessMode.StaticLayout)
-            {
-                var layoutScript = $$"""
-                    (() => {
-                      // ExecuteScriptAsync itself is not cancelable. If the
-                      // renderer services this command after the host fallback,
-                      // do not hide content that has already been revealed.
-                      if (Date.now() > {{deadlineUnixMilliseconds}}) return false;
-
-                      const root = document.documentElement;
-                      if (!root) return false;
-
-                      // These reads synchronously flush computed style and
-                      // layout. The view itself is still hidden, so this lane
-                      // never mutates page presentation just to acknowledge it.
-                      const computedDisplay = getComputedStyle(root).display;
-                      const body = document.body;
-                      const rootBounds = root.getBoundingClientRect();
-                      const bodyBounds = body ? body.getBoundingClientRect() : null;
-                      const layout = [
-                        rootBounds.width,
-                        rootBounds.height,
-                        root.scrollWidth,
-                        root.scrollHeight,
-                        bodyBounds ? bodyBounds.width : 0,
-                        bodyBounds ? bodyBounds.height : 0,
-                        body ? body.scrollWidth : 0,
-                        body ? body.scrollHeight : 0
-                      ];
-                      return computedDisplay.length > 0
-                        && layout.every(Number.isFinite);
-                    })();
-                    """;
-
-                var layoutReady = await core.ExecuteScriptAsync(layoutScript).WaitAsync(timeout.Token);
-                return string.Equals(layoutReady, "true", StringComparison.Ordinal);
-            }
-
-            var signal = $"glimpse-paint-ready:{Guid.NewGuid():N}";
-            var paintReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            handler = (_, args) =>
-            {
-                try
-                {
-                    if (string.Equals(args.TryGetWebMessageAsString(), signal, StringComparison.Ordinal))
-                    {
-                        paintReady.TrySetResult(true);
-                    }
-                }
-                catch
-                {
-                    // Other page messages are objects (media state, dimensions,
-                    // errors). They belong to their normal handlers, not this gate.
-                }
-            };
-
-            // A renderer can exit between the CoreWebView2 lookup and event
-            // hookup. Keep subscription inside the protected scope so a
-            // disposed COM event source degrades to the bounded fallback.
-            core.WebMessageReceived += handler;
-            attached = true;
-            timeout.Token.ThrowIfCancellationRequested();
-
-            var encodedSignal = JsonSerializer.Serialize(signal);
-            var frameScript = $$"""
-                (() => {
-                  // ExecuteScriptAsync itself is not cancelable. If the
-                  // renderer only services this command after the host-side
-                  // fallback elapsed, never hide content that is now visible.
-                  if (Date.now() > {{deadlineUnixMilliseconds}}) return;
-
-                  const root = document.documentElement;
-                  if (root) {
-                    root.style.setProperty('opacity', '0', 'important');
-                    root.style.setProperty('transition', 'opacity 180ms ease-out');
-                  }
-
-                  const report = () => {
-                    try { window.chrome.webview.postMessage({{encodedSignal}}); } catch { }
-                  };
-                  const afterPaint = () => {
-                    if (typeof requestAnimationFrame !== 'function') {
-                      setTimeout(report, 0);
-                      return;
-                    }
-
-                    requestAnimationFrame(() => requestAnimationFrame(report));
-                  };
-
-                  if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', afterPaint, { once: true });
-                  } else {
-                    afterPaint();
-                  }
-                })();
-                """;
-
-            await core.ExecuteScriptAsync(frameScript).WaitAsync(timeout.Token);
-            await paintReady.Task.WaitAsync(timeout.Token);
-            return true;
-        }
-        catch (OperationCanceledException)
-        {
-            return false;
-        }
-        catch
-        {
-            // A hardened/plugin document that refuses the probe still gets the
-            // bounded fallback and reveals fully laid out, as before.
-            return false;
-        }
-        finally
-        {
-            if (attached)
-            {
-                try
-                {
-                    core.WebMessageReceived -= handler!;
-                }
-                catch
-                {
-                    // The renderer may have exited while the bounded gate waited.
-                }
-            }
-        }
-    }
-
-    private static async Task WaitForDocumentRevealGateAsync(FrameworkElement content)
-    {
-        if (content.Tag is PdfPageRailState state)
-        {
-            await Task.WhenAny(state.FirstRailReady.Task, Task.Delay(520));
-            return;
-        }
-
-        if (content.Tag is MediaStageState media)
-        {
-            if (!media.DimensionsKnown)
-            {
-                // Metadata for a local file lands well inside the cap; the
-                // cap exists so a slow source degrades to the default stage,
-                // never to a blank window.
-                await Task.WhenAny(media.DimsReady.Task, Task.Delay(600));
-            }
-        }
-    }
-
-    private void SetPreviewContent(FrameworkElement content, IDisposable? disposable, bool animate = true)
-    {
-        if (!animate || !IsVisible)
-        {
-            SetPreviewContentNow(content, disposable, animate: false);
-            return;
-        }
-
-        // The outgoing content spends the first beat of a swap dissolving to
-        // the canvas; attaching the successor earlier would rip it out
-        // mid-fade.
-        var version = _loadVersion;
-        RunAfter(_swapStartedAt + TimeSpan.FromMilliseconds(110) - DateTime.UtcNow, () =>
-        {
-            if (version != _loadVersion || !IsVisible)
-            {
-                disposable?.Dispose();
-                return;
-            }
-
-            StagePreviewContent(content, disposable, version);
-        });
-    }
-
-    /// <summary>
-    /// Attaches the new content HIDDEN: a browser view starts its engine,
-    /// navigates and lays out its document offstage (a PDF viewer builds
-    /// its whole UI in stages - watched live, that is a flash and a resize).
-    /// The canvas holds, and the preview reveals in one piece once geometry
-    /// has settled and the document has had a beat to paint.
-    /// </summary>
-    private void StagePreviewContent(FrameworkElement content, IDisposable? disposable, long version)
-    {
-        // _loadFinished stays false: the load is done but nothing is on
-        // screen yet; the reveal marks finished. The timestamp names UI
-        // thread stalls: a stage arriving far past its scheduled beat means
-        // something blocked the dispatcher mid-swap.
-        DiagnosticLog.Write($"stage +{ElapsedSinceSwap():0}ms");
-
-        // Hide the outgoing hwnd in the same tick it is destroyed: a live
-        // browser view being disposed paints a black frame on its way out.
-        if (PreviewContent.Content is UIElement outgoingContent)
-        {
-            outgoingContent.Visibility = Visibility.Collapsed;
-        }
-
-        // The blank beat: outgoing content is gone, the successor is not
-        // attached yet. The stage takes the new item's shape in one step,
-        // so the successor lays out exactly once, at its final size.
-        RetargetStageToFit();
-
-        ClearPreviewContent();
-        PreviewContent.Content = content;
-        _currentDisposable = disposable;
-        SetBrowseControlsVisible(CurrentPath is not null && !IsPinned);
-
-        var stagedWebView = FindVisualChild<WebView2>(content);
-
-        // A browser view stages Hidden so the document lays out once at its
-        // final size. WPF content stages
-        // Collapsed instead: Hidden elements still MEASURE at attach, and a
-        // 400K-character text preview measuring during a swap freezes the whole
-        // choreography. Collapsed defers that layout to the reveal, after
-        // geometry has settled - and a file the user scrubs straight past
-        // never pays for its layout at all.
-        content.Visibility = stagedWebView is not null ? Visibility.Hidden : Visibility.Collapsed;
-
-        var revealed = false;
-        bool MayReveal()
-        {
-            if (revealed || version != _loadVersion || !ReferenceEquals(PreviewContent.Content, content))
-            {
-                return false;
-            }
-
-            revealed = true;
-            return true;
-        }
-
-        // Documents wait for their first rail decision before reveal. That
-        // keeps the PDF surface from appearing, then shifting sideways when
-        // thumbnails arrive a beat later.
-        if (stagedWebView is { } webView)
-        {
-            var revealToken = _loadCancellation?.Token ?? CancellationToken.None;
-
-            bool StillOwnsContent() =>
-                !revealToken.IsCancellationRequested
-                && version == _loadVersion
-                && !revealed
-                && ReferenceEquals(PreviewContent.Content, content);
-
-            var revealAttemptStarted = false;
-            async Task TryRevealWebAsync(bool waitForDocumentGate, string reason)
-            {
-                // Navigation and the 1.4s escape hatch share one owner. Two
-                // probes can both prime opacity=0; if the loser finishes after
-                // the winner reveals, it hides the winner again.
-                if (!StillOwnsContent() || revealAttemptStarted)
-                {
-                    return;
-                }
-
-                revealAttemptStarted = true;
-                if (waitForDocumentGate)
-                {
-                    await WaitForDocumentRevealGateAsync(content);
-                    if (!StillOwnsContent())
-                    {
-                        return;
-                    }
-
-                    DiagnosticLog.Write($"web reveal gate +{ElapsedSinceSwap():0}ms");
-                }
-
-                var paintClock = Stopwatch.StartNew();
-                var readinessMode = PaintReadinessMode(webView);
-                var paintReady = await WaitForWebPaintReadyAsync(
-                    webView,
-                    WebPaintReadyFallback(content),
-                    revealToken,
-                    readinessMode);
-                if (!StillOwnsContent())
-                {
-                    return;
-                }
-
-                DiagnosticLog.Write(
-                    $"web paint gate +{ElapsedSinceSwap():0}ms ready={paintReady} wait={paintClock.Elapsed.TotalMilliseconds:0}ms mode={PaintReadinessModeName(readinessMode)} reason={reason}");
-                if (MayReveal())
-                {
-                    RevealStagedWebContent(content, webView);
-                }
-            }
-
-            webView.NavigationCompleted += async (_, args) =>
-            {
-                if (!StillOwnsContent())
-                {
-                    return;
-                }
-
-                DiagnosticLog.Write($"web navigation +{ElapsedSinceSwap():0}ms success={args.IsSuccess}");
-                if (!args.IsSuccess)
-                {
-                    return;
-                }
-
-                await TryRevealWebAsync(waitForDocumentGate: true, reason: "navigation");
-            };
-
-            // A view that never finishes must not leave a blank window.
-            RunAfter(TimeSpan.FromMilliseconds(1400), () =>
-            {
-                if (StillOwnsContent())
-                {
-                    _ = TryRevealWebAsync(waitForDocumentGate: false, reason: "timeout");
-                }
-            });
-        }
-        else
-        {
-            RunAfter(TimeSpan.Zero, () =>
-            {
-                if (!MayReveal())
-                {
-                    return;
-                }
-
-                _loadFinished = true;
-                DiagnosticLog.Write($"reveal +{ElapsedSinceSwap():0}ms");
-                UpdateRotateButtons();
-                content.Visibility = Visibility.Visible;
-                content.Opacity = 0;
-                content.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
-                {
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                });
-                FadeOutLoadingOverlay();
-                RevealContentSwapScrim(animate: true);
-                ContentReady?.Invoke(this, EventArgs.Empty);
-            });
-        }
-    }
-
-    /// <summary>
-    /// Frame-rendered web content dissolves in after its paint gate primes the
-    /// page transparent. Static layout content is never page-mutated and simply
-    /// becomes visible once its synchronous layout acknowledgement returns.
-    /// </summary>
-    private void RevealStagedWebContent(FrameworkElement content, WebView2 webView)
-    {
-        if (!ReferenceEquals(PreviewContent.Content, content))
-        {
-            return;
-        }
-
-        _loadFinished = true;
-        DiagnosticLog.Write($"reveal web +{ElapsedSinceSwap():0}ms");
-        if (Equals(content.Tag, ZoomableContentTag))
-        {
-            ShowZoomControls(webView);
-        }
-
-        UpdateRotateButtons();
-        content.Visibility = Visibility.Visible;
-
-        // The wrapper syncs the browser's bounds lazily while hidden; force
-        // the arrange NOW, in the same tick as the show, so the first
-        // presented frame cannot appear at stale bounds.
-        content.UpdateLayout();
-        if (PaintReadinessMode(webView) == WebPaintReadinessMode.AnimationFrames)
-        {
-            RevealPrimedWebDocument(webView);
-        }
-
-        FadeOutLoadingOverlay();
-        RevealContentSwapScrim(animate: true);
-        ContentReady?.Invoke(this, EventArgs.Empty);
-    }
-
-    private static void RevealPrimedWebDocument(WebView2 webView)
-    {
-        try
-        {
-            if (webView.CoreWebView2 is { } core)
-            {
-                _ = core.ExecuteScriptAsync(
-                    "document.documentElement?.style.setProperty('opacity','1','important');");
-            }
-        }
-        catch
-        {
-            // Best-effort only.
-        }
-    }
-
-    private double ElapsedSinceSwap()
-    {
-        var startedAt = _swapStartedAt == DateTime.MinValue ? _loadStartedAt : _swapStartedAt;
-        return startedAt == DateTime.MinValue
-            ? -1
-            : (DateTime.UtcNow - startedAt).TotalMilliseconds;
-    }
+    private double ElapsedSinceInput() => _presentation?.Since() ?? -1;
 
     /// <summary>One-shot dispatcher delay; a non-positive delay runs now.</summary>
     private static void RunAfter(TimeSpan delay, Action action)
@@ -1019,37 +1293,8 @@ public partial class PreviewWindow
         timer.Start();
     }
 
-    private void SetPreviewContentNow(FrameworkElement content, IDisposable? disposable, bool animate)
-    {
-        RetargetStageToFit();
-        _loadFinished = true;
-        HideLoadingOverlay();
-        ClearPreviewContent();
-        PreviewContent.Content = content;
-        _currentDisposable = disposable;
-        SetBrowseControlsVisible(CurrentPath is not null && !IsPinned);
-
-        if (Equals(content.Tag, ZoomableContentTag) && FindVisualChild<WebView2>(content) is { } zoomable)
-        {
-            ShowZoomControls(zoomable);
-        }
-
-        UpdateRotateButtons();
-
-        if (animate && IsVisible)
-        {
-            content.Opacity = 0;
-            content.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(160))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
-        }
-
-        RevealContentSwapScrim(animate && IsVisible);
-        ContentReady?.Invoke(this, EventArgs.Empty);
-    }
-
-    private void ClearPreviewContent()
+    /// <summary>Mode state that belongs to the item on screen; it dies with that item.</summary>
+    private void ResetContentState()
     {
         HideZoomControls();
         HideContentActions();
@@ -1064,6 +1309,11 @@ public partial class PreviewWindow
         _folderHover = null;
         _activePdfRail = null;
         _activeEpubRail = null;
+    }
+
+    private void ClearPreviewContent()
+    {
+        ResetContentState();
         PreviewContent.Content = null;
         _currentDisposable?.Dispose();
         _currentDisposable = null;

@@ -216,9 +216,8 @@ public partial class PreviewWindow
             Window = new { Width = ActualWidth, Height = ActualHeight, State = WindowState.ToString() },
             ContentType = PreviewContent.Content?.GetType().Name,
             LoadFinished = _loadFinished,
-            Loading = LoadingOverlay.Visibility.ToString(),
-            Scrim = ContentSwapScrim.Visibility.ToString(),
-            ScrimBlocksInput = ContentSwapScrim.IsHitTestVisible,
+            StandIn = StandInLayer.Visibility.ToString(),
+            ShownTakesInput = PreviewContent.Content is UIElement { IsHitTestVisible: true },
             Icon = new { Visibility = FileIconImage.Visibility.ToString(), HasSource = FileIconImage.Source is not null },
             FileNameWidth = FileNameText.ActualWidth,
             OpenWidth = OpenControl.ActualWidth,
@@ -315,20 +314,8 @@ public partial class PreviewWindow
         }
     }
 
-    /// <summary>Dev probe only: recreates the cross-load overlay completion race.</summary>
-    internal async Task<bool> ProbeLoadingOverlayRaceAsync()
-    {
-        ShowLoadingOverlayNow();
-        FadeOutLoadingOverlay();
-        await Task.Delay(90);
-        ShowLoadingOverlayNow();
-        await Task.Delay(110);
-        var newOverlayStillOwnsTheStage =
-            LoadingOverlay.Visibility == Visibility.Visible && LoadingOverlay.Opacity >= 0.95;
-        DiagnosticLog.Write($"probe overlay-race -> visible={LoadingOverlay.Visibility} opacity={LoadingOverlay.Opacity:0.00} pass={newOverlayStillOwnsTheStage}");
-        HideLoadingOverlay();
-        return newOverlayStillOwnsTheStage;
-    }
+    /// <summary>Dev probe only: recreates the cross-load stand-in cleanup race.</summary>
+    internal Task<bool> ProbeLoadingOverlayRaceAsync() => Task.FromResult(ProbeStandInRace());
 
     /// <summary>Dev probe only: parked probe windows must never re-place themselves.</summary>
     internal void MarkGeometryUserPinnedForProbe() => _stageFrozenForProbe = true;

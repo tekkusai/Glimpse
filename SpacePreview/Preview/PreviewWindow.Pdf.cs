@@ -140,17 +140,15 @@ public partial class PreviewWindow
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
         // FitH = fit the page to the window's width, the way PDF apps open
         // documents. The viewer's default fits the whole page instead, which
         // renders portrait documents at ~two-thirds size.
         var webView = CreateWebView(
-            background,
+            WebSurfaceKind.PdfViewer,
             () => PdfViewerSource(path),
             $"pdf preview {path}",
             ex => { _ = PdfWebFallbackAsync(path, version, token); },
-            configure: core => ConfigurePdfViewer(core, path),
-            readinessMode: WebPaintReadinessMode.PdfPlugin);
+            configure: core => ConfigurePdfViewer(core, path));
         Grid.SetColumn(webView, 1);
         var railHost = BuildPdfPageRailHost();
         Grid.SetColumn(railHost, 0);
@@ -1382,21 +1380,16 @@ public partial class PreviewWindow
             return;
         }
 
-        var palette = Theme.Current;
-        var background = System.Drawing.Color.FromArgb(
-            palette.CanvasBg.R,
-            palette.CanvasBg.G,
-            palette.CanvasBg.B);
         var fresh = CreateWebView(
-            background,
+            WebSurfaceKind.PdfViewer,
             source,
             navigationLabel,
             onFailed: null,
             configure: core => ConfigurePdfViewer(core, pdfPath),
-            trackAsPreviewDisposable: false,
-            readinessMode: WebPaintReadinessMode.PdfPlugin);
+            trackAsPreviewDisposable: false);
         Grid.SetColumn(fresh, 1);
         fresh.Visibility = Visibility.Hidden;
+        fresh.AllowNavigation();
         surface.Children.Add(fresh);
 
         var finished = false;
@@ -1464,12 +1457,7 @@ public partial class PreviewWindow
 
             paintAttemptStarted = true;
             var paintClock = Stopwatch.StartNew();
-            var readinessMode = PaintReadinessMode(fresh);
-            var paintReady = await WaitForWebPaintReadyAsync(
-                fresh,
-                PdfPluginSettleDelay,
-                state.Token,
-                readinessMode);
+            var paintReady = await WaitForDocumentPaintAsync(fresh, state.Token);
             if (finished)
             {
                 return;
@@ -1482,7 +1470,7 @@ public partial class PreviewWindow
             }
 
             DiagnosticLog.Write(
-                $"{paintLabel} paint gate ready={paintReady} wait={paintClock.Elapsed.TotalMilliseconds:0}ms mode={PaintReadinessModeName(readinessMode)}");
+                $"{paintLabel} paint gate ready={paintReady} wait={paintClock.Elapsed.TotalMilliseconds:0}ms");
             Swap();
         };
         RunAfter(TimeSpan.FromMilliseconds(4000), () =>
@@ -1504,7 +1492,7 @@ public partial class PreviewWindow
                 return;
             }
 
-            SetPreviewContent(content, null, animate: false);
+            SetPreviewContent(content, null);
         }
         catch (OperationCanceledException)
         {
