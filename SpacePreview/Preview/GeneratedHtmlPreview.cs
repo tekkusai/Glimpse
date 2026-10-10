@@ -76,8 +76,7 @@ internal static partial class GeneratedHtmlPreview
                 {
                     var rendered = Markdown.ToHtml(MarkdownSourceWithoutLoaderNotice(preview), MarkdownPipeline);
                     var notice = preview.Truncated ? MarkdownTruncationNotice(preview) : string.Empty;
-                    var baseHref = host is null ? null : $"https://{host}/";
-                    return BuildShell(ThemeKey(palette), baseHref, $"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered)}{notice}</div>");
+                    return BuildShell($"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered, host)}{notice}</div>", palette);
                 });
 
             return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath, host, directory);
@@ -122,7 +121,7 @@ internal static partial class GeneratedHtmlPreview
 
                     var body = TryRenderCode(path, loadedText.Text, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
-                    return body is null ? null : BuildShell(ThemeKey(palette), null, body);
+                    return body is null ? null : BuildShell(body, palette);
                 });
 
             return htmlPath is null
@@ -156,7 +155,7 @@ internal static partial class GeneratedHtmlPreview
                 {
                     var body = EpubPreviewLoader.TryBuildBody(path, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
-                    return body is null ? null : BuildShell(ThemeKey(palette), null, body);
+                    return body is null ? null : BuildShell(body, palette);
                 });
 
             return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath);
@@ -192,7 +191,7 @@ internal static partial class GeneratedHtmlPreview
     {
         var shown = FileKinds.FormatSize(Math.Min(preview.TotalBytes, TextPreviewLoader.MaxPreviewBytes));
         var total = FileKinds.FormatSize(preview.TotalBytes);
-        return $"<p><em>Showing the first {WebUtility.HtmlEncode(shown)} of {WebUtility.HtmlEncode(total)}. Open the file for the rest.</em></p>";
+        return $"<p class=\"notice\">Showing the first {WebUtility.HtmlEncode(shown)} of {WebUtility.HtmlEncode(total)}. Open the file for the rest.</p>";
     }
 
     internal static string StripYamlFrontMatter(string text)
@@ -226,7 +225,13 @@ internal static partial class GeneratedHtmlPreview
         return text;
     }
 
-    internal static string NormalizeMarkdownHtml(string html)
+    /// <summary>
+    /// Shapes Markdig's output for the page: fenced code takes the app's
+    /// block style, remote images never load, and relative images point at
+    /// the virtual host that maps the file's folder. The page carries no
+    /// &lt;base&gt;, so "#heading" links stay inside the document.
+    /// </summary>
+    internal static string NormalizeMarkdownHtml(string html, string? resourceHost = null)
     {
         html = FencedCodeRegex().Replace(html, match =>
         {
@@ -235,7 +240,29 @@ internal static partial class GeneratedHtmlPreview
         });
 
         html = RemoteImageRegex().Replace(html, "<em>Remote image blocked</em>");
+        if (resourceHost is not null)
+        {
+            html = ImageSourceRegex().Replace(html, match =>
+                $"{match.Groups[1].Value}{ResolveImageSource(match.Groups[2].Value, resourceHost)}\"");
+        }
+
         return html;
+    }
+
+    // Relative and root-relative sources resolve against the file's folder.
+    // Anything with a scheme, or protocol-relative, is left for the resource
+    // policy to judge.
+    private static string ResolveImageSource(string source, string resourceHost)
+    {
+        var colon = source.IndexOf(':');
+        var slash = source.IndexOf('/');
+        var hasScheme = colon > 0 && (slash < 0 || colon < slash);
+        if (source.Length == 0 || hasScheme || source.StartsWith("//", StringComparison.Ordinal) || source.StartsWith('#'))
+        {
+            return source;
+        }
+
+        return $"https://{resourceHost}/{source.TrimStart('/')}";
     }
 
     internal static string? TryRenderCode(string path, string text, CancellationToken cancellationToken = default)
@@ -389,29 +416,20 @@ internal static partial class GeneratedHtmlPreview
         return false;
     }
 
-    private static string BuildShell(string theme, string? baseHref, string body)
-    {
-        var baseElement = string.IsNullOrWhiteSpace(baseHref)
-            ? string.Empty
-            : $"<base href=\"{WebUtility.HtmlEncode(baseHref)}\">";
-
-        return $$"""
+    private static string BuildShell(string body, ThemePalette palette) => $$"""
 <!doctype html>
-<html data-theme="{{theme}}">
+<html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-{{baseElement}}
 <style>
-{{GeneratedHtmlTheme.Css}}
-</style>
+{{GeneratedHtmlTheme.PageCss(palette)}}{{GeneratedHtmlTheme.DocumentCss(palette)}}</style>
 </head>
 <body>
 {{body}}
 </body>
 </html>
 """;
-    }
 
     private static string StableToken(string path)
     {
@@ -454,8 +472,11 @@ internal static partial class GeneratedHtmlPreview
     [GeneratedRegex("<pre><code([^>]*)>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex FencedCodeRegex();
 
-    [GeneratedRegex("<img\\b[^>]*\\bsrc\\s*=\\s*(['\"]?)https?://[^'\"\\s>]+\\1[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    [GeneratedRegex("<img\\b[^>]*\\bsrc\\s*=\\s*(['\"]?)(?:https?:)?//[^'\"\\s>]+\\1[^>]*>", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex RemoteImageRegex();
+
+    [GeneratedRegex("(<img\\b[^>]*?\\bsrc=\")([^\"]*)\"", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ImageSourceRegex();
 
     private sealed class SyntaxState
     {
