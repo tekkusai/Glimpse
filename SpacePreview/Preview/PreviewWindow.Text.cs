@@ -105,8 +105,10 @@ public partial class PreviewWindow
             new FontFamily("Cascadia Mono, Consolas"),
             fontSize,
             wrap,
-            // The text box insets its text 2 px on each side of its own.
-            new Thickness(22, 18, 22, 48),
+            // The text box insets its text 2 px on each side of its own. Its
+            // padding does not scroll, so the bottom stays open: a band there
+            // would cut lines off above the window's edge.
+            new Thickness(22, 18, 22, 0),
             Theme.Current.CanvasBg);
         TextBlock.SetLineHeight(textBox, fontSize * 1.6);
         TextBlock.SetLineStackingStrategy(textBox, LineStackingStrategy.BlockLineHeight);
