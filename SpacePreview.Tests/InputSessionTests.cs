@@ -139,6 +139,34 @@ public sealed class InputSessionTests
     }
 
     [Fact]
+    public void UnpinningOverASigningGlanceAsksFirst()
+    {
+        WithSigningPreview((controller, signing, surface) =>
+        {
+            // As if a fullscreen app were in front, so the test never
+            // installs a real mouse hook for the pinned window.
+            Fields.Set(Fields.Get<FullscreenInputSuspension>(controller, "_fullscreenInputSuspension"), "_suspended", true);
+            var pinned = new PreviewWindow();
+            try
+            {
+                Fields.Call(controller, "OnPinToggleRequested", pinned);
+                Assert.True(pinned.IsPinned);
+
+                Fields.Call(controller, "OnPinToggleRequested", pinned);
+
+                Assert.True(pinned.IsPinned);
+                Assert.Same(signing, Fields.Get<PreviewWindow>(controller, "_previewWindow"));
+                Assert.True(SignMode.SaveChoiceShown(surface));
+            }
+            finally
+            {
+                Fields.Get<List<PreviewWindow>>(controller, "_pinnedWindows").Clear();
+                pinned.Close();
+            }
+        });
+    }
+
+    [Fact]
     public void AGlanceBelongsToItsOwnerGlimpseAndTheBrowserItOpened()
     {
         Sta.Run(() =>

@@ -856,6 +856,12 @@ internal sealed class SpacePreviewController : IDisposable
         }
         else
         {
+            // Unpinning retires the live glance, so it asks first too.
+            if (_previewWindow is { } live && live != window && !CanLeavePreview(live))
+            {
+                return;
+            }
+
             _pinnedWindows.Remove(window);
             window.SetPinned(false);
             window.DetachBrowseContext();
