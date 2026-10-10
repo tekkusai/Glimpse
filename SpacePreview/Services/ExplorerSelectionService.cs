@@ -153,8 +153,11 @@ internal static class ExplorerSelectionService
 
     public static ForegroundSelectionContext? TryGetForegroundContext(bool ignoreTextEditing = true)
     {
+        // Glimpse's own windows offer nothing to glance at. Sign mode's stamp
+        // import is a real file dialog, but a glance from it would replace
+        // the preview that opened it.
         var root = NativeMethods.GetForegroundRoot();
-        if (root == IntPtr.Zero)
+        if (root == IntPtr.Zero || NativeMethods.GetWindowProcessId(root) == (uint)Environment.ProcessId)
         {
             return null;
         }
