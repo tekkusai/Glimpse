@@ -3,6 +3,14 @@ using System.Text;
 
 namespace SpacePreview.Utilities;
 
+internal enum OfficeKind
+{
+    None,
+    Document,
+    Presentation,
+    Spreadsheet
+}
+
 internal static class FileKinds
 {
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -167,15 +175,45 @@ internal static class FileKinds
             || extension.Equals(".msixbundle", StringComparison.OrdinalIgnoreCase);
     }
 
-    public static bool IsSpreadsheet(string path)
+    // The one Office table: every lane that converts, probes, sanitizes or
+    // routes an Office file asks it. Templates, shows and macro variants
+    // preview like their documents. .dot and .pot stay out: Graphviz and
+    // gettext own those names on developer machines.
+    private static readonly Dictionary<string, OfficeKind> OfficeExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        var extension = Path.GetExtension(path);
-        return extension.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".xls", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".xlsm", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".xlsb", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".ods", StringComparison.OrdinalIgnoreCase);
-    }
+        [".docx"] = OfficeKind.Document, [".docm"] = OfficeKind.Document,
+        [".dotx"] = OfficeKind.Document, [".dotm"] = OfficeKind.Document,
+        [".doc"] = OfficeKind.Document, [".rtf"] = OfficeKind.Document,
+        [".odt"] = OfficeKind.Document, [".ott"] = OfficeKind.Document,
+
+        [".pptx"] = OfficeKind.Presentation, [".pptm"] = OfficeKind.Presentation,
+        [".potx"] = OfficeKind.Presentation, [".potm"] = OfficeKind.Presentation,
+        [".ppsx"] = OfficeKind.Presentation, [".ppsm"] = OfficeKind.Presentation,
+        [".ppt"] = OfficeKind.Presentation, [".pps"] = OfficeKind.Presentation,
+        [".odp"] = OfficeKind.Presentation, [".otp"] = OfficeKind.Presentation,
+
+        [".xlsx"] = OfficeKind.Spreadsheet, [".xlsm"] = OfficeKind.Spreadsheet,
+        [".xltx"] = OfficeKind.Spreadsheet, [".xltm"] = OfficeKind.Spreadsheet,
+        [".xlsb"] = OfficeKind.Spreadsheet, [".xls"] = OfficeKind.Spreadsheet,
+        [".xlt"] = OfficeKind.Spreadsheet,
+        [".ods"] = OfficeKind.Spreadsheet, [".ots"] = OfficeKind.Spreadsheet
+    };
+
+    public static OfficeKind GetOfficeKind(string path) =>
+        OfficeExtensions.GetValueOrDefault(Path.GetExtension(path));
+
+    /// <summary>OOXML found by its content, whatever the file is called.</summary>
+    public static OfficeKind GetOfficeKind(ZipPackageKind package) => package switch
+    {
+        ZipPackageKind.OfficeWord => OfficeKind.Document,
+        ZipPackageKind.OfficePowerPoint => OfficeKind.Presentation,
+        ZipPackageKind.OfficeExcel => OfficeKind.Spreadsheet,
+        _ => OfficeKind.None
+    };
+
+    public static bool IsOffice(string path) => GetOfficeKind(path) != OfficeKind.None;
+
+    public static bool IsSpreadsheet(string path) => GetOfficeKind(path) == OfficeKind.Spreadsheet;
 
     public static bool CanUseSignatureRouting(string path)
     {
@@ -205,7 +243,7 @@ internal static class FileKinds
             && !IsArchive(path)
             && !IsEpub(path)
             && !IsWindowsAppPackage(path)
-            && !OfficeOpenXmlPreviewLoader.IsSupported(path);
+            && !IsOffice(path);
     }
 
     private static bool IsPdfBackedIllustrator(string path)

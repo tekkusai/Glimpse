@@ -522,7 +522,7 @@ public partial class PreviewWindow
             && !FileKinds.IsMedia(path)
             && !FileKinds.IsPdf(path)
             && !FileKinds.IsEpub(path)
-            && !OfficeOpenXmlPreviewLoader.IsSupported(path);
+            && !FileKinds.IsOffice(path);
     }
 
     /// <summary>

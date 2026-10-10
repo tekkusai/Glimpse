@@ -79,7 +79,7 @@ public sealed class FileKindsTests
     public void XlsbIsAnOfficeSpreadsheet()
     {
         Assert.True(FileKinds.IsSpreadsheet("budget.xlsb"));
-        Assert.True(OfficeOpenXmlPreviewLoader.IsSupported("budget.xlsb"));
+        Assert.True(FileKinds.IsOffice("budget.xlsb"));
     }
 
     [Theory]

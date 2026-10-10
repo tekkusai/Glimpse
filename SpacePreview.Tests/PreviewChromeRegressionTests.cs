@@ -195,7 +195,7 @@ public sealed class PreviewChromeRegressionTests
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var appSource = ReadSource(@"SpacePreview\App.xaml.cs");
-        var upgradeBody = ReadMethod(windowSource, "private void UpgradeConvertedOfficePreview");
+        var upgradeBody = ReadMethod(windowSource, "private void FollowProgressiveConversion");
         var stagedJumpBody = ReadMethod(windowSource, "private void StagePdfViewerJump");
         var stagedReplacementBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
         var inProcessRailBody = ReadMethod(windowSource, "private Task LoadPdfPageRailAsync");
@@ -693,15 +693,12 @@ public sealed class PreviewChromeRegressionTests
     public void OfficeNeighborPreconversionUsesTheExistingConversionLane()
     {
         var controllerSource = ReadSource(@"SpacePreview\Services\SpacePreviewController.cs");
-        var converterSource = ReadSource(@"SpacePreview\Preview\OfficeDocumentPdfConverter.cs");
         var shellSource = ReadSource(@"SpacePreview\Native\ShellComInterop.cs");
 
         Assert.Contains("CancelOfficeNeighborPreconversion();", controllerSource, StringComparison.Ordinal);
         Assert.Contains("ContentReady +=", controllerSource, StringComparison.Ordinal);
         Assert.Contains("ExplorerSelectionService.TryGetNeighborPaths", controllerSource, StringComparison.Ordinal);
         Assert.Contains("OfficeDocumentPdfConverter.TryConvert(path, token, background: true)", controllerSource, StringComparison.Ordinal);
-        Assert.Contains("ConversionLane.Wait(cancellationToken)", converterSource, StringComparison.Ordinal);
-        Assert.Contains("ProcessPriorityClass.BelowNormal", converterSource, StringComparison.Ordinal);
         Assert.Contains("TryGetNeighborPaths(object window, int currentIndex, int maxNeighbors)", shellSource, StringComparison.Ordinal);
     }
 

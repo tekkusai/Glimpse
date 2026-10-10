@@ -40,6 +40,12 @@ internal sealed class PreparedOfficeSource : IDisposable
     }
 }
 
+/// <summary>
+/// A preview never fetches. OOXML names its remote parts (linked images,
+/// templates, OLE links, external workbooks) as external relationships, and
+/// those are cut from a private copy before the engine sees the file.
+/// Hyperlinks stay: nothing loads them, and the preview keeps them clickable.
+/// </summary>
 internal static class OfficePreviewSourceSanitizer
 {
     private const long MaxRelationshipsBytes = 4L * 1024 * 1024;
@@ -47,11 +53,10 @@ internal static class OfficePreviewSourceSanitizer
     private static readonly XNamespace PackageRelationships =
         "http://schemas.openxmlformats.org/package/2006/relationships";
 
-    private static readonly HashSet<string> OpenXmlExtensions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> HyperlinkTypes = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".docx", ".docm", ".dotx", ".dotm",
-        ".xlsx", ".xlsm", ".xltx", ".xltm",
-        ".pptx", ".pptm", ".potx", ".potm", ".ppsx", ".ppsm"
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        "http://purl.oclc.org/ooxml/officeDocument/relationships/hyperlink"
     };
 
     internal static PreparedOfficeSource Prepare(
@@ -60,27 +65,28 @@ internal static class OfficePreviewSourceSanitizer
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (!OpenXmlExtensions.Contains(System.IO.Path.GetExtension(sourcePath)))
-        {
-            return new PreparedOfficeSource(sourcePath, null, 0);
-        }
 
-        int externalRelationships;
-        using (var source = ZipFile.OpenRead(sourcePath))
+        // Any zip is checked, whatever its name: a renamed .docx is still OOXML.
+        int fetchable;
+        try
         {
-            externalRelationships = source.Entries
+            using var source = ZipFile.OpenRead(sourcePath);
+            fetchable = source.Entries
                 .Where(IsRelationshipsEntry)
-                .Sum(entry => CountExternalRelationships(entry, cancellationToken));
+                .Sum(entry => FetchableRelationships(LoadRelationships(entry, cancellationToken)).Count());
+        }
+        catch (InvalidDataException) when (!IsZip(sourcePath))
+        {
+            // Legacy binary formats have no package relationships to cut.
+            return new PreparedOfficeSource(sourcePath, null, 0);
         }
 
-        if (externalRelationships == 0)
+        if (fetchable == 0)
         {
             return new PreparedOfficeSource(sourcePath, null, 0);
         }
 
-        var stagingRoot = System.IO.Path.Combine(
-            stagingParent,
-            $".glimpse-source-{Guid.NewGuid():N}");
+        var stagingRoot = System.IO.Path.Combine(stagingParent, $".glimpse-source-{Guid.NewGuid():N}");
         var sanitizedPath = System.IO.Path.Combine(stagingRoot, System.IO.Path.GetFileName(sourcePath));
         Directory.CreateDirectory(stagingRoot);
         try
@@ -90,9 +96,7 @@ internal static class OfficePreviewSourceSanitizer
             foreach (var sourceEntry in source.Entries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var destinationEntry = destination.CreateEntry(
-                    sourceEntry.FullName,
-                    CompressionLevel.Fastest);
+                var destinationEntry = destination.CreateEntry(sourceEntry.FullName, CompressionLevel.Fastest);
                 destinationEntry.LastWriteTime = sourceEntry.LastWriteTime;
                 destinationEntry.ExternalAttributes = sourceEntry.ExternalAttributes;
 
@@ -100,7 +104,7 @@ internal static class OfficePreviewSourceSanitizer
                 if (IsRelationshipsEntry(sourceEntry))
                 {
                     var document = LoadRelationships(sourceEntry, cancellationToken);
-                    foreach (var relationship in ExternalRelationships(document).ToList())
+                    foreach (var relationship in FetchableRelationships(document).ToList())
                     {
                         relationship.Remove();
                     }
@@ -113,10 +117,7 @@ internal static class OfficePreviewSourceSanitizer
                 CopyTo(input, output, cancellationToken);
             }
 
-            return new PreparedOfficeSource(
-                sanitizedPath,
-                stagingRoot,
-                externalRelationships);
+            return new PreparedOfficeSource(sanitizedPath, stagingRoot, fetchable);
         }
         catch
         {
@@ -133,20 +134,28 @@ internal static class OfficePreviewSourceSanitizer
         }
     }
 
+    private static bool IsZip(string path)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            Span<byte> header = stackalloc byte[2];
+            return stream.Read(header) == 2 && header[0] == (byte)'P' && header[1] == (byte)'K';
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool IsRelationshipsEntry(ZipArchiveEntry entry) =>
         entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
 
-    private static int CountExternalRelationships(
-        ZipArchiveEntry entry,
-        CancellationToken cancellationToken) =>
-        ExternalRelationships(LoadRelationships(entry, cancellationToken)).Count();
-
-    private static IEnumerable<XElement> ExternalRelationships(XDocument document) =>
+    private static IEnumerable<XElement> FetchableRelationships(XDocument document) =>
         document.Descendants(PackageRelationships + "Relationship")
-            .Where(relationship => string.Equals(
-                (string?)relationship.Attribute("TargetMode"),
-                "External",
-                StringComparison.OrdinalIgnoreCase));
+            .Where(relationship =>
+                string.Equals((string?)relationship.Attribute("TargetMode"), "External", StringComparison.OrdinalIgnoreCase)
+                && !HyperlinkTypes.Contains((string?)relationship.Attribute("Type") ?? string.Empty));
 
     private static XDocument LoadRelationships(
         ZipArchiveEntry entry,

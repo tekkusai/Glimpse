@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -11,19 +12,202 @@ using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// A converted document: a PDF, or a spreadsheet's HTML page (with one page
+/// per sheet when it has several). A partial holds only the first pages of a
+/// big document; its job's Complete brings the rest.
+/// </summary>
 internal sealed record ConvertedOfficeDocument(
     string DocumentPath,
-    string EngineLog,
     IReadOnlyList<SpreadsheetSheet>? Sheets = null,
-    string? SourcePath = null,
-    bool IsPartial = false,
-    int? PartialPageCount = null,
-    int? ExpectedPageCount = null);
-
-/// <summary>One sheet of a converted workbook: display name + its own page.</summary>
-internal sealed record SpreadsheetSheet(string Name, string Path);
+    int PartialPages = 0,
+    int ExpectedPages = 0)
+{
+    public bool IsPartial => PartialPages > 0;
+}
 
 internal sealed record OfficeProgressiveConversionPlan(int FirstPageCount, int ExpectedPageCount, string Filter);
+
+/// <summary>What one engine run is asked to do. The runner writes into OutputDirectory.</summary>
+internal sealed record OfficeRunRequest(string SourcePath, string ConvertTo, string OutputDirectory, OfficeRunControl Control);
+
+/// <summary>
+/// The running engine's priority. A job nobody waits for drops to
+/// BelowNormal; soffice.exe is only a launcher, so the change has to reach
+/// its soffice.bin child too.
+/// </summary>
+internal sealed class OfficeRunControl
+{
+    private readonly object _gate = new();
+    private Process? _process;
+
+    public bool Background { get; private set; }
+
+    public void SetBackground(bool background)
+    {
+        lock (_gate)
+        {
+            if (Background == background)
+            {
+                return;
+            }
+
+            Background = background;
+            Apply();
+        }
+    }
+
+    public void Attach(Process process)
+    {
+        lock (_gate)
+        {
+            _process = process;
+            if (Background)
+            {
+                Apply();
+            }
+        }
+    }
+
+    private void Apply()
+    {
+        if (_process is null)
+        {
+            return;
+        }
+
+        var priority = Background ? ProcessPriorityClass.BelowNormal : ProcessPriorityClass.Normal;
+        try
+        {
+            _process.PriorityClass = priority;
+            foreach (var childId in ProcessTree.ChildrenOf(_process.Id))
+            {
+                using var child = Process.GetProcessById(childId);
+                child.PriorityClass = priority;
+            }
+        }
+        catch
+        {
+            // Priority is a courtesy; the run stays killable either way.
+        }
+    }
+
+    /// <summary>Direct children of a process, from one Toolhelp snapshot.</summary>
+    private static class ProcessTree
+    {
+        private const uint SnapProcess = 0x00000002;
+
+        public static List<int> ChildrenOf(int parentId)
+        {
+            var children = new List<int>();
+            var snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
+            if (snapshot == IntPtr.Zero || snapshot == new IntPtr(-1))
+            {
+                return children;
+            }
+
+            try
+            {
+                var entry = new ProcessEntry32 { Size = (uint)Marshal.SizeOf<ProcessEntry32>() };
+                for (var more = Process32First(snapshot, ref entry); more; more = Process32Next(snapshot, ref entry))
+                {
+                    if (entry.ParentProcessId == parentId)
+                    {
+                        children.Add((int)entry.ProcessId);
+                    }
+                }
+            }
+            finally
+            {
+                CloseHandle(snapshot);
+            }
+
+            return children;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ProcessEntry32
+        {
+            public uint Size;
+            public uint Usage;
+            public uint ProcessId;
+            public IntPtr DefaultHeapId;
+            public uint ModuleId;
+            public uint Threads;
+            public uint ParentProcessId;
+            public int PriorityClassBase;
+            public uint Flags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string ExeFile;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "Process32FirstW")]
+        private static extern bool Process32First(IntPtr snapshot, ref ProcessEntry32 entry);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "Process32NextW")]
+        private static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry32 entry);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr handle);
+    }
+}
+
+/// <summary>
+/// One conversion, keyed by its cache entry. It outlives the preview that
+/// asked for it: a preview stops waiting, the job finishes (at BelowNormal)
+/// unless a preview of another file needs the engine first.
+/// </summary>
+internal sealed class OfficeConversionJob
+{
+    private readonly TaskCompletionSource<ConvertedOfficeDocument?> _first =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<ConvertedOfficeDocument?> _complete =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    internal OfficeConversionJob(string key, string sourcePath, OfficeKind kind)
+    {
+        Key = key;
+        SourcePath = sourcePath;
+        Kind = kind;
+    }
+
+    public string Key { get; }
+    public string SourcePath { get; }
+    public OfficeKind Kind { get; }
+
+    /// <summary>The first thing worth showing: the document, or its first pages when it is big.</summary>
+    public Task<ConvertedOfficeDocument?> FirstContent => _first.Task;
+
+    /// <summary>The whole document, or null when it could not be converted.</summary>
+    public Task<ConvertedOfficeDocument?> Complete => _complete.Task;
+
+    // Guarded by the converter's lane lock.
+    internal bool Background;
+    internal int Waiters;
+    internal bool Finished;
+    internal string? PartialDirectory;
+    internal int PartialHolds;
+    internal readonly List<CancellationTokenRegistration> Registrations = [];
+
+    /// <summary>
+    /// A viewer showing the partial keeps its folder alive until it lets go.
+    /// False when the folder is already gone; show Complete instead.
+    /// </summary>
+    public bool TryHoldPartial() => OfficeDocumentPdfConverter.TryHoldPartial(this);
+
+    public void ReleasePartial() => OfficeDocumentPdfConverter.ReleasePartial(this);
+
+    internal void PublishFirst(ConvertedOfficeDocument document) => _first.TrySetResult(document);
+
+    internal void PublishComplete(ConvertedOfficeDocument? document)
+    {
+        _first.TrySetResult(document);
+        _complete.TrySetResult(document);
+    }
+}
 
 internal static class OfficeDocumentPdfConverter
 {
@@ -35,104 +219,150 @@ internal static class OfficeDocumentPdfConverter
     private const long MaxAppPropertiesBytes = 256 * 1024;
     private const string BlockedProxyHost = "127.0.0.1";
     private const int BlockedProxyPort = 9;
-    private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
-    private static readonly SemaphoreSlim ConversionLane = new(1, 1);
 
-    /// <summary>Whether the conversion engine exists on this machine.</summary>
+    // The pipeline version is the cache's invalidation: bump it whenever
+    // conversion or sheet styling changes, or old output keeps being served.
+    private const string PipelineVersion = "v13";
+
+    private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
+
+    // One engine at a time on one private profile: a second soffice on the
+    // same profile forwards its request to the first and both fail.
+    private static readonly object Lane = new();
+    private static readonly object PriorityGate = new();
+    private static readonly Dictionary<string, OfficeConversionJob> Jobs = new(StringComparer.Ordinal);
+    private static readonly List<LaneTicket> Waiting = [];
+    private static LaneTicket? _holder;
+    private static string? _soffice;
+
+    /// <summary>The engine run. Tests swap in a fake; production runs soffice.</summary>
+    internal static Func<OfficeRunRequest, CancellationToken, string?> Runner { get; set; } = RunSoffice;
+
     public static bool IsAvailable => FindSoffice() is not null;
 
     public static string? EnginePath => FindSoffice();
 
-    public static string EngineName
+    /// <summary>The engine's display name, for "Converting with LibreOffice". Null without one.</summary>
+    public static string? EngineName => FindSoffice() is { } path
+        ? path.Contains("OpenOffice", StringComparison.OrdinalIgnoreCase) ? "OpenOffice" : "LibreOffice"
+        : null;
+
+    /// <summary>A finished conversion on disk, without touching the engine lane.</summary>
+    public static ConvertedOfficeDocument? TryGetCached(string path) =>
+        TryGetCached(path, FileKinds.GetOfficeKind(path));
+
+    public static ConvertedOfficeDocument? TryGetCached(string path, OfficeKind kind)
     {
-        get
+        foreach (var format in Formats(kind))
         {
-            var path = FindSoffice();
-            if (path is null)
-            {
-                return "Basic previews";
-            }
-
-            return path.Contains("OpenOffice", StringComparison.OrdinalIgnoreCase)
-                ? "OpenOffice"
-                : "LibreOffice";
-        }
-    }
-
-    /// <summary>
-    /// The engine is present but has never completed a conversion or warm-up
-    /// as THIS installation, so the next conversion pays LibreOffice's
-    /// one-time initialization (~15s). The profile folder alone cannot tell:
-    /// it survives a LibreOffice uninstall, so a reinstall or upgrade must
-    /// count as a first run again. The marker records the engine's identity.
-    /// </summary>
-    public static bool IsFirstRunPending
-    {
-        get
-        {
-            var identity = GetEngineIdentity();
-            if (identity is null)
-            {
-                return false;
-            }
-
-            if (!Directory.Exists(GetProfileDirectory()))
-            {
-                return true;
-            }
-
             try
             {
-                var markerPath = GetEngineMarkerPath();
-                return !File.Exists(markerPath) || File.ReadAllText(markerPath) != identity;
+                var directory = GetCacheDirectory(path, format);
+                var output = Path.Combine(directory, OutputName(path, format));
+                if (!File.Exists(output) || new FileInfo(output).Length <= 0)
+                {
+                    continue;
+                }
+
+                // Housekeeping prunes by this clock: a hit keeps the entry young.
+                TryTouch(directory);
+                return new ConvertedOfficeDocument(output, format == "html" ? SheetHtml.TryReadSheetList(output) : null);
             }
             catch
             {
-                return false;
+                // An unreadable source has no cache entry.
             }
         }
+
+        return null;
     }
 
-    private static string GetEngineMarkerPath() => Path.Combine(
-        AppPaths.DataRoot,
-        "EngineWarmed.txt");
-
-    private static string? GetEngineIdentity()
+    /// <summary>
+    /// The job for this file: the one already running when there is one,
+    /// otherwise a new one. A foreground caller waits until its token is
+    /// cancelled; the job runs on after that, demoted.
+    /// </summary>
+    public static OfficeConversionJob Convert(string path, OfficeKind kind, CancellationToken waitToken, bool foreground = true)
     {
-        var soffice = FindSoffice();
-        if (soffice is null)
+        var key = GetCacheDirectory(path, Formats(kind)[0]);
+        OfficeConversionJob job;
+        bool started;
+        lock (Lane)
+        {
+            started = !Jobs.TryGetValue(key, out var running);
+            job = running ?? new OfficeConversionJob(key, path, kind) { Background = !foreground };
+            if (started)
+            {
+                Jobs[key] = job;
+            }
+
+            if (foreground)
+            {
+                job.Waiters++;
+            }
+        }
+
+        DiagnosticLog.Write(started ? $"office job start {path}" : $"office job attach {path}");
+        if (foreground)
+        {
+            var registration = waitToken.Register(() => Detach(job));
+            lock (Lane)
+            {
+                if (job.Finished)
+                {
+                    registration.Dispose();
+                }
+                else
+                {
+                    job.Registrations.Add(registration);
+                }
+            }
+        }
+
+        if (started)
+        {
+            _ = Task.Run(() => RunJobAsync(job));
+        }
+        else
+        {
+            Rebalance();
+        }
+
+        return job;
+    }
+
+    /// <summary>
+    /// Blocking form for callers that only want the finished document. A
+    /// background caller never holds the engine against a preview.
+    /// </summary>
+    public static ConvertedOfficeDocument? TryConvert(string path, CancellationToken cancellationToken, bool background = false)
+    {
+        var kind = FileKinds.GetOfficeKind(path);
+        if (kind == OfficeKind.None)
         {
             return null;
+        }
+
+        if (TryGetCached(path, kind) is { } cached)
+        {
+            return cached;
         }
 
         try
         {
-            var info = new FileInfo(soffice);
-            return $"{soffice}|{info.CreationTimeUtc.Ticks}|{info.Length}";
+            var job = Convert(path, kind, cancellationToken, foreground: !background);
+            return job.Complete.WaitAsync(cancellationToken).GetAwaiter().GetResult();
         }
-        catch
-        {
-            return soffice;
-        }
-    }
-
-    /// <summary>
-    /// True after the first real conversion this session. Until then the
-    /// engine's process start makes every conversion predictably slow, so
-    /// the preview names the wait early instead of spinning in silence.
-    /// </summary>
-    public static bool HasConvertedThisSession { get; private set; }
-
-    public static OfficeProgressiveConversionPlan? TryCreateProgressivePlan(string path)
-    {
-        if (FileKinds.IsSpreadsheet(path))
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException)
         {
             return null;
         }
+    }
 
-        var extension = Path.GetExtension(path);
+    public static OfficeProgressiveConversionPlan? TryCreateProgressivePlan(string path, OfficeKind kind)
+    {
         var size = SafeFileLength(path);
-        if (IsPresentation(extension))
+        if (kind == OfficeKind.Presentation)
         {
             var slides = TryReadExtendedPropertyCount(path, "Slides");
             if (slides > ProgressivePresentationSlideThreshold
@@ -141,11 +371,11 @@ internal static class OfficeDocumentPdfConverter
                 return new OfficeProgressiveConversionPlan(
                     ProgressiveFirstPages,
                     Math.Max(slides ?? ProgressiveFirstPages + 1, ProgressiveFirstPages + 1),
-                    BuildPageRangeFilter(extension, ProgressiveFirstPages));
+                    BuildPageRangeFilter("impress_pdf_Export", ProgressiveFirstPages));
             }
         }
 
-        if (IsWriterDocument(extension))
+        if (kind == OfficeKind.Document)
         {
             var pages = TryReadExtendedPropertyCount(path, "Pages");
             if (pages > ProgressiveDocumentPageThreshold && size > ProgressiveDocumentSizeThreshold)
@@ -153,189 +383,373 @@ internal static class OfficeDocumentPdfConverter
                 return new OfficeProgressiveConversionPlan(
                     ProgressiveFirstPages,
                     Math.Max(pages.Value, ProgressiveFirstPages + 1),
-                    BuildPageRangeFilter(extension, ProgressiveFirstPages));
+                    BuildPageRangeFilter("writer_pdf_Export", ProgressiveFirstPages));
             }
         }
 
         return null;
     }
 
-    public static ConvertedOfficeDocument? TryGetCachedPdfConversion(string path)
+    private static async Task RunJobAsync(OfficeConversionJob job)
     {
-        if (FileKinds.IsSpreadsheet(path))
-        {
-            return null;
-        }
-
-        return TryGetCachedOutput(path, "pdf");
-    }
-
-    private static void MarkEngineWarmed()
-    {
+        ConvertedOfficeDocument? complete = null;
         try
         {
-            if (GetEngineIdentity() is { } identity)
+            // A finished conversion never waits behind the engine.
+            complete = TryGetCached(job.SourcePath, job.Kind);
+            if (complete is not null)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(GetEngineMarkerPath())!);
-                File.WriteAllText(GetEngineMarkerPath(), identity);
-            }
-        }
-        catch
-        {
-            // Worst case the first-run message shows once more.
-        }
-    }
-
-    public static ConvertedOfficeDocument? TryConvertFirstPages(
-        string path,
-        OfficeProgressiveConversionPlan plan,
-        CancellationToken cancellationToken)
-    {
-        var soffice = FindSoffice();
-        if (soffice is null)
-        {
-            DiagnosticLog.Write("office progressive skipped: compatible soffice.exe not found");
-            return null;
-        }
-
-        var tempDirectory = Path.Combine(
-            AppPaths.DataRoot,
-            "DocumentCache",
-            ".partial-" + Guid.NewGuid().ToString("N"));
-
-        try
-        {
-            ConversionLane.Wait(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            TryDeleteDirectory(tempDirectory);
-            return null;
-        }
-
-        try
-        {
-            var converted = RunConversion(
-                soffice,
-                path,
-                plan.Filter,
-                cancellationToken,
-                background: false,
-                outputDirectory: tempDirectory,
-                useCache: false);
-            if (converted is null)
-            {
-                TryDeleteDirectory(tempDirectory);
-                return null;
+                return;
             }
 
-            var outputPages = CountPdfPages(converted.DocumentPath, cancellationToken);
-            if (outputPages is null)
+            var restStage = false;
+            if (TryCreateProgressivePlan(job.SourcePath, job.Kind) is { } plan)
             {
-                TryDeleteDirectory(tempDirectory);
-                return null;
+                var partialDirectory = Path.Combine(AppPaths.DataRoot, "DocumentCache", ".partial-" + Guid.NewGuid().ToString("N"));
+                lock (Lane)
+                {
+                    job.PartialDirectory = partialDirectory;
+                }
+
+                var (partial, dropped) = await RunStageAsync(job, firstStage: true, plan.Filter, partialDirectory);
+                if (dropped)
+                {
+                    return;
+                }
+
+                if (partial is not null)
+                {
+                    var pages = CountPdfPages(partial);
+                    if (pages is { } count && count != plan.FirstPageCount)
+                    {
+                        // app.xml counts go stale: the "first pages" were the
+                        // whole document, so they are the cache entry.
+                        complete = PromotePdfToCache(job.SourcePath, partial);
+                        return;
+                    }
+
+                    DiagnosticLog.Write($"office progressive partial ready {job.SourcePath} pages={pages ?? plan.FirstPageCount}/{plan.ExpectedPageCount}");
+                    job.PublishFirst(new ConvertedOfficeDocument(
+                        partial,
+                        PartialPages: pages ?? plan.FirstPageCount,
+                        ExpectedPages: plan.ExpectedPageCount));
+                    restStage = true;
+                }
             }
 
-            if (outputPages.Value != plan.FirstPageCount)
+            foreach (var format in Formats(job.Kind))
             {
-                var promoted = PromotePdfToCache(path, converted.DocumentPath, converted.EngineLog);
-                TryDeleteDirectory(tempDirectory);
-                return promoted;
-            }
+                var directory = GetCacheDirectory(job.SourcePath, format);
+                var staging = Path.Combine(directory, ".staging-" + Guid.NewGuid().ToString("N"));
+                try
+                {
+                    var (output, dropped) = await RunStageAsync(job, firstStage: !restStage, format, staging);
+                    if (dropped)
+                    {
+                        return;
+                    }
 
-            DiagnosticLog.Write(
-                $"office progressive partial ready {path} pages={outputPages.Value}/{plan.ExpectedPageCount}");
-            return converted with
-            {
-                SourcePath = path,
-                IsPartial = true,
-                PartialPageCount = outputPages.Value,
-                ExpectedPageCount = plan.ExpectedPageCount
-            };
+                    if (output is not null)
+                    {
+                        complete = Publish(job.SourcePath, format, output, staging, directory);
+                        if (complete is not null)
+                        {
+                            return;
+                        }
+                    }
+                }
+                finally
+                {
+                    TryDeleteDirectory(staging);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"office job failed {job.SourcePath}: {ex.GetType().Name}: {ex.Message}");
         }
         finally
         {
-            ConversionLane.Release();
+            Finish(job, complete);
         }
     }
 
-    public static ConvertedOfficeDocument? TryConvert(string path, CancellationToken cancellationToken, bool background = false)
+    /// <summary>
+    /// One engine run under the lane. A run preempted for another file's
+    /// preview goes back in line while anyone still waits for it, and is
+    /// dropped otherwise.
+    /// </summary>
+    private static async Task<(string? Output, bool Dropped)> RunStageAsync(
+        OfficeConversionJob job,
+        bool firstStage,
+        string convertTo,
+        string outputDirectory)
     {
-        var soffice = FindSoffice();
-        if (soffice is null)
+        while (true)
         {
-            DiagnosticLog.Write("office conversion skipped: compatible soffice.exe not found");
-            return null;
-        }
-
-        try
-        {
-            ConversionLane.Wait(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            return null;
-        }
-
-        try
-        {
-            if (FileKinds.IsSpreadsheet(path))
+            var ticket = new LaneTicket(job, firstStage);
+            if (!await EnterLaneAsync(ticket))
             {
-                // Calc's print/PDF pipeline paginates wide sheets into strips and
-                // clips text that overflows into empty neighbour cells. The HTML
-                // export renders the sheet the way Calc shows it on screen.
-                return RunConversion(soffice, path, "html", cancellationToken, background)
-                    ?? RunConversion(soffice, path, "pdf", cancellationToken, background);
+                DiagnosticLog.Write($"office job dropped before it started {job.SourcePath}");
+                return (null, true);
             }
 
-            return RunConversion(soffice, path, "pdf", cancellationToken, background);
-        }
-        finally
-        {
-            ConversionLane.Release();
-        }
-    }
-
-    private static ConvertedOfficeDocument? TryGetCachedOutput(string path, string convertTo)
-    {
-        var outputExtension = convertTo.StartsWith("html", StringComparison.OrdinalIgnoreCase) ? ".html" : ".pdf";
-        var cacheDirectory = GetCacheDirectory(path, convertTo);
-        var expectedOutputPath = Path.Combine(cacheDirectory, Path.GetFileNameWithoutExtension(path) + outputExtension);
-        if (!File.Exists(expectedOutputPath) || new FileInfo(expectedOutputPath).Length <= 0)
-        {
-            return null;
-        }
-
-        try
-        {
-            Directory.SetLastWriteTimeUtc(cacheDirectory, DateTime.UtcNow);
-        }
-        catch
-        {
-            // Timestamp refresh is best-effort.
-        }
-
-        return new ConvertedOfficeDocument(
-            expectedOutputPath,
-            "cache hit",
-            expectedOutputPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ? TryReadSheetList(expectedOutputPath) : null);
-    }
-
-    private static ConvertedOfficeDocument? PromotePdfToCache(string sourcePath, string convertedPath, string engineLog)
-    {
-        try
-        {
-            var cacheDirectory = GetCacheDirectory(sourcePath, "pdf");
-            Directory.CreateDirectory(cacheDirectory);
-            foreach (var stale in Directory.EnumerateFiles(cacheDirectory, "*.pdf"))
+            string? output;
+            try
             {
-                TryDelete(stale);
+                Directory.CreateDirectory(outputDirectory);
+                output = Runner(new OfficeRunRequest(job.SourcePath, convertTo, outputDirectory, ticket.Control), ticket.Kill.Token);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"office conversion exception {job.SourcePath}: {ex.GetType().Name}: {ex.Message}");
+                output = null;
+            }
+            finally
+            {
+                ExitLane(ticket);
+                ticket.Kill.Dispose();
             }
 
-            var target = Path.Combine(cacheDirectory, Path.GetFileNameWithoutExtension(sourcePath) + ".pdf");
-            File.Copy(convertedPath, target, overwrite: true);
+            if (!ticket.Preempted || output is not null)
+            {
+                return (output, false);
+            }
+
+            bool wanted;
+            lock (Lane)
+            {
+                wanted = job.Waiters > 0;
+            }
+
+            DiagnosticLog.Write($"office job preempted {job.SourcePath} {(wanted ? "requeued" : "dropped")}");
+            if (!wanted)
+            {
+                return (null, true);
+            }
+        }
+    }
+
+    private static Task<bool> EnterLaneAsync(LaneTicket ticket)
+    {
+        lock (Lane)
+        {
+            if (_holder is null)
+            {
+                _holder = ticket;
+                ticket.Granted.TrySetResult(true);
+            }
+            else
+            {
+                Waiting.Add(ticket);
+            }
+        }
+
+        Rebalance();
+        return ticket.Granted.Task;
+    }
+
+    private static void ExitLane(LaneTicket ticket)
+    {
+        lock (Lane)
+        {
+            if (!ReferenceEquals(_holder, ticket))
+            {
+                Waiting.Remove(ticket);
+                return;
+            }
+
+            // Previews first, in arrival order; then everything else.
+            var next = Waiting.FirstOrDefault(IsUrgent) ?? Waiting.FirstOrDefault();
+            _holder = next;
+            if (next is not null)
+            {
+                Waiting.Remove(next);
+                next.Granted.TrySetResult(true);
+            }
+        }
+
+        Rebalance();
+    }
+
+    /// <summary>
+    /// The holder runs at Normal only while a preview waits for its first
+    /// content. Otherwise it yields: BelowNormal, and killed outright when a
+    /// preview of another file is waiting for the engine. Queued work that
+    /// nobody waits for any more never starts.
+    /// </summary>
+    private static void Rebalance()
+    {
+        LaneTicket? preempt = null;
+        lock (PriorityGate)
+        {
+            LaneTicket? holder;
+            List<LaneTicket>? unwatched = null;
+            lock (Lane)
+            {
+                foreach (var ticket in Waiting.Where(ticket => ticket.Job.Waiters == 0 && !ticket.Job.Background).ToList())
+                {
+                    Waiting.Remove(ticket);
+                    (unwatched ??= []).Add(ticket);
+                }
+
+                holder = _holder;
+                if (holder is not null && !IsUrgent(holder) && !holder.Preempted && Waiting.Any(IsUrgent))
+                {
+                    holder.Preempted = true;
+                    preempt = holder;
+                }
+            }
+
+            foreach (var ticket in unwatched ?? [])
+            {
+                ticket.Granted.TrySetResult(false);
+            }
+
+            holder?.Control.SetBackground(!IsUrgent(holder));
+        }
+
+        try
+        {
+            preempt?.Kill.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The run ended between the decision and the kill.
+        }
+    }
+
+    private static bool IsUrgent(LaneTicket ticket) => ticket.FirstStage && ticket.Job.Waiters > 0;
+
+    private static void Detach(OfficeConversionJob job)
+    {
+        lock (Lane)
+        {
+            if (job.Finished || job.Waiters == 0)
+            {
+                return;
+            }
+
+            job.Waiters--;
+        }
+
+        Rebalance();
+    }
+
+    private static void Finish(OfficeConversionJob job, ConvertedOfficeDocument? complete)
+    {
+        List<CancellationTokenRegistration> registrations;
+        string? partialToDelete = null;
+        lock (Lane)
+        {
+            job.Finished = true;
+            job.Waiters = 0;
+            if (Jobs.TryGetValue(job.Key, out var current) && ReferenceEquals(current, job))
+            {
+                Jobs.Remove(job.Key);
+            }
+
+            registrations = [.. job.Registrations];
+            job.Registrations.Clear();
+            if (job.PartialHolds == 0)
+            {
+                partialToDelete = job.PartialDirectory;
+                job.PartialDirectory = null;
+            }
+        }
+
+        job.PublishComplete(complete);
+        foreach (var registration in registrations)
+        {
+            registration.Dispose();
+        }
+
+        if (partialToDelete is not null)
+        {
+            TryDeleteDirectory(partialToDelete);
+        }
+
+        DiagnosticLog.Write(complete is null ? $"office job ended without output {job.SourcePath}" : $"office job done {job.SourcePath}");
+    }
+
+    internal static bool TryHoldPartial(OfficeConversionJob job)
+    {
+        lock (Lane)
+        {
+            if (job.PartialDirectory is null)
+            {
+                return false;
+            }
+
+            job.PartialHolds++;
+            return true;
+        }
+    }
+
+    internal static void ReleasePartial(OfficeConversionJob job)
+    {
+        string? partialToDelete = null;
+        lock (Lane)
+        {
+            job.PartialHolds = Math.Max(0, job.PartialHolds - 1);
+            if (job.Finished && job.PartialHolds == 0)
+            {
+                partialToDelete = job.PartialDirectory;
+                job.PartialDirectory = null;
+            }
+        }
+
+        if (partialToDelete is not null)
+        {
+            TryDeleteDirectory(partialToDelete);
+        }
+    }
+
+    /// <summary>
+    /// Moves a finished run into its cache entry, the main output last, so a
+    /// reader never finds a half-written document.
+    /// </summary>
+    private static ConvertedOfficeDocument? Publish(string sourcePath, string format, string output, string staging, string directory)
+    {
+        try
+        {
+            if (format == "html")
+            {
+                SheetHtml.Normalize(output);
+            }
+
+            var target = Path.Combine(directory, OutputName(sourcePath, format));
+            foreach (var file in Directory.EnumerateFiles(staging))
+            {
+                if (!string.Equals(file, output, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Move(file, Path.Combine(directory, Path.GetFileName(file)), overwrite: true);
+                }
+            }
+
+            File.Move(output, target, overwrite: true);
+            DiagnosticLog.Write($"office conversion ok {target}");
+            return new ConvertedOfficeDocument(target, format == "html" ? SheetHtml.TryReadSheetList(target) : null);
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"office publish failed {sourcePath}: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    private static ConvertedOfficeDocument? PromotePdfToCache(string sourcePath, string convertedPath)
+    {
+        try
+        {
+            var directory = GetCacheDirectory(sourcePath, "pdf");
+            Directory.CreateDirectory(directory);
+            var target = Path.Combine(directory, OutputName(sourcePath, "pdf"));
+            var temporary = target + ".tmp";
+            File.Copy(convertedPath, temporary, overwrite: true);
+            File.Move(temporary, target, overwrite: true);
             DiagnosticLog.Write($"office progressive promoted {sourcePath}");
-            return new ConvertedOfficeDocument(target, engineLog);
+            return new ConvertedOfficeDocument(target);
         }
         catch (Exception ex)
         {
@@ -344,9 +758,146 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
-    private static string GetProfileDirectory() => Path.Combine(
-        AppPaths.DataRoot,
-        "LibreOfficeProfile");
+    private static string[] Formats(OfficeKind kind) => kind switch
+    {
+        // Calc's print pipeline paginates wide sheets into strips and clips
+        // text that overflows into empty neighbors. Its HTML export draws
+        // the sheet the way Calc shows it on screen; PDF is the fallback.
+        OfficeKind.Spreadsheet => ["html", "pdf"],
+        OfficeKind.None => [],
+        _ => ["pdf"]
+    };
+
+    private static string OutputName(string sourcePath, string format) =>
+        Path.GetFileNameWithoutExtension(sourcePath) + (format == "html" ? ".html" : ".pdf");
+
+    /// <summary>
+    /// The production runner: one soffice per conversion, network-isolated
+    /// three ways (sanitized source, blocked-proxy profile, blocked-proxy
+    /// environment), killed with its whole tree when cancelled.
+    /// </summary>
+    private static string? RunSoffice(OfficeRunRequest request, CancellationToken kill)
+    {
+        var soffice = FindSoffice();
+        if (soffice is null)
+        {
+            DiagnosticLog.Write("office conversion skipped: compatible soffice.exe not found");
+            return null;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(kill);
+        timeout.CancelAfter(TimeSpan.FromSeconds(ConversionTimeoutSeconds));
+        try
+        {
+            using var preparedSource = OfficePreviewSourceSanitizer.Prepare(request.SourcePath, request.OutputDirectory, timeout.Token);
+            if (preparedSource.ExternalRelationshipsRemoved > 0)
+            {
+                DiagnosticLog.Write(
+                    $"office external relationships removed count={preparedSource.ExternalRelationshipsRemoved} {request.SourcePath}");
+            }
+
+            var profileDirectory = Path.Combine(AppPaths.DataRoot, "LibreOfficeProfile");
+            PrepareNetworkIsolatedProfile(profileDirectory);
+            using var process = new Process
+            {
+                StartInfo = BuildStartInfo(soffice, preparedSource.Path, request.ConvertTo, request.OutputDirectory, profileDirectory)
+            };
+
+            DiagnosticLog.Write($"office conversion start {request.SourcePath}");
+            process.Start();
+            // Set before soffice.exe spawns soffice.bin, so the child inherits it.
+            request.Control.Attach(process);
+            var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+            var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+            try
+            {
+                process.WaitForExitAsync(timeout.Token).GetAwaiter().GetResult();
+            }
+            catch (OperationCanceledException)
+            {
+                // soffice.exe is a launcher: disposing it leaves soffice.bin
+                // converting, and holding the profile, long after we left.
+                try
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+                catch
+                {
+                    // It may have exited between the cancel and the kill.
+                }
+
+                throw;
+            }
+
+            var log = (outputTask.GetAwaiter().GetResult() + Environment.NewLine + errorTask.GetAwaiter().GetResult()).Trim();
+            if (process.ExitCode != 0)
+            {
+                DiagnosticLog.Write($"office conversion failed exit={process.ExitCode}: {log}");
+                return null;
+            }
+
+            var extension = request.ConvertTo.StartsWith("html", StringComparison.OrdinalIgnoreCase) ? ".html" : ".pdf";
+            var output = Path.Combine(request.OutputDirectory, Path.GetFileNameWithoutExtension(preparedSource.Path) + extension);
+            if (!File.Exists(output) || new FileInfo(output).Length == 0)
+            {
+                DiagnosticLog.Write($"office conversion produced no output: {log}");
+                return null;
+            }
+
+            return output;
+        }
+        catch (OperationCanceledException)
+        {
+            DiagnosticLog.Write($"office conversion {(kill.IsCancellationRequested ? "stopped" : "timed out")} {request.SourcePath}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"office conversion exception {request.SourcePath}: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    internal static ProcessStartInfo BuildStartInfo(
+        string soffice,
+        string sourcePath,
+        string convertTo,
+        string outputDirectory,
+        string profileDirectory)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = soffice,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
+        };
+
+        var blockedProxy = $"http://{BlockedProxyHost}:{BlockedProxyPort}";
+        foreach (var key in new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" })
+        {
+            startInfo.Environment[key] = blockedProxy;
+        }
+
+        startInfo.Environment["NO_PROXY"] = string.Empty;
+        startInfo.Environment["no_proxy"] = string.Empty;
+        foreach (var argument in new[]
+                 {
+                     "--headless", "--nologo", "--nodefault", "--nofirststartwizard", "--norestore", "--nolockcheck",
+                     "-env:UserInstallation=" + new Uri(profileDirectory + Path.DirectorySeparatorChar).AbsoluteUri,
+                     "--convert-to", convertTo,
+                     "--outdir", outputDirectory,
+                     sourcePath
+                 })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+
+        return startInfo;
+    }
 
     internal static void PrepareNetworkIsolatedProfile(string profileDirectory)
     {
@@ -354,29 +905,22 @@ internal static class OfficeDocumentPdfConverter
         Directory.CreateDirectory(userDirectory);
         var settingsPath = Path.Combine(userDirectory, "registrymodifications.xcu");
 
-        XDocument document;
-        if (File.Exists(settingsPath))
-        {
-            document = XDocument.Load(settingsPath, LoadOptions.PreserveWhitespace);
-        }
-        else
-        {
-            document = new XDocument(
+        var document = File.Exists(settingsPath)
+            ? XDocument.Load(settingsPath, LoadOptions.PreserveWhitespace)
+            : new XDocument(
                 new XDeclaration("1.0", "UTF-8", null),
-                new XElement(
-                    OfficeRegistry + "items",
-                    new XAttribute(XNamespace.Xmlns + "oor", OfficeRegistry)));
-        }
+                new XElement(OfficeRegistry + "items", new XAttribute(XNamespace.Xmlns + "oor", OfficeRegistry)));
 
         var root = document.Root ?? throw new InvalidDataException("LibreOffice profile has no settings root.");
         const string settingsNode = "/org.openoffice.Inet/Settings";
+        var port = BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
         var values = new (string Name, string Value)[]
         {
             ("ooInetProxyType", "2"),
             ("ooInetHTTPProxyName", BlockedProxyHost),
-            ("ooInetHTTPProxyPort", BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ("ooInetHTTPProxyPort", port),
             ("ooInetHTTPSProxyName", BlockedProxyHost),
-            ("ooInetHTTPSProxyPort", BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            ("ooInetHTTPSProxyPort", port),
             ("ooInetNoProxy", string.Empty)
         };
 
@@ -401,12 +945,11 @@ internal static class OfficeDocumentPdfConverter
         var networkItem = new XElement("item", new XAttribute(OfficeRegistry + "path", settingsNode));
         foreach (var (name, value) in values)
         {
-            networkItem.Add(
-                new XElement(
-                    "prop",
-                    new XAttribute(OfficeRegistry + "name", name),
-                    new XAttribute(OfficeRegistry + "op", "fuse"),
-                    new XElement("value", value)));
+            networkItem.Add(new XElement(
+                "prop",
+                new XAttribute(OfficeRegistry + "name", name),
+                new XAttribute(OfficeRegistry + "op", "fuse"),
+                new XElement("value", value)));
         }
 
         root.Add(networkItem);
@@ -415,531 +958,31 @@ internal static class OfficeDocumentPdfConverter
         File.Move(tempPath, settingsPath, overwrite: true);
     }
 
-    private static ConvertedOfficeDocument? RunConversion(
-        string soffice,
-        string path,
-        string convertTo,
-        CancellationToken cancellationToken,
-        bool background,
-        string? outputDirectory = null,
-        bool useCache = true)
-    {
-        var outputExtension = convertTo.StartsWith("html", StringComparison.OrdinalIgnoreCase) ? ".html" : ".pdf";
-        var cacheDirectory = outputDirectory ?? GetCacheDirectory(path, convertTo);
-        Directory.CreateDirectory(cacheDirectory);
-        var expectedOutputPath = Path.Combine(cacheDirectory, Path.GetFileNameWithoutExtension(path) + outputExtension);
-        if (useCache && File.Exists(expectedOutputPath) && new FileInfo(expectedOutputPath).Length > 0)
-        {
-            // Refresh the entry's clock so housekeeping's LRU stays current.
-            try
-            {
-                Directory.SetLastWriteTimeUtc(cacheDirectory, DateTime.UtcNow);
-            }
-            catch
-            {
-                // Timestamp refresh is best-effort.
-            }
-
-            return new ConvertedOfficeDocument(
-                expectedOutputPath,
-                "cache hit",
-                expectedOutputPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase) ? TryReadSheetList(expectedOutputPath) : null);
-        }
-
-        foreach (var stale in Directory.EnumerateFiles(cacheDirectory, "*" + outputExtension))
-        {
-            TryDelete(stale);
-        }
-
-        var profileDirectory = GetProfileDirectory();
-
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(ConversionTimeoutSeconds));
-
-        try
-        {
-            using var preparedSource = OfficePreviewSourceSanitizer.Prepare(
-                path,
-                cacheDirectory,
-                timeout.Token);
-            if (preparedSource.ExternalRelationshipsRemoved > 0)
-            {
-                DiagnosticLog.Write(
-                    $"office external relationships removed count={preparedSource.ExternalRelationshipsRemoved} {path}");
-            }
-
-            PrepareNetworkIsolatedProfile(profileDirectory);
-            using var process = new Process();
-            process.StartInfo.FileName = soffice;
-            process.StartInfo.UseShellExecute = false;
-            process.StartInfo.CreateNoWindow = true;
-            process.StartInfo.RedirectStandardOutput = true;
-            process.StartInfo.RedirectStandardError = true;
-            process.StartInfo.StandardOutputEncoding = Encoding.UTF8;
-            process.StartInfo.StandardErrorEncoding = Encoding.UTF8;
-            var blockedProxy = $"http://{BlockedProxyHost}:{BlockedProxyPort}";
-            foreach (var key in new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" })
-            {
-                process.StartInfo.Environment[key] = blockedProxy;
-            }
-
-            process.StartInfo.Environment["NO_PROXY"] = string.Empty;
-            process.StartInfo.Environment["no_proxy"] = string.Empty;
-            process.StartInfo.ArgumentList.Add("--headless");
-            process.StartInfo.ArgumentList.Add("--nologo");
-            process.StartInfo.ArgumentList.Add("--nodefault");
-            process.StartInfo.ArgumentList.Add("--nofirststartwizard");
-            process.StartInfo.ArgumentList.Add("--norestore");
-            process.StartInfo.ArgumentList.Add("--nolockcheck");
-            process.StartInfo.ArgumentList.Add("-env:UserInstallation=" + new Uri(profileDirectory + Path.DirectorySeparatorChar).AbsoluteUri);
-            process.StartInfo.ArgumentList.Add("--convert-to");
-            process.StartInfo.ArgumentList.Add(convertTo);
-            process.StartInfo.ArgumentList.Add("--outdir");
-            process.StartInfo.ArgumentList.Add(cacheDirectory);
-            process.StartInfo.ArgumentList.Add(preparedSource.Path);
-
-            DiagnosticLog.Write($"office conversion start {path}");
-            process.Start();
-            if (background)
-            {
-                try
-                {
-                    process.PriorityClass = System.Diagnostics.ProcessPriorityClass.BelowNormal;
-                }
-                catch
-                {
-                    // Priority is best effort; conversion still stays cancellable.
-                }
-            }
-
-            var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
-            try
-            {
-                process.WaitForExitAsync(timeout.Token).GetAwaiter().GetResult();
-            }
-            catch (OperationCanceledException)
-            {
-                // Disposing a Process does not terminate the child; an orphaned
-                // soffice.exe would keep converting (and hold its profile)
-                // long after the preview moved on.
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                    // It may have exited between the cancel and the kill.
-                }
-
-                throw;
-            }
-
-            var output = outputTask.GetAwaiter().GetResult();
-            var error = errorTask.GetAwaiter().GetResult();
-            var log = (output + Environment.NewLine + error).Trim();
-
-            if (process.ExitCode != 0)
-            {
-                DiagnosticLog.Write($"office conversion failed exit={process.ExitCode}: {log}");
-                return null;
-            }
-
-            var outputPath = File.Exists(expectedOutputPath)
-                ? expectedOutputPath
-                : Directory.EnumerateFiles(cacheDirectory, "*" + outputExtension).OrderByDescending(File.GetLastWriteTimeUtc).FirstOrDefault();
-
-            if (outputPath is null || new FileInfo(outputPath).Length == 0)
-            {
-                DiagnosticLog.Write($"office conversion produced no output: {log}");
-                return null;
-            }
-
-            if (outputExtension == ".html")
-            {
-                NormalizeExportedHtml(outputPath);
-            }
-
-            MarkEngineWarmed();
-            HasConvertedThisSession = true;
-            DiagnosticLog.Write($"office conversion ok {outputPath}");
-            return new ConvertedOfficeDocument(
-                outputPath,
-                log,
-                outputExtension == ".html" ? TryReadSheetList(outputPath) : null);
-        }
-        catch (OperationCanceledException)
-        {
-            DiagnosticLog.Write($"office conversion timed out/cancelled {path}");
-            return null;
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"office conversion exception {path}: {ex.GetType().Name}: {ex.Message}");
-            return null;
-        }
-    }
-
     /// <summary>
-    /// Calc's HTML export is cramped, dated typography on a bare white page.
-    /// This restyles it to read like a spreadsheet: the sheet sits on the
-    /// app's canvas and follows the system theme, the page scrolls inside a
-    /// viewport-height container so both scrollbars stay at the preview's
-    /// edges, and tables get sticky row numbers and column letters. CSS and
-    /// markup only, so the export stays script-free. The sheet's own fonts
-    /// arrive as inline attributes and are left alone.
+    /// Found once and kept while the file is there; a missing engine is
+    /// looked for again, so installing LibreOffice works without a restart.
     /// </summary>
-    // Canvas colours mirror Theme.CanvasBg (light E7E8EC / dark 121316);
-    // header chrome mirrors the badge palette.
-    private const string SheetStyle = "<style>"
-                + ":root{color-scheme:light}"
-                // Each sheet page (and every tab switch) resolves onto the
-                // canvas instead of popping; pairs with the preview's fade-out.
-                + "html{animation:sp-reveal 160ms ease-out}"
-                + "@keyframes sp-reveal{from{opacity:0}}"
-                + "html,body{height:100%;margin:0;overflow:hidden}"
-                + "body{background:#E7E8EC;font-family:\"Segoe UI\",system-ui,sans-serif}"
-                + "#sp-wrap{height:100%;overflow:auto}"
-                // A sheet viewer keeps its scrollbars: slim, themed, always
-                // grabbable (overlay bars vanish mid-reach and hover in the
-                // wrong color scheme).
-                + "#sp-wrap::-webkit-scrollbar{width:12px;height:12px}"
-                + "#sp-wrap::-webkit-scrollbar-button{display:none}"
-                + "#sp-wrap::-webkit-scrollbar-track,#sp-wrap::-webkit-scrollbar-corner{background:transparent}"
-                + "#sp-wrap::-webkit-scrollbar-thumb{background:#B4B8C2;border-radius:6px;border:3px solid #E7E8EC;background-clip:padding-box}"
-                + "#sp-wrap::-webkit-scrollbar-thumb:hover{background:#9AA0AB}"
-                + "table{background:#fff;color:#000;box-shadow:0 1px 12px rgba(0,0,0,.20);margin:24px}"
-                + "td,th{padding:2px 8px}"
-                // Cell comments export as inline <comment> text; Excel shows a
-                // red corner marker instead. Match that.
-                + "comment{display:none}"
-                + "a.comment-indicator{float:right;width:0;height:0;border-top:6px solid #C42B1C;border-left:6px solid transparent}"
-                + "td.sp-h{position:sticky;background:#F3F3F6;color:#5C6270;font:600 10.5px \"Segoe UI\",sans-serif;"
-                + "text-align:center;vertical-align:middle;padding:2px 7px;box-shadow:inset 0 0 0 .5px #D8DADF}"
-                + "td.sp-cl{top:0;z-index:3}"
-                + "td.sp-rn{left:0;z-index:2;min-width:26px}"
-                + "td.sp-corner{top:0;left:0;z-index:4}"
-                + "@media (prefers-color-scheme:dark){:root{color-scheme:dark}"
-                + "body{background:#121316}table{box-shadow:0 2px 16px rgba(0,0,0,.55)}"
-                + "td.sp-h{background:#26282F;color:#A9ADB8;box-shadow:inset 0 0 0 .5px #4B4E58}"
-                + "#sp-wrap::-webkit-scrollbar-thumb{background:#5C616E;border-color:#121316}"
-                + "#sp-wrap::-webkit-scrollbar-thumb:hover{background:#6E7480}}"
-                + "</style>";
-
-    private static void NormalizeExportedHtml(string htmlPath)
-    {
-        try
-        {
-            var html = File.ReadAllText(htmlPath);
-            var headEnd = html.IndexOf("</head>", StringComparison.OrdinalIgnoreCase);
-            html = headEnd >= 0 ? html.Insert(headEnd, SheetStyle) : SheetStyle + html;
-
-            // Sheets often carry image anchors whose pictures were not included
-            // into the export (images linked from another machine export as
-            // a 32x32 generic placeholder). Calc renders those as nothing;
-            // the preview should too. Keeping only real local files also
-            // guarantees a preview does not fetch remote images.
-            var directory = Path.GetDirectoryName(htmlPath) ?? string.Empty;
-            html = System.Text.RegularExpressions.Regex.Replace(html, "<img[^>]*>", match =>
-            {
-                var src = System.Text.RegularExpressions.Regex.Match(match.Value, "src=\"([^\"]*)\"").Groups[1].Value;
-                if (src.Length == 0 || src.Contains("://") || src.StartsWith("//", StringComparison.Ordinal))
-                {
-                    return string.Empty;
-                }
-
-                try
-                {
-                    var file = new FileInfo(Path.Combine(directory, Uri.UnescapeDataString(src)));
-                    return file.Exists && file.Length >= 256 ? match.Value : string.Empty;
-                }
-                catch
-                {
-                    return string.Empty;
-                }
-            });
-
-            html = AddSpreadsheetChrome(html);
-
-            File.WriteAllText(htmlPath, html);
-            WriteSheetPages(htmlPath, html);
-        }
-        catch
-        {
-            // The raw export is still a valid preview.
-        }
-    }
-
-    /// <summary>
-    /// A multi-sheet workbook becomes one page per sheet, so the preview can
-    /// show a tab strip instead of the export's stacked tables and its
-    /// "Overview" link block. Each page carries its sheet name in its title.
-    /// </summary>
-    private static void WriteSheetPages(string htmlPath, string html)
-    {
-        var tables = new List<string>();
-        var position = 0;
-        while (true)
-        {
-            var start = html.IndexOf("<table", position, StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-            {
-                break;
-            }
-
-            var end = html.IndexOf("</table>", start, StringComparison.OrdinalIgnoreCase);
-            if (end < 0)
-            {
-                break;
-            }
-
-            tables.Add(html[start..(end + "</table>".Length)]);
-            position = end + "</table>".Length;
-        }
-
-        if (tables.Count < 2)
-        {
-            return;
-        }
-
-        // The export names each sheet in a heading right before its table.
-        var names = System.Text.RegularExpressions.Regex.Matches(
-                html, "<h1>Sheet \\d+: <em>(.*?)</em></h1>", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            .Select(match => match.Groups[1].Value)
-            .ToList();
-
-        var directory = Path.GetDirectoryName(htmlPath) ?? string.Empty;
-        var baseName = Path.GetFileNameWithoutExtension(htmlPath);
-        for (var i = 0; i < tables.Count; i++)
-        {
-            var name = i < names.Count && !string.IsNullOrWhiteSpace(names[i]) ? names[i] : $"Sheet {i + 1}";
-            var page = "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
-                + name
-                + "</title>"
-                + SheetStyle
-                + "</head><body><div id=\"sp-wrap\">"
-                + tables[i]
-                + "</div></body></html>";
-            File.WriteAllText(Path.Combine(directory, $"{baseName}.sheet{i}.html"), page);
-        }
-    }
-
-    /// <summary>
-    /// The sheet pages a normalized workbook export left next to itself, in
-    /// order, named from their titles. Null when there is only one sheet.
-    /// </summary>
-    private static IReadOnlyList<SpreadsheetSheet>? TryReadSheetList(string htmlPath)
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(htmlPath) ?? string.Empty;
-            var baseName = Path.GetFileNameWithoutExtension(htmlPath);
-            var pages = new SortedList<int, SpreadsheetSheet>();
-            var head = new char[2048];
-            foreach (var file in Directory.GetFiles(directory, baseName + ".sheet*.html"))
-            {
-                var match = System.Text.RegularExpressions.Regex.Match(
-                    Path.GetFileName(file), "\\.sheet(\\d+)\\.html$", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                if (!match.Success)
-                {
-                    continue;
-                }
-
-                using var reader = new StreamReader(file);
-                Array.Clear(head);
-                var read = reader.ReadBlock(head, 0, head.Length);
-                var title = System.Text.RegularExpressions.Regex.Match(
-                    new string(head, 0, read), "<title>(.*?)</title>", System.Text.RegularExpressions.RegexOptions.Singleline);
-                var index = int.Parse(match.Groups[1].Value);
-                var name = title.Success ? System.Net.WebUtility.HtmlDecode(title.Groups[1].Value) : $"Sheet {index + 1}";
-                pages[index] = new SpreadsheetSheet(name, file);
-            }
-
-            return pages.Count >= 2 ? pages.Values.ToList() : null;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Wraps the document in the scroll container and gives every sheet
-    /// table sticky column letters (A, B, C...) and row numbers, counted
-    /// from the export's own colgroup declarations.
-    /// </summary>
-    private static string AddSpreadsheetChrome(string html)
-    {
-        var bodyOpen = System.Text.RegularExpressions.Regex.Match(html, "<body[^>]*>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var bodyClose = html.LastIndexOf("</body>", StringComparison.OrdinalIgnoreCase);
-        if (bodyOpen.Success && bodyClose > bodyOpen.Index)
-        {
-            html = html.Insert(bodyClose, "</div>")
-                       .Insert(bodyOpen.Index + bodyOpen.Length, "<div id=\"sp-wrap\">");
-        }
-
-        var builder = new StringBuilder(html.Length + html.Length / 8);
-        var position = 0;
-        while (true)
-        {
-            var tableStart = html.IndexOf("<table", position, StringComparison.OrdinalIgnoreCase);
-            if (tableStart < 0)
-            {
-                builder.Append(html, position, html.Length - position);
-                break;
-            }
-
-            var tableEnd = html.IndexOf("</table>", tableStart, StringComparison.OrdinalIgnoreCase);
-            if (tableEnd < 0)
-            {
-                builder.Append(html, position, html.Length - position);
-                break;
-            }
-
-            builder.Append(html, position, tableStart - position);
-            var table = html[tableStart..(tableEnd + "</table>".Length)];
-            builder.Append(DecorateSheetTable(table));
-            position = tableEnd + "</table>".Length;
-        }
-
-        return builder.ToString();
-    }
-
-    private static string DecorateSheetTable(string table)
-    {
-        // Column count and total width from the export's own colgroup
-        // declarations. The width feeds table-layout:fixed below.
-        var columns = 0;
-        var totalWidth = 0;
-        var widthsComplete = true;
-        foreach (System.Text.RegularExpressions.Match colgroup in System.Text.RegularExpressions.Regex.Matches(
-            table, "<colgroup([^>]*)>", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
-        {
-            var attributes = colgroup.Groups[1].Value;
-            var span = System.Text.RegularExpressions.Regex.Match(attributes, "span=\"?(\\d+)");
-            var count = span.Success ? int.Parse(span.Groups[1].Value) : 1;
-            columns += count;
-            var width = System.Text.RegularExpressions.Regex.Match(attributes, "width=\"?(\\d+)");
-            if (width.Success)
-            {
-                totalWidth += count * int.Parse(width.Groups[1].Value);
-            }
-            else
-            {
-                widthsComplete = false;
-            }
-        }
-
-        var firstRow = table.IndexOf("<tr", StringComparison.OrdinalIgnoreCase);
-        if (columns == 0 || columns > 1024 || firstRow < 0)
-        {
-            return table;
-        }
-
-        var header = new StringBuilder("\t<tr>");
-        header.Append("<td class=\"sp-h sp-corner\"></td>");
-        for (var column = 0; column < columns; column++)
-        {
-            header.Append("<td class=\"sp-h sp-cl\">").Append(ColumnLetters(column)).Append("</td>");
-        }
-
-        header.Append("</tr>\n");
-
-        var row = 0;
-        var body = System.Text.RegularExpressions.Regex.Replace(
-            table[firstRow..],
-            "<tr[^>]*>",
-            match =>
-            {
-                row++;
-                return match.Value + "<td class=\"sp-h sp-rn\">" + row + "</td>";
-            },
-            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-
-        // The export's colgroup widths map to columns in order; the number
-        // gutter needs its own colgroup so theirs stay aligned.
-        var openTagEnd = table.IndexOf('>');
-        if (openTagEnd < 0)
-        {
-            return table;
-        }
-
-        // Fixed layout renders the sheet's true column widths in a single
-        // pass: a large sheet must not visibly renegotiate its columns
-        // while it parses, and overflow into empty neighbors behaves like
-        // Calc's screen instead of silently widening the column.
-        var layout = widthsComplete
-            ? $" style=\"table-layout:fixed;width:{totalWidth + 34}px\""
-            : string.Empty;
-
-        return table[..openTagEnd]
-            + layout
-            + ">\n\t<colgroup width=\"34\"></colgroup>"
-            + table[(openTagEnd + 1)..firstRow]
-            + header
-            + body;
-    }
-
-    private static string ColumnLetters(int index)
-    {
-        var letters = string.Empty;
-        index++;
-        while (index > 0)
-        {
-            index--;
-            letters = (char)('A' + index % 26) + letters;
-            index /= 26;
-        }
-
-        return letters;
-    }
-
     private static string? FindSoffice()
     {
         var overridePath = Environment.GetEnvironmentVariable("SPACEPREVIEW_SOFFICE");
         if (string.Equals(overridePath, "off", StringComparison.OrdinalIgnoreCase))
         {
-            // Simulates a machine without a document engine (tests the degraded
-            // preview and its suggestion pill on a machine that has it).
+            // Shows the engine-less preview on a machine that has the engine.
             return null;
         }
 
-        foreach (var candidate in GetDefaultSofficeCandidates(
-                     overridePath,
-                     AppPaths.LocalAppData))
+        var known = Volatile.Read(ref _soffice);
+        if (known is not null && File.Exists(known))
         {
-            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-            {
-                return candidate;
-            }
+            return known;
         }
 
-        foreach (var candidate in GetRegistrySofficeCandidates())
-        {
-            if (!string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        var pathVariable = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
-        foreach (var directory in pathVariable.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            try
-            {
-                var candidate = Path.Combine(directory.Trim(), "soffice.exe");
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-            catch
-            {
-                // Ignore malformed PATH entries.
-            }
-        }
-
-        return null;
+        var found = GetDefaultSofficeCandidates(overridePath, AppPaths.LocalAppData)
+            .Concat(GetRegistrySofficeCandidates())
+            .Concat(GetPathSofficeCandidates())
+            .FirstOrDefault(candidate => !string.IsNullOrWhiteSpace(candidate) && File.Exists(candidate));
+        Volatile.Write(ref _soffice, found);
+        return found;
     }
 
     internal static IReadOnlyList<string> GetDefaultSofficeCandidates(string? overridePath, string localAppData) =>
@@ -976,36 +1019,27 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
-    private static long SafeFileLength(string path)
+    private static IEnumerable<string> GetPathSofficeCandidates()
     {
-        try
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
-            return new FileInfo(path).Length;
-        }
-        catch
-        {
-            return 0;
+            string candidate;
+            try
+            {
+                candidate = Path.Combine(directory.Trim(), "soffice.exe");
+            }
+            catch
+            {
+                continue;
+            }
+
+            yield return candidate;
         }
     }
 
-    private static bool IsPresentation(string extension) =>
-        extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".ppt", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".pptm", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".odp", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsWriterDocument(string extension) =>
-        extension.Equals(".docx", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".doc", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".docm", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".rtf", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".odt", StringComparison.OrdinalIgnoreCase);
-
-    private static string BuildPageRangeFilter(string extension, int firstPages)
-    {
-        var filter = IsPresentation(extension) ? "impress_pdf_Export" : "writer_pdf_Export";
-        return $"pdf:{filter}:{{\"PageRange\":{{\"type\":\"string\",\"value\":\"1-{firstPages}\"}}}}";
-    }
+    private static string BuildPageRangeFilter(string filter, int firstPages) =>
+        $"pdf:{filter}:{{\"PageRange\":{{\"type\":\"string\",\"value\":\"1-{firstPages}\"}}}}";
 
     private static int? TryReadExtendedPropertyCount(string path, string propertyName)
     {
@@ -1031,20 +1065,14 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
-    private static int? CountPdfPages(string path, CancellationToken token)
+    /// <summary>Pages in a PDF LibreOffice wrote; null when its objects are compressed out of reach.</summary>
+    private static int? CountPdfPages(string path)
     {
         try
         {
-            token.ThrowIfCancellationRequested();
-            var bytes = File.ReadAllBytes(path);
-            token.ThrowIfCancellationRequested();
-            var text = Encoding.Latin1.GetString(bytes);
+            var text = Encoding.Latin1.GetString(File.ReadAllBytes(path));
             var count = Regex.Matches(text, @"/Type\s*/Page\b", RegexOptions.CultureInvariant).Count;
             return count > 0 ? count : null;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -1052,29 +1080,35 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
-    private static string GetCacheDirectory(string path, string convertTo)
+    private static string GetCacheDirectory(string path, string format)
     {
         var file = new FileInfo(path);
-        // The conversion format and normalization version are part of the identity:
-        // without them a cached conversion would keep serving stale styling
-        // after the pipeline changes.
-        var input = $"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}|{convertTo}|v12";
-        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input)))[..16];
-        return Path.Combine(
-            AppPaths.DataRoot,
-            "DocumentCache",
-            hash);
+        var input = $"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}|{format}|{PipelineVersion}";
+        var hash = System.Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input)))[..16];
+        return Path.Combine(AppPaths.DataRoot, "DocumentCache", hash);
     }
 
-    private static void TryDelete(string path)
+    private static long SafeFileLength(string path)
     {
         try
         {
-            File.Delete(path);
+            return new FileInfo(path).Length;
         }
         catch
         {
-            // Best effort cache cleanup.
+            return 0;
+        }
+    }
+
+    private static void TryTouch(string directory)
+    {
+        try
+        {
+            Directory.SetLastWriteTimeUtc(directory, DateTime.UtcNow);
+        }
+        catch
+        {
+            // The clock is best effort.
         }
     }
 
@@ -1089,7 +1123,17 @@ internal static class OfficeDocumentPdfConverter
         }
         catch
         {
-            // Best effort cache cleanup.
+            // Housekeeping removes what a live viewer still held.
         }
+    }
+
+    private sealed class LaneTicket(OfficeConversionJob job, bool firstStage)
+    {
+        public OfficeConversionJob Job { get; } = job;
+        public bool FirstStage { get; } = firstStage;
+        public TaskCompletionSource<bool> Granted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public CancellationTokenSource Kill { get; } = new();
+        public OfficeRunControl Control { get; } = new();
+        public bool Preempted { get; set; }
     }
 }

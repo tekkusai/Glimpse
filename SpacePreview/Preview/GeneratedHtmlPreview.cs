@@ -521,7 +521,7 @@ internal static partial class GeneratedHtmlPreview
         return false;
     }
 
-    private static string BuildShell(string theme, string? baseHref, string body)
+    internal static string BuildShell(string theme, string? baseHref, string body)
     {
         var baseElement = string.IsNullOrWhiteSpace(baseHref)
             ? string.Empty

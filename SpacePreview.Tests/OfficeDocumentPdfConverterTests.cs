@@ -1,4 +1,5 @@
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 using System.IO.Compression;
 using System.Net.Sockets;
 using System.Text;
@@ -45,15 +46,89 @@ public sealed class OfficeDocumentPdfConverterTests
     }
 
     [Fact]
-    public void ConversionProcessAlsoCarriesFailClosedProxyEnvironment()
+    public void ConversionProcessCarriesAFailClosedProxyAndAPrivateProfile()
     {
-        var run = TestSource.Method(@"SpacePreview\Preview\OfficeDocumentPdfConverter.cs", "RunConversion");
+        var startInfo = OfficeDocumentPdfConverter.BuildStartInfo(
+            @"C:\LibreOffice\program\soffice.exe",
+            @"C:\staging\report.docx",
+            "pdf",
+            @"C:\cache\entry",
+            @"C:\data\LibreOfficeProfile");
 
-        Assert.Contains("PrepareNetworkIsolatedProfile(profileDirectory)", run, StringComparison.Ordinal);
-        Assert.Contains("process.StartInfo.Environment[key] = blockedProxy", run, StringComparison.Ordinal);
-        Assert.Contains("process.StartInfo.Environment[\"NO_PROXY\"] = string.Empty", run, StringComparison.Ordinal);
-        Assert.Contains("OfficePreviewSourceSanitizer.Prepare", run, StringComparison.Ordinal);
-        Assert.Contains("process.StartInfo.ArgumentList.Add(preparedSource.Path)", run, StringComparison.Ordinal);
+        foreach (var key in new[] { "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy" })
+        {
+            Assert.Equal("http://127.0.0.1:9", startInfo.Environment[key]);
+        }
+
+        Assert.Equal(string.Empty, startInfo.Environment["NO_PROXY"]);
+        Assert.Equal(string.Empty, startInfo.Environment["no_proxy"]);
+        Assert.Contains("--headless", startInfo.ArgumentList);
+        Assert.Contains("--nolockcheck", startInfo.ArgumentList);
+        Assert.Contains("-env:UserInstallation=file:///C:/data/LibreOfficeProfile/", startInfo.ArgumentList);
+        Assert.Equal(@"C:\staging\report.docx", startInfo.ArgumentList[^1]);
+        Assert.Equal("pdf", startInfo.ArgumentList[startInfo.ArgumentList.IndexOf("--convert-to") + 1]);
+        Assert.Equal(@"C:\cache\entry", startInfo.ArgumentList[startInfo.ArgumentList.IndexOf("--outdir") + 1]);
+        Assert.False(startInfo.UseShellExecute);
+    }
+
+    [Fact]
+    public void HyperlinkOnlyDocumentsReachTheEngineUntouched()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "links.docx");
+        WriteLinkedImageDocument(source, "https://example.com/page", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink");
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(source, prepared.Path);
+        Assert.Equal(0, prepared.ExternalRelationshipsRemoved);
+    }
+
+    [Theory]
+    [InlineData("http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate")]
+    [InlineData("http://schemas.openxmlformats.org/officeDocument/2006/relationships/oleObject")]
+    [InlineData("http://schemas.openxmlformats.org/officeDocument/2006/relationships/subDocument")]
+    public void FetchableRelationshipsAreCutAndHyperlinksKept(string fetchableType)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "mixed.docx");
+        WriteLinkedImageDocument(
+            source,
+            "https://example.com/template.dotx",
+            fetchableType,
+            extraRelationship: "<Relationship Id=\"rId9\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink\" Target=\"https://example.com/\" TargetMode=\"External\"/>");
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(1, prepared.ExternalRelationshipsRemoved);
+        var relationships = ReadRelationshipXml(prepared.Path);
+        Assert.DoesNotContain(fetchableType, relationships, StringComparison.Ordinal);
+        Assert.Contains("relationships/hyperlink", relationships, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ARenamedDocumentIsSanitizedByItsContent()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "report-without-extension");
+        WriteLinkedImageDocument(source, "http://127.0.0.1/pixel.png");
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(1, prepared.ExternalRelationshipsRemoved);
+        Assert.DoesNotContain("TargetMode=\"External\"", ReadRelationshipXml(prepared.Path), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LegacyBinaryDocumentsPassThrough()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "old.doc");
+        File.WriteAllBytes(source, [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0, 0, 0]);
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(source, prepared.Path);
     }
 
     [Theory]
@@ -95,18 +170,16 @@ public sealed class OfficeDocumentPdfConverterTests
         WriteLinkedImageDocument(path, $"http://127.0.0.1:{port}/pixel.png");
         using var observationCancellation = new CancellationTokenSource();
         var observation = ObserveConnectionAsync(listener, observationCancellation.Token);
-        var previousDataRoot = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
 
         ConvertedOfficeDocument? converted;
         try
         {
-            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
             converted = await Task.Run(() => OfficeDocumentPdfConverter.TryConvert(path, CancellationToken.None));
+            // A lingering soffice.bin could still reach out after the launcher returns.
             await Task.Delay(300);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previousDataRoot);
             observationCancellation.Cancel();
         }
 
@@ -121,7 +194,7 @@ public sealed class OfficeDocumentPdfConverterTests
         var path = Path.Combine(temp.Path, "deck.pptx");
         WriteOfficeAppProperties(path, "Slides", 51);
 
-        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path);
+        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Presentation);
 
         Assert.NotNull(plan);
         Assert.Equal(6, plan.FirstPageCount);
@@ -137,7 +210,7 @@ public sealed class OfficeDocumentPdfConverterTests
         var path = Path.Combine(temp.Path, "contract.docx");
         WriteOfficeAppProperties(path, "Pages", 5, minimumBytes: 1_600_000);
 
-        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path);
+        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Document);
 
         Assert.Null(plan);
     }
@@ -149,14 +222,14 @@ public sealed class OfficeDocumentPdfConverterTests
         var path = Path.Combine(temp.Path, "manual.docx");
         WriteOfficeAppProperties(path, "Pages", 60, minimumBytes: 1_600_000);
 
-        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path);
+        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Document);
 
         Assert.NotNull(plan);
         Assert.Equal(60, plan.ExpectedPageCount);
         Assert.Contains("writer_pdf_Export", plan.Filter, StringComparison.Ordinal);
     }
 
-    private static void WriteOfficeAppProperties(string path, string propertyName, int value, int minimumBytes = 0)
+    internal static void WriteOfficeAppProperties(string path, string propertyName, int value, int minimumBytes = 0)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
@@ -206,7 +279,11 @@ public sealed class OfficeDocumentPdfConverterTests
         }
     }
 
-    private static void WriteLinkedImageDocument(string path, string imageUrl)
+    internal static void WriteLinkedImageDocument(
+        string path,
+        string target,
+        string type = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",
+        string extraRelationship = "")
     {
         using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
         WriteEntry(archive, "[Content_Types].xml", """
@@ -247,7 +324,8 @@ public sealed class OfficeDocumentPdfConverterTests
         WriteEntry(archive, "word/_rels/document.xml.rels", $$"""
             <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
             <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{{imageUrl}}" TargetMode="External"/>
+              <Relationship Id="rId1" Type="{{type}}" Target="{{target}}" TargetMode="External"/>
+              {{extraRelationship}}
             </Relationships>
             """);
     }

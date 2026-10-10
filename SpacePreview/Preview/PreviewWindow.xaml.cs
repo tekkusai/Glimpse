@@ -380,28 +380,12 @@ public partial class PreviewWindow : Window
             LastPresentationFailureReason = presented ? string.Empty : failureReason;
         }
 
-        // A first office conversion builds LibreOffice's profile (~15s). It is
-        // the wait most likely to feel broken, so name it up front and
-        // make clear that it is one-time.
-        if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath) && OfficeDocumentPdfConverter.IsFirstRunPending)
-        {
-            DiagnosticLog.Write("first-run conversion message shown");
-            _ = ShowLoadingOverlayLaterAsync(version, 120, token, FirstOfficeRunMessage);
-        }
-        else
-        {
-            _ = ShowLoadingOverlayLaterAsync(version, freshOpen ? 240 : 420, token);
+        _ = ShowLoadingOverlayLaterAsync(version, freshOpen ? 240 : 420, token);
 
-            // Prediction is not enough: a large document takes its time even
-            // on a warm engine. If a conversion is still running, say so -
-            // the cache makes the message true per file. The session's first
-            // conversion pays the engine's process start, so it gets named
-            // almost immediately instead of spinning in silence.
-            if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath))
-            {
-                var messageDelay = OfficeDocumentPdfConverter.HasConvertedThisSession ? 2500 : 700;
-                _ = ShowLoadingOverlayLaterAsync(version, messageDelay, token, SlowConversionMessage);
-            }
+        // A conversion still running after a beat gets named, nothing more.
+        if (FileKinds.IsOffice(contentPath) && OfficeDocumentPdfConverter.EngineName is { } engine)
+        {
+            _ = ShowLoadingOverlayLaterAsync(version, 1200, token, ($"Converting with {engine}", string.Empty));
         }
 
         _ = LoadPreviewAsync(path, contentPath, version, token);
@@ -595,40 +579,9 @@ public partial class PreviewWindow : Window
                         ? await BuildPdfViaPdfiumAsync(contentPath, token)
                         : BuildPdfWebPreview(viewerPath, version, token);
                 }
-                else if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath))
+                else if (FileKinds.GetOfficeKind(contentPath) is not OfficeKind.None and var officeKind)
                 {
-                    var converted = await Task.Run(() =>
-                    {
-                        if (OfficeDocumentPdfConverter.TryGetCachedPdfConversion(contentPath) is { } cached)
-                        {
-                            return cached;
-                        }
-
-                        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(contentPath);
-                        return plan is null
-                            ? OfficeDocumentPdfConverter.TryConvert(contentPath, token)
-                            : OfficeDocumentPdfConverter.TryConvertFirstPages(contentPath, plan, token)
-                                ?? OfficeDocumentPdfConverter.TryConvert(contentPath, token);
-                    }, token);
-                    if (converted is not null)
-                    {
-                        content = BuildConvertedOfficePreview(converted, version, token);
-                    }
-                    else
-                    {
-                        var office = await Task.Run(() => OfficeOpenXmlPreviewLoader.TryLoad(contentPath), token);
-                        content = office is null
-                            ? await BuildFileCardAsync(contentPath, token)
-                            : BuildOfficePreviewContent(office);
-
-                        // The machine simply lacks the engine (as opposed to a
-                        // conversion failing): offer the fix in place. Never a
-                        // notification, never required, one click to act.
-                        if (!OfficeDocumentPdfConverter.IsAvailable)
-                        {
-                            content = WithLibreOfficeSuggestion(content);
-                        }
-                    }
+                    content = await LoadOfficePreviewAsync(contentPath, officeKind, version, token);
                 }
                 else
                 {
@@ -786,13 +739,9 @@ public partial class PreviewWindow : Window
             }
         }
 
-        if (TryMapOpenXmlPackage(zipPackage, out var officeType))
+        if (FileKinds.GetOfficeKind(zipPackage) is not OfficeKind.None and var officeKind)
         {
-            var office = await Task.Run(() => OfficeOpenXmlPreviewLoader.TryLoad(path, officeType), token);
-            if (office is not null)
-            {
-                return BuildOfficePreviewContent(office);
-            }
+            return await LoadOfficePreviewAsync(path, officeKind, version, token);
         }
 
         if (FileKinds.IsArchive(path) || (useSignatureRouting && FileSignatures.IsArchive(signature)))
@@ -1185,7 +1134,7 @@ public partial class PreviewWindow : Window
                 return;
             }
 
-            if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath))
+            if (FileKinds.IsOffice(contentPath))
             {
                 // Spreadsheets convert to HTML, not pages: no PDF to probe
                 // and no meaningful page size to declare. They ask for the
@@ -1196,7 +1145,7 @@ public partial class PreviewWindow : Window
                     return;
                 }
 
-                if (OfficeDocumentPdfConverter.TryGetCachedPdfConversion(contentPath) is { } cached
+                if (OfficeDocumentPdfConverter.TryGetCached(contentPath) is { } cached
                     && PdfPageSizeProbe.TryReadFirstPageSize(cached.DocumentPath, out pageWidth, out pageHeight))
                 {
                     SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);

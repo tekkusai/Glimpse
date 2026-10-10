@@ -1,27 +1,11 @@
-using System.Buffers.Binary;
-using System.Collections.Specialized;
-using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
-using System.Threading;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
-using System.Windows.Threading;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
-using SpacePreview.Native;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
 
@@ -29,122 +13,58 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
-    private static readonly (string Title, string Subtitle) FirstOfficeRunMessage =
-        ("Preparing document previews", "Just this once. After this, they open instantly.");
-
-    private static readonly (string Title, string Subtitle) SlowConversionMessage =
-        ("Preparing this document", "Next time it opens instantly.");
-
-    private static bool TryMapOpenXmlPackage(ZipPackageKind packageKind, out OfficePreviewType previewType)
+    /// <summary>
+    /// Every Office file comes through here, found by name or by content: a
+    /// finished conversion, else the engine's job, else the text-only page.
+    /// Leaving stops the waiting, not the job.
+    /// </summary>
+    private async Task<FrameworkElement> LoadOfficePreviewAsync(string path, OfficeKind kind, long version, CancellationToken token)
     {
-        previewType = packageKind switch
+        if (OfficeDocumentPdfConverter.IsAvailable)
         {
-            ZipPackageKind.OfficeWord => OfficePreviewType.Word,
-            ZipPackageKind.OfficePowerPoint => OfficePreviewType.PowerPoint,
-            ZipPackageKind.OfficeExcel => OfficePreviewType.Excel,
-            _ => default
-        };
-
-        return packageKind is ZipPackageKind.OfficeWord or ZipPackageKind.OfficePowerPoint or ZipPackageKind.OfficeExcel;
-    }
-
-    private async Task CompleteProgressiveOfficeConversionAsync(
-        string sourcePath,
-        int partialPageCount,
-        PdfPageRailState railState,
-        Action<ConvertedOfficeDocument> setFullDocument)
-    {
-        var started = DateTime.UtcNow;
-        try
-        {
-            var full = await Task.Run(() => OfficeDocumentPdfConverter.TryConvert(sourcePath, railState.Token, background: true), railState.Token);
-            if (full is null
-                || railState.Version != _loadVersion
-                || railState.Token.IsCancellationRequested)
+            var cached = await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), token);
+            if (cached is not null)
             {
-                return;
+                return BuildConvertedOfficePreview(cached, null, version, token);
             }
 
-            setFullDocument(full);
-            DiagnosticLog.Write(
-                $"office progressive full ready {sourcePath} +{(DateTime.UtcNow - started).TotalMilliseconds:0}ms partial={partialPageCount}");
-
-            if (_userEngagedContent)
+            var job = OfficeDocumentPdfConverter.Convert(path, kind, token);
+            var first = await job.FirstContent.WaitAsync(token);
+            if (first is { IsPartial: true } && !job.TryHoldPartial())
             {
-                DiagnosticLog.Write($"office progressive upgrade -> none {sourcePath}");
-                railState.Path = full.DocumentPath;
-                railState.Document = null;
-                _ = LoadPdfPageRailOutOfProcessAsync(railState);
-                return;
+                // The rest landed and the first pages were cleaned up meanwhile.
+                first = await job.Complete.WaitAsync(token);
             }
 
-            DiagnosticLog.Write($"office progressive upgrade -> auto {sourcePath}");
-            UpgradeConvertedOfficePreview(railState, full, Math.Max(1, railState.CurrentPage));
-        }
-        catch (OperationCanceledException)
-        {
-            // Preview moved on.
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"office progressive full failed {sourcePath}: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private void UpgradeConvertedOfficePreview(
-        PdfPageRailState state,
-        ConvertedOfficeDocument fullDocument,
-        int targetPage)
-    {
-        if (state.Version != _loadVersion
-            || state.Token.IsCancellationRequested
-            || string.Equals(state.Path, fullDocument.DocumentPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        var target = Math.Max(1, targetPage);
-        StagePdfViewerReplacement(
-            state,
-            () => PdfViewerSource(fullDocument.DocumentPath, target),
-            fullDocument.DocumentPath,
-            $"office progressive upgrade {fullDocument.DocumentPath} -> {target}",
-            "office upgrade",
-            () =>
+            if (first is not null)
             {
-                state.Path = fullDocument.DocumentPath;
-                state.CurrentPage = target;
-                state.Document = null;
-                state.TryHandleJump = null;
-                _ = LoadPdfPageRailOutOfProcessAsync(state);
-            });
+                return BuildConvertedOfficePreview(first, job, version, token);
+            }
+        }
+
+        var page = await Task.Run(() => OfficeOpenXmlPreview.TryBuild(path, kind, token), token);
+        var content = page is null
+            ? await BuildFileCardAsync(path, token)
+            : BuildConvertedOfficePreview(page, null, version, token);
+
+        // The machine lacks the engine (as opposed to a conversion failing):
+        // offer the fix in place. Never a notification, one click to act.
+        return OfficeDocumentPdfConverter.IsAvailable ? content : WithLibreOfficeSuggestion(content);
     }
 
-    private FrameworkElement BuildConvertedOfficePreview(ConvertedOfficeDocument document, long version, CancellationToken token)
+    /// <summary>
+    /// PDFs go to the Chromium viewer with the page rail. HTML (spreadsheets,
+    /// and the text-only page) is treated like a user's HTML file: no
+    /// scripts, no network; links open in the browser.
+    /// </summary>
+    private FrameworkElement BuildConvertedOfficePreview(ConvertedOfficeDocument document, OfficeConversionJob? job, long version, CancellationToken token)
     {
-        // Spreadsheets convert to HTML (screen-faithful, wide sheets scroll);
-        // everything else converts to PDF for the Chromium viewer. Converted
-        // HTML is treated like a user's HTML file: no scripts, no
-        // network.
-        // Both shapes sit on the same deep canvas: the PDF viewer draws its
-        // own page there, and the exported spreadsheet HTML carries a
-        // matching canvas in its stylesheet.
         var isHtml = document.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
         var palette = Theme.Current;
         var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
-        ColumnDefinition? railColumn = null;
-        if (!isHtml)
-        {
-            railColumn = new ColumnDefinition { Width = new GridLength(0) };
-            grid.ColumnDefinitions.Add(railColumn);
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        }
         var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
-        var initialPath = isHtml && document.Sheets is { Count: > 1 } tabbedSheets
-            ? tabbedSheets[0].Path
-            : document.DocumentPath;
-        if (!isHtml
-            && PdfPageSizeProbe.TryReadFirstPageSize(initialPath, out var pageWidth, out var pageHeight))
+        var initialPath = document.Sheets is { Count: > 1 } sheets ? sheets[0].Path : document.DocumentPath;
+        if (!isHtml && PdfPageSizeProbe.TryReadFirstPageSize(initialPath, out var pageWidth, out var pageHeight))
         {
             SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
         }
@@ -157,7 +77,7 @@ public partial class PreviewWindow
             {
                 if (version == _loadVersion)
                 {
-                    SetPreviewContent(BuildErrorPreview("Glimpse can't preview this document", "The converted document could not be displayed."), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null, animate: false);
                 }
             },
             configure: core =>
@@ -165,104 +85,299 @@ public partial class PreviewWindow
                 if (isHtml)
                 {
                     HardenForUntrustedHtml(core);
+                    OpenWebLinksExternally(core);
+                    // The sheet's chrome follows prefers-color-scheme, so the
+                    // cached page stays theme-neutral.
+                    core.Profile.PreferredColorScheme = palette.IsDark
+                        ? CoreWebView2PreferredColorScheme.Dark
+                        : CoreWebView2PreferredColorScheme.Light;
                 }
                 else
                 {
                     ConfigurePdfViewer(core, initialPath);
                 }
             },
-            readinessMode: isHtml
-                ? WebPaintReadinessMode.StaticLayout
-                : WebPaintReadinessMode.PdfPlugin);
-
-        // Multi-sheet workbooks get a bottom tab strip - the native language
-        // of spreadsheets - one page per sheet, instead of the export's
-        // stacked tables and "Overview" link block.
-        if (!isHtml)
-        {
-            Grid.SetColumn(webView, 1);
-            var railHost = BuildPdfPageRailHost();
-            Grid.SetColumn(railHost, 0);
-            grid.Children.Add(railHost);
-            grid.Children.Add(webView);
-            // Converted Office PDFs use the same rail, but their thumbnails
-            // render in a short helper process. If pdfium dislikes a
-            // LibreOffice-generated PDF, the helper dies instead of the
-            // resident preview process.
-            var railState = new PdfPageRailState(railHost, railColumn!, webView, initialPath, version, token) { Surface = grid };
-            grid.Tag = railState;
-            TrackPdfRailLifetime(grid, railState);
-
-            if (document.IsPartial
-                && document.SourcePath is { } sourcePath
-                && document.PartialPageCount is { } partialPageCount)
-            {
-                ConvertedOfficeDocument? fullDocument = null;
-                railState.TryHandleJump = (state, page) =>
-                {
-                    if (fullDocument is null
-                        || page <= partialPageCount
-                        || string.Equals(state.Path, fullDocument.DocumentPath, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return false;
-                    }
-
-                    DiagnosticLog.Write($"office progressive upgrade -> jump page {page} {sourcePath}");
-                    UpgradeConvertedOfficePreview(state, fullDocument, page);
-                    return true;
-                };
-
-                grid.Unloaded += (_, _) =>
-                {
-                    var directory = Path.GetDirectoryName(document.DocumentPath);
-                    if (!string.IsNullOrWhiteSpace(directory))
-                    {
-                        OfficeDocumentPdfConverter.TryDeleteDirectory(directory);
-                    }
-                };
-
-                _ = CompleteProgressiveOfficeConversionAsync(
-                    sourcePath,
-                    partialPageCount,
-                    railState,
-                    full => fullDocument = full);
-            }
-
-            _ = LoadPdfPageRailOutOfProcessAsync(railState);
-        }
-        else if (document.Sheets is { Count: > 1 } sheets)
-        {
-            grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            grid.Children.Add(webView);
-            var tabBar = BuildSheetTabBar(sheets, webView);
-            Grid.SetRow(tabBar, 1);
-            grid.Children.Add(tabBar);
-        }
-        else
-        {
-            grid.Children.Add(webView);
-        }
+            readinessMode: isHtml ? WebPaintReadinessMode.StaticLayout : WebPaintReadinessMode.PdfPlugin);
 
         if (isHtml)
         {
-            // Converted spreadsheets have no viewer chrome of their own (the
-            // PDF path does); the header uses them zoom controls.
+            grid.Children.Add(webView);
+            // Multi-sheet workbooks get a bottom tab strip, one page per sheet.
+            if (document.Sheets is { Count: > 1 } tabs)
+            {
+                grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                var tabBar = BuildSheetTabBar(tabs, webView);
+                Grid.SetRow(tabBar, 1);
+                grid.Children.Add(tabBar);
+            }
+
+            // These pages have no viewer chrome of their own; the header's
+            // zoom controls drive them.
             grid.Tag = ZoomableContentTag;
+            return grid;
+        }
+
+        // The rail column holds the rail and, under it, the note a partial
+        // document needs. The viewer spans the other column alone, which is
+        // where a staged replacement lands too.
+        var railColumn = new ColumnDefinition { Width = new GridLength(0) };
+        grid.ColumnDefinitions.Add(railColumn);
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        var railHost = BuildPdfPageRailHost();
+        var railStack = new Grid();
+        railStack.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        railStack.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        railStack.Children.Add(railHost);
+        grid.Children.Add(railStack);
+        Grid.SetColumn(webView, 1);
+        grid.Children.Add(webView);
+
+        // Thumbnails render in a short helper process: if pdfium dislikes a
+        // LibreOffice PDF, the helper dies instead of the resident app.
+        var railState = new PdfPageRailState(railHost, railColumn, webView, initialPath, version, token) { Surface = grid };
+        grid.Tag = railState;
+        TrackPdfRailLifetime(grid, railState);
+
+        if (document.IsPartial && job is not null)
+        {
+            var note = BuildArrivingPagesNote(document, job.Kind);
+            Grid.SetRow(note, 1);
+            railStack.Children.Add(note);
+            // Shown beside the open rail only, and only until the rest lands.
+            railStack.SizeChanged += (_, _) =>
+                note.Visibility = note.IsEnabled && railStack.ActualWidth >= PdfPageRailWidth - 1
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            FollowProgressiveConversion(document, job, railState, note);
+            _ = LoadPartialOfficeRailAsync(railState, document);
+        }
+        else
+        {
+            _ = LoadPdfPageRailOutOfProcessAsync(railState);
         }
 
         return grid;
     }
 
     /// <summary>
-    /// Excel-style sheet tabs along the bottom: plain text buttons, the
-    /// active one raised on a surface pill. Only built when a workbook has
-    /// more than one sheet.
+    /// The first pages are on screen; the rest is still converting. The rail
+    /// already has a slot for every page, a click on a page that has not
+    /// arrived is kept, and when the whole document lands the viewer swaps
+    /// to it in place, at the page the user is on or asked for.
+    /// </summary>
+    private void FollowProgressiveConversion(
+        ConvertedOfficeDocument partial,
+        OfficeConversionJob job,
+        PdfPageRailState railState,
+        FrameworkElement note)
+    {
+        var holdsPartial = true;
+        void ReleasePartial()
+        {
+            if (holdsPartial)
+            {
+                holdsPartial = false;
+                job.ReleasePartial();
+            }
+        }
+
+        var showingPartial = true;
+        var upgrading = false;
+        int? askedPage = null;
+        ConvertedOfficeDocument? full = null;
+
+        void Upgrade(int page)
+        {
+            upgrading = true;
+            StagePdfViewerReplacement(
+                railState,
+                () => PdfViewerSource(full!.DocumentPath, page),
+                full!.DocumentPath,
+                $"office progressive upgrade {full.DocumentPath} -> {page}",
+                "office upgrade",
+                () =>
+                {
+                    showingPartial = false;
+                    upgrading = false;
+                    railState.Path = full.DocumentPath;
+                    railState.CurrentPage = page;
+                    railState.Document = null;
+                    railState.TryHandleJump = null;
+                    ReleasePartial();
+                    _ = LoadPdfPageRailOutOfProcessAsync(railState);
+                    if (askedPage is { } later && later != page)
+                    {
+                        JumpPdfToPage(railState, later);
+                    }
+                });
+        }
+
+        railState.TryHandleJump = (_, page) =>
+        {
+            if (!showingPartial || page <= partial.PartialPages)
+            {
+                return false;
+            }
+
+            askedPage = page;
+            if (full is not null && !upgrading)
+            {
+                DiagnosticLog.Write($"office progressive upgrade -> jump page {page} {job.SourcePath}");
+                Upgrade(page);
+            }
+
+            return true;
+        };
+
+        railState.Surface!.Unloaded += (_, _) => ReleasePartial();
+        _ = WaitForRestAsync();
+
+        async Task WaitForRestAsync()
+        {
+            var started = DateTime.UtcNow;
+            try
+            {
+                var complete = await job.Complete.WaitAsync(railState.Token);
+                if (railState.Version != _loadVersion || railState.Token.IsCancellationRequested)
+                {
+                    ReleasePartial();
+                    return;
+                }
+
+                note.IsEnabled = false;
+                note.Visibility = Visibility.Collapsed;
+                if (complete is null)
+                {
+                    // The rest failed: the first pages are the preview, and
+                    // the rail stops promising more.
+                    DiagnosticLog.Write($"office progressive rest failed {job.SourcePath}");
+                    railState.Document = null;
+                    _ = LoadPdfPageRailOutOfProcessAsync(railState);
+                    return;
+                }
+
+                full = complete;
+                var target = askedPage ?? Math.Max(1, railState.CurrentPage);
+                DiagnosticLog.Write(
+                    $"office progressive full ready {job.SourcePath} +{(DateTime.UtcNow - started).TotalMilliseconds:0}ms -> page {target}");
+                Upgrade(target);
+            }
+            catch (OperationCanceledException)
+            {
+                // The preview moved on, maybe before it ever showed: the job
+                // finishes without it.
+                ReleasePartial();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The partial's own thumbnails, then a page-shaped slot for every page
+    /// still converting, so the rail shows the document's real length.
+    /// </summary>
+    private async Task LoadPartialOfficeRailAsync(PdfPageRailState state, ConvertedOfficeDocument partial)
+    {
+        try
+        {
+            var rendered = await TryRenderPdfThumbnailsOutOfProcessAsync(state.Path, partial.PartialPages, state.Token);
+            if (state.Version != _loadVersion || state.Token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            if (rendered is not { Pages.Count: > 0 } || state.Document is not null)
+            {
+                // No thumbnails, or the whole document already replaced them.
+                state.FirstRailReady.TrySetResult(true);
+                return;
+            }
+
+            var first = rendered.Pages[0];
+            var slots = Math.Min(Math.Max(partial.ExpectedPages, rendered.Pages.Count), PdfPageRailMaxPages);
+            var ghost = new PdfPreviewPage(BuildGhostPage(first.Width, first.Height), first.Width, first.Height);
+            var pages = rendered.Pages.Concat(Enumerable.Repeat(ghost, slots - rendered.Pages.Count)).ToList();
+            state.Document = new PdfPreviewDocument(pages, pages.Count);
+            HintStageFromRailTruth(state, state.Document);
+            RenderPdfPageRail(state);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"office partial rail failed {state.Path}: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            state.FirstRailReady.TrySetResult(true);
+        }
+    }
+
+    /// <summary>A blank sheet the size of a real thumbnail: a page that is on its way.</summary>
+    private static BitmapSource BuildGhostPage(int width, int height)
+    {
+        width = Math.Max(1, width);
+        height = Math.Max(1, height);
+        var paper = Theme.Light.ChromeBg;
+        var pixels = new byte[width * height * 4];
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            pixels[i] = paper.B;
+            pixels[i + 1] = paper.G;
+            pixels[i + 2] = paper.R;
+            pixels[i + 3] = 255;
+        }
+
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
+        bitmap.Freeze();
+        return bitmap;
+    }
+
+    private static FrameworkElement BuildArrivingPagesNote(ConvertedOfficeDocument partial, OfficeKind kind)
+    {
+        var palette = Theme.Current;
+        var unit = kind == OfficeKind.Presentation ? "Slides" : "Pages";
+        return new Border
+        {
+            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
+            BorderBrush = Theme.Brush(palette.Border),
+            BorderThickness = new Thickness(0, 1, 1, 0),
+            Padding = new Thickness(12, 10, 12, 12),
+            Child = new TextBlock
+            {
+                Text = $"{unit} {partial.PartialPages + 1} to {partial.ExpectedPages} are on the way",
+                FontSize = Metrics.FontCaption,
+                Foreground = Theme.Brush(palette.TextTertiary),
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center
+            }
+        };
+    }
+
+    /// <summary>Links in a converted page open in the browser, as they do in the PDF viewer.</summary>
+    private static void OpenWebLinksExternally(CoreWebView2 core)
+    {
+        core.NavigationStarting += (_, args) =>
+        {
+            if (args.IsUserInitiated
+                && Uri.TryCreate(args.Uri, UriKind.Absolute, out var target)
+                && (target.Scheme == Uri.UriSchemeHttps || target.Scheme == Uri.UriSchemeHttp))
+            {
+                args.Cancel = true;
+                OpenExternalUri(target.AbsoluteUri);
+            }
+        };
+    }
+
+    /// <summary>
+    /// Sheet tabs along the bottom: plain labels, the active one raised on a
+    /// surface pill. Built only for a workbook with more than one sheet.
     /// </summary>
     private static FrameworkElement BuildSheetTabBar(IReadOnlyList<SpreadsheetSheet> sheets, WebView2 webView)
     {
         var palette = Theme.Current;
-        var strip = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(10, 5, 10, 6) };
+        var strip = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 6, 8, 6) };
         var tabs = new List<(Border Chrome, TextBlock Label)>();
         var activeIndex = 0;
 
@@ -274,7 +389,6 @@ public partial class PreviewWindow
                 tabs[i].Chrome.Background = active ? Theme.Brush(palette.RaisedBg) : Brushes.Transparent;
                 tabs[i].Chrome.BorderBrush = active ? Theme.Brush(palette.RaisedBorder) : Brushes.Transparent;
                 tabs[i].Label.Foreground = Theme.Brush(active ? palette.TextPrimary : palette.TextSecondary);
-                tabs[i].Label.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
             }
         }
 
@@ -284,15 +398,17 @@ public partial class PreviewWindow
             var label = new TextBlock
             {
                 Text = sheets[i].Name,
-                FontSize = 12,
+                FontSize = Metrics.FontLabel,
+                FontWeight = FontWeights.SemiBold,
                 MaxWidth = 180,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 VerticalAlignment = VerticalAlignment.Center
             };
             var chrome = new Border
             {
-                CornerRadius = Metrics.RowCorner,
-                Padding = Metrics.ChipPadding,
+                Height = 30,
+                CornerRadius = Metrics.PillCorner,
+                Padding = Metrics.PillPadding,
                 Margin = new Thickness(0, 0, 4, 0),
                 BorderThickness = new Thickness(1),
                 Background = Brushes.Transparent,
@@ -308,15 +424,23 @@ public partial class PreviewWindow
                 }
             };
             chrome.MouseLeave += (_, _) => RefreshTabs();
-            chrome.MouseLeftButtonDown += (_, e) => e.Handled = true;
+            chrome.MouseLeftButtonDown += (_, e) =>
+            {
+                if (index != activeIndex)
+                {
+                    chrome.Background = Theme.Brush(palette.PressedBg);
+                }
+
+                e.Handled = true;
+            };
             chrome.MouseLeftButtonUp += (_, e) =>
             {
                 if (index != activeIndex)
                 {
                     activeIndex = index;
-                    // WebView keeps the outgoing surface until navigation
-                    // commits. A fire-and-forget script command can instead
-                    // arrive in the incoming document and leave it blank.
+                    // A navigation keeps the outgoing surface until it
+                    // commits; a scripted swap can land in the incoming
+                    // document and leave it blank.
                     webView.Source = new Uri(sheets[index].Path, UriKind.Absolute);
                     RefreshTabs();
                 }
@@ -346,244 +470,48 @@ public partial class PreviewWindow
         };
     }
 
-    private static FrameworkElement BuildOfficePreviewContent(OfficeOpenXmlPreview preview)
-    {
-        var palette = Theme.Current;
-        var accent = preview.Type switch
-        {
-            OfficePreviewType.PowerPoint => Color.FromRgb(242, 112, 79),
-            OfficePreviewType.Excel => Color.FromRgb(73, 179, 126),
-            _ => Color.FromRgb(101, 151, 245)
-        };
-
-        var title = preview.Type switch
-        {
-            OfficePreviewType.PowerPoint => "PowerPoint slide text",
-            OfficePreviewType.Excel => "Excel sheet preview",
-            _ => "Word document text"
-        };
-
-        var label = new Border
-        {
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Margin = new Thickness(24, 20, 24, 0),
-            Padding = Metrics.ChipPadding,
-            CornerRadius = Metrics.PillCorner,
-            Background = new SolidColorBrush(Color.FromArgb(42, accent.R, accent.G, accent.B)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(110, accent.R, accent.G, accent.B)),
-            BorderThickness = new Thickness(1),
-            Child = new TextBlock
-            {
-                Text = title,
-                FontSize = 12,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = Theme.Brush(palette.TextPrimary)
-            }
-        };
-
-        var fontFamily = preview.Type == OfficePreviewType.Excel
-            ? new FontFamily("Cascadia Mono, Consolas")
-            : new FontFamily("Segoe UI Variable, Segoe UI");
-
-        var grid = new Grid
-        {
-            Background = Theme.Brush(palette.CanvasBg)
-        };
-        grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        Grid.SetRow(label, 0);
-
-        FrameworkElement body = preview.Type == OfficePreviewType.Excel
-            ? BuildSelectableTextBox(
-                preview.Text,
-                fontFamily,
-                fontSize: 12.5,
-                wrap: false,
-                new Thickness(24, 16, 24, 24),
-                palette.CanvasBg)
-            : BuildOfficeDocumentPreview(preview, fontFamily, accent);
-
-        Grid.SetRow(body, 1);
-        grid.Children.Add(label);
-        grid.Children.Add(body);
-        return grid;
-    }
-
-    private static FrameworkElement BuildOfficeDocumentPreview(OfficeOpenXmlPreview preview, FontFamily fontFamily, Color accent)
-    {
-        var palette = Theme.Current;
-        var document = new FlowDocument
-        {
-            Background = Theme.Brush(palette.CanvasBg),
-            Foreground = Theme.Brush(palette.TextPrimary),
-            FontFamily = fontFamily,
-            FontSize = 14,
-            PagePadding = new Thickness(24, 14, 24, 24),
-            ColumnWidth = 100000
-        };
-
-        foreach (var block in preview.Text.Split(["\r\n", "\n"], StringSplitOptions.None).Take(500))
-        {
-            if (string.IsNullOrWhiteSpace(block))
-            {
-                document.Blocks.Add(new Paragraph
-                {
-                    Margin = new Thickness(0, 0, 0, 8),
-                    LineHeight = 8
-                });
-                continue;
-            }
-
-            var isHeading = preview.Type == OfficePreviewType.PowerPoint
-                && block.StartsWith("Slide ", StringComparison.OrdinalIgnoreCase);
-            document.Blocks.Add(new Paragraph(new Run(block.Trim()))
-            {
-                Margin = new Thickness(0, isHeading ? 16 : 2, 0, isHeading ? 6 : 2),
-                Foreground = isHeading ? new SolidColorBrush(accent) : Theme.Brush(palette.TextPrimary),
-                FontSize = isHeading ? 15 : 14,
-                FontWeight = isHeading ? FontWeights.SemiBold : FontWeights.Normal,
-                LineHeight = isHeading ? 22 : 21
-            });
-        }
-
-        if (preview.ImagePaths.Count > 0)
-        {
-            document.Blocks.Add(new Paragraph(new Run("Images"))
-            {
-                Margin = new Thickness(0, 24, 0, 10),
-                FontSize = 15,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = Theme.Brush(palette.TextPrimary)
-            });
-
-            var wrap = new WrapPanel();
-            foreach (var imagePath in preview.ImagePaths.Take(24))
-            {
-                try
-                {
-                    var bitmap = new BitmapImage();
-                    bitmap.BeginInit();
-                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                    bitmap.UriSource = new Uri(imagePath, UriKind.Absolute);
-                    bitmap.DecodePixelWidth = 320;
-                    bitmap.EndInit();
-                    bitmap.Freeze();
-
-                    wrap.Children.Add(new Border
-                    {
-                        Width = 220,
-                        Height = 150,
-                        Margin = new Thickness(0, 0, 12, 12),
-                        CornerRadius = new CornerRadius(12),
-                        ClipToBounds = true,
-                        Background = Theme.Brush(palette.RaisedBg),
-                        BorderBrush = Theme.Brush(palette.RaisedBorder),
-                        BorderThickness = new Thickness(1),
-                        Child = new Image
-                        {
-                            Source = bitmap,
-                            Stretch = Stretch.Uniform
-                        }
-                    });
-                }
-                catch
-                {
-                    // Ignore broken embedded media.
-                }
-            }
-
-            document.Blocks.Add(new BlockUIContainer(wrap)
-            {
-                Margin = new Thickness(0, 0, 0, 8)
-            });
-        }
-
-        var richTextBox = new RichTextBox(document)
-        {
-            IsReadOnly = true,
-            BorderThickness = new Thickness(0),
-            Background = Theme.Brush(palette.CanvasBg),
-            Foreground = Theme.Brush(palette.TextPrimary),
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            SelectionBrush = Theme.Brush(palette.Accent),
-            SelectionOpacity = 0.55,
-            CaretBrush = Theme.Brush(palette.TextPrimary)
-        };
-        AttachMiddleAutoScroll(richTextBox, () => FindVisualChild<ScrollViewer>(richTextBox), horizontal: false);
-        ApplyScrollBarStyle(richTextBox);
-        return richTextBox;
-    }
-
     /// <summary>
-    /// A card under a degraded document preview: first names the state
-    /// (testers read the reduced view as the app rendering poorly), then the
-    /// fix and its payoff. Shown in the preview only.
+    /// The text-only preview says what it is and offers the fix: one line
+    /// and one pill in their own row under the content, never over it.
     /// </summary>
     private static FrameworkElement WithLibreOfficeSuggestion(FrameworkElement content)
     {
         var palette = Theme.Current;
-        var title = new TextBlock
+        var pill = HousePill.Build("Get LibreOffice", () => OpenExternalUri("https://www.libreoffice.org/download/"));
+        pill.Margin = new Thickness(16, 0, 0, 0);
+        pill.ToolTip = "Opens libreoffice.org in your browser";
+        DockPanel.SetDock(pill, Dock.Right);
+
+        var bar = new Border
         {
-            Text = "This is a basic preview",
-            FontSize = Metrics.FontBody,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(palette.TextPrimary)
-        };
-        var text = new TextBlock
-        {
-            Text = "Get LibreOffice (free) to see documents fully formatted",
-            Margin = new Thickness(0, 2, 0, 0),
-            FontSize = 12,
-            Foreground = Theme.Brush(palette.TextSecondary)
-        };
-        var glyph = new TextBlock
-        {
-            Text = "\uE896",
-            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-            FontSize = 15,
-            Margin = new Thickness(0, 0, 12, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(palette.Accent)
-        };
-        var pill = new Border
-        {
-            CornerRadius = Metrics.SurfaceCorner,
-            Padding = new Thickness(16, 10, 19, 11),
-            Margin = new Thickness(0, 0, 0, 20),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            ToolTip = "Opens libreoffice.org in your browser",
-            Child = new StackPanel
+            Background = Theme.Brush(palette.ChromeBg),
+            BorderBrush = Theme.Brush(palette.Border),
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Padding = new Thickness(16, 10, 12, 10),
+            Child = new DockPanel
             {
-                Orientation = Orientation.Horizontal,
-                Children = { glyph, new StackPanel { Children = { title, text } } }
+                LastChildFill = true,
+                Children =
+                {
+                    pill,
+                    new TextBlock
+                    {
+                        Text = "Text-only preview. Install LibreOffice to see this file as designed.",
+                        FontSize = Metrics.FontBody,
+                        Foreground = Theme.Brush(palette.TextSecondary),
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        VerticalAlignment = VerticalAlignment.Center
+                    }
+                }
             }
         };
-        pill.MouseEnter += (_, _) =>
-        {
-            pill.Background = Theme.Brush(palette.HoverBg);
-            text.Foreground = Theme.Brush(palette.TextPrimary);
-        };
-        pill.MouseLeave += (_, _) =>
-        {
-            pill.Background = Theme.Brush(palette.RaisedBg);
-            text.Foreground = Theme.Brush(palette.TextSecondary);
-        };
-        pill.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        pill.MouseLeftButtonUp += (_, e) =>
-        {
-            OpenExternalUri("https://www.libreoffice.org/download/");
-            e.Handled = true;
-        };
 
-        var host = new Grid();
+        var host = new Grid { Background = Theme.Brush(palette.CanvasBg), Tag = content.Tag };
+        host.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         host.Children.Add(content);
-        host.Children.Add(pill);
+        Grid.SetRow(bar, 1);
+        host.Children.Add(bar);
         return host;
     }
 }

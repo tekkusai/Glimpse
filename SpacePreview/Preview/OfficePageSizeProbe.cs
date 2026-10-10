@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Xml;
 using System.Xml.Linq;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
@@ -10,23 +11,22 @@ internal static class OfficePageSizeProbe
 {
     private const long MaxXmlBytes = 2 * 1024 * 1024;
 
+    /// <summary>OOXML only; other formats keep the default stage until the PDF lands.</summary>
     public static bool TryReadFirstPageAspect(string path, out double aspect)
     {
         aspect = 0;
+        var kind = FileKinds.GetOfficeKind(path);
+        if (kind is not (OfficeKind.Presentation or OfficeKind.Document))
+        {
+            return false;
+        }
 
         try
         {
             using var archive = ZipFile.OpenRead(path);
-            var extension = Path.GetExtension(path);
-            if (IsPresentation(extension))
-            {
-                return TryReadPresentationAspect(archive, out aspect);
-            }
-
-            if (IsWordDocument(extension))
-            {
-                return TryReadWordAspect(archive, out aspect);
-            }
+            return kind == OfficeKind.Presentation
+                ? TryReadPresentationAspect(archive, out aspect)
+                : TryReadWordAspect(archive, out aspect);
         }
         catch
         {
@@ -122,11 +122,4 @@ internal static class OfficePageSizeProbe
         return double.IsFinite(aspect) && aspect is >= 0.2 and <= 5;
     }
 
-    private static bool IsPresentation(string extension) =>
-        extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".pptm", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsWordDocument(string extension) =>
-        extension.Equals(".docx", StringComparison.OrdinalIgnoreCase)
-        || extension.Equals(".docm", StringComparison.OrdinalIgnoreCase);
 }
