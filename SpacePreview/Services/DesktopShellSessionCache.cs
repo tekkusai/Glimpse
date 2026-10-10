@@ -1,12 +1,9 @@
-using System.Runtime.InteropServices;
 using SpacePreview.Native;
 
 namespace SpacePreview.Services;
 
 /// <summary>
-/// One desktop Shell dispatch, owned by the permanent Shell STA. Acquisition
-/// parents are released immediately so other Explorer lookups cannot share
-/// and final-release an RCW retained by this cache.
+/// One desktop Shell dispatch, owned by the permanent Shell STA.
 /// Selection collections are deliberately never cached: they are snapshots
 /// and must be read fresh for every physical Space press.
 /// </summary>
@@ -14,10 +11,6 @@ internal sealed class DesktopShellSessionCache : IDisposable
 {
     private readonly int _ownerThreadId = Environment.CurrentManagedThreadId;
     private DesktopShellSession? _session;
-
-    internal int AcquisitionCount { get; private set; }
-    internal int HitCount { get; private set; }
-    internal int InvalidationCount { get; private set; }
 
     internal DesktopShellSession? GetOrCreate(out string state)
     {
@@ -27,7 +20,6 @@ internal sealed class DesktopShellSessionCache : IDisposable
         {
             if (_session.IsIdentityValid(out var invalidReason))
             {
-                HitCount++;
                 state = "hit";
                 return _session;
             }
@@ -43,7 +35,6 @@ internal sealed class DesktopShellSessionCache : IDisposable
         }
 
         _session = created;
-        AcquisitionCount++;
         state = "miss";
         DiagnosticLog.Write(
             $"desktop shell session acquired hwnd=0x{created.Hwnd.ToInt64():X} pid={created.ProcessId}");
@@ -62,7 +53,6 @@ internal sealed class DesktopShellSessionCache : IDisposable
             $"desktop shell session invalidated reason={reason} hwnd=0x{_session.Hwnd.ToInt64():X} pid={_session.ProcessId}");
         _session.Dispose();
         _session = null;
-        InvalidationCount++;
     }
 
     public void Dispose()
@@ -83,8 +73,6 @@ internal sealed class DesktopShellSessionCache : IDisposable
 
 internal sealed class DesktopShellSession : IDisposable
 {
-    private const int SwcDesktop = 8;
-    private const int SwfoNeedDispatch = 1;
     private bool _disposed;
 
     private DesktopShellSession(
@@ -136,37 +124,13 @@ internal sealed class DesktopShellSession : IDisposable
     {
         session = null;
         failureReason = string.Empty;
-        object? shell = null;
-        object? windows = null;
+        IShellWindows? windows = null;
         object? desktop = null;
 
         try
         {
-            var shellType = Type.GetTypeFromProgID("Shell.Application");
-            if (shellType is null)
-            {
-                failureReason = "shell-unavailable";
-                return false;
-            }
-
-            shell = Activator.CreateInstance(shellType);
-            if (shell is null)
-            {
-                failureReason = "shell-activation-empty";
-                return false;
-            }
-
-            windows = ((dynamic)shell).Windows();
-            object location = 0;
-            object locationRoot = 0;
-            int rawHwnd = 0;
-            desktop = ((dynamic)windows).FindWindowSW(
-                ref location,
-                ref locationRoot,
-                SwcDesktop,
-                ref rawHwnd,
-                SwfoNeedDispatch);
-            var hwnd = new IntPtr(rawHwnd);
+            windows = ShellViews.CreateShellWindows();
+            desktop = ShellViews.FindDesktop(windows, out var hwnd);
             if (desktop is null || hwnd == IntPtr.Zero)
             {
                 failureReason = "desktop-entry-empty";
@@ -197,9 +161,8 @@ internal sealed class DesktopShellSession : IDisposable
         }
         finally
         {
-            ReleaseComObject(desktop);
-            ReleaseComObject(windows);
-            ReleaseComObject(shell);
+            ShellViews.Release(desktop);
+            ShellViews.Release(windows);
         }
     }
 
@@ -211,27 +174,7 @@ internal sealed class DesktopShellSession : IDisposable
         }
 
         _disposed = true;
-        ReleaseComObject(Desktop);
-    }
-
-    internal static void ReleaseComObject(object? instance)
-    {
-        if (instance is null)
-        {
-            return;
-        }
-
-        try
-        {
-            if (Marshal.IsComObject(instance))
-            {
-                Marshal.FinalReleaseComObject(instance);
-            }
-        }
-        catch
-        {
-            // Best-effort cleanup only. The process still owns final cleanup.
-        }
+        ShellViews.Release(Desktop);
     }
 }
 
