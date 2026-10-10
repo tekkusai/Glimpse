@@ -323,6 +323,9 @@ public partial class PreviewWindow
         public bool PageSyncDisabled { get; set; }
         public long PageSyncGeneration { get; set; }
 
+        /// <summary>Latched when the user shows they are reading; page sync asks the viewer only after.</summary>
+        public bool Reading { get; set; }
+
         public string? LastPageSource { get; set; }
         public System.Windows.Automation.AutomationElement? PageAutomationElement { get; set; }
         public TaskCompletionSource<bool> FirstRailReady { get; } =
@@ -849,6 +852,7 @@ public partial class PreviewWindow
                 palette,
                 page =>
                 {
+                    MarkPdfReading(state, "rail click");
                     SetPdfCurrentPageFromViewer(state, page, logChange: false);
                     if (state.TryHandleJump?.Invoke(state, page) == true)
                     {
@@ -911,6 +915,9 @@ public partial class PreviewWindow
                         state.RailNeedsSelectedPageScroll = false;
                     }));
             });
+
+        // Looking at the rail is reading: it is worth keeping its highlight true.
+        surface.MouseEnter += (_, _) => MarkPdfReading(state, "rail");
         return surface;
     }
 
@@ -935,6 +942,14 @@ public partial class PreviewWindow
         }
     }
 
+    /// <summary>
+    /// Page sync watches the viewer's address from the start: its own page
+    /// box and links jump by fragment, which costs nothing to read. Asking
+    /// the viewer through UI Automation turns on Chromium's accessibility
+    /// tree, seconds of renderer work on a long document, so that waits until
+    /// the user shows they are reading: a click in the document, the keyboard
+    /// in it, the rail, or Fill &amp; Sign.
+    /// </summary>
     private void StartPdfPageSync(PdfPageRailState state)
     {
         if (state.PageSyncTimer is not null)
@@ -961,6 +976,17 @@ public partial class PreviewWindow
         state.PageAutomationElement = null;
     }
 
+    private static void MarkPdfReading(PdfPageRailState state, string reason)
+    {
+        if (state.Reading)
+        {
+            return;
+        }
+
+        state.Reading = true;
+        DiagnosticLog.Write($"pdf page sync reading ({reason})");
+    }
+
     private async void SyncPdfPageFromViewer(PdfPageRailState state)
     {
         if (state.JumpInFlight)
@@ -982,6 +1008,22 @@ public partial class PreviewWindow
                 if (TryReadPdfPageFromSource(core.Source, out var sourcePage))
                 {
                     SetPdfCurrentPageFromViewer(state, sourcePage);
+                    return;
+                }
+            }
+
+            if (!state.Reading)
+            {
+                if (_userEngagedContent)
+                {
+                    MarkPdfReading(state, "content click");
+                }
+                else if (ContentOwnsKeyboard())
+                {
+                    MarkPdfReading(state, "keyboard");
+                }
+                else
+                {
                     return;
                 }
             }
@@ -1070,6 +1112,28 @@ public partial class PreviewWindow
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// The page the reader is on, asked of the viewer now. Page sync waits
+    /// for signs of reading, so a document scrolled by wheel alone has a
+    /// stale CurrentPage; Fill &amp; Sign reads the page this way on entry.
+    /// Returns the one-based page and the page count (0 when unknown).
+    /// </summary>
+    private async Task<(int Page, int TotalPages)> ReadPdfPositionAsync()
+    {
+        if (_activePdfRail is not { } state)
+        {
+            return (1, 0);
+        }
+
+        MarkPdfReading(state, "fill and sign");
+        if (await ProbePdfPageAsync(state) is { Page: > 0 } result && state.Version == _loadVersion)
+        {
+            SetPdfCurrentPageFromViewer(state, result.Page, logChange: false);
+        }
+
+        return (state.CurrentPage, state.Document?.TotalPages ?? 0);
     }
 
     private void SetPdfCurrentPageFromViewer(

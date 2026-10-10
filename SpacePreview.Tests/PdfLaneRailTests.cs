@@ -131,6 +131,19 @@ public sealed class PdfLaneRailTests
         Assert.Equal(new[] { "PdfViewerLink.cs", "Program.cs" }, Callers(sources, "\"--prove-pdf-scale\""));
     }
 
+    // The first UI Automation question turns on Chromium's accessibility
+    // tree: about 3.5 s of renderer CPU on an 81-page document, paid on
+    // every open, for a highlight nobody looked at. Only reading pays it.
+    [Fact]
+    public void PageSyncAsksTheViewerOnlyOnceTheUserReads()
+    {
+        var sync = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "private async void SyncPdfPageFromViewer");
+
+        var gate = sync.IndexOf("if (!state.Reading)", StringComparison.Ordinal);
+        var ask = sync.IndexOf("ProbePdfPageAsync(state)", StringComparison.Ordinal);
+        Assert.True(gate >= 0 && ask > gate, "Page sync must not ask the viewer before the user reads.");
+    }
+
     private static string[] Callers(List<(string Name, string Text)> sources, string call) =>
         sources.Where(source => source.Text.Contains(call, StringComparison.Ordinal))
             .Select(source => source.Name)
