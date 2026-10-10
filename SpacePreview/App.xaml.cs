@@ -480,6 +480,22 @@ public partial class App : Application
             {
                 DiagnosticLog.Write($"probe audit {window.ProbeAuditState(extra["audit:".Length..])}");
             }
+            else if (extra.StartsWith("zoomkey:", StringComparison.OrdinalIgnoreCase))
+            {
+                // The window's Ctrl+Plus, Ctrl+Minus and Ctrl+0 path.
+                window.TryAdjustZoomFromShortcut(extra["zoomkey:".Length..] switch
+                {
+                    "+" => Native.NativeMethods.VK_OEM_PLUS,
+                    "-" => Native.NativeMethods.VK_OEM_MINUS,
+                    _ => Native.NativeMethods.VK_0
+                });
+                await Task.Delay(250);
+            }
+            else if (string.Equals(extra, "imagetoggle", StringComparison.OrdinalIgnoreCase))
+            {
+                window.ProbeImageToggle();
+                await Task.Delay(250);
+            }
             else if (string.Equals(extra, "meshspin", StringComparison.OrdinalIgnoreCase))
             {
                 DiagnosticLog.Write($"probe meshspin {await window.ProbeMeshSpinAsync()}");

@@ -104,10 +104,21 @@ public partial class PreviewWindow
         string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase)
         || string.Equals(_shortcutTarget, path, StringComparison.OrdinalIgnoreCase);
 
-    public bool HasHeaderZoom => _zoomWebView is not null;
+    public bool HasHeaderZoom => _zoomWebView is not null || _imageZoom is not null;
 
     public bool TryAdjustZoomFromShortcut(int vk)
     {
+        if (_zoomWebView is null && _imageZoom is { } image)
+        {
+            var direction = IsZoomInKey(vk) ? 1 : IsZoomOutKey(vk) ? -1 : IsZoomResetKey(vk) ? 0 : (int?)null;
+            if (direction is { } step)
+            {
+                image.ZoomBy(step);
+            }
+
+            return direction is not null;
+        }
+
         if (_zoomWebView is null)
         {
             return false;

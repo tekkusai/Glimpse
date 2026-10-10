@@ -364,47 +364,20 @@ public sealed class PreviewWindowSizingTests
         Assert.Contains("StageFitHint.PageAspect(pageWidth / pageHeight)", windowSource, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void DecodedImageHintCannotOverwriteIntrinsicHeaderTruth()
+    [Theory]
+    [InlineData("TryBuildImagePreviewAsync")]
+    [InlineData("TryBuildPsdPreviewAsync")]
+    public void DecodedPixelsCannotOverwriteIntrinsicHeaderTruth(string lane)
     {
-        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var methodStart = windowSource.IndexOf(
-            "private async Task<FrameworkElement> BuildPreviewContentAsync(",
-            StringComparison.Ordinal);
-        Assert.True(methodStart >= 0);
-        var methodEnd = windowSource.IndexOf("\n    private ", methodStart + 1, StringComparison.Ordinal);
-        Assert.True(methodEnd > methodStart);
-        var method = windowSource[methodStart..methodEnd];
-
-        // A local image was already probed from its exact source header before
-        // decoding. The decoded frame may be only Explorer's tiny cache entry,
-        // so it supplies a fallback hint only when no hint exists for this load.
-        const string decodedHint = "StageFitHint.ImagePixels(session.CurrentBitmap.PixelWidth, session.CurrentBitmap.PixelHeight)";
-        Assert.Equal(1, method.Split(decodedHint, StringSplitOptions.None).Length - 1);
-        Assert.Matches(
-            @"if\s*\(_stageFitVersion\s*!=\s*version\)\s*\{\s*SetStageFitHint\(\s*StageFitHint\.ImagePixels\(\s*session\.CurrentBitmap\.PixelWidth,\s*session\.CurrentBitmap\.PixelHeight\),\s*version\);\s*\}",
-            method);
-    }
-
-    [Fact]
-    public void DecodedPsdCompositeHintCannotOverwriteIntrinsicCanvasTruth()
-    {
-        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var methodStart = windowSource.IndexOf(
-            "private async Task<FrameworkElement> BuildPreviewContentAsync(",
-            StringComparison.Ordinal);
-        Assert.True(methodStart >= 0);
-        var methodEnd = windowSource.IndexOf("\n    private ", methodStart + 1, StringComparison.Ordinal);
-        Assert.True(methodEnd > methodStart);
-        var method = windowSource[methodStart..methodEnd];
-
-        // The PSD header already supplied the exact canvas dimensions. Its
-        // decoded composite is intentionally capped at 4096px, so it may only
-        // supply fallback geometry when the source probe produced no hint.
-        const string compositeHint = "StageFitHint.ImagePixels(composite.PixelWidth, composite.PixelHeight)";
-        Assert.Equal(1, method.Split(compositeHint, StringSplitOptions.None).Length - 1);
-        Assert.Matches(
-            @"if\s*\(_stageFitVersion\s*!=\s*version\)\s*\{\s*SetStageFitHint\(\s*StageFitHint\.ImagePixels\(\s*composite\.PixelWidth,\s*composite\.PixelHeight\),\s*version\);\s*\}",
-            method);
+        // The header already sized the stage before decoding. A first frame
+        // or a PSD composite may be downsampled, so a lane may hint only when
+        // no hint exists for this load.
+        var method = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", lane);
+        var hints = method.Split("SetStageFitHint(", StringSplitOptions.None).Length - 1;
+        var guarded = System.Text.RegularExpressions.Regex.Matches(
+            method,
+            @"if\s*\(_stageFitVersion\s*!=\s*version\)\s*\{\s*SetStageFitHint\(").Count;
+        Assert.True(hints > 0);
+        Assert.Equal(hints, guarded);
     }
 }
