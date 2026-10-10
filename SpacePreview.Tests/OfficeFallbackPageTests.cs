@@ -31,6 +31,36 @@ public sealed class OfficeFallbackPageTests
     }
 
     [Fact]
+    public void MergedTableCellsKeepTheirGrid()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "merged.docx");
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
+        {
+            Entry(archive, "word/document.xml", """
+                <?xml version="1.0" encoding="UTF-8"?>
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                  <w:body><w:tbl>
+                    <w:tr>
+                      <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Chapter</w:t></w:r></w:p></w:tc>
+                      <w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc>
+                    </w:tr>
+                    <w:tr>
+                      <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+                      <w:tc><w:p><w:r><w:t>Short</w:t></w:r></w:p></w:tc>
+                      <w:tc><w:p><w:r><w:t>Long</w:t></w:r></w:p></w:tc>
+                    </w:tr>
+                  </w:tbl></w:body>
+                </w:document>
+                """);
+        }
+
+        var html = File.ReadAllText(OfficeOpenXmlPreview.TryBuild(path, OfficeKind.Document, CancellationToken.None)!.DocumentPath);
+
+        Assert.Contains("<tr><td rowspan=\"2\">Chapter</td><td colspan=\"2\">Name</td></tr><tr><td>Short</td><td>Long</td></tr>", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ARenamedDocumentPreviewsByTheKindItsContentNames()
     {
         using var temp = new TempDirectory();

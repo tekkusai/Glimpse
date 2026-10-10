@@ -70,12 +70,16 @@ internal static partial class SheetHtml
         }
     }
 
-    /// <summary>A sheet page around one table, in the same chrome as a conversion.</summary>
+    /// <summary>
+    /// A sheet page around one table, in the same chrome as a conversion.
+    /// Cells read in the system face; a conversion keeps the sheet's own.
+    /// </summary>
     public static string Page(string title, string table) =>
         "<!doctype html><html><head><meta charset=\"utf-8\"><title>"
         + WebUtility.HtmlEncode(title)
         + "</title>"
         + Style
+        + "<style>body{font-family:\"Segoe UI Variable Text\",\"Segoe UI\",sans-serif}</style>"
         + "</head><body><div id=\"sp-wrap\">"
         + DecorateSheetTable(table)
         + "</div></body></html>";

@@ -26,7 +26,7 @@ internal static class OfficeOpenXmlPreview
     private const long MaxXmlEntryBytes = 8L * 1024 * 1024;
     private const long MaxImageBytes = 8L * 1024 * 1024;
     private const long MaxBookImageBytes = 24L * 1024 * 1024;
-    private const string PageVersion = "fallback-v1";
+    private const string PageVersion = "fallback-v3";
 
     private static readonly XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -217,19 +217,57 @@ internal static class OfficeOpenXmlPreview
         }
     }
 
+    /// <summary>
+    /// A Word table with its merged cells kept: gridSpan becomes colspan, and
+    /// a vertical merge becomes one cell spanning the rows it continues into.
+    /// </summary>
     private static void AppendWordTable(StringBuilder html, XElement table, Budget budget)
     {
+        var rows = table.Elements(W + "tr")
+            .Select(row =>
+            {
+                var column = 0;
+                return row.Elements(W + "tc").Select(cell =>
+                {
+                    var properties = cell.Element(W + "tcPr");
+                    var span = int.TryParse((string?)properties?.Element(W + "gridSpan")?.Attribute(W + "val"), out var value) ? Math.Max(1, value) : 1;
+                    var merge = properties?.Element(W + "vMerge");
+                    var continues = merge is not null && (string?)merge.Attribute(W + "val") is null or "continue";
+                    var placed = (Cell: cell, Column: column, Span: span, Continues: continues);
+                    column += span;
+                    return placed;
+                }).ToList();
+            })
+            .ToList();
+
         html.Append("<table>");
-        foreach (var row in table.Elements(W + "tr"))
+        for (var r = 0; r < rows.Count; r++)
         {
             html.Append("<tr>");
-            foreach (var cell in row.Elements(W + "tc"))
+            foreach (var (cell, column, span, continues) in rows[r])
             {
+                if (continues)
+                {
+                    continue;
+                }
+
+                var rowSpan = 1;
+                while (r + rowSpan < rows.Count
+                       && rows[r + rowSpan].Any(below => below.Column == column && below.Continues))
+                {
+                    rowSpan++;
+                }
+
                 var lines = cell.Descendants(W + "p")
                     .Select(paragraph => string.Concat(paragraph.Descendants(W + "t").Select(text => text.Value)))
                     .Where(line => line.Length > 0)
                     .Select(line => WebUtility.HtmlEncode(budget.TakeText(line)));
-                html.Append("<td>").AppendJoin("<br>", lines).Append("</td>");
+                html.Append("<td")
+                    .Append(span > 1 ? $" colspan=\"{span}\"" : string.Empty)
+                    .Append(rowSpan > 1 ? $" rowspan=\"{rowSpan}\"" : string.Empty)
+                    .Append('>')
+                    .AppendJoin("<br>", lines)
+                    .Append("</td>");
             }
 
             html.Append("</tr>");
@@ -327,7 +365,7 @@ internal static class OfficeOpenXmlPreview
 
         var style = "<style>"
             + $".deck .slide{{background:{Hex(theme.RaisedBg)};border:1px solid {Hex(theme.RaisedBorder)};border-radius:12px;"
-            + "padding:20px 28px 24px;margin:0 0 24px;overflow:hidden}"
+            + "padding:20px 28px 24px;margin:0 0 24px}"
             + $".deck .slide-number{{margin:0 0 8px;font-size:11.5px;color:{Hex(theme.TextTertiary)}}}"
             + ".deck .slide h2{border:0;margin:0 0 .6em;padding:0}"
             + ".deck .slide img{max-height:240px;width:auto;margin:.4em 0}"
@@ -656,8 +694,20 @@ internal static class OfficeOpenXmlPreview
         }
     }
 
-    private static string Shell(string body, string style) =>
-        GeneratedHtmlPreview.BuildShell(Theme.Current.IsDark ? "dark" : "light", null, style + body);
+    /// <summary>
+    /// The generated-page shell. Tables leave the reading column for the
+    /// window's width, centered, because Office tables are laid out for a
+    /// page, not a paragraph.
+    /// </summary>
+    private static string Shell(string body, string style)
+    {
+        var theme = Theme.Current;
+        var tables = "<style>"
+            + ".office table{position:relative;left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100vw - 64px)}"
+            + $".office td{{border:1px solid {Hex(theme.RaisedBorder)}}}"
+            + "</style>";
+        return GeneratedHtmlPreview.BuildShell(theme.IsDark ? "dark" : "light", null, tables + style + body);
+    }
 
     private static string Hex(System.Windows.Media.Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
 
