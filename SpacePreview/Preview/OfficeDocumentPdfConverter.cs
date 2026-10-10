@@ -186,6 +186,7 @@ internal sealed class OfficeConversionJob
 
     // Guarded by the converter's lane lock.
     internal bool Background;
+    internal bool Started;
     internal int Waiters;
     internal bool Finished;
     internal string? PartialDirectory;
@@ -536,10 +537,13 @@ internal static class OfficeDocumentPdfConverter
     {
         lock (Lane)
         {
-            if (_holder is null)
+            if (IsUnwanted(ticket.Job))
             {
-                _holder = ticket;
-                ticket.Granted.TrySetResult(true);
+                ticket.Granted.TrySetResult(false);
+            }
+            else if (_holder is null)
+            {
+                Grant(ticket);
             }
             else
             {
@@ -563,22 +567,35 @@ internal static class OfficeDocumentPdfConverter
 
             // Previews first, in arrival order; then everything else.
             var next = Waiting.FirstOrDefault(IsUrgent) ?? Waiting.FirstOrDefault();
-            _holder = next;
+            _holder = null;
             if (next is not null)
             {
                 Waiting.Remove(next);
-                next.Granted.TrySetResult(true);
+                Grant(next);
             }
         }
 
         Rebalance();
     }
 
+    private static void Grant(LaneTicket ticket)
+    {
+        _holder = ticket;
+        ticket.Job.Started = true;
+        ticket.Granted.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// A job that never started and that nobody waits for any more: the
+    /// user moved past the file before the engine got to it.
+    /// </summary>
+    private static bool IsUnwanted(OfficeConversionJob job) => !job.Started && job.Waiters == 0 && !job.Background;
+
     /// <summary>
     /// The holder runs at Normal only while a preview waits for its first
     /// content. Otherwise it yields: BelowNormal, and killed outright when a
-    /// preview of another file is waiting for the engine. Queued work that
-    /// nobody waits for any more never starts.
+    /// preview of another file is waiting for the engine. A started job
+    /// finishes; queued work nobody waits for never starts.
     /// </summary>
     private static void Rebalance()
     {
@@ -589,7 +606,7 @@ internal static class OfficeDocumentPdfConverter
             List<LaneTicket>? unwatched = null;
             lock (Lane)
             {
-                foreach (var ticket in Waiting.Where(ticket => ticket.Job.Waiters == 0 && !ticket.Job.Background).ToList())
+                foreach (var ticket in Waiting.Where(ticket => IsUnwanted(ticket.Job)).ToList())
                 {
                     Waiting.Remove(ticket);
                     (unwatched ??= []).Add(ticket);

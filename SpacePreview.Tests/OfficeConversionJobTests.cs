@@ -118,6 +118,51 @@ public sealed class OfficeConversionJobTests
     }
 
     [Fact]
+    public async Task AFileTheUserMovedPastBeforeTheEngineFreedUpNeverStarts()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var path = temp.CreateFile("skipped.docx");
+        using var preview = new CancellationTokenSource();
+        preview.Cancel();
+
+        var job = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, preview.Token);
+
+        Assert.Null(await job.Complete.WaitAsync(Patience));
+        Assert.Equal(0, engine.RunCount);
+    }
+
+    [Fact]
+    public async Task ADeckWhosePreviewLeftAfterTheFirstPagesStillFinishes()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var path = Path.Combine(temp.Path, "deck.pptx");
+        OfficeDocumentPdfConverterTests.WriteOfficeAppProperties(path, "Slides", 51);
+        using var preview = new CancellationTokenSource();
+
+        var other = temp.CreateFile("other.docx");
+
+        var job = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, preview.Token);
+        var firstPages = await engine.RunAsync(0);
+        // Another preview queues behind the deck's first pages, so the rest
+        // of the deck has to wait its turn after the user leaves.
+        var otherJob = OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
+        firstPages.Finish(pages: 6);
+        await job.FirstContent.WaitAsync(Patience);
+        var otherRun = await engine.RunAsync(1);
+        preview.Cancel();
+        otherRun.Finish();
+        await otherJob.Complete.WaitAsync(Patience);
+        var rest = await engine.RunAsync(2);
+        rest.Finish(pages: 51);
+
+        Assert.Equal(path, rest.Request.SourcePath);
+        Assert.NotNull(await job.Complete.WaitAsync(Patience));
+        Assert.NotNull(OfficeDocumentPdfConverter.TryGetCached(path));
+    }
+
+    [Fact]
     public async Task AFinishedConversionNeverWaitsBehindTheEngine()
     {
         using var temp = new TempDirectory();
