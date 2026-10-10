@@ -154,8 +154,12 @@ public sealed class OfficeDocumentPdfConverterTests
         Assert.True(File.Exists(source));
     }
 
-    [Fact]
-    public async Task LinkedImageConversionDoesNotContactTheRemoteHost()
+    // The image link is cut before the engine sees it; the hyperlink reaches
+    // the engine, which must leave it alone.
+    [Theory]
+    [InlineData("linked-image.docx", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image")]
+    [InlineData("hyperlink.docx", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink")]
+    public async Task ConversionNeverContactsALinkedHost(string name, string relationshipType)
     {
         if (!OfficeDocumentPdfConverter.IsAvailable)
         {
@@ -166,8 +170,8 @@ public sealed class OfficeDocumentPdfConverterTests
         using var listener = new TcpListener(System.Net.IPAddress.Loopback, 0);
         listener.Start();
         var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-        var path = Path.Combine(temp.Path, "linked-image.docx");
-        WriteLinkedImageDocument(path, $"http://127.0.0.1:{port}/pixel.png");
+        var path = Path.Combine(temp.Path, name);
+        WriteLinkedImageDocument(path, $"http://127.0.0.1:{port}/pixel.png", relationshipType);
         using var observationCancellation = new CancellationTokenSource();
         var observation = ObserveConnectionAsync(listener, observationCancellation.Token);
 
@@ -227,6 +231,47 @@ public sealed class OfficeDocumentPdfConverterTests
         Assert.NotNull(plan);
         Assert.Equal(60, plan.ExpectedPageCount);
         Assert.Contains("writer_pdf_Export", plan.Filter, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProgressivePlanReadsTheOpenDocumentPageCount()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "manual.odt");
+        WriteOpenDocumentMeta(path, """<meta:document-statistic meta:page-count="60"/>""", minimumBytes: 1_600_000);
+
+        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Document);
+
+        Assert.NotNull(plan);
+        Assert.Equal(60, plan.ExpectedPageCount);
+    }
+
+    [Fact]
+    public void ABigDeckWithoutACountPromisesNoNumber()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "talk.odp");
+        WriteOpenDocumentMeta(path, """<meta:document-statistic meta:object-count="1699"/>""", minimumBytes: 1_600_000);
+
+        var plan = OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Presentation);
+
+        Assert.NotNull(plan);
+        Assert.Equal(0, plan.ExpectedPageCount);
+    }
+
+    private static void WriteOpenDocumentMeta(string path, string statistic, int minimumBytes)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        WriteEntry(archive, "meta.xml", $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                                  xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0">
+              <office:meta>{statistic}</office:meta>
+            </office:document-meta>
+            """);
+        var filler = archive.CreateEntry("Pictures/filler.bin", CompressionLevel.NoCompression);
+        using var stream = filler.Open();
+        stream.Write(new byte[minimumBytes]);
     }
 
     internal static void WriteOfficeAppProperties(string path, string propertyName, int value, int minimumBytes = 0)

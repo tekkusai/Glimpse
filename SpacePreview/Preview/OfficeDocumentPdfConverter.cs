@@ -364,25 +364,27 @@ internal static class OfficeDocumentPdfConverter
         var size = SafeFileLength(path);
         if (kind == OfficeKind.Presentation)
         {
-            var slides = TryReadExtendedPropertyCount(path, "Slides");
+            // A big deck with no count still converts its first slides
+            // first; the rest arrive without a promised number.
+            var slides = TryReadPageCount(path, "Slides");
             if (slides > ProgressivePresentationSlideThreshold
                 || (slides is null && size > ProgressiveDocumentSizeThreshold))
             {
                 return new OfficeProgressiveConversionPlan(
                     ProgressiveFirstPages,
-                    Math.Max(slides ?? ProgressiveFirstPages + 1, ProgressiveFirstPages + 1),
+                    slides ?? 0,
                     BuildPageRangeFilter("impress_pdf_Export", ProgressiveFirstPages));
             }
         }
 
         if (kind == OfficeKind.Document)
         {
-            var pages = TryReadExtendedPropertyCount(path, "Pages");
+            var pages = TryReadPageCount(path, "Pages");
             if (pages > ProgressiveDocumentPageThreshold && size > ProgressiveDocumentSizeThreshold)
             {
                 return new OfficeProgressiveConversionPlan(
                     ProgressiveFirstPages,
-                    Math.Max(pages.Value, ProgressiveFirstPages + 1),
+                    pages.Value,
                     BuildPageRangeFilter("writer_pdf_Export", ProgressiveFirstPages));
             }
         }
@@ -1041,12 +1043,18 @@ internal static class OfficeDocumentPdfConverter
     private static string BuildPageRangeFilter(string filter, int firstPages) =>
         $"pdf:{filter}:{{\"PageRange\":{{\"type\":\"string\",\"value\":\"1-{firstPages}\"}}}}";
 
-    private static int? TryReadExtendedPropertyCount(string path, string propertyName)
+    /// <summary>
+    /// The page or slide count the authoring app saved: OOXML's app.xml
+    /// element, or ODF's meta:page-count (Writer keeps one; Impress does not).
+    /// </summary>
+    private static int? TryReadPageCount(string path, string ooxmlElement)
     {
         try
         {
             using var archive = ZipFile.OpenRead(path);
-            var entry = archive.GetEntry("docProps/app.xml");
+            var app = archive.GetEntry("docProps/app.xml");
+            var meta = archive.GetEntry("meta.xml");
+            var entry = app ?? meta;
             if (entry is null || entry.Length <= 0 || entry.Length > MaxAppPropertiesBytes)
             {
                 return null;
@@ -1054,9 +1062,10 @@ internal static class OfficeDocumentPdfConverter
 
             using var stream = entry.Open();
             var document = XDocument.Load(stream, LoadOptions.None);
-            var text = document.Descendants()
-                .FirstOrDefault(element => element.Name.LocalName.Equals(propertyName, StringComparison.OrdinalIgnoreCase))
-                ?.Value;
+            var text = app is not null
+                ? document.Descendants().FirstOrDefault(element => element.Name.LocalName.Equals(ooxmlElement, StringComparison.OrdinalIgnoreCase))?.Value
+                : document.Descendants().FirstOrDefault(element => element.Name.LocalName == "document-statistic")
+                    ?.Attributes().FirstOrDefault(attribute => attribute.Name.LocalName == "page-count")?.Value;
             return int.TryParse(text, out var value) && value > 0 ? value : null;
         }
         catch

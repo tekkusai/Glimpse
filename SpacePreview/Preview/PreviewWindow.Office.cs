@@ -82,15 +82,15 @@ public partial class PreviewWindow
             },
             configure: core =>
             {
+                // The sheet's chrome and the PDF toolbar follow the app theme
+                // through prefers-color-scheme, so cached pages stay neutral.
+                core.Profile.PreferredColorScheme = palette.IsDark
+                    ? CoreWebView2PreferredColorScheme.Dark
+                    : CoreWebView2PreferredColorScheme.Light;
                 if (isHtml)
                 {
                     HardenForUntrustedHtml(core);
                     OpenWebLinksExternally(core);
-                    // The sheet's chrome follows prefers-color-scheme, so the
-                    // cached page stays theme-neutral.
-                    core.Profile.PreferredColorScheme = palette.IsDark
-                        ? CoreWebView2PreferredColorScheme.Dark
-                        : CoreWebView2PreferredColorScheme.Light;
                 }
                 else
                 {
@@ -194,7 +194,7 @@ public partial class PreviewWindow
                 railState,
                 () => PdfViewerSource(full!.DocumentPath, page),
                 full!.DocumentPath,
-                $"office progressive upgrade {full.DocumentPath} -> {page}",
+                $"office progressive upgrade {full.DocumentPath} page={page}",
                 "office upgrade",
                 () =>
                 {
@@ -223,7 +223,7 @@ public partial class PreviewWindow
             askedPage = page;
             if (full is not null && !upgrading)
             {
-                DiagnosticLog.Write($"office progressive upgrade -> jump page {page} {job.SourcePath}");
+                DiagnosticLog.Write($"office progressive jump page={page} {job.SourcePath}");
                 Upgrade(page);
             }
 
@@ -260,7 +260,7 @@ public partial class PreviewWindow
                 full = complete;
                 var target = askedPage ?? Math.Max(1, railState.CurrentPage);
                 DiagnosticLog.Write(
-                    $"office progressive full ready {job.SourcePath} +{(DateTime.UtcNow - started).TotalMilliseconds:0}ms -> page {target}");
+                    $"office progressive full ready {job.SourcePath} after={(DateTime.UtcNow - started).TotalMilliseconds:0}ms page={target}");
                 Upgrade(target);
             }
             catch (OperationCanceledException)
@@ -337,7 +337,10 @@ public partial class PreviewWindow
     private static FrameworkElement BuildArrivingPagesNote(ConvertedOfficeDocument partial, OfficeKind kind)
     {
         var palette = Theme.Current;
-        var unit = kind == OfficeKind.Presentation ? "Slides" : "Pages";
+        var unit = kind == OfficeKind.Presentation ? "slides" : "pages";
+        var text = partial.ExpectedPages > partial.PartialPages
+            ? $"{char.ToUpperInvariant(unit[0])}{unit[1..]} {partial.PartialPages + 1} to {partial.ExpectedPages}"
+            : $"More {unit}";
         return new Border
         {
             Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
@@ -346,7 +349,7 @@ public partial class PreviewWindow
             Padding = new Thickness(12, 10, 12, 12),
             Child = new TextBlock
             {
-                Text = $"{unit} {partial.PartialPages + 1} to {partial.ExpectedPages} are on the way",
+                Text = text + "\nare on the way",
                 FontSize = Metrics.FontCaption,
                 Foreground = Theme.Brush(palette.TextTertiary),
                 TextWrapping = TextWrapping.Wrap,
@@ -496,7 +499,7 @@ public partial class PreviewWindow
                     pill,
                     new TextBlock
                     {
-                        Text = "Text-only preview. Install LibreOffice to see this file as designed.",
+                        Text = "Preview without formatting. Install LibreOffice to see this file as designed.",
                         FontSize = Metrics.FontBody,
                         Foreground = Theme.Brush(palette.TextSecondary),
                         TextTrimming = TextTrimming.CharacterEllipsis,
