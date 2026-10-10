@@ -10,8 +10,30 @@ internal static class TestSource
     public static string FilePath(string relativePath) =>
         Path.Combine(Root.Value, relativePath);
 
+    /// <summary>
+    /// Reads a source file. A class split into partial files reads as one
+    /// source: asking for PreviewWindow.xaml.cs returns it followed by every
+    /// PreviewWindow.*.cs beside it, so moving a method between the partials
+    /// neither breaks a lookup nor silently empties a whole-file assertion.
+    /// </summary>
     public static string Read(string relativePath) =>
-        Cache.GetOrAdd(FilePath(relativePath), File.ReadAllText);
+        Cache.GetOrAdd(FilePath(relativePath), ReadWithPartials);
+
+    private static string ReadWithPartials(string path)
+    {
+        if (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        {
+            return File.ReadAllText(path);
+        }
+
+        var directory = Path.GetDirectoryName(path)!;
+        var fileName = Path.GetFileName(path);
+        var stem = fileName[..fileName.IndexOf('.')];
+        var partials = Directory.EnumerateFiles(directory, stem + ".*.cs")
+            .Where(candidate => !string.Equals(candidate, path, StringComparison.OrdinalIgnoreCase))
+            .Order(StringComparer.OrdinalIgnoreCase);
+        return string.Join(Environment.NewLine, new[] { path }.Concat(partials).Select(File.ReadAllText));
+    }
 
     public static string Method(string relativePath, string methodName) =>
         MethodFrom(Read(relativePath), methodName);
