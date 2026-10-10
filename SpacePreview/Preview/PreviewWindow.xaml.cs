@@ -718,7 +718,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsFont(path))
         {
-            return BuildFontPreview(path);
+            return await BuildFontPreviewAsync(path, token);
         }
 
         var zipPackage = useSignatureRouting && signature == FileSignatureKind.Zip
