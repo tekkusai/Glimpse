@@ -114,7 +114,7 @@ internal static class FileKinds
 
     private static readonly HashSet<string> MeshExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".stl", ".obj", ".ply", ".3mf"
+        ".stl", ".obj", ".ply", ".3mf", ".glb"
     };
 
     public static bool IsMesh(string path) => MeshExtensions.Contains(Path.GetExtension(path));

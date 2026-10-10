@@ -480,6 +480,10 @@ public partial class App : Application
             {
                 DiagnosticLog.Write($"probe audit {window.ProbeAuditState(extra["audit:".Length..])}");
             }
+            else if (string.Equals(extra, "meshspin", StringComparison.OrdinalIgnoreCase))
+            {
+                DiagnosticLog.Write($"probe meshspin {await window.ProbeMeshSpinAsync()}");
+            }
             else if (string.Equals(extra, "buttonaudit", StringComparison.OrdinalIgnoreCase))
             {
                 DiagnosticLog.Write($"probe buttons {window.ProbeButtonAudit()}");

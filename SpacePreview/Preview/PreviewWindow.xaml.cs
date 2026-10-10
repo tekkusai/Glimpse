@@ -806,7 +806,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsMesh(path))
         {
-            var meshPreview = await Task.Run(() => MeshPreviewLoader.TryLoad(path), token);
+            var meshPreview = await Task.Run(() => MeshPreviewLoader.TryLoad(path, token), token);
             if (meshPreview is not null)
             {
                 return BuildMeshPreview(meshPreview);
@@ -826,7 +826,7 @@ public partial class PreviewWindow : Window
         {
             // A rotating vertex outline beats a static card. True surfaces
             // would need a CAD kernel; the cloud still shows the shape.
-            var outline = await Task.Run(() => MeshPreviewLoader.TryLoadStepOutline(path), token);
+            var outline = await Task.Run(() => MeshPreviewLoader.TryLoadStepOutline(path, token), token);
             if (outline is not null)
             {
                 return BuildMeshPreview(outline);
