@@ -12,8 +12,10 @@ namespace SpacePreview.Preview;
 /// files take: 8-bit RGB, grayscale, and CMYK (naive ink conversion, close
 /// enough for a preview), raw or RLE, plus raw 16-bit taken at 8. Any legal
 /// PSD size decodes row-streamed and integer-downsampled, so a 10800x7200
-/// print file costs a 4K preview's memory, not its own. Lab, 32-bit, and PSB
-/// fall back to the file card rather than guess.
+/// print file costs a 4K preview's memory, not its own. Each output pixel is
+/// the average of its box of document pixels, so a downsampled preview is
+/// smooth, not aliased. Lab, 32-bit, and PSB fall back to the file card
+/// rather than guess.
 /// </summary>
 internal static class PsdPreviewLoader
 {
@@ -22,12 +24,22 @@ internal static class PsdPreviewLoader
 
     private const int MaxOutputDimension = 4096;
 
-    public static BitmapSource? TryLoad(string path)
+    public static BitmapSource? TryLoad(string path, CancellationToken token = default)
     {
         try
         {
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            return Decode(stream, path);
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete,
+                bufferSize: 1 << 16,
+                FileOptions.SequentialScan);
+            return Decode(stream, path, token);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -72,7 +84,7 @@ internal static class PsdPreviewLoader
         Cmyk
     }
 
-    private static BitmapSource? Decode(Stream stream, string path)
+    private static BitmapSource? Decode(Stream stream, string path, CancellationToken token)
     {
         Span<byte> header = stackalloc byte[26];
         stream.ReadExactly(header);
@@ -147,8 +159,8 @@ internal static class PsdPreviewLoader
         stream.ReadExactly(two);
         var compression = ReadUInt16(two);
 
-        // Rows and columns are sampled by an integer factor while decoding,
-        // so plane memory is bounded by the preview, not the document.
+        // Rows and columns shrink by an integer factor while decoding, so
+        // plane memory is bounded by the preview, not the document.
         var factor = Math.Max(1, (int)Math.Ceiling(Math.Max(width, height) / (double)MaxOutputDimension));
         var outWidth = (width + factor - 1) / factor;
         var outHeight = (height + factor - 1) / factor;
@@ -163,72 +175,51 @@ internal static class PsdPreviewLoader
             : Math.Min(channels, colorChannels + 1);
         var planes = new byte[planesWanted][];
 
-        if (compression == 0)
-        {
-            var bytesPerSample = depth / 8;
-            var rowBuffer = new byte[(long)width * bytesPerSample];
-            for (var plane = 0; plane < planesWanted; plane++)
-            {
-                planes[plane] = new byte[planeBytes];
-                for (var row = 0; row < height; row++)
-                {
-                    if (row % factor != 0)
-                    {
-                        stream.Seek(rowBuffer.Length, SeekOrigin.Current);
-                        continue;
-                    }
-
-                    stream.ReadExactly(rowBuffer);
-                    var target = planes[plane].AsSpan(row / factor * outWidth, outWidth);
-                    for (var x = 0; x < outWidth; x++)
-                    {
-                        // Big-endian 16-bit: the high byte is the 8-bit value.
-                        target[x] = rowBuffer[(long)x * factor * bytesPerSample];
-                    }
-                }
-            }
-        }
-        else if (compression == 1 && depth == 8)
-        {
-            // PackBits. A row-length table for every channel row comes first;
-            // it also lets skipped rows be seeked past instead of decoded.
-            var rowCounts = new ushort[channels * height];
-            var table = new byte[rowCounts.Length * 2];
-            stream.ReadExactly(table);
-            for (var i = 0; i < rowCounts.Length; i++)
-            {
-                rowCounts[i] = ReadUInt16(table.AsSpan(i * 2));
-            }
-
-            var compressed = new byte[rowCounts.Max()];
-            var rowBuffer = new byte[width];
-            for (var plane = 0; plane < planesWanted; plane++)
-            {
-                planes[plane] = new byte[planeBytes];
-                for (var row = 0; row < height; row++)
-                {
-                    var length = rowCounts[plane * height + row];
-                    if (row % factor != 0)
-                    {
-                        stream.Seek(length, SeekOrigin.Current);
-                        continue;
-                    }
-
-                    stream.ReadExactly(compressed, 0, length);
-                    Array.Clear(rowBuffer);
-                    DecodePackBits(compressed.AsSpan(0, length), rowBuffer);
-                    var target = planes[plane].AsSpan(row / factor * outWidth, outWidth);
-                    for (var x = 0; x < outWidth; x++)
-                    {
-                        target[x] = rowBuffer[x * factor];
-                    }
-                }
-            }
-        }
-        else
+        if (compression is not (0 or 1) || (compression == 1 && depth != 8))
         {
             DiagnosticLog.Write($"psd preview skipped {path}: compression {compression} at depth {depth}");
             return null;
+        }
+
+        // Big-endian 16-bit samples: the high byte is the 8-bit value.
+        var bytesPerSample = depth / 8;
+        var rowBuffer = new byte[(long)width * bytesPerSample];
+        // PackBits puts a row-length table for every channel row first.
+        var rowCounts = compression == 1 ? ReadRowCounts(stream, channels * height) : null;
+        var compressed = new byte[rowCounts is null ? 0 : rowCounts.Max()];
+
+        var sums = new int[outWidth];
+        for (var plane = 0; plane < planesWanted; plane++)
+        {
+            planes[plane] = new byte[planeBytes];
+            Array.Clear(sums);
+            for (var row = 0; row < height; row++)
+            {
+                if ((row & 255) == 0)
+                {
+                    token.ThrowIfCancellationRequested();
+                }
+
+                if (rowCounts is null)
+                {
+                    stream.ReadExactly(rowBuffer);
+                }
+                else
+                {
+                    var length = rowCounts[plane * height + row];
+                    stream.ReadExactly(compressed, 0, length);
+                    Array.Clear(rowBuffer);
+                    DecodePackBits(compressed.AsSpan(0, length), rowBuffer);
+                }
+
+                AddRowToBoxes(rowBuffer, bytesPerSample, width, factor, sums);
+                var rowsInBox = row % factor + 1;
+                if (rowsInBox == factor || row == height - 1)
+                {
+                    WriteBoxAverages(sums, planes[plane].AsSpan(row / factor * outWidth, outWidth), width, factor, rowsInBox);
+                    Array.Clear(sums);
+                }
+            }
         }
 
         var alpha = planesWanted > colorChannels ? planes[colorChannels] : null;
@@ -278,6 +269,43 @@ internal static class PsdPreviewLoader
         var bitmap = BitmapSource.Create(outWidth, outHeight, 96, 96, PixelFormats.Bgra32, null, pixels, outWidth * 4);
         bitmap.Freeze();
         return bitmap;
+    }
+
+    private static ushort[] ReadRowCounts(Stream stream, int rows)
+    {
+        var table = new byte[rows * 2];
+        stream.ReadExactly(table);
+        var counts = new ushort[rows];
+        for (var i = 0; i < rows; i++)
+        {
+            counts[i] = ReadUInt16(table.AsSpan(i * 2));
+        }
+
+        return counts;
+    }
+
+    private static void AddRowToBoxes(byte[] row, int bytesPerSample, int width, int factor, int[] sums)
+    {
+        for (var box = 0; box < sums.Length; box++)
+        {
+            var end = Math.Min(width, (box + 1) * factor);
+            var sum = 0;
+            for (var x = box * factor; x < end; x++)
+            {
+                sum += row[x * bytesPerSample];
+            }
+
+            sums[box] += sum;
+        }
+    }
+
+    private static void WriteBoxAverages(int[] sums, Span<byte> target, int width, int factor, int rows)
+    {
+        for (var box = 0; box < sums.Length; box++)
+        {
+            var pixels = (Math.Min(width, (box + 1) * factor) - box * factor) * rows;
+            target[box] = (byte)((sums[box] + pixels / 2) / pixels);
+        }
     }
 
     private static void DecodePackBits(ReadOnlySpan<byte> source, Span<byte> target)
