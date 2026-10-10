@@ -392,6 +392,39 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void DeletingASavedSignatureTakesASecondClick()
+    {
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        try
+        {
+            OnSta(() =>
+            {
+                SignatureStore.SaveSignatureFromStrokes([new List<Point> { new(0, 0), new(60, 20) }], Colors.Black);
+                var surface = new FillSignSurface(0, 1, BlankPage());
+                Click(Pill(surface, "Signature"));
+
+                var remove = Descendants(surface).OfType<Border>().Single(border => border.ToolTip as string == "Delete this signature");
+                Click(remove);
+                Assert.Single(SignatureStore.ListSignatures());
+
+                Click(Pill(surface, "Keep"));
+                Assert.False(Shown(Pill(surface, "Delete")));
+                Assert.Single(SignatureStore.ListSignatures());
+
+                Click(remove);
+                Click(Pill(surface, "Delete"));
+                Assert.Empty(SignatureStore.ListSignatures());
+            });
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    }
+
+    [Fact]
     public void AnImportedStampIsNoLargerThanAPageNeeds()
     {
         using var temp = new TempDirectory();
