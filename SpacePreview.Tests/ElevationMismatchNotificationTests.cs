@@ -131,35 +131,6 @@ public sealed class ElevationMismatchNotificationTests
     }
 
     [Fact]
-    public void LegacyPerAppHistoryConsumesTheGlobalBudgetAcrossSchemas()
-    {
-        var earlier = new DateTimeOffset(2026, 7, 1, 12, 0, 0, TimeSpan.Zero);
-        var later = earlier.AddDays(1);
-        var state = PreviewAccessWarningPolicy.NormalizeLifetimeState(
-            shows: 0,
-            lastShownUtc: null,
-            dismissedForever: false,
-            [
-                new PreviewAccessWarningHistoryEntry
-                {
-                    SchemaVersion = 1,
-                    InitialShows = 1,
-                    LastShownUtc = earlier
-                },
-                new PreviewAccessWarningHistoryEntry
-                {
-                    SchemaVersion = 999,
-                    InitialShows = 1,
-                    LastShownUtc = later
-                }
-            ]);
-
-        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, state.Shows);
-        Assert.Equal(later, state.LastShownUtc);
-        Assert.False(PreviewAccessWarningPolicy.CanShowLifetime(state, later.AddYears(10)));
-    }
-
-    [Fact]
     public void GlobalWarningLifetimeRoundTripsThroughSettingsJson()
     {
         var lastShown = new DateTimeOffset(2026, 7, 11, 12, 0, 0, TimeSpan.Zero);
@@ -176,38 +147,6 @@ public sealed class ElevationMismatchNotificationTests
         Assert.Equal(1, roundTripped!.PreviewAccessWarningLifetimeShows);
         Assert.Equal(lastShown, roundTripped.PreviewAccessWarningLastShownUtc);
         Assert.True(roundTripped.PreviewAccessWarningDismissedForever);
-    }
-
-    [Fact]
-    public void SettingsNormalizationRepairsCaseDuplicatesAndNullHistory()
-    {
-        var earlier = new PreviewAccessWarningHistoryEntry
-        {
-            InitialShows = 1,
-            LastShownUtc = DateTimeOffset.UtcNow.AddDays(-1)
-        };
-        var later = earlier with
-        {
-            InitialShows = 2,
-            LastShownUtc = DateTimeOffset.UtcNow
-        };
-        var settings = new Settings
-        {
-            PreviewAccessWarnings = new Dictionary<string, PreviewAccessWarningHistoryEntry>
-            {
-                ["v2|accessunavailable|discord"] = earlier,
-                ["V2|ACCESSUNAVAILABLE|DISCORD"] = later,
-                ["V2|ACCESSUNAVAILABLE|BROKEN"] = null!
-            }
-        };
-
-        var normalized = Settings.Normalize(settings);
-
-        var entry = Assert.Single(normalized.PreviewAccessWarnings).Value;
-        Assert.Equal(2, entry.InitialShows);
-        Assert.Same(later, entry);
-        Assert.Equal(PreviewAccessWarningPolicy.LifetimeShowLimit, normalized.PreviewAccessWarningLifetimeShows);
-        Assert.Equal(later.LastShownUtc.ToUniversalTime(), normalized.PreviewAccessWarningLastShownUtc);
     }
 
     [Fact]

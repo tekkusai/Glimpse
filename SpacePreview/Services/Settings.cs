@@ -32,22 +32,14 @@ internal sealed record Settings
     public bool PinnedAlwaysOnTopDefault { get; init; } = true;
 
     /// <summary>
-    /// Global, update-stable budget for inaccessible file-picker notices.
-    /// Manual dismissal permanently completes the budget; a timed-out first
-    /// notice permits one final reminder after seven days.
+    /// The access notice's lifetime budget (see PreviewAccessWarningPolicy).
+    /// Unversioned on purpose: an update can never refill it.
     /// </summary>
     public int PreviewAccessWarningLifetimeShows { get; init; }
 
     public DateTimeOffset? PreviewAccessWarningLastShownUtc { get; init; }
 
     public bool PreviewAccessWarningDismissedForever { get; init; }
-
-    /// <summary>
-    /// Legacy per-app history retained for conservative one-time migration.
-    /// Existing users never receive a replenished budget after an update.
-    /// </summary>
-    public Dictionary<string, PreviewAccessWarningHistoryEntry> PreviewAccessWarnings { get; init; } =
-        new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
     /// The release whose automatic update prompt was most recently dismissed.
@@ -70,13 +62,13 @@ internal sealed record Settings
     /// preference. All reads and updates happen on the UI thread (tray menu,
     /// preview window), so a plain property is enough.
     /// </summary>
-    public static Settings Current => _current ??= Load();
+    public static Settings Current => _current ??= Load(Pathname);
 
     /// <summary>Applies a change to <see cref="Current"/> and persists it.</summary>
     public static void Update(Func<Settings, Settings> change)
     {
         _current = change(Current);
-        _current.Save();
+        _current.Save(Pathname);
     }
 
     private static readonly JsonSerializerOptions Options = new()
@@ -87,64 +79,63 @@ internal sealed record Settings
 
     private static string Pathname { get; } = AppPaths.InDataRoot("settings.json");
 
-    public static Settings Load()
+    /// <summary>
+    /// Reads the file at <paramref name="path"/>. A file that cannot be read
+    /// as settings is moved aside to settings.json.bad and named in the log,
+    /// so a torn write costs the user their preferences once, visibly, and
+    /// the evidence survives the next save.
+    /// </summary>
+    internal static Settings Load(string path)
     {
+        string json;
         try
         {
-            if (File.Exists(Pathname))
+            if (!File.Exists(path))
             {
-                var json = File.ReadAllText(Pathname);
-                var loaded = JsonSerializer.Deserialize<Settings>(json, Options) ?? new Settings();
-                var normalized = Normalize(loaded);
-
-                // Persist the legacy per-app migration immediately. Keeping
-                // the normalized lifetime fields on disk makes the global
-                // budget explicit and stable even if a later release stops
-                // understanding the old dictionary shape.
-                if (loaded.PreviewAccessWarningLifetimeShows
-                        != normalized.PreviewAccessWarningLifetimeShows
-                    || loaded.PreviewAccessWarningLastShownUtc?.ToUniversalTime()
-                        != normalized.PreviewAccessWarningLastShownUtc
-                    || loaded.PreviewAccessWarningDismissedForever
-                        != normalized.PreviewAccessWarningDismissedForever)
-                {
-                    normalized.Save();
-                }
-
-                return normalized;
+                return new Settings();
             }
+
+            json = File.ReadAllText(path);
         }
-        catch
+        catch (Exception ex)
         {
-            // Corrupt or unreadable settings fall back to defaults silently.
+            DiagnosticLog.Write($"settings unreadable, using defaults: {ex.GetType().Name}: {ex.Message}");
+            return new Settings();
         }
 
-        return new Settings();
+        try
+        {
+            var loaded = Normalize(JsonSerializer.Deserialize<Settings>(json, Options) ?? throw new JsonException("null settings"));
+
+            // 2.x kept the names of elevated apps the user opened file
+            // dialogs in. Nothing reads them any more; the first load
+            // rewrites the file without them.
+            if (json.Contains("\"PreviewAccessWarnings\"", StringComparison.Ordinal))
+            {
+                loaded.Save(path);
+            }
+
+            return loaded;
+        }
+        catch (Exception ex)
+        {
+            var aside = path + ".bad";
+            try
+            {
+                File.Move(path, aside, overwrite: true);
+            }
+            catch
+            {
+                // Kept in place, the next save overwrites it; the log line stays.
+            }
+
+            DiagnosticLog.Write($"settings corrupt, kept as {Path.GetFileName(aside)} and reset: {ex.GetType().Name}: {ex.Message}");
+            return new Settings();
+        }
     }
 
     internal static Settings Normalize(Settings settings)
     {
-        var history = new Dictionary<string, PreviewAccessWarningHistoryEntry>(
-            StringComparer.OrdinalIgnoreCase);
-        if (settings.PreviewAccessWarnings is { } loadedHistory)
-        {
-            foreach (var pair in loadedHistory)
-            {
-                if (!string.IsNullOrWhiteSpace(pair.Key) && pair.Value is { } entry)
-                {
-                    // Assignment deliberately makes the last case-insensitive
-                    // duplicate win instead of throwing on a malformed file.
-                    history[pair.Key] = entry;
-                }
-            }
-        }
-
-        var lifetime = PreviewAccessWarningPolicy.NormalizeLifetimeState(
-            settings.PreviewAccessWarningLifetimeShows,
-            settings.PreviewAccessWarningLastShownUtc,
-            settings.PreviewAccessWarningDismissedForever,
-            history.Values);
-
         var notificationVersion = settings.UpdateNotificationVersion?.Trim();
         var snoozedUntil = settings.UpdateNotificationSnoozedUntilUtc?.ToUniversalTime();
         if (!AppUpdateService.TryParseVersion(notificationVersion, out var parsedNotificationVersion))
@@ -159,30 +150,33 @@ internal sealed record Settings
 
         return settings with
         {
-            PreviewAccessWarningLifetimeShows = lifetime.Shows,
-            PreviewAccessWarningLastShownUtc = lifetime.LastShownUtc,
-            PreviewAccessWarningDismissedForever = lifetime.DismissedForever,
-            PreviewAccessWarnings = history,
             UpdateNotificationVersion = notificationVersion,
             UpdateNotificationSnoozedUntilUtc = snoozedUntil
         };
     }
 
-    public void Save()
+    /// <summary>
+    /// Writes beside the file, then moves over it: a crash or a forced quit
+    /// mid-write leaves the previous settings, never half of the new ones.
+    /// </summary>
+    internal void Save(string path)
     {
         try
         {
-            var directory = Path.GetDirectoryName(Pathname);
+            var directory = Path.GetDirectoryName(path);
             if (!string.IsNullOrWhiteSpace(directory))
             {
                 Directory.CreateDirectory(directory);
             }
 
-            File.WriteAllText(Pathname, JsonSerializer.Serialize(this, Options));
+            var temp = path + ".tmp";
+            File.WriteAllText(temp, JsonSerializer.Serialize(this, Options));
+            File.Move(temp, path, overwrite: true);
         }
-        catch
+        catch (Exception ex)
         {
             // Persisting preferences must not affect app behavior.
+            DiagnosticLog.Write($"settings save failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 }

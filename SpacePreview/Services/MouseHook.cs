@@ -102,8 +102,6 @@ internal sealed class MouseHook : IDisposable
                 _hook = hook;
             }
 
-            DiagnosticLog.Write(
-                $"mouse hook installed hhook=0x{hook.ToInt64():X} thread={threadId}");
             ready.Set();
 
             while (NativeMethods.GetMessage(out _, IntPtr.Zero, 0, 0) > 0)
@@ -124,10 +122,7 @@ internal sealed class MouseHook : IDisposable
             ready.Set();
             if (hook != IntPtr.Zero)
             {
-                if (NativeMethods.UnhookWindowsHookEx(hook))
-                {
-                    DiagnosticLog.Write("mouse hook removed");
-                }
+                NativeMethods.UnhookWindowsHookEx(hook);
             }
 
             lock (_lifecycleGate)
@@ -201,9 +196,9 @@ internal sealed class MouseHook : IDisposable
             return;
         }
 
-        if (hook != IntPtr.Zero && NativeMethods.UnhookWindowsHookEx(hook))
+        if (hook != IntPtr.Zero)
         {
-            DiagnosticLog.Write("mouse hook removed");
+            NativeMethods.UnhookWindowsHookEx(hook);
         }
 
         if (threadId != 0

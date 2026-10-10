@@ -752,9 +752,6 @@ public partial class PreviewWindow
         // then renders clipped into the old slot. Explicitly dirty the
         // control's measure so the header re-measures on the next pass.
         OpenControl.InvalidateMeasure();
-
-        container.Loaded += (_, _) => DiagnosticLog.Write(
-            $"openpill label='{label}' container={container.ActualWidth:0} open={openHalf.ActualWidth:0} control={OpenControl.ActualWidth:0}");
     }
 
     private static double MeasureOpenPillWidth(string label, bool hasMenu)

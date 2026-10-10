@@ -20,6 +20,11 @@ public partial class App : Application
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
+        // Helpers, the probe and installer commands share the resident's
+        // log. Until a process proves it is the resident, its lines carry
+        // its first argument.
+        DiagnosticLog.TagProcess(e.Args.Length > 0 ? e.Args[0].TrimStart('-', '/') : null);
+
         // A crash must name itself: a log that simply stops points at
         // native code, a FATAL line points at ours.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
@@ -101,6 +106,7 @@ public partial class App : Application
             return;
         }
 
+        DiagnosticLog.TagProcess(null);
         DiagnosticLog.Write("app starting");
 
         // Persisted preferences apply before anything renders so the first preview
@@ -136,10 +142,7 @@ public partial class App : Application
             _controller.PreviewAccessWarningDetected += warning =>
                 _trayIcon?.ShowPreviewAccessWarning(warning);
             _controller.Start();
-            _ = Task.Run(() =>
-            {
-                CacheHousekeeping.Run();
-            });
+            CacheHousekeeping.Start();
 
             // Once, right after install: the app introduces itself with its
             // own preview window and is dismissed with the gesture it teaches.
@@ -301,20 +304,27 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        DiagnosticLog.Write("app exiting");
-        _trayIcon?.Dispose();
-        _controller?.Dispose();
-        try
+        // Helpers, the probe and installer commands exit through here too,
+        // but only the resident has hooks, a tray and a shell session to
+        // tear down. A helper's exit was 'app exiting' in the user's log and
+        // a shell thread started to dispose nothing.
+        if (_controller is not null)
         {
-            if (!ExplorerSelectionService.ReleaseDesktopSessionAsync().Wait(TimeSpan.FromSeconds(2)))
+            DiagnosticLog.Write("app exiting");
+            _trayIcon?.Dispose();
+            _controller.Dispose();
+            try
             {
-                DiagnosticLog.Write("desktop shell session cleanup timed out");
+                if (!ExplorerSelectionService.ReleaseDesktopSessionAsync().Wait(TimeSpan.FromSeconds(2)))
+                {
+                    DiagnosticLog.Write("desktop shell session cleanup timed out");
+                }
             }
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write(
-                $"desktop shell session cleanup failed: {ex.GetType().Name}: {ex.Message}");
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write(
+                    $"desktop shell session cleanup failed: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         _quitRegistration?.Unregister(null);
