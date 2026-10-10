@@ -319,7 +319,7 @@ public partial class PreviewWindow
         var requestToken = _loadCancellation?.Token ?? CancellationToken.None;
         var failureReported = 0;
         var initializationStarted = 0;
-        var webView = new WebView2
+        var webView = new StagedWebView
         {
             DefaultBackgroundColor = background,
             HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -411,6 +411,7 @@ public partial class PreviewWindow
                 webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                WebViewTheme.Apply(webView.CoreWebView2);
                 RememberWebViewProcesses(webView.CoreWebView2);
                 webView.CoreWebView2.ContextMenuRequested += (_, _) => ArmWebContextMenu(webView.CoreWebView2);
                 webView.CoreWebView2.ProcessFailed += (_, args) =>

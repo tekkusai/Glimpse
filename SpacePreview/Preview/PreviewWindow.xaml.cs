@@ -79,6 +79,7 @@ public partial class PreviewWindow : Window
 
     private IDisposable? _currentDisposable;
     private IDisposable? _nextDisposable;
+    private readonly WarmBrowser _warmBrowser = new();
     private CancellationTokenSource? _loadCancellation;
     private long _loadVersion;
     private readonly SemaphoreSlim _shellIconGate = new(1, 1);
@@ -146,6 +147,7 @@ public partial class PreviewWindow : Window
         ZoomResetButton.Click += (_, _) => ResetZoom();
         StateChanged += (_, _) => SyncNativeWindowState();
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
+        Closed += (_, _) => _warmBrowser.Dispose();
 
         // One line per click: where it landed and who owned the capture.
         // This is the first question for any "clicks stopped working" report.
@@ -380,6 +382,8 @@ public partial class PreviewWindow : Window
             LastPresentationFailureReason = presented ? string.Empty : failureReason;
         }
 
+        _warmBrowser.Start(Hwnd);
+
         // A first office conversion builds LibreOffice's profile (~15s). It is
         // the wait most likely to feel broken, so name it up front and
         // make clear that it is one-time.
@@ -452,7 +456,9 @@ public partial class PreviewWindow : Window
         HideContentSwapScrim();
         HideLoadingOverlay();
         SetPreviewContent(BuildWelcomeContent(), null, animate: false);
-        return ShowWithEntrance();
+        var presented = ShowWithEntrance();
+        _warmBrowser.Start(Hwnd);
+        return presented;
     }
 
     private static FrameworkElement BuildWelcomeContent()
