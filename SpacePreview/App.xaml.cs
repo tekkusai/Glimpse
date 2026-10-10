@@ -81,25 +81,6 @@ public partial class App : Application
             return;
         }
 
-        // Helper mode for document page thumbnails. Converted Office PDFs can
-        // crash pdfium in native code, so thumbnailing them happens in a short
-        // child process instead of the resident preview process.
-        if (e.Args.Length >= 4 && string.Equals(e.Args[0], "--render-pdf-thumbnails", StringComparison.OrdinalIgnoreCase))
-        {
-            RenderPdfThumbnailsAndExit(e.Args);
-            return;
-        }
-
-        // Same reasoning, sharper case: the document being proved is one this
-        // app wrote seconds earlier, so it is the likeliest input in the whole
-        // program to make pdfium unhappy. A crash here has to cost a fallback,
-        // not the resident preview.
-        if (e.Args.Length >= 3 && string.Equals(e.Args[0], "--prove-pdf-scale", StringComparison.OrdinalIgnoreCase))
-        {
-            ProvePdfScaleAndExit(e.Args);
-            return;
-        }
-
         if (HandleCommand(e.Args))
         {
             Shutdown();
@@ -172,51 +153,6 @@ public partial class App : Application
                 MessageBoxButton.OK,
                 MessageBoxImage.Error);
             Shutdown();
-        }
-    }
-
-    private void RenderPdfThumbnailsAndExit(string[] args)
-    {
-        var exitCode = 1;
-        try
-        {
-            var pageLimit = int.Parse(args[3], System.Globalization.CultureInfo.InvariantCulture);
-            var startPage = args.Length > 4
-                ? int.Parse(args[4], System.Globalization.CultureInfo.InvariantCulture)
-                : 0;
-            exitCode = PdfPreviewRenderer.TryRenderThumbnailsToDirectory(
-                args[1],
-                args[2],
-                pageLimit,
-                CancellationToken.None,
-                startPage)
-                ? 0
-                : 2;
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"pdf thumbnail helper failed: {ex.GetType().Name}: {ex.Message}");
-        }
-        finally
-        {
-            Shutdown(exitCode);
-        }
-    }
-
-    private void ProvePdfScaleAndExit(string[] args)
-    {
-        var exitCode = 1;
-        try
-        {
-            exitCode = PdfPreviewRenderer.RendersLike(args[1], args[2], CancellationToken.None) ? 0 : 2;
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"pdf proof helper failed: {ex.GetType().Name}: {ex.Message}");
-        }
-        finally
-        {
-            Shutdown(exitCode);
         }
     }
 

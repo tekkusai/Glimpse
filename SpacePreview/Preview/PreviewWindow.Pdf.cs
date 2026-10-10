@@ -148,7 +148,13 @@ public partial class PreviewWindow
             background,
             () => PdfViewerSource(path),
             $"pdf preview {path}",
-            ex => { _ = PdfWebFallbackAsync(path, version, token); },
+            _ =>
+            {
+                if (version == _loadVersion)
+                {
+                    SetPreviewContent(BuildPdfErrorPreview(path), null, animate: false);
+                }
+            },
             configure: core => ConfigurePdfViewer(core, path),
             readinessMode: WebPaintReadinessMode.PdfPlugin);
         Grid.SetColumn(webView, 1);
@@ -1494,97 +1500,19 @@ public partial class PreviewWindow
         });
     }
 
-    private async Task PdfWebFallbackAsync(string path, long version, CancellationToken token)
+    /// <summary>
+    /// What a document the viewer cannot show gets. pdfium never renders a
+    /// user's document in this process: it can die in native code, and here
+    /// it would take every later preview with it.
+    /// </summary>
+    private static FrameworkElement BuildPdfErrorPreview(string path)
     {
-        try
-        {
-            var content = await BuildPdfViaPdfiumAsync(path, token);
-            if (version != _loadVersion)
-            {
-                return;
-            }
-
-            SetPreviewContent(content, null, animate: false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Superseded by a newer preview; nothing to render.
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"pdf fallback failed {path}: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private static async Task<FrameworkElement> BuildPdfViaPdfiumAsync(string path, CancellationToken token)
-    {
-        var pdf = await Task.Run(() => PdfPreviewRenderer.TryRender(path, token), token);
-        return pdf is null
-            ? BuildErrorPreview("Glimpse can't preview this PDF", "It may be damaged or in use.")
-            : BuildPdfPreview(pdf);
-    }
-
-    // ---------------------------------------------------------------------
-    // Static content builders. All colors come from the active theme.
-    // ---------------------------------------------------------------------
-
-    private static FrameworkElement BuildPdfPreview(PdfPreviewDocument document)
-    {
-        var palette = Theme.Current;
-        var stack = new StackPanel
-        {
-            Margin = new Thickness(0, 22, 0, 22),
-            HorizontalAlignment = HorizontalAlignment.Center
-        };
-
-        for (var i = 0; i < document.Pages.Count; i++)
-        {
-            var page = document.Pages[i];
-            var maxWidth = 940.0;
-            stack.Children.Add(new Border
-            {
-                MaxWidth = maxWidth,
-                Width = Math.Min(maxWidth, page.Width),
-                Margin = new Thickness(24, i == 0 ? 0 : 20, 24, 0),
-                Background = Brushes.White,
-                Effect = new DropShadowEffect
-                {
-                    BlurRadius = 18,
-                    ShadowDepth = 4,
-                    Direction = 270,
-                    Color = Colors.Black,
-                    Opacity = palette.IsDark ? 0.24 : 0.16
-                },
-                Child = new Image
-                {
-                    Source = page.Bitmap,
-                    Stretch = Stretch.Uniform,
-                    SnapsToDevicePixels = true
-                }
-            });
-
-            stack.Children.Add(new TextBlock
-            {
-                Text = $"Page {i + 1} of {document.TotalPages}",
-                Margin = new Thickness(0, 8, 0, 0),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                FontSize = 11,
-                Foreground = Theme.Brush(palette.TextTertiary)
-            });
-        }
-
-        if (document.TotalPages > document.Pages.Count)
-        {
-            stack.Children.Add(new TextBlock
-            {
-                Text = $"Showing first {document.Pages.Count} pages",
-                Margin = new Thickness(0, 18, 0, 0),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                FontSize = 12,
-                Foreground = Theme.Brush(palette.TextSecondary)
-            });
-        }
-
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
+        var kind = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : "file";
+        var extension = Path.GetExtension(path);
+        var app = string.IsNullOrEmpty(extension) ? null : NativeMethods.TryGetFriendlyAppName(extension);
+        var next = string.IsNullOrWhiteSpace(app) || app.Equals("Pick an app", StringComparison.OrdinalIgnoreCase)
+            ? "Open it in another app instead."
+            : $"Open it with {app} instead.";
+        return BuildErrorPreview($"{Branding.Name} can't preview this {kind}", next);
     }
 }

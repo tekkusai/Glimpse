@@ -33,7 +33,7 @@ public sealed class PdfFillSignWriterTests
         Assert.Contains("/Annots", written, StringComparison.Ordinal);
         Assert.Contains("/Rect [20 40 80 80]", written, StringComparison.Ordinal);
         Assert.Contains("/Prev ", written, StringComparison.Ordinal);
-        Assert.NotNull(PdfPreviewRenderer.TryRender(output, CancellationToken.None));
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None));
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public sealed class PdfFillSignWriterTests
         Assert.Contains("/Subtype /Stamp", written, StringComparison.Ordinal);
         Assert.Contains("/Subtype /Image", written, StringComparison.Ordinal);
         Assert.Contains("/SMask", written, StringComparison.Ordinal);
-        Assert.NotNull(PdfPreviewRenderer.TryRender(output, CancellationToken.None));
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None));
     }
 
     [Theory]

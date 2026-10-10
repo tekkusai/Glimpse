@@ -194,7 +194,7 @@ public sealed class PreviewChromeRegressionTests
     public void PdfDocumentsUseOwnedPageRailInsteadOfBrokenNativeSidebar()
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var appSource = ReadSource(@"SpacePreview\App.xaml.cs");
+        var appSource = ReadSource(@"SpacePreview\Program.cs");
         var upgradeBody = ReadMethod(windowSource, "private void UpgradeConvertedOfficePreview");
         var stagedJumpBody = ReadMethod(windowSource, "private void StagePdfViewerJump");
         var stagedReplacementBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
