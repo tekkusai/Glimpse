@@ -42,10 +42,8 @@ public partial class PreviewWindow
         // these sizes the first layout visibly stutters, so large previews
         // trade completeness for instant open. A single enormous record is
         // more expensive than ordinary multiline text, so it gets a tighter
-        // budget. This covers bencoded metadata, minified source maps/JSON,
+        // budget. This covers bencoded metadata, minified source maps,
         // lockfiles, and malformed CSV/log records without type exceptions.
-        const int PrettyPrintLimit = 300_000;
-
         if (preview is null)
         {
             return null;
@@ -60,21 +58,13 @@ public partial class PreviewWindow
             || extension.Equals(".txt", StringComparison.OrdinalIgnoreCase)
             || extension.Equals(".log", StringComparison.OrdinalIgnoreCase);
 
-        if (extension.Equals(".json", StringComparison.OrdinalIgnoreCase)
-            && !preview.Truncated
-            && text.Length <= PrettyPrintLimit)
-        {
-            text = TryFormatJson(text);
-            wrap = true;
-        }
-
         var displayLimit = ContainsPathologicalLine(text)
             ? LongLineDisplayLimit
             : TextDisplayLimit;
         if (text.Length > displayLimit)
         {
             text = text[..displayLimit]
-                + $"\n\nShowing the first {FileKinds.FormatSize(displayLimit)} of {FileKinds.FormatSize(preview.TotalBytes)}. Open the file for the rest.";
+                + $"\n\nShowing the first {displayLimit:N0} characters. Open the file for the rest.";
             wrap = false;
         }
 
@@ -102,28 +92,25 @@ public partial class PreviewWindow
         return false;
     }
 
+    /// <summary>
+    /// Plain text set like the code page beside it (docs/DESIGN.md, Type):
+    /// 13 px Cascadia Mono at 1.6 line height, the same top inset, primary
+    /// text, so a .txt next to a .cs reads as one app.
+    /// </summary>
     private static FrameworkElement BuildTextPreview(TextPreview preview, bool wrap)
     {
-        return BuildSelectableTextBox(
+        const double fontSize = 13;
+        var textBox = BuildSelectableTextBox(
             preview.Text,
             new FontFamily("Cascadia Mono, Consolas"),
-            fontSize: 13,
+            fontSize,
             wrap,
-            new Thickness(24, 20, 24, 24),
+            // The text box insets its text 2 px on each side of its own.
+            new Thickness(22, 18, 22, 48),
             Theme.Current.CanvasBg);
-    }
-
-    private static string TryFormatJson(string text)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(text);
-            return JsonSerializer.Serialize(document, new JsonSerializerOptions { WriteIndented = true });
-        }
-        catch
-        {
-            return text;
-        }
+        TextBlock.SetLineHeight(textBox, fontSize * 1.6);
+        TextBlock.SetLineStackingStrategy(textBox, LineStackingStrategy.BlockLineHeight);
+        return textBox;
     }
 
     private static TextBox BuildSelectableTextBox(

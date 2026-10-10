@@ -1,5 +1,8 @@
+using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 
 namespace SpacePreview.Utilities;
 
@@ -288,9 +291,22 @@ internal static class FileKinds
 
 internal sealed record TextPreview(string Text, bool Truncated, long TotalBytes);
 
+/// <summary>
+/// Bytes to display text, once for every text lane: the native text view
+/// and the code and markdown pages all read through here, so an encoding or
+/// JSON fix lands everywhere at once.
+/// </summary>
 internal static class TextPreviewLoader
 {
     public const int MaxPreviewBytes = 2 * 1024 * 1024;
+
+    /// <summary>JSON up to this many characters is indented before display.</summary>
+    public const int JsonPrettyPrintLimit = 300_000;
+
+    private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+
+    // Windows' ANSI code pages are not built into .NET; the provider adds them.
+    private static readonly Encoding Ansi = LoadAnsiCodePage();
 
     /// <summary>
     /// The one truncation sentence, shared with the lanes that need to strip
@@ -309,35 +325,28 @@ internal static class TextPreviewLoader
 
             using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             {
-                var offset = 0;
-                while (offset < bytesToRead)
+                var read = stream.ReadAtLeast(buffer, bytesToRead, throwOnEndOfStream: false);
+                if (read != bytesToRead)
                 {
-                    var read = stream.Read(buffer, offset, bytesToRead - offset);
-                    if (read == 0)
-                    {
-                        break;
-                    }
-
-                    offset += read;
-                }
-
-                if (offset != bytesToRead)
-                {
-                    Array.Resize(ref buffer, offset);
+                    Array.Resize(ref buffer, read);
                 }
             }
 
-            var encoding = DetectEncoding(buffer);
-            if (encoding is null && LooksBinary(buffer))
+            var truncated = file.Length > buffer.Length;
+            var text = Decode(buffer, truncated);
+            if (text is null)
             {
                 return null;
             }
 
-            encoding ??= Encoding.UTF8;
-            var text = encoding.GetString(buffer);
             text = text.Replace("\0", string.Empty);
+            if (!truncated
+                && text.Length <= JsonPrettyPrintLimit
+                && Path.GetExtension(path).Equals(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                text = PrettyPrintJson(text);
+            }
 
-            var truncated = file.Length > buffer.Length;
             if (truncated)
             {
                 text += TruncationNotice(buffer.Length, file.Length);
@@ -348,6 +357,100 @@ internal static class TextPreviewLoader
         catch
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// A byte order mark names the encoding. Without one the bytes are UTF-8
+    /// only if all of them are valid UTF-8; anything else is the ANSI code
+    /// page, which is what Excel's CSV export and older Notepad write.
+    /// Returns null for binary data.
+    /// </summary>
+    internal static string? Decode(byte[] buffer, bool truncated)
+    {
+        if (DetectEncoding(buffer) is { } marked)
+        {
+            var preamble = marked.Preamble.Length;
+            return marked.GetString(buffer, preamble, buffer.Length - preamble);
+        }
+
+        if (LooksBinary(buffer))
+        {
+            return null;
+        }
+
+        // A read cut at the byte limit can split the last character; that
+        // tail is no evidence against UTF-8.
+        var length = truncated ? buffer.Length - IncompleteUtf8Tail(buffer) : buffer.Length;
+        try
+        {
+            return StrictUtf8.GetString(buffer, 0, length);
+        }
+        catch (DecoderFallbackException)
+        {
+            return Ansi.GetString(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Indents JSON. The relaxed encoder keeps non-ASCII letters and
+    /// &lt; &gt; &amp; ' as written, and numbers keep their exact text.
+    /// Anything that does not parse (comments, JSON Lines) stays as it is.
+    /// </summary>
+    internal static string PrettyPrintJson(string text)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(text);
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
+            {
+                Indented = true,
+                Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+            }))
+            {
+                document.WriteTo(writer);
+            }
+
+            return Encoding.UTF8.GetString(stream.GetBuffer(), 0, (int)stream.Length);
+        }
+        catch (JsonException)
+        {
+            return text;
+        }
+    }
+
+    /// <summary>Bytes at the end that start a UTF-8 character the buffer does not finish.</summary>
+    private static int IncompleteUtf8Tail(byte[] buffer)
+    {
+        for (var back = 1; back <= Math.Min(3, buffer.Length); back++)
+        {
+            var value = buffer[^back];
+            if ((value & 0xC0) == 0x80)
+            {
+                continue;
+            }
+
+            var needed = (value & 0xE0) == 0xC0 ? 2
+                : (value & 0xF0) == 0xE0 ? 3
+                : (value & 0xF8) == 0xF0 ? 4
+                : 1;
+            return needed > back ? back : 0;
+        }
+
+        return 0;
+    }
+
+    private static Encoding LoadAnsiCodePage()
+    {
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        try
+        {
+            return Encoding.GetEncoding(CultureInfo.CurrentCulture.TextInfo.ANSICodePage);
+        }
+        catch
+        {
+            return Encoding.Latin1;
         }
     }
 
