@@ -559,6 +559,10 @@ public partial class App : Application
                 window.ShowPreview(extra["show:".Length..], IntPtr.Zero);
                 window.Left = -30000;
             }
+            else if (extra.StartsWith("fullshot:", StringComparison.OrdinalIgnoreCase))
+            {
+                await window.ProbeCompositeShotAsync(extra["fullshot:".Length..]);
+            }
             else if (extra.StartsWith("shot:", StringComparison.OrdinalIgnoreCase))
             {
                 // Mid-sequence capture: catches transient states (the ghost
@@ -575,8 +579,8 @@ public partial class App : Application
 
         await Task.Delay(2500);
 
-        var (width, height) = CaptureWindow(window, outputPng);
-        DiagnosticLog.Write($"probe rendered {path} -> {outputPng} ({width}x{height})");
+        await window.ProbeCompositeShotAsync(outputPng);
+        DiagnosticLog.Write($"probe rendered {path} -> {outputPng}");
         Shutdown();
     }
 

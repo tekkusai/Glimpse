@@ -1494,6 +1494,52 @@ public partial class PreviewWindow : Window
         }
     }
 
+    /// <summary>Dev probe only: the whole window as the user sees it. WPF
+    /// renders the chrome; each visible webview's own pixels, captured over
+    /// CDP, are laid over the black hole RenderTargetBitmap leaves for it.</summary>
+    internal async Task ProbeCompositeShotAsync(string outputPng)
+    {
+        UpdateLayout();
+        var width = (int)Math.Ceiling(ActualWidth);
+        var height = (int)Math.Ceiling(ActualHeight);
+        var visual = new DrawingVisual();
+        using (var context = visual.RenderOpen())
+        {
+            context.DrawRectangle(new VisualBrush(this), null, new Rect(0, 0, width, height));
+            foreach (var webView in FindVisualChildren<WebView2>(this))
+            {
+                if (!webView.IsVisible || webView.CoreWebView2 is not { } core || webView.ActualWidth < 1)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var json = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}");
+                    using var document = JsonDocument.Parse(json);
+                    var bytes = Convert.FromBase64String(document.RootElement.GetProperty("data").GetString() ?? string.Empty);
+                    var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                    var origin = webView.TransformToAncestor(this).Transform(new Point(0, 0));
+                    context.PushOpacity(webView.Opacity);
+                    context.DrawImage(frame, new Rect(origin, new Size(webView.ActualWidth, webView.ActualHeight)));
+                    context.Pop();
+                }
+                catch (Exception ex)
+                {
+                    DiagnosticLog.Write($"probe composite webview skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(visual);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        await using var stream = File.Create(outputPng);
+        encoder.Save(stream);
+        DiagnosticLog.Write($"probe composite -> {outputPng} ({width}x{height})");
+    }
+
     /// <summary>Dev-only: runs script inside the current preview's webview.</summary>
     internal async Task ProbeEvalJsAsync(string script)
     {
