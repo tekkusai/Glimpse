@@ -48,15 +48,6 @@ public partial class PreviewWindow : Window
     private const double HeaderOpenMenuMinWidth = 104;
     private const double HeaderOpenLabelMaxWidth = 162;
     private const double HeaderOpenLabelWithMenuMaxWidth = 136;
-    private const double FileCardWidth = 600;
-    private const double FileCardVisualSlotWidth = 560;
-    private const double FileCardVisualSlotHeight = 220;
-    private const double FileCardTitleSlotHeight = 58;
-    private const double FileCardInfoSlotHeight = 124;
-    private const double FileCardFooterSlotHeight = 168;
-    private const double FileCardIconSide = 148;
-    private const double FolderArtworkSlotWidth = 280;
-    private const double FolderArtworkSlotHeight = 220;
     private const string HevcVideoExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7";
     private const string Av1VideoExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V";
     private const string HeifImageExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9PMMSR1CGPWG";
@@ -258,7 +249,7 @@ public partial class PreviewWindow : Window
         ApplyHeaderSubtitle(path, _shortcutTarget, selectedCount);
 
         var secondaryActions = new List<(string Label, Action Action)>();
-        if (FileKinds.IsExecutableLike(contentPath))
+        if (CanRunAsAdministrator(contentPath))
         {
             var exePath = contentPath;
             secondaryActions.Add(("Run as administrator", () => RunAsAdministrator(exePath)));
@@ -658,7 +649,7 @@ public partial class PreviewWindow : Window
             {
                 _fillSignPath = null;
                 UpdateFillSignPill();
-                SetPreviewContent(BuildErrorPreview("Glimpse can't preview this file", "Something went wrong while reading it."), null);
+                SetPreviewContent(BuildErrorPreview("Can't preview this file", "Something went wrong while reading it."), null);
             }
         }
     }
@@ -726,7 +717,7 @@ public partial class PreviewWindow : Window
             if (FileKinds.IsHeif(path) || signature == FileSignatureKind.Heif)
             {
                 DiagnosticLog.Write($"image decode failed {path}: heif brand={FileSignatures.HeifBrandText(path)}");
-                return BuildHeifFailurePreview(path);
+                return BuildHeifFailurePreview(await Task.Run(() => FileSignatures.ClassifyHeifFailure(path), token));
             }
         }
 
@@ -812,14 +803,7 @@ public partial class PreviewWindow : Window
                 return BuildMeshPreview(meshPreview);
             }
 
-            if (FileKinds.IsStl(path))
-            {
-                var cadPreview = await Task.Run(() => CadPreviewLoader.TryLoadStl(path, token), token);
-                return BuildCadPreview(cadPreview, "#C8A2FF");
-            }
-
-            // Other mesh formats that fail to parse fall through to the
-            // generic card below.
+            // A mesh that fails to parse falls through to the file card.
         }
 
         if (FileKinds.IsStep(path))
@@ -832,14 +816,8 @@ public partial class PreviewWindow : Window
                 return BuildMeshPreview(outline);
             }
 
-            var shellImage = await Task.Run(() => ShellThumbnailProvider.TryGetThumbnail(path), token);
-            if (shellImage is { IsThumbnail: true })
-            {
-                return await BuildFileCardAsync(path, token);
-            }
-
-            var cadPreview = await Task.Run(() => CadPreviewLoader.TryLoadStep(path), token);
-            return BuildCadPreview(cadPreview, "#C8A2FF");
+            // The file card still shows a CAD handler's thumbnail.
+            return await BuildFileCardAsync(path, token);
         }
 
         if (FileKinds.IsHtml(path))
@@ -884,24 +862,6 @@ public partial class PreviewWindow : Window
             {
                 return BuildTextPreview(new TextPreview(text.Value.Text, Truncated: false, TotalBytes: 0), text.Value.Wrap);
             }
-        }
-
-        if (FileKinds.IsIllustrator(path))
-        {
-            var summary = await Task.Run(() => BuildIllustratorSummary(path), token);
-            return BuildLabeledTextPreview(
-                "Illustrator artwork",
-                Color.FromRgb(255, 157, 72),
-                summary,
-                new FontFamily("Segoe UI Variable, Segoe UI"),
-                fontSize: 14,
-                wrap: true);
-        }
-
-        if (FileKinds.IsExecutableLike(path))
-        {
-            var data = await Task.Run(() => CollectFileCardData(path, token), token);
-            return BuildFileCard(data, liveLine: null, BuildExecutableToggles(path));
         }
 
         return await BuildFileCardAsync(path, token);

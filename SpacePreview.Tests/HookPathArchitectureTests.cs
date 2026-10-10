@@ -117,38 +117,30 @@ public sealed class HookPathArchitectureTests
     {
         var body = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildHoverArtwork");
 
-        // Icon-only children use the file card's icon side; real thumbnails
-        // keep the large artwork treatment.
-        Assert.Contains("FileCardIconSide", body, StringComparison.Ordinal);
-        Assert.Contains("BuildFolderArtwork", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("184", body, StringComparison.Ordinal);
+        // A hovered file is drawn by the same builder as its own card.
+        Assert.Contains("BuildCardVisual(shellImage", body, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// A folder's first frame is local UI: the shell icon and the size walk
+    /// start from their own async methods, after the reveal.
+    /// </summary>
     [Fact]
     public void FolderCardRevealDoesNotWaitForAThumbnailOrItemEnumeration()
     {
-        var collector = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CollectFileCardData");
-        var directoryCollector = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CollectDirectoryCardData");
         var loader = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "LoadPreviewAsync");
         var cardBuilder = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildDirectoryCard");
-        var folderArtwork = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildFolderArtwork");
         var scanRunner = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RunFolderSizeScanAsync");
         var revealScheduler = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RunAfter");
 
-        Assert.True(
-            collector.IndexOf("Directory.Exists(path)", StringComparison.Ordinal)
-            < collector.IndexOf("ShellThumbnailProvider.TryGetThumbnail(path)", StringComparison.Ordinal));
-        Assert.True(
-            loader.IndexOf("Directory.Exists(contentPath)", StringComparison.Ordinal)
-            < loader.IndexOf("FileSignatures.Detect(contentPath)", StringComparison.Ordinal));
-        Assert.DoesNotContain("TryGetThumbnail", directoryCollector, StringComparison.Ordinal);
-        Assert.DoesNotContain("TryGetIcon", directoryCollector, StringComparison.Ordinal);
-        Assert.DoesNotContain("EnumerateFileSystemInfos", directoryCollector, StringComparison.Ordinal);
-        Assert.DoesNotContain("DirectoryInfo", directoryCollector, StringComparison.Ordinal);
+        var folderBranch = loader.IndexOf("Directory.Exists(contentPath)", StringComparison.Ordinal);
+        var sniff = loader.IndexOf("FileSignatures.Detect(contentPath)", StringComparison.Ordinal);
+        Assert.True(folderBranch >= 0 && sniff > folderBranch);
+        Assert.DoesNotContain("ShellThumbnailProvider.", cardBuilder, StringComparison.Ordinal);
+        Assert.DoesNotContain("FolderScanner.Scan", cardBuilder, StringComparison.Ordinal);
+        Assert.DoesNotContain("EnumerateFileSystemInfos", cardBuilder, StringComparison.Ordinal);
         Assert.Contains("UpdateFolderArtworkAsync", cardBuilder, StringComparison.Ordinal);
         Assert.Contains("StartFolderSizeScan", cardBuilder, StringComparison.Ordinal);
-        Assert.Contains("LinearGradientBrush", folderArtwork, StringComparison.Ordinal);
-        Assert.Contains("DropShadowEffect", folderArtwork, StringComparison.Ordinal);
         Assert.Contains("Task.Delay(FolderSizeScanStartDelay, token)", scanRunner, StringComparison.Ordinal);
         Assert.Contains("_folderSizeScanGate.WaitAsync(token)", scanRunner, StringComparison.Ordinal);
         Assert.Contains("DispatcherPriority.Render", revealScheduler, StringComparison.Ordinal);

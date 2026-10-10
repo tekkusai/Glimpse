@@ -139,7 +139,7 @@ public partial class PreviewWindow
             {
                 if (IsCurrentContentPath(path))
                 {
-                    SetPreviewContent(BuildErrorPreview("Glimpse can't play this file", MediaOpenInsteadText(path)), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Can't play this file", MediaOpenInsteadText(path)), null, animate: false);
                 }
             },
             configure: core =>
@@ -657,51 +657,38 @@ media.addEventListener('error', () => reportPlayFailure({ name: media.error ? St
     private static FrameworkElement BuildMediaFailurePreview(string path, Mp4CodecInfo? codecs)
     {
         return BuildErrorPreview(
-            "Glimpse can't play this file",
+            "Can't play this file",
             MediaFailureNextStep(path, codecs),
             MediaCodecStoreAction(codecs));
     }
 
-    private static FrameworkElement BuildHeifFailurePreview(string path)
+    /// <summary>
+    /// A damaged photo is not a missing codec: the Store is offered only when
+    /// the file really is HEIF and the decoder did not report bad data.
+    /// </summary>
+    private static FrameworkElement BuildHeifFailurePreview(HeifFailure failure) => failure switch
     {
-        var usesHevc = FileSignatures.HasHevcCodedHeifBrand(path)
-            || Path.GetExtension(path).Equals(".heic", StringComparison.OrdinalIgnoreCase);
-        var action = usesHevc
-            ? new PreviewAction(
-                "Get HEVC support",
-                "Opens Microsoft Store",
-                HevcVideoExtensionStoreUri,
-                "Open HEVC Video Extensions in Microsoft Store")
-            : new PreviewAction(
-                "Get HEIF support",
-                "Opens Microsoft Store",
-                HeifImageExtensionStoreUri,
-                "Open HEIF Image Extensions in Microsoft Store");
-
-        return BuildErrorPreview(
-            "Glimpse can't preview this image",
-            usesHevc ? "This image uses HEVC." : "This image uses HEIF.",
-            action);
-    }
+        HeifFailure.NeedsHevc => BuildErrorPreview(
+            "Can't preview this image",
+            "This image uses HEVC.",
+            new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store")),
+        HeifFailure.NeedsHeif => BuildErrorPreview(
+            "Can't preview this image",
+            "This image uses HEIF.",
+            new PreviewAction("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store")),
+        _ => BuildErrorPreview("Can't preview this image", "This image may be damaged.")
+    };
 
     private static PreviewAction? MediaCodecStoreAction(Mp4CodecInfo? codecs)
     {
         if (codecs?.HasHevcVideo == true)
         {
-            return new PreviewAction(
-                "Get HEVC support",
-                "Opens Microsoft Store",
-                HevcVideoExtensionStoreUri,
-                "Open HEVC Video Extensions in Microsoft Store");
+            return new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
         }
 
         if (codecs?.HasAv1Video == true)
         {
-            return new PreviewAction(
-                "Get AV1 support",
-                "Opens Microsoft Store",
-                Av1VideoExtensionStoreUri,
-                "Open AV1 Video Extension in Microsoft Store");
+            return new PreviewAction("Get AV1 support", Av1VideoExtensionStoreUri, "Opens AV1 Video Extension in Microsoft Store");
         }
 
         return null;

@@ -34,8 +34,7 @@ public sealed class AppPackagePreviewLoaderTests
         Assert.Equal(1, info.ApplicationCount);
         Assert.False(info.IsBundle);
         Assert.Contains("internetClient", info.Capabilities);
-        Assert.Equal(AppPackageSignature.NotSigned, info.Signature);
-        Assert.Null(info.SignerName);
+        Assert.Equal(path, info.SourcePath);
         Assert.NotNull(info.LogoBytes);
         Assert.NotEmpty(info.LogoBytes!);
     }
