@@ -472,4 +472,149 @@ public partial class PreviewWindow
             return false;
         }
     }
+
+    private FrameworkElement BuildBrowserImagePreview(string path)
+    {
+        var palette = Theme.Current;
+        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
+        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        grid.Children.Add(CreateWebView(
+            background,
+            () => WriteImageHtml(path),
+            $"browser image {path}",
+            ex => _ = ShowFileCardFallbackAsync(path)));
+        return grid;
+    }
+
+    private static Uri WriteImageHtml(string imagePath)
+    {
+        var palette = Theme.Current;
+        var background = $"#{palette.CanvasBg.R:X2}{palette.CanvasBg.G:X2}{palette.CanvasBg.B:X2}";
+        var svgSize = FileKinds.IsSvg(imagePath) && SvgSizeProbe.TryReadCanvasSize(imagePath, out var canvasSize)
+            ? canvasSize
+            : Size.Empty;
+        var svgWidth = svgSize.Width.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        var svgHeight = svgSize.Height.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+        // Key carries the full content recipe (v6 = hook handles arrow browse,
+        // page listener removed); an existing file is already correct, and
+        // skipping the rewrite avoids racing another window's navigation
+        // read of the same file.
+        var htmlPath = TempHtmlPath("ImageHtml", imagePath + background + $"|svg:{svgWidth}x{svgHeight}|v7");
+        if (File.Exists(htmlPath))
+        {
+            return new Uri(htmlPath, UriKind.Absolute);
+        }
+
+        var source = WebUtility.HtmlEncode(new Uri(imagePath, UriKind.Absolute).AbsoluteUri);
+
+        // Same gestures as the native image viewer: wheel zooms at the
+        // cursor, drag pans, double-click toggles fit/actual. Zoom resizes
+        // the img itself (not a transform) so SVG re-rasterizes crisp.
+        var html = $$"""
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html,body{margin:0;width:100%;height:100%;background:{{background}};overflow:hidden;}
+html{animation:sp-reveal 160ms ease-out;}
+@keyframes sp-reveal{from{opacity:0} }
+#pic{position:absolute;left:0;top:0;transform-origin:0 0;cursor:grab;user-select:none;-webkit-user-drag:none;}
+</style>
+</head>
+<body>
+<img id="pic" src="{{source}}">
+<script>
+const pic = document.getElementById('pic');
+let scale = 1, fit = 1, x = 0, y = 0, baseW = 0, baseH = 0, interacted = false;
+const hintedW = {{svgWidth}};
+const hintedH = {{svgHeight}};
+
+// A percentage-sized SVG can report a browser default instead of its viewBox;
+// prefer the probed canvas so the first fit sees the drawing's real shape.
+// carries the right aspect, so measure that instead of collapsing to 0px.
+function measureBase() {
+  if (hintedW > 0 && hintedH > 0) {
+    baseW = hintedW;
+    baseH = hintedH;
+    return;
+  }
+
+  baseW = pic.naturalWidth;
+  baseH = pic.naturalHeight;
+  if (!baseW || !baseH) {
+    pic.style.width = '';
+    pic.style.height = '';
+    const box = pic.getBoundingClientRect();
+    baseW = box.width || 300;
+    baseH = box.height || 150;
+  }
+}
+
+function layout() {
+  pic.style.width = (baseW * scale) + 'px';
+  pic.style.height = (baseH * scale) + 'px';
+  pic.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+function fitToWindow() {
+  measureBase();
+  fit = Math.min(window.innerWidth / baseW, window.innerHeight / baseH, 1);
+  scale = fit;
+  x = (window.innerWidth - baseW * scale) / 2;
+  y = (window.innerHeight - baseH * scale) / 2;
+  layout();
+}
+
+function zoomAt(cx, cy, next) {
+  next = Math.max(Math.min(next, 40), Math.min(fit, 1) * 0.25);
+  x = cx - (cx - x) * next / scale;
+  y = cy - (cy - y) * next / scale;
+  scale = next;
+  interacted = true;
+  layout();
+}
+
+pic.addEventListener('load', fitToWindow);
+if (pic.complete) fitToWindow();
+window.addEventListener('resize', () => { if (!interacted) fitToWindow(); });
+
+window.addEventListener('wheel', e => {
+  e.preventDefault();
+  zoomAt(e.clientX, e.clientY, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
+}, { passive: false });
+
+window.addEventListener('dblclick', e => {
+  if (Math.abs(scale - fit) < 0.001) {
+    zoomAt(e.clientX, e.clientY, Math.max(1, fit * 2));
+  } else {
+    interacted = false;
+    fitToWindow();
+  }
+});
+
+let dragging = false, lastX = 0, lastY = 0;
+window.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  dragging = true;
+  lastX = e.clientX; lastY = e.clientY;
+  pic.style.cursor = 'grabbing';
+  document.body.setPointerCapture(e.pointerId);
+});
+window.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  x += e.clientX - lastX;
+  y += e.clientY - lastY;
+  lastX = e.clientX; lastY = e.clientY;
+  interacted = true;
+  layout();
+});
+window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor = 'grab'; });
+</script>
+</body>
+</html>
+""";
+        File.WriteAllText(htmlPath, html);
+        return new Uri(htmlPath, UriKind.Absolute);
+    }
 }
