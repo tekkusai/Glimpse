@@ -44,7 +44,11 @@ public partial class PreviewWindow
         // Built once per palette: a theme change between files repaints it.
         if (!ReferenceEquals(_fillSignPill?.Tag, Theme.Current))
         {
-            ContentToolsSlot.Children.Remove(_fillSignPill);
+            if (_fillSignPill is not null)
+            {
+                ContentToolsSlot.Children.Remove(_fillSignPill);
+            }
+
             _fillSignPill = HousePill.Build("Sign", () => _ = EnterFillSignModeAsync());
             _fillSignPill.Tag = Theme.Current;
             _fillSignPill.Margin = new Thickness(0);
