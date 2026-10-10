@@ -508,9 +508,9 @@ public sealed class PreviewChromeRegressionTests
         var revealBody = ReadMethod(windowSource, "private void RevealStagedWebContent");
         var stageBody = ReadMethod(windowSource, "private void StagePreviewContent");
 
-        // The readiness contract is explicit. It must not be inferred from
-        // IsScriptEnabled: arbitrary saved HTML also disables page script but
-        // queues a host-side scrolling normalization after navigation.
+        // The readiness contract is explicit. Saved HTML queues host-side
+        // scrolling normalization after navigation, then acknowledges the
+        // resulting static layout without waiting on page animation frames.
         Assert.Contains(
             "WebPaintReadinessMode readinessMode = WebPaintReadinessMode.AnimationFrames",
             windowSource,
@@ -522,7 +522,7 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("? WebPaintReadinessMode.StaticLayout", convertedBody, StringComparison.Ordinal);
         Assert.Contains(": WebPaintReadinessMode.PdfPlugin", convertedBody, StringComparison.Ordinal);
         Assert.DoesNotContain("WebPaintReadinessMode.StaticLayout", browserImageBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("WebPaintReadinessMode.StaticLayout", htmlBody, StringComparison.Ordinal);
+        Assert.Contains("readinessMode: WebPaintReadinessMode.StaticLayout", htmlBody, StringComparison.Ordinal);
         Assert.DoesNotContain("WebPaintReadinessMode.StaticLayout", mediaBody, StringComparison.Ordinal);
         Assert.Contains("readinessMode: WebPaintReadinessMode.PdfPlugin", pdfBody, StringComparison.Ordinal);
         Assert.Contains("readinessMode: WebPaintReadinessMode.PdfPlugin", stagedPdfBody, StringComparison.Ordinal);

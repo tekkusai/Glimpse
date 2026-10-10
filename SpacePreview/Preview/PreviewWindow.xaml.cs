@@ -2932,7 +2932,8 @@ public partial class PreviewWindow : Window
             {
                 HardenForUntrustedHtml(core);
                 NormalizeHtmlPageScrolling(core);
-            }));
+            },
+            readinessMode: WebPaintReadinessMode.StaticLayout));
         return grid;
     }
 
