@@ -76,6 +76,11 @@ internal sealed class SpacePreviewController : IDisposable
     private CancellationTokenSource? _officeNeighborPreconvertCts;
     private bool _disposed;
 
+    // When the latest key or click arrived; the preview it asks for counts
+    // its wait and its log from here. Taken once, so a later load the user
+    // did not ask for (a slideshow step) starts its own clock.
+    private long _inputTimestamp;
+
     public event Action<PreviewAccessWarningInfo>? PreviewAccessWarningDetected;
 
     internal bool CanShowUpdateNotification =>
@@ -212,6 +217,7 @@ internal sealed class SpacePreviewController : IDisposable
     // lookup, or slow cleanup here. Queue/BeginInvoke/Task.Run instead.
     private bool OnKeyDown(int vk)
     {
+        _inputTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         if (vk != NativeMethods.VK_SPACE)
         {
             ClearPendingFileDialogPreview();
@@ -656,6 +662,7 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void OnMouseDown(int message, int screenX, int screenY)
     {
+        _inputTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         ClearPendingFileDialogPreview();
 
         if (_fullscreenInputSuspension.ShouldPassThroughInput())
@@ -1057,7 +1064,8 @@ internal sealed class SpacePreviewController : IDisposable
             selection.Path,
             selection.ExplorerHwnd,
             selection.SelectedCount,
-            fileDialogMode);
+            fileDialogMode,
+            Interlocked.Exchange(ref _inputTimestamp, 0));
         if (!presented)
         {
             DiagnosticLog.Write(
@@ -1146,7 +1154,7 @@ internal sealed class SpacePreviewController : IDisposable
         {
             _pendingOfficePreconvertSelection = null;
             CancelOfficeNeighborPreconversion();
-            _previewWindow.ShowPreview(path, _lastExplorerHwnd, set.Count);
+            _previewWindow.ShowPreview(path, _lastExplorerHwnd, set.Count, inputTimestamp: Interlocked.Exchange(ref _inputTimestamp, 0));
         }
 
         _previewWindow.SetBrowsePosition(_multiIndex, set.Count);
