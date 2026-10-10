@@ -112,8 +112,10 @@ public sealed class PdfPageSizeProbeTests
         Assert.Equal(700, height);
     }
 
+    // Only strings and streams are encrypted; the page tree's numbers are
+    // plain, so a protected file still opens page-shaped.
     [Fact]
-    public void ReturnsFalseForEncryptedDocuments()
+    public void ReadsEncryptedDocumentsWhosePageTreeIsPlain()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "encrypted.pdf");
@@ -130,9 +132,9 @@ public sealed class PdfPageSizeProbeTests
 
         var ok = PdfPageSizeProbe.TryReadFirstPageSize(path, out var width, out var height);
 
-        Assert.False(ok);
-        Assert.Equal(0, width);
-        Assert.Equal(0, height);
+        Assert.True(ok);
+        Assert.Equal(612, width);
+        Assert.Equal(792, height);
     }
 
     [Fact]
