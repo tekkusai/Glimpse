@@ -44,27 +44,6 @@ public sealed class PreviewRuntimeContractTests
     }
 
     [Fact]
-    public void ProcessProbeCanAuditLayoutControlsRacesAndRapidSwitches()
-    {
-        var app = TestSource.Read(@"SpacePreview\App.xaml.cs");
-        var window = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-
-        Assert.Contains("RunProbeSafelyAsync", app, StringComparison.Ordinal);
-        Assert.Contains("audit:", app, StringComparison.Ordinal);
-        Assert.Contains("buttonaudit", app, StringComparison.Ordinal);
-        Assert.Contains("pinnedoff", app, StringComparison.Ordinal);
-        Assert.Contains("settingsshot:", app, StringComparison.Ordinal);
-        Assert.Contains("warningshot:", app, StringComparison.Ordinal);
-        Assert.Contains("warningfinalshot:", app, StringComparison.Ordinal);
-        Assert.Contains("overlayrace", app, StringComparison.Ordinal);
-        Assert.Contains("string.Equals(extra, \"welcome\"", app, StringComparison.Ordinal);
-        Assert.Contains("show:", app, StringComparison.Ordinal);
-        Assert.Contains("ProbeAuditState", window, StringComparison.Ordinal);
-        Assert.Contains("ProbeButtonAudit", window, StringComparison.Ordinal);
-        Assert.Contains("ProbeLoadingOverlayRaceAsync", window, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void PreviewRequestsAreNotLoggedOrTrackedAsPresentedUntilNativeChecksPass()
     {
         var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");

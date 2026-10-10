@@ -1,0 +1,369 @@
+using System.Globalization;
+using System.IO;
+using System.Windows;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using SpacePreview.Preview;
+using SpacePreview.Services;
+using SpacePreview.Utilities;
+
+namespace SpacePreview.Dev;
+
+/// <summary>
+/// The dev modes, kept out of the product types. --probe renders the real
+/// preview window for a file to a PNG, off screen, without hooks or
+/// Explorer. --browse-test drives a real Explorer window through the
+/// production browse path. Both ship in the exe because the regression
+/// scripts run against the Release build, and both own the process they
+/// start in: it exits when they finish.
+/// </summary>
+internal static class ProbeRunner
+{
+    /// <summary>True when the arguments name a dev mode, which now runs the process.</summary>
+    public static bool TryRun(Application app, string[] args)
+    {
+        if (args.Length >= 3 && IsSwitch(args[0], "--probe"))
+        {
+            // Probes render what the user would see, in the saved theme.
+            Theme.Preference = Settings.Current.Theme;
+            _ = RunProbeSafelyAsync(app, args[1], args[2], args[3..]);
+            return true;
+        }
+
+        if (args.Length >= 2 && IsSwitch(args[0], "--browse-test"))
+        {
+            _ = BrowseTestAsync(app, args[1], args.Length >= 3 ? args[2] : null);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsSwitch(string arg, string name) => string.Equals(arg, name, StringComparison.OrdinalIgnoreCase);
+
+    private static async Task RunProbeSafelyAsync(Application app, string path, string outputPng, string[] steps)
+    {
+        try
+        {
+            await ProbePreviewAsync(path, outputPng, steps);
+        }
+        catch (Exception ex)
+        {
+            Environment.ExitCode = 1;
+            DiagnosticLog.Write($"probe FATAL pid={Environment.ProcessId}: {ex}");
+        }
+        finally
+        {
+            app.Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// Opens the file, runs the optional steps in order, then captures the
+    /// whole window (chrome plus web content) about 2.5 s after the last one.
+    /// </summary>
+    private static async Task ProbePreviewAsync(string path, string outputPng, string[] steps)
+    {
+        DiagnosticLog.Write($"probe starting pid={Environment.ProcessId} path={path}");
+        var window = new PreviewWindow();
+        window.ShowPreview(path, IntPtr.Zero);
+        // Park it far off screen and freeze its geometry so later transitions
+        // cannot recenter it onto the desktop.
+        window.Left = -30000;
+        window.MarkGeometryUserPinnedForProbe();
+        await Task.Delay(2500);
+
+        foreach (var step in steps)
+        {
+            await RunStepAsync(window, path, step);
+        }
+
+        await Task.Delay(2500);
+        await window.ProbeCompositeShotAsync(outputPng);
+        DiagnosticLog.Write($"probe rendered {path} -> {outputPng}");
+    }
+
+    private static async Task RunStepAsync(PreviewWindow window, string path, string step)
+    {
+        var (verb, value) = step.IndexOf(':') is var colon and > 0
+            ? (step[..colon].ToLowerInvariant(), step[(colon + 1)..])
+            : (step.ToLowerInvariant(), string.Empty);
+
+        switch (verb)
+        {
+            case "delay":
+                await Task.Delay(int.Parse(value, CultureInfo.InvariantCulture));
+                break;
+
+            case "evaljs":
+                await window.ProbeEvalJsAsync(value);
+                break;
+
+            case "zoomin":
+                window.ZoomInButton.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+                await Task.Delay(250);
+                break;
+
+            case "webshot":
+                await window.ProbeWebShotAsync(value);
+                break;
+
+            case "size":
+                var parts = value.Split(',');
+                window.Width = double.Parse(parts[0], CultureInfo.InvariantCulture);
+                window.Height = double.Parse(parts[1], CultureInfo.InvariantCulture);
+                window.MarkGeometryUserPinnedForProbe();
+                window.UpdateLayout();
+                await Task.Delay(120);
+                break;
+
+            case "multiselect":
+                var count = Math.Max(2, int.Parse(value, CultureInfo.InvariantCulture));
+                window.SetMultiSelection(Enumerable.Repeat(window.CurrentPath ?? path, count).ToArray(), 0);
+                window.SetSelectionCount(count);
+                window.UpdateLayout();
+                break;
+
+            case "audit":
+                DiagnosticLog.Write($"probe audit {window.ProbeAuditState(value)}");
+                break;
+
+            case "buttonaudit":
+                DiagnosticLog.Write($"probe buttons {window.ProbeButtonAudit()}");
+                break;
+
+            case "pinnedoff":
+                // Leaves the window pinned with Always on top off through the
+                // final capture, so a live pass can verify the reveal visuals
+                // and taskbar/Alt+Tab reachability from outside the process.
+                window.SetPinned(true);
+                window.AlwaysOnTopButton.IsChecked = false;
+                window.UpdateLayout();
+                await Task.Delay(120);
+                break;
+
+            case "settingsshot":
+                await CaptureSettingsAsync(value);
+                break;
+
+            case "warningshot":
+            case "warningfinalshot":
+                await CaptureWarningAsync(value, finalReminder: verb == "warningfinalshot");
+                break;
+
+            case "overlayrace":
+                if (!await window.ProbeLoadingOverlayRaceAsync())
+                {
+                    throw new InvalidOperationException("The previous load hid the current loading overlay.");
+                }
+
+                break;
+
+            case "welcome":
+                window.ShowWelcome();
+                window.Left = -30000;
+                await Task.Delay(120);
+                break;
+
+            case "sign":
+            case "signdate":
+            case "signpad":
+            case "signsave":
+                DiagnosticLog.Write($"probe {verb} -> {await window.ProbeFillSignAsync(verb)}");
+                break;
+
+            case "show":
+                window.ShowPreview(value, IntPtr.Zero);
+                window.Left = -30000;
+                break;
+
+            case "fullshot":
+                await window.ProbeCompositeShotAsync(value);
+                break;
+
+            case "shot":
+                // Mid-sequence capture: catches transient states (the ghost
+                // loading overlay) the final screenshot never sees.
+                CaptureWindow(window, value);
+                break;
+
+            default:
+                // A bare path previews that file next, like an arrow press.
+                window.ShowPreview(step, IntPtr.Zero);
+                window.Left = -30000;
+                await Task.Delay(120);
+                break;
+        }
+    }
+
+    /// <summary>Renders the settings window off screen. Stub callbacks: the probe never touches live settings.</summary>
+    private static async Task CaptureSettingsAsync(string outputPng)
+    {
+        var settings = new SettingsWindow(() => null, () => { }, _ => { })
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = -30000,
+            Top = 0,
+            ShowActivated = false
+        };
+        settings.Show();
+        await Task.Delay(150);
+        CaptureWindow(settings, outputPng);
+        settings.Close();
+    }
+
+    /// <summary>Renders either access-notice state off screen.</summary>
+    private static async Task CaptureWarningAsync(string outputPng, bool finalReminder)
+    {
+        var info = new PreviewAccessWarningInfo("probe", "Discord", 0, PreviewAccessWarningKind.ConfirmedElevationMismatch);
+        var notification = new PreviewAccessWarningWindow(info, finalReminder)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            Left = -30000,
+            Top = 0
+        };
+        notification.Loaded += (_, _) =>
+        {
+            // Its own Loaded placement runs first; this override keeps the
+            // probe copy off the desktop.
+            notification.Left = -30000;
+            notification.Top = 0;
+        };
+        notification.Show();
+        await Task.Delay(150);
+        CaptureWindow(notification, outputPng);
+        notification.Dismiss(PreviewAccessWarningDismissalReason.Probe);
+    }
+
+    private static void CaptureWindow(Window window, string outputPng)
+    {
+        var width = (int)Math.Ceiling(window.ActualWidth);
+        var height = (int)Math.Ceiling(window.ActualHeight);
+        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(window);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(outputPng);
+        encoder.Save(stream);
+    }
+
+    private static async Task BrowseTestAsync(Application app, string folder, string? outputPath)
+    {
+        try
+        {
+            var files = Directory.GetFiles(folder)
+                .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (files.Length < 4)
+            {
+                DiagnosticLog.Write("browse-test: needs at least 4 files");
+                return;
+            }
+
+            // Open the folder with its second item selected - the state a
+            // real browse always starts from (a selection exists).
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(
+                "explorer.exe", $"/select,\"{files[1]}\"")
+            { UseShellExecute = true });
+
+            var hwnd = IntPtr.Zero;
+            for (var attempt = 0; attempt < 40 && hwnd == IntPtr.Zero; attempt++)
+            {
+                await Task.Delay(250);
+                hwnd = await StaTask.Run(() => FindExplorerWindowForFolder(folder));
+            }
+
+            DiagnosticLog.Write($"browse-test window 0x{hwnd.ToInt64():X}");
+            if (hwnd == IntPtr.Zero)
+            {
+                return;
+            }
+
+            await Task.Delay(700);
+            var read = await StaTask.Run(() => ExplorerSelectionService.TryGetSelectionFromExplorerWindow(hwnd));
+            DiagnosticLog.Write(read is null
+                ? "browse-test initial read -> NULL"
+                : $"browse-test initial read -> {Path.GetFileName(read.Path)} index={read.ViewIndex} count={read.ViewCount}");
+            if (read is not null)
+            {
+                var neighbors = await StaTask.Run(() => ExplorerSelectionService.TryGetNeighborPaths(hwnd, false, read.ViewIndex, 4));
+                var neighborLine = neighbors is null
+                    ? "browse-test neighbors -> NULL"
+                    : $"browse-test neighbors -> {string.Join(" | ", neighbors)}";
+                DiagnosticLog.Write(neighborLine);
+                if (!string.IsNullOrWhiteSpace(outputPath))
+                {
+                    File.AppendAllText(outputPath, neighborLine + Environment.NewLine);
+                }
+            }
+
+            foreach (var delta in new[] { 1, 1, -1, -9, 2 })
+            {
+                var result = await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, false, delta));
+                DiagnosticLog.Write(result is null
+                    ? $"browse-test delta {delta:+0;-0} -> NULL"
+                    : $"browse-test delta {delta:+0;-0} -> {Path.GetFileName(result.Path)} index={result.ViewIndex} count={result.ViewCount}");
+                await Task.Delay(200);
+            }
+
+            // Grow the selection (current item + view indexes 0 and 4) and
+            // read it back: within-selection browsing stays on the carried
+            // set arriving in view order.
+            var multi = await StaTask.Run(() => ExplorerSelectionService.DescribeMultiSelectionForTest(hwnd, 0, 4));
+            DiagnosticLog.Write($"browse-test multi -> {multi ?? "NULL"}");
+
+            Native.NativeMethods.SendMessage(hwnd, 0x0010 /* WM_CLOSE */, IntPtr.Zero, IntPtr.Zero);
+            DiagnosticLog.Write("browse-test done");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"browse-test failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            app.Shutdown();
+        }
+    }
+
+    private static IntPtr FindExplorerWindowForFolder(string folder)
+    {
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("Shell.Application");
+            if (shellType is null)
+            {
+                return IntPtr.Zero;
+            }
+
+            dynamic shell = Activator.CreateInstance(shellType)!;
+            var windows = shell.Windows();
+            foreach (dynamic window in (System.Collections.IEnumerable)windows)
+            {
+                try
+                {
+                    if (window.LocationURL is not string location || string.IsNullOrEmpty(location))
+                    {
+                        continue;
+                    }
+
+                    var path = new Uri(location).LocalPath;
+                    if (string.Equals(path.TrimEnd('\\'), folder.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new IntPtr(Convert.ToInt64(window.HWND));
+                    }
+                }
+                catch
+                {
+                    // Entries mid-navigation answer with errors; skip them.
+                }
+            }
+        }
+        catch
+        {
+            // No shell, no test.
+        }
+
+        return IntPtr.Zero;
+    }
+}

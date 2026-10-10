@@ -129,7 +129,7 @@ public sealed class ExplorerSelectionResilienceTests
     [Fact]
     public void FullPositionLookupRemainsAvailableForProbesAndExplicitBrowsing()
     {
-        var app = TestSource.Read(@"SpacePreview\App.xaml.cs");
+        var app = TestSource.Read(@"SpacePreview\Dev\ProbeRunner.cs");
         var service = TestSource.Read(@"SpacePreview\Services\ExplorerSelectionService.cs");
 
         // Omitted options preserve the diagnostic/probe contract: those
