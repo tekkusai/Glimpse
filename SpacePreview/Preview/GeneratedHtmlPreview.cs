@@ -12,13 +12,28 @@ using TextMateRegistry = TextMateSharp.Registry.Registry;
 
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// A page Glimpse rendered for a file. Markdown maps the file's folder to a
+/// virtual host so its relative images resolve; nothing else is reachable.
+/// </summary>
 internal sealed record GeneratedHtmlDocument(
     string SourcePath,
-    Uri Source,
     string HtmlPath,
-    string? ResourceHost,
-    string? ResourceFolder,
-    System.Drawing.Color Background);
+    string? ResourceHost = null,
+    string? ResourceFolder = null)
+{
+    public Uri Source => new(HtmlPath, UriKind.Absolute);
+
+    // The page paints the canvas itself; the view under it matches.
+    public System.Drawing.Color Background
+    {
+        get
+        {
+            var color = Theme.Current.CanvasBg;
+            return System.Drawing.Color.FromArgb(color.R, color.G, color.B);
+        }
+    }
+}
 
 internal sealed record GeneratedCodeAttempt(
     GeneratedHtmlDocument? Document,
@@ -39,6 +54,8 @@ internal static partial class GeneratedHtmlPreview
         .UseAutoIdentifiers()
         .Build();
 
+    private static string ThemeKey(ThemePalette palette) => palette.IsDark ? "dark" : "light";
+
     public static GeneratedHtmlDocument? TryBuildMarkdown(string path)
     {
         try
@@ -49,39 +66,21 @@ internal static partial class GeneratedHtmlPreview
                 return null;
             }
 
-            var theme = Theme.Current.IsDark ? "dark" : "light";
-            var htmlPath = PreviewWindow.TempHtmlPath(
-                "MarkdownHtml",
-                $"{path}|{StableTextContentToken(preview)}|{Theme.Current.IsDark}|md-v2");
+            var palette = Theme.Current;
             var directory = Path.GetDirectoryName(Path.GetFullPath(path));
-            var host = $"glimpse-md-{StableToken(path)}.local".ToLowerInvariant();
-            if (HasCachedHtml(htmlPath))
-            {
-                return new GeneratedHtmlDocument(
-                    path,
-                    new Uri(htmlPath, UriKind.Absolute),
-                    htmlPath,
-                    directory is null ? null : host,
-                    directory,
-                    BackgroundForTheme());
-            }
+            var host = directory is null ? null : $"glimpse-md-{StableToken(path)}.local".ToLowerInvariant();
+            var htmlPath = HtmlCache.Get(
+                "MarkdownHtml",
+                $"{path}|{StableTextContentToken(preview)}|{ThemeKey(palette)}",
+                () =>
+                {
+                    var rendered = Markdown.ToHtml(MarkdownSourceWithoutLoaderNotice(preview), MarkdownPipeline);
+                    var notice = preview.Truncated ? MarkdownTruncationNotice(preview) : string.Empty;
+                    var baseHref = host is null ? null : $"https://{host}/";
+                    return BuildShell(ThemeKey(palette), baseHref, $"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered)}{notice}</div>");
+                });
 
-            var source = MarkdownSourceWithoutLoaderNotice(preview);
-            var rendered = Markdown.ToHtml(source, MarkdownPipeline);
-            rendered = NormalizeMarkdownHtml(rendered);
-            var notice = preview.Truncated ? MarkdownTruncationNotice(preview) : string.Empty;
-
-            var baseHref = $"https://{host}/";
-            var html = BuildShell(theme, baseHref, $"<div class=\"md-root\">{rendered}{notice}</div>");
-            WriteCachedHtml(htmlPath, html);
-
-            return new GeneratedHtmlDocument(
-                path,
-                new Uri(htmlPath, UriKind.Absolute),
-                htmlPath,
-                directory is null ? null : host,
-                directory,
-                BackgroundForTheme());
+            return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath, host, directory);
         }
         catch (Exception ex)
         {
@@ -90,9 +89,6 @@ internal static partial class GeneratedHtmlPreview
         }
     }
 
-    public static GeneratedHtmlDocument? TryBuildCode(string path, CancellationToken cancellationToken = default) =>
-        TryBuildCodeCore(path, preserveFallbackText: false, cancellationToken).Document;
-
     /// <summary>
     /// The window's text lane needs both outcomes from one disk read: either
     /// generated HTML or the already-loaded text to hand to the native
@@ -100,81 +96,38 @@ internal static partial class GeneratedHtmlPreview
     /// </summary>
     internal static GeneratedCodeAttempt TryBuildCodeForPreview(
         string path,
-        CancellationToken cancellationToken = default) =>
-        TryBuildCodeCore(path, preserveFallbackText: true, cancellationToken);
-
-    internal static bool CanHighlightCodeLength(int length) =>
-        length >= 0 && length <= CodeHighlightLimit;
-
-    private static GeneratedCodeAttempt TryBuildCodeCore(
-        string path,
-        bool preserveFallbackText,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         TextPreview? loadedText = null;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (FileKinds.UsesNativeTextPreview(path))
-            {
-                return new GeneratedCodeAttempt(
-                    null,
-                    preserveFallbackText ? TextPreviewLoader.TryLoad(path) : null);
-            }
-
             loadedText = TextPreviewLoader.TryLoad(path);
-            if (loadedText is null)
+            if (loadedText is null || FileKinds.UsesNativeTextPreview(path))
             {
-                return new GeneratedCodeAttempt(null, null);
+                return new GeneratedCodeAttempt(null, loadedText);
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var theme = Theme.Current.IsDark ? "dark" : "light";
-            var htmlPath = PreviewWindow.TempHtmlPath(
+            var palette = Theme.Current;
+            var htmlPath = HtmlCache.Get(
                 "CodeHtml",
-                $"{path}|{StableTextContentToken(loadedText)}|{Theme.Current.IsDark}|code-v2");
-            if (HasCachedHtml(htmlPath))
-            {
-                return new GeneratedCodeAttempt(
-                    new GeneratedHtmlDocument(
-                        path,
-                        new Uri(htmlPath, UriKind.Absolute),
-                        htmlPath,
-                        null,
-                        null,
-                        BackgroundForTheme()),
-                    null);
-            }
+                $"{path}|{StableTextContentToken(loadedText)}|{ThemeKey(palette)}",
+                () =>
+                {
+                    if (!CanHighlightCodeLength(loadedText.Text.Length))
+                    {
+                        return null;
+                    }
 
-            if (!CanHighlightCodeLength(loadedText.Text.Length))
-            {
-                return new GeneratedCodeAttempt(
-                    null,
-                    preserveFallbackText ? loadedText : null);
-            }
+                    var body = TryRenderCode(path, loadedText.Text, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return body is null ? null : BuildShell(ThemeKey(palette), null, body);
+                });
 
-            var source = loadedText.Text;
-            var body = TryRenderCode(path, source, cancellationToken);
-            if (body is null)
-            {
-                return new GeneratedCodeAttempt(
-                    null,
-                    preserveFallbackText ? loadedText : null);
-            }
-
-            var html = BuildShell(theme, null, body);
-            cancellationToken.ThrowIfCancellationRequested();
-            WriteCachedHtml(htmlPath, html);
-
-            return new GeneratedCodeAttempt(
-                new GeneratedHtmlDocument(
-                    path,
-                    new Uri(htmlPath, UriKind.Absolute),
-                    htmlPath,
-                    null,
-                    null,
-                    BackgroundForTheme()),
-                null);
+            return htmlPath is null
+                ? new GeneratedCodeAttempt(null, loadedText)
+                : new GeneratedCodeAttempt(new GeneratedHtmlDocument(path, htmlPath), null);
         }
         catch (OperationCanceledException)
         {
@@ -183,49 +136,30 @@ internal static partial class GeneratedHtmlPreview
         catch (Exception ex)
         {
             DiagnosticLog.Write($"code preview failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return new GeneratedCodeAttempt(
-                null,
-                preserveFallbackText ? loadedText : null);
+            return new GeneratedCodeAttempt(null, loadedText);
         }
     }
+
+    internal static bool CanHighlightCodeLength(int length) =>
+        length >= 0 && length <= CodeHighlightLimit;
 
     public static GeneratedHtmlDocument? TryBuildEpub(string path, CancellationToken cancellationToken = default)
     {
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var theme = Theme.Current.IsDark ? "dark" : "light";
-            var htmlPath = PreviewWindow.TempHtmlPath(
+            var palette = Theme.Current;
+            var htmlPath = HtmlCache.Get(
                 "EpubHtml",
-                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{Theme.Current.IsDark}|epub-v3");
-            if (HasCachedHtml(htmlPath))
-            {
-                return new GeneratedHtmlDocument(
-                    path,
-                    new Uri(htmlPath, UriKind.Absolute),
-                    htmlPath,
-                    null,
-                    null,
-                    BackgroundForTheme());
-            }
+                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{ThemeKey(palette)}",
+                () =>
+                {
+                    var body = EpubPreviewLoader.TryBuildBody(path, cancellationToken);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return body is null ? null : BuildShell(ThemeKey(palette), null, body);
+                });
 
-            var body = EpubPreviewLoader.TryBuildBody(path, cancellationToken);
-            if (body is null)
-            {
-                return null;
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            var html = BuildShell(theme, null, body);
-            WriteCachedHtml(htmlPath, html);
-
-            return new GeneratedHtmlDocument(
-                path,
-                new Uri(htmlPath, UriKind.Absolute),
-                htmlPath,
-                null,
-                null,
-                BackgroundForTheme());
+            return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath);
         }
         catch (OperationCanceledException)
         {
@@ -374,72 +308,6 @@ internal static partial class GeneratedHtmlPreview
         }
     }
 
-    private static bool HasCachedHtml(string path)
-    {
-        try
-        {
-            var file = new FileInfo(path);
-            if (!file.Exists || file.Length < 7)
-            {
-                return false;
-            }
-
-            Span<byte> ending = stackalloc byte[7];
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            stream.Seek(-ending.Length, SeekOrigin.End);
-            stream.ReadExactly(ending);
-            return ending.SequenceEqual("</html>"u8);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static void WriteCachedHtml(string path, string html)
-    {
-        var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            File.WriteAllText(tempPath, html, Encoding.UTF8);
-            if (HasCachedHtml(path))
-            {
-                return;
-            }
-
-            try
-            {
-                File.Move(tempPath, path, overwrite: false);
-                tempPath = string.Empty;
-            }
-            catch (IOException)
-            {
-                if (HasCachedHtml(path))
-                {
-                    // Another preview completed the same deterministic document.
-                    return;
-                }
-
-                File.Move(tempPath, path, overwrite: true);
-                tempPath = string.Empty;
-            }
-        }
-        finally
-        {
-            if (!string.IsNullOrEmpty(tempPath))
-            {
-                try
-                {
-                    File.Delete(tempPath);
-                }
-                catch
-                {
-                    // A stranded temp is ignored by cache pruning (*.html).
-                }
-            }
-        }
-    }
-
     private static void AppendHighlightedLine(StringBuilder builder, string line, IToken[] tokens)
     {
         if (tokens.Length == 0)
@@ -543,12 +411,6 @@ internal static partial class GeneratedHtmlPreview
 </body>
 </html>
 """;
-    }
-
-    private static System.Drawing.Color BackgroundForTheme()
-    {
-        var color = Theme.Current.CanvasBg;
-        return System.Drawing.Color.FromArgb(color.R, color.G, color.B);
     }
 
     private static string StableToken(string path)
