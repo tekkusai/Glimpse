@@ -43,6 +43,9 @@ public partial class PreviewWindow
     private IDisposable? _incomingDisposable;
     private byte _windowAlpha = 255;
 
+    /// <summary>What disk already knows before an item loads: a poster, and whether it is one page.</summary>
+    private readonly record struct StandInFacts(BitmapSource? Poster, bool SinglePage);
+
     /// <summary>The window side of one load: its decisions, its clock, and what waits on its beat.</summary>
     private sealed class Presentation(RevealPlan plan, long inputTimestamp, string? contentPath)
     {
@@ -52,7 +55,8 @@ public partial class PreviewWindow
 
         public string? ContentPath { get; } = contentPath;
 
-        public Task<BitmapSource?>? Poster { get; set; }
+        /// <summary>What disk already knows about the item, looked up off the UI thread.</summary>
+        public Task<StandInFacts>? Facts { get; set; }
 
         /// <summary>WPF content that arrived before the old item finished leaving.</summary>
         public (FrameworkElement Content, IDisposable? Owned)? Held { get; set; }
@@ -105,14 +109,14 @@ public partial class PreviewWindow
     /// <summary>
     /// The wait, on the load's clock: at 120 ms the window shows with a
     /// stand-in if the content is not ready, a sheen after a second, the
-    /// reason after 1.2 s. The poster lookup starts now, off the UI thread,
-    /// so it is ready when the wait is over.
+    /// reason after 1.2 s. The disk lookup starts now, off the UI thread, so
+    /// it is ready when the wait is over.
     /// </summary>
     private void ScheduleWait(Presentation p)
     {
         if (p.ContentPath is { } path && StandIn.KnowsShape(ShapeOf(p)) && LooksLikeLocalDrivePath(path))
         {
-            p.Poster = Task.Run(() => FindPoster(path));
+            p.Facts = Task.Run(() => new StandInFacts(FindPoster(path), KnownSinglePage(path)));
         }
 
         RunAt(p, RevealPlan.StandInAt, () => OnWait(p, RevealPlan.StandInAt));
@@ -186,13 +190,14 @@ public partial class PreviewWindow
             return;
         }
 
-        var poster = p.Poster is { IsCompletedSuccessfully: true } lookup ? lookup.Result : null;
+        // A lookup still running when the wait ends counts as knowing nothing.
+        var facts = p.Facts is { IsCompletedSuccessfully: true } lookup ? lookup.Result : default;
         var standIn = StandIn.Create(
             ShapeOf(p),
             DpiScaleFor(Hwnd),
-            KnownSinglePage(p.ContentPath) ? 0 : PdfPageRailWidth,
+            facts.SinglePage ? 0 : PdfPageRailWidth,
             ViewerChromeBandHeight,
-            poster);
+            facts.Poster);
         _standIn?.Stop();
         _standIn = standIn;
         _standInOwner = p;
@@ -272,8 +277,16 @@ public partial class PreviewWindow
     private static BitmapSource? ExplorerCachedThumbnail(string path) =>
         ShellThumbnailProvider.TryGetCachedThumbnail(path, 1024)?.Bitmap;
 
+    /// <summary>The .pdf the viewer shows for this item, if one was made before.</summary>
     private static string? RailDocumentPath(string path)
     {
+        // Artwork reaches the viewer through a .pdf link of its own, and
+        // FileKinds counts PDF-backed artwork as a PDF.
+        if (FileKinds.IsIllustrator(path))
+        {
+            return PdfViewerLink.TryGetCached(path);
+        }
+
         if (FileKinds.IsPdf(path))
         {
             return File.Exists(path) ? path : null;
@@ -285,12 +298,11 @@ public partial class PreviewWindow
     }
 
     /// <summary>A document the rail cache knows has one page shows no rail, so its page lands further left.</summary>
-    private static bool KnownSinglePage(string? path)
+    private static bool KnownSinglePage(string path)
     {
         try
         {
-            return path is not null
-                && RailDocumentPath(path) is { } pdf
+            return RailDocumentPath(path) is { } pdf
                 && TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { TotalPages: 1 };
         }
         catch

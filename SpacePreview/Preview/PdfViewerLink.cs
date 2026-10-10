@@ -82,6 +82,25 @@ internal static class PdfViewerLink
         }
     }
 
+    /// <summary>The .pdf path already made for this artwork, or null. Never builds one.</summary>
+    public static string? TryGetCached(string path)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            var viewable = Path.Combine(
+                AppPaths.DataRoot,
+                "DocumentCache",
+                CacheKey(file),
+                Path.GetFileNameWithoutExtension(file.Name) + ".pdf");
+            return Usable(viewable) ? viewable : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// Builds the entry beside its final name and renames it into place. The
     /// staging name is never the published one, because the published one can
