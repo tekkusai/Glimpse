@@ -559,6 +559,13 @@ public partial class App : Application
                 window.ShowPreview(extra["show:".Length..], IntPtr.Zero);
                 window.Left = -30000;
             }
+            else if (string.Equals(extra, "hide", StringComparison.OrdinalIgnoreCase))
+            {
+                // Closes the preview the way Space does, so a later show:
+                // measures a fresh open rather than a browse.
+                window.HidePreview();
+                await Task.Delay(150);
+            }
             else if (extra.StartsWith("fullshot:", StringComparison.OrdinalIgnoreCase))
             {
                 await window.ProbeCompositeShotAsync(extra["fullshot:".Length..]);
