@@ -16,7 +16,8 @@ public partial class PreviewWindow
 {
     private const double FolderArtSide = 184;
     private const double FolderListWidth = 480;
-    private const double FolderListMinHeight = 96;
+    // Three rows: at the smallest stage the list fits without lifting the card.
+    private const double FolderListMinHeight = 84;
     private const int FolderBreakdownRowsCap = 300;
     private const int FolderSizeScanEntryBudget = 25000;
     private static readonly TimeSpan FolderSizeScanStartDelay = TimeSpan.FromMilliseconds(220);
