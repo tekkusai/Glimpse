@@ -49,18 +49,15 @@ public partial class PreviewWindow
         _multiSelectionPaths = paths;
         _multiSelectionIndex = index;
         UpdateSelectionPosition();
+        ShowOptionalLanes();
 
         if (paths is null)
         {
             CloseGridView();
             StopSlideshow(restoreSize: true);
-            GridButton.Visibility = Visibility.Collapsed;
-            PlayButton.Visibility = Visibility.Collapsed;
             return;
         }
 
-        GridButton.Visibility = Visibility.Visible;
-        PlayButton.Visibility = Visibility.Visible;
         if (setChanged)
         {
             // A different selection means a different sheet.
@@ -154,7 +151,9 @@ public partial class PreviewWindow
 
     private void GridButton_Click(object sender, RoutedEventArgs e) => ToggleGridView();
 
-    private void PlayButton_Click(object sender, RoutedEventArgs e)
+    private void PlayButton_Click(object sender, RoutedEventArgs e) => ToggleSlideshow();
+
+    private void ToggleSlideshow()
     {
         if (IsSlideshowActive)
         {

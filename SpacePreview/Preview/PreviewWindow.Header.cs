@@ -175,11 +175,19 @@ public partial class PreviewWindow
         ZoomControls.Visibility = tool == HeaderTool.Zoom ? Visibility.Visible : Visibility.Collapsed;
         ContentActions.Visibility = tool == HeaderTool.Rotate ? Visibility.Visible : Visibility.Collapsed;
         SignButton.Visibility = tool == HeaderTool.Sign ? Visibility.Visible : Visibility.Collapsed;
-        ContentToolsSlot.Visibility = tool == HeaderTool.None ? Visibility.Collapsed : Visibility.Visible;
         ZoomControls.IsEnabled = true;
         ContentActions.IsEnabled = true;
         SignButton.IsEnabled = true;
+        ShowOptionalLanes();
     }
+
+    private FrameworkElement? ToolFace(HeaderTool tool) => tool switch
+    {
+        HeaderTool.Zoom => ZoomControls,
+        HeaderTool.Rotate => ContentActions,
+        HeaderTool.Sign => SignButton,
+        _ => null
+    };
 
     /// <summary>
     /// Until the item reveals, its tool keeps its face and a click finds
@@ -205,6 +213,67 @@ public partial class PreviewWindow
     }
 
     private void SignButton_Click(object sender, RoutedEventArgs e) => _ = EnterFillSignModeAsync();
+
+    // ---------------------------------------------------------------------
+    // Fit. The name keeps its floor; optional lanes step aside in turn.
+    // ---------------------------------------------------------------------
+
+    // A lane that stepped aside returns only with this much to spare, so a
+    // rounding pixel at the threshold cannot flip it every layout.
+    private const double LaneReturnMargin = 2;
+
+    /// <summary>
+    /// Every optional lane the item wants shows; the next layout steps
+    /// aside whatever leaves the name under its floor. These two methods
+    /// are the lanes' only writers.
+    /// </summary>
+    private void ShowOptionalLanes()
+    {
+        var selection = _multiSelectionPaths is not null ? Visibility.Visible : Visibility.Collapsed;
+        GridButton.Visibility = selection;
+        PlayButton.Visibility = selection;
+        ContentToolsSlot.Visibility = _headerTool == HeaderTool.None ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// The name keeps at least its floor. On a stage too narrow for it, the
+    /// selection's grid and slideshow buttons step aside first, then the
+    /// tool; Ctrl+Enter, the tool's keys and the right-click menu still
+    /// reach them. Each comes back once the name keeps its floor beside it.
+    /// </summary>
+    private void IdentityPanel_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        if (!e.WidthChanged || !IdentityPanel.IsVisible)
+        {
+            return;
+        }
+
+        // Each lane measured the same way shown or aside, so the name's
+        // room with every lane aside is the same in both states.
+        var toolWidth = 0.0;
+        if (ToolFace(_headerTool) is { } tool)
+        {
+            tool.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            toolWidth = ContentToolsSlot.Margin.Left + tool.DesiredSize.Width;
+        }
+
+        var selectionWidth = BrowseControls.IsVisible ? GridButton.Width + PlayButton.Width : 0;
+        var room = IdentityPanel.ActualWidth
+            + (ContentToolsSlot.IsVisible ? toolWidth : 0)
+            + (GridButton.IsVisible ? selectionWidth : 0);
+
+        // Back in priority order, each where the floor still holds: the
+        // tool first, then the selection's buttons in whatever room is left.
+        var showTool = toolWidth > 0
+            && room - toolWidth >= Metrics.HeaderNameMinWidth + (ContentToolsSlot.IsVisible ? 0 : LaneReturnMargin);
+        room -= showTool ? toolWidth : 0;
+        var showSelection = _multiSelectionPaths is not null
+            && room - selectionWidth >= Metrics.HeaderNameMinWidth + (GridButton.IsVisible ? 0 : LaneReturnMargin);
+
+        GridButton.Visibility = showSelection ? Visibility.Visible : Visibility.Collapsed;
+        PlayButton.Visibility = GridButton.Visibility;
+        ContentToolsSlot.Visibility = showTool ? Visibility.Visible : Visibility.Collapsed;
+    }
 
     /// <summary>
     /// The header zoom drives the same browser zoom as Ctrl+wheel, and the
@@ -813,6 +882,18 @@ public partial class PreviewWindow
             menu.Items.Add(MenuItemFor(label, action));
         }
 
+        // The selection's buttons may have stepped aside; their commands never do.
+        if (_multiSelectionPaths is { Count: > 1 })
+        {
+            menu.Items.Add(new Separator { Style = separator });
+            if (_gridView is null)
+            {
+                menu.Items.Add(MenuItemFor("All selected items", ToggleGridView));
+            }
+
+            menu.Items.Add(MenuItemFor(IsSlideshowActive ? "Stop slideshow" : "Slideshow", ToggleSlideshow));
+        }
+
         menu.Items.Add(new Separator { Style = separator });
         menu.Items.Add(MenuItemFor(string.IsNullOrEmpty(selectedText) ? "Copy" : "Copy file", CopyCurrentFile));
         menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
@@ -1136,8 +1217,7 @@ public partial class PreviewWindow
         _multiSelectionIndex = 0;
         CloseGridView();
         StopSlideshow(restoreSlideshowSize);
-        GridButton.Visibility = Visibility.Collapsed;
-        PlayButton.Visibility = Visibility.Collapsed;
+        ShowOptionalLanes();
         UpdateSelectionPosition();
         SetBrowsePosition(-1, 0);
     }

@@ -42,7 +42,7 @@ public sealed class ChromeHeaderTests
             Assert.True(root.GetProperty("LanesInsideHeader").GetBoolean(), root.GetRawText());
             Assert.True(root.GetProperty("AllVisibleButtonsNamed").GetBoolean(), root.GetRawText());
             Assert.True(root.GetProperty("AllVisibleButtonCentersHit").GetBoolean(), root.GetRawText());
-            Assert.True(root.GetProperty("FileNameWidth").GetDouble() >= 120, root.GetRawText());
+            Assert.True(root.GetProperty("FileNameWidth").GetDouble() >= Metrics.HeaderNameMinWidth, root.GetRawText());
 
             // Open is never squeezed: it gets every pixel it asks for.
             var openMargin = window.OpenControl.Margin;
@@ -52,6 +52,39 @@ public sealed class ChromeHeaderTests
             Assert.Equal(Visibility.Visible, window.SelectionPositionText.Visibility);
             Assert.Equal("1 of 4", window.SelectionPositionText.Text);
             Assert.DoesNotContain("selected", window.SubtitleText.Text, StringComparison.Ordinal);
+
+            // The selection's buttons stepped aside for the name; the tool
+            // stayed, and the right-click menu still reaches both commands.
+            Assert.Equal(Visibility.Collapsed, window.GridButton.Visibility);
+            Assert.Equal(Visibility.Visible, window.ContentToolsSlot.Visibility);
+            var menu = new ContextMenu();
+            window.FillContextMenu(menu, selectedText: null);
+            var labels = menu.Items.OfType<MenuItem>().Select(item => (string)item.Header).ToArray();
+            Assert.Contains("All selected items", labels);
+            Assert.Contains("Slideshow", labels);
+
+            // Browsing the set moves nothing.
+            var tools = BoundsInHeader(window, window.ContentToolsSlot);
+            window.ShowPreview(paths[1], IntPtr.Zero, selectedCount: 4);
+            window.SetMultiSelectionIndex(1);
+            await WaitForRevealAsync(window);
+            window.UpdateLayout();
+            Assert.Equal(tools, BoundsInHeader(window, window.ContentToolsSlot));
+            Assert.Equal(Visibility.Collapsed, window.GridButton.Visibility);
+
+            // Dragging wider crosses every threshold; the floor holds at each
+            // width and no lane flips back and forth.
+            for (var width = 640; width <= 1000; width += 3)
+            {
+                window.Width = width;
+                window.UpdateLayout();
+                Assert.True(window.IdentityPanel.ActualWidth >= Metrics.HeaderNameMinWidth, $"{window.IdentityPanel.ActualWidth} at {width}");
+            }
+
+            // With room again, they come back.
+            Assert.Equal(Visibility.Visible, window.GridButton.Visibility);
+            Assert.Equal(Visibility.Visible, window.PlayButton.Visibility);
+            Assert.True(window.IdentityPanel.ActualWidth >= Metrics.HeaderNameMinWidth);
         }
         finally
         {

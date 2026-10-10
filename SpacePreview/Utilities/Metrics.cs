@@ -39,6 +39,9 @@ internal static class Metrics
     // The gap between an anchor and its flyout.
     public const double FlyoutGap = 6;
 
+    // The header file name's floor (docs/DESIGN.md, Header).
+    public const double HeaderNameMinWidth = 160;
+
     // Type ramp (docs/DESIGN.md, Type). Glyph fonts size to their icon, and
     // content rendering (documents, font specimens) keeps its own scale;
     // everything that reads as the app's own words draws from here.

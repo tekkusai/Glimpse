@@ -38,7 +38,8 @@
 
             <!-- docs/DESIGN.md, Header. Left to right: browse, identity,
                  the kind's tools, Open, the window's own buttons. Only the
-                 identity column stretches, so it is the one that yields. -->
+                 identity column stretches; below the name's floor the
+                 optional lanes step aside instead (IdentityPanel_SizeChanged). -->
             <Border x:Name="HeaderBar"
                     Grid.Row="0"
                     Background="{DynamicResource Theme.ChromeBg}"
@@ -108,7 +109,10 @@
                            Visibility="Hidden"
                            RenderOptions.BitmapScalingMode="HighQuality" />
 
-                    <StackPanel x:Name="IdentityPanel" Grid.Column="2" VerticalAlignment="Center">
+                    <StackPanel x:Name="IdentityPanel"
+                                Grid.Column="2"
+                                VerticalAlignment="Center"
+                                SizeChanged="IdentityPanel_SizeChanged">
                         <TextBlock x:Name="FileNameText"
                                    FontSize="{x:Static u:Metrics.FontName}"
                                    FontWeight="SemiBold"
