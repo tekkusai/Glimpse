@@ -61,6 +61,34 @@ public sealed class PsdPreviewLoaderTests
     }
 
     [Fact]
+    public void EachPlaneStartsWhereThePlanesBeforeItEnd()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "alpha.psd");
+        // Flat rows pack to two bytes and the rest to four, so the planes
+        // differ in length and a plane read from a guessed offset decodes
+        // its neighbor's bytes.
+        byte[][] planes =
+        [
+            [200, 200, 200, 200, 200, 200],
+            [1, 2, 3, 4, 5, 6],
+            [9, 9, 9, 7, 8, 9],
+            [255, 255, 255, 0, 128, 255]
+        ];
+        WritePsd(path, width: 3, height: 2, planes, packBits: true);
+
+        var pixels = Pixels(PsdPreviewLoader.TryLoad(path)!);
+
+        Assert.Equal(
+            new byte[]
+            {
+                9, 1, 200, 255, 9, 2, 200, 255, 9, 3, 200, 255,
+                7, 4, 200, 0, 8, 5, 200, 128, 9, 6, 200, 255
+            },
+            pixels);
+    }
+
+    [Fact]
     public void SixteenBitRawTakesTheHighByte()
     {
         using var temp = new TempDirectory();
@@ -133,9 +161,8 @@ public sealed class PsdPreviewLoaderTests
             return;
         }
 
-        // Literal runs of at most 128 bytes: valid PackBits, if not small.
         var rows = planes.SelectMany(plane => Enumerable.Range(0, height)
-            .Select(row => Literal(plane.AsSpan(row * width, width).ToArray()))).ToList();
+            .Select(row => PackBits(plane.AsSpan(row * width, width).ToArray()))).ToList();
         foreach (var row in rows)
         {
             U16(row.Length);
@@ -147,8 +174,15 @@ public sealed class PsdPreviewLoaderTests
         }
     }
 
-    private static byte[] Literal(byte[] row)
+    // A row of one value is one repeat run; any other row is literal runs
+    // of at most 128 bytes. Valid PackBits, if not the smallest.
+    private static byte[] PackBits(byte[] row)
     {
+        if (row.Length is > 1 and <= 128 && row.All(value => value == row[0]))
+        {
+            return [(byte)(1 - row.Length), row[0]];
+        }
+
         var encoded = new List<byte>();
         for (var at = 0; at < row.Length; at += 128)
         {
