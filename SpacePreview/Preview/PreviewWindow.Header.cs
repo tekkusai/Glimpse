@@ -50,7 +50,7 @@ public partial class PreviewWindow
 
     // App icons outlive items: stepping through one app's files never
     // reloads its icon. UI thread only.
-    private static readonly Dictionary<string, BitmapSource?> AppIcons = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, BitmapSource> AppIcons = new(StringComparer.OrdinalIgnoreCase);
 
     private IReadOnlyList<(string Label, Action Action)> _openActions = [];
     private OpenTarget _openTarget = new(null, null);
@@ -574,6 +574,10 @@ public partial class PreviewWindow
         // often a different, blurrier drawing.
         var pixels = (int)Math.Ceiling(32 * VisualTreeHelper.GetDpi(this).DpiScaleX);
         BitmapSource? icon = null;
+
+        // One shell icon at a time: beside the file icon's request, one of
+        // the two came back empty.
+        await _shellIconGate.WaitAsync();
         try
         {
             icon = await Task.Run(() => ShellThumbnailProvider.TryGetIcon(source, pixels));
@@ -581,6 +585,16 @@ public partial class PreviewWindow
         catch
         {
             // The pill reads without its icon.
+        }
+        finally
+        {
+            _shellIconGate.Release();
+        }
+
+        // A miss is not remembered; the next preview asks again.
+        if (icon is null)
+        {
+            return;
         }
 
         AppIcons[source] = icon;
