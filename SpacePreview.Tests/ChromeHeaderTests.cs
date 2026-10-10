@@ -1,8 +1,11 @@
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Shell;
+using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
@@ -12,7 +15,8 @@ namespace SpacePreview.Tests;
 /// <summary>
 /// The header measured on the real window: lanes at the smallest stage, the
 /// tools and icon holding still while browsing, the welcome starting clean,
-/// one right-click menu, and a theme change reaching an open window.
+/// one right-click menu, a theme change reaching an open window, and the
+/// dialogs on the preview's own frame.
 /// </summary>
 [Collection(WpfCollection.Name)]
 public sealed class ChromeHeaderTests
@@ -241,6 +245,69 @@ public sealed class ChromeHeaderTests
         finally
         {
             settings.Close();
+        }
+
+        return Task.CompletedTask;
+    });
+
+    [Fact]
+    public Task DialogsWearThePreviewFrameAndTheNoticeNeverActivates() => WpfApp.RunAsync(() =>
+    {
+        const long WS_THICKFRAME = 0x00040000;
+        const long WS_MAXIMIZEBOX = 0x00010000;
+        var root = Path.Combine(Path.GetTempPath(), $"GlimpseChromeTest-{Guid.NewGuid():N}");
+        using var client = new HttpClient();
+        using var updates = new AppUpdateService(client, new Version(1, 0, 0), root);
+        var release = new AppUpdateRelease(
+            new Version(9, 1, 0),
+            "v9.1.0",
+            new Uri("https://example.invalid/setup.exe"),
+            1,
+            string.Empty,
+            new Uri("https://example.invalid/setup.exe.sha256"));
+        var notice = new PreviewAccessWarningWindow(
+            new PreviewAccessWarningInfo("key", "Notepad", 1, PreviewAccessWarningKind.ConfirmedElevationMismatch),
+            finalReminder: false);
+        Window[] dialogs =
+        [
+            new SettingsWindow(() => null, () => { }, _ => { }),
+            new AppUpdateWindow(updates, release),
+            notice
+        ];
+        try
+        {
+            foreach (var dialog in dialogs)
+            {
+                // A handle, never a frame on screen.
+                var hwnd = new WindowInteropHelper(dialog).EnsureHandle();
+                var style = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_STYLE).ToInt64();
+                var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64();
+                var name = dialog.GetType().Name;
+
+                Assert.False(dialog.AllowsTransparency, name);
+                Assert.True((exStyle & NativeMethods.WS_EX_LAYERED) == 0, $"{name} is layered");
+                Assert.True((style & WS_THICKFRAME) != 0, $"{name} has no frame for the shadow");
+                Assert.True((style & WS_MAXIMIZEBOX) == 0, $"{name} can maximize");
+                Assert.NotNull(WindowChrome.GetWindowChrome(dialog));
+            }
+
+            var noticeStyle = NativeMethods.GetWindowLongPtr(
+                new WindowInteropHelper(notice).Handle,
+                NativeMethods.GWL_EXSTYLE).ToInt64();
+            Assert.True((noticeStyle & NativeMethods.WS_EX_NOACTIVATE) != 0);
+            Assert.False(notice.ShowActivated);
+        }
+        finally
+        {
+            foreach (var dialog in dialogs)
+            {
+                dialog.Close();
+            }
+
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
 
         return Task.CompletedTask;
