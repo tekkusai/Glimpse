@@ -168,9 +168,8 @@ internal static class ProbeRunner
 
             case "sign":
             case "signdate":
-            case "signpad":
-            case "signsave":
-                DiagnosticLog.Write($"probe {verb} -> {await window.ProbeFillSignAsync(verb)}");
+            case "signpress":
+                DiagnosticLog.Write($"probe {verb} -> {await window.ProbeFillSignAsync(verb, value)}");
                 break;
 
             case "show":

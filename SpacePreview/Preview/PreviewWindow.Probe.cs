@@ -340,10 +340,10 @@ public partial class PreviewWindow
     /// <summary>
     /// Dev probe only: "sign" enters sign mode on the current PDF the way the
     /// Sign pill does, "signdate" places today's date near the top of the
-    /// page, "signpad" presses the Signature pill, "signsave" opens the save
-    /// choice.
+    /// page, and "signpress:Label" presses the sign-mode pill with that label
+    /// (Signature, Save, Discard, Save a signed copy...).
     /// </summary>
-    internal async Task<string> ProbeFillSignAsync(string verb)
+    internal async Task<string> ProbeFillSignAsync(string verb, string label)
     {
         if (verb == "sign")
         {
@@ -356,22 +356,24 @@ public partial class PreviewWindow
         }
 
         surface.UpdateLayout();
-        switch (verb)
+        if (verb == "signdate" && !surface.Place(SignPlacementKind.Date, 0.5, 0.18))
         {
-            case "signdate" when !surface.Place(SignPlacementKind.Date, 0.5, 0.18):
-                return "date not placed";
-            case "signpad":
-                var pill = FindLogicalChildren<Border>(surface).First(item => item.Child is TextBlock { Text: "Signature" });
-                pill.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = MouseLeftButtonUpEvent });
-                break;
-            case "signsave":
-                surface.ShowSaveChoice();
-                break;
+            return "date not placed";
+        }
+
+        if (verb == "signpress")
+        {
+            PressPill(surface, label);
         }
 
         await Task.Delay(200);
         return $"placements={surface.Placements.Count}";
     }
+
+    private static void PressPill(DependencyObject root, string label) =>
+        FindLogicalChildren<Border>(root)
+            .First(item => item.Child is TextBlock { Text: var text } && text == label)
+            .RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = MouseLeftButtonUpEvent });
 
     private static IEnumerable<T> FindLogicalChildren<T>(DependencyObject root) where T : DependencyObject
     {
