@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Media.Media3D;
@@ -146,26 +147,28 @@ internal static class MeshPreviewLoader
 
     // The body streams from disk on every pass, so a million-facet part
     // never has to sit in memory whole.
-    private static TriangleStream BinaryStlTriangles(Stream stream, uint count) => (visit, token) =>
-    {
-        const int batchTriangles = 4096;
-        var buffer = new byte[50 * batchTriangles];
-        stream.Position = 84;
-        for (var done = 0u; done < count;)
+    private static TriangleStream BinaryStlTriangles(Stream stream, uint count) =>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] (visit, token) =>
         {
-            token.ThrowIfCancellationRequested();
-            var batch = (int)Math.Min(batchTriangles, count - done);
-            stream.ReadExactly(buffer, 0, batch * 50);
-            for (var i = 0; i < batch; i++)
+            const int batchTriangles = 4096;
+            var buffer = new byte[50 * batchTriangles];
+            stream.Position = 84;
+            for (var done = 0u; done < count;)
             {
-                var record = buffer.AsSpan(i * 50, 50);
-                VisitFinite(visit, ReadVector(record[12..]), ReadVector(record[24..]), ReadVector(record[36..]));
+                token.ThrowIfCancellationRequested();
+                var batch = (int)Math.Min(batchTriangles, count - done);
+                stream.ReadExactly(buffer, 0, batch * 50);
+                for (var i = 0; i < batch; i++)
+                {
+                    var record = buffer.AsSpan(i * 50, 50);
+                    VisitFinite(visit, ReadVector(record[12..]), ReadVector(record[24..]), ReadVector(record[36..]));
+                }
+
+                done += (uint)batch;
             }
+        };
 
-            done += (uint)batch;
-        }
-    };
-
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static Vector3 ReadVector(ReadOnlySpan<byte> bytes) => new(
         BinaryPrimitives.ReadSingleLittleEndian(bytes),
         BinaryPrimitives.ReadSingleLittleEndian(bytes[4..]),
@@ -230,6 +233,7 @@ internal static class MeshPreviewLoader
         return Build(mesh.Triangles, "OBJ mesh", cap, token);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static int ParseObjIndex(ReadOnlySpan<char> corner, int vertexCount)
     {
         var slash = corner.IndexOf('/');
@@ -437,6 +441,7 @@ internal static class MeshPreviewLoader
         return Build(mesh.Triangles, "PLY mesh", cap, token);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void ParsePlyAsciiVertex(string line, PlyElement element, IndexedMesh mesh)
     {
         var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -475,6 +480,7 @@ internal static class MeshPreviewLoader
         mesh.AddVertex(x, y, z);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void ParsePlyAsciiFace(string line, IndexedMesh mesh)
     {
         var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
@@ -498,6 +504,7 @@ internal static class MeshPreviewLoader
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void SkipPlyList(BinaryReader reader, PlyProperty property)
     {
         var count = (int)ReadPlyScalar(reader, property.ListCountType!);
@@ -512,6 +519,7 @@ internal static class MeshPreviewLoader
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static double ReadPlyScalar(BinaryReader reader, string type) => type switch
     {
         "char" or "int8" => reader.ReadSByte(),
@@ -1845,6 +1853,9 @@ internal static class MeshPreviewLoader
 
     // ----------------------------------------------------------- shared --
 
+    // The first preview after launch runs the per-vertex and per-triangle
+    // paths millions of times before tiering would promote them, so they
+    // start optimized.
     private delegate void TriangleVisitor(Vector3 a, Vector3 b, Vector3 c);
 
     /// <summary>Visits every source triangle in order; building may ask for more than one pass.</summary>
@@ -1871,7 +1882,7 @@ internal static class MeshPreviewLoader
         var min = new Vector3(float.PositiveInfinity);
         var max = new Vector3(float.NegativeInfinity);
         var area = 0.0;
-        source((a, b, c) =>
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
         {
             count++;
             min = Vector3.Min(min, Vector3.Min(a, Vector3.Min(b, c)));
@@ -1908,6 +1919,7 @@ internal static class MeshPreviewLoader
         var positions = new List<Vector3>();
         var corners = new int[count * 3];
         var next = 0;
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         int Id(Vector3 point)
         {
             if (!ids.TryGetValue(point, out var id))
@@ -1920,7 +1932,7 @@ internal static class MeshPreviewLoader
             return id;
         }
 
-        source((a, b, c) =>
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
         {
             if (next < corners.Length)
             {
@@ -1938,8 +1950,8 @@ internal static class MeshPreviewLoader
     /// cell's corners into their mean, and keep the triangles whose three
     /// corners land in three different cells, once each. Linear in the
     /// source, and the result is still a closed surface. The cell size comes
-    /// from the surface area so the result lands near the cap, with a pass
-    /// or two more if the estimate misses.
+    /// from the surface area; a result over the cap, or far under it, takes
+    /// another pass with cells resized from the count it got.
     /// </summary>
     private static MeshShape Simplify(
         TriangleStream source,
@@ -1956,8 +1968,12 @@ internal static class MeshPreviewLoader
             return new MeshShape([], []);
         }
 
-        // A closed surface keeps about two triangles per occupied cell and
-        // crosses about one and a half cells per cell-sized patch of area.
+        // A smooth closed surface keeps about two triangles per occupied
+        // cell and crosses about one and a half cells per cell-sized patch
+        // of area, so with these cells a dense sphere lands at 1.4 times the
+        // cap. CAD meshes, whose flat faces carry few vertices at any cell
+        // size, land under it: a mouse shell at 0.4. A third of the cap is
+        // plenty to show.
         var floor = longest / 1_000_000;
         var cell = Math.Sqrt(1.6 * area / cap);
         if (!(cell > floor))
@@ -1965,26 +1981,21 @@ internal static class MeshPreviewLoader
             cell = longest / 512;
         }
 
-        MeshShape? best = null;
-        MeshShape? last = null;
-        for (var attempt = 0; attempt < 3; attempt++)
+        var shape = ClusterOnce(source, min, cell, token);
+        if (shape.TriangleCount < cap / 3)
         {
-            last = ClusterOnce(source, min, cell, token);
-            var triangles = last.TriangleCount;
-            if (triangles <= cap * 1.1 && (best is null || triangles > best.TriangleCount))
-            {
-                best = last;
-            }
-
-            if ((triangles <= cap * 1.1 && triangles >= cap * 0.5) || triangles == 0)
-            {
-                break;
-            }
-
-            cell = Math.Max(floor, cell * Math.Sqrt(triangles / (double)cap) * (triangles > cap ? 1.05 : 0.95));
+            cell = Math.Max(floor, cell * Math.Sqrt(shape.TriangleCount / (0.8 * cap)));
+            shape = ClusterOnce(source, min, cell, token);
         }
 
-        return best ?? last!;
+        // Each pass widens the cells by at least 17 percent, so this ends.
+        while (shape.TriangleCount > cap * 1.1)
+        {
+            cell *= Math.Sqrt(shape.TriangleCount / (0.8 * cap));
+            shape = ClusterOnce(source, min, cell, token);
+        }
+
+        return shape;
     }
 
     private static MeshShape ClusterOnce(TriangleStream source, Vector3 origin, double cell, CancellationToken token)
@@ -1993,6 +2004,7 @@ internal static class MeshPreviewLoader
         var inverse = 1 / cell;
         var cells = new Dictionary<long, int>();
         var sums = new List<(double X, double Y, double Z, int Count)>();
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         int Cell(Vector3 point)
         {
             var x = Math.Min(axisCells - 1, (long)((point.X - origin.X) * inverse));
@@ -2013,7 +2025,7 @@ internal static class MeshPreviewLoader
 
         var seen = new HashSet<(int, int, int)>();
         var corners = new List<int>();
-        source((a, b, c) =>
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
         {
             int ia = Cell(a), ib = Cell(b), ic = Cell(c);
             if (ia == ib || ib == ic || ia == ic)
@@ -2120,20 +2132,25 @@ internal static class MeshPreviewLoader
         double longest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
         var scale = longest > 0 && double.IsFinite(longest) ? 3.1 / longest : 1;
         var normals = CreaseNormals(shape);
-        var positions = new Point3DCollection(shape.Corners.Length);
-        var vectors = new Vector3DCollection(shape.Corners.Length);
-        for (var i = 0; i < shape.Corners.Length; i++)
+        var positions = new Point3D[shape.Corners.Length];
+        var vectors = new Vector3D[shape.Corners.Length];
+        for (var i = 0; i < positions.Length; i++)
         {
             var point = shape.Positions[shape.Corners[i]];
-            positions.Add(new Point3D(
+            positions[i] = new Point3D(
                 (point.X - center.X) * scale,
                 (point.Y - center.Y) * scale,
-                (point.Z - center.Z) * scale));
-            vectors.Add(new Vector3D(normals[i].X, normals[i].Y, normals[i].Z));
+                (point.Z - center.Z) * scale);
+            vectors[i] = new Vector3D(normals[i].X, normals[i].Y, normals[i].Z);
         }
 
-        // No index list: each three positions are one triangle.
-        var geometry = new MeshGeometry3D { Positions = positions, Normals = vectors };
+        // No index list: each three positions are one triangle. The
+        // collections take whole arrays in one copy instead of an Add each.
+        var geometry = new MeshGeometry3D
+        {
+            Positions = new Point3DCollection(positions),
+            Normals = new Vector3DCollection(vectors)
+        };
         geometry.Freeze();
         return geometry;
     }
@@ -2148,6 +2165,7 @@ internal static class MeshPreviewLoader
 
         public int TriangleCount { get; private set; }
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public int AddVertex(Vector3 position)
         {
             if (VertexCount == _positions.Length)
@@ -2162,6 +2180,7 @@ internal static class MeshPreviewLoader
         public int AddVertex(double x, double y, double z) => AddVertex(new Vector3((float)x, (float)y, (float)z));
 
         /// <summary>A corner outside the vertex list drops its triangle.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void AddTriangle(int a, int b, int c)
         {
             if ((uint)a >= (uint)VertexCount || (uint)b >= (uint)VertexCount || (uint)c >= (uint)VertexCount)
@@ -2183,6 +2202,7 @@ internal static class MeshPreviewLoader
 
         public void AddTriangle(Vector3 a, Vector3 b, Vector3 c) => AddTriangle(AddVertex(a), AddVertex(b), AddVertex(c));
 
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public void Triangles(TriangleVisitor visit, CancellationToken token)
         {
             for (var t = 0; t < TriangleCount; t++)
@@ -2201,6 +2221,7 @@ internal static class MeshPreviewLoader
     // Text formats can carry literal NaN or Infinity coordinates, and binary
     // ones garbage floats; one such corner would poison the bounds and blank
     // the whole render, so its triangle is dropped.
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void VisitFinite(TriangleVisitor visit, Vector3 a, Vector3 b, Vector3 c)
     {
         if (IsFinite(a) && IsFinite(b) && IsFinite(c))
@@ -2221,6 +2242,7 @@ internal static class MeshPreviewLoader
         bufferSize: 1 << 16,
         FileOptions.SequentialScan);
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static bool NextToken(ref ReadOnlySpan<char> line, out ReadOnlySpan<char> token)
     {
         line = line.TrimStart();
@@ -2236,6 +2258,7 @@ internal static class MeshPreviewLoader
         return true;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static bool TryReadVector(ref ReadOnlySpan<char> line, out Vector3 vector)
     {
         vector = default;
