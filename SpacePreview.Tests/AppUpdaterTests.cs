@@ -1,4 +1,5 @@
 using System.Windows.Threading;
+using SpacePreview.Native;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
 
@@ -74,6 +75,25 @@ public sealed class AppUpdaterTests
         Assert.False(AppUpdater.TriedRecently(tried with { UpdateAttemptUtc = now.AddHours(-24) }, release, now));
         Assert.False(AppUpdater.TriedRecently(tried with { UpdateAttemptVersion = "3.0.1" }, release, now));
         Assert.False(AppUpdater.CanInstallNow(Away with { TriedRecently = true }));
+    }
+
+    [Fact]
+    public void TheRulesReadTheLivePc()
+    {
+        var app = TestSource.Read(@"SpacePreview\App.xaml.cs");
+        Assert.Contains("PreviewOpen = _controller?.NoPreviewOpen != true", app, StringComparison.Ordinal);
+        Assert.Contains("FullscreenSuspended = _controller?.InputSuspendedForFullscreen != false", app, StringComparison.Ordinal);
+        Assert.Contains("AcceptsNotifications = NativeMethods.AcceptsNotifications()", app, StringComparison.Ordinal);
+        Assert.Contains("Idle = NativeMethods.TimeSinceLastInput()", app, StringComparison.Ordinal);
+        Assert.Contains(
+            "SystemEvents.PowerModeChanged += OnPowerModeChanged",
+            TestSource.Method(@"SpacePreview\Services\AppUpdater.cs", "Start"),
+            StringComparison.Ordinal);
+
+        // The calls themselves answer on this PC without throwing.
+        Assert.InRange(NativeMethods.TimeSinceLastInput(), TimeSpan.Zero, TimeSpan.FromDays(50));
+        _ = NativeMethods.AcceptsNotifications();
+        _ = AppUpdater.ConnectionIsMetered();
     }
 
     [Fact]
