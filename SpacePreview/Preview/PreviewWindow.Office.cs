@@ -256,6 +256,15 @@ public partial class PreviewWindow
                     return;
                 }
 
+                // A wheel alone never moves the rail, so the viewer says
+                // where the reader is. A page asked for meanwhile still wins.
+                await ReadPdfPageFromViewerAsync(railState);
+                if (railState.Version != _loadVersion || railState.Token.IsCancellationRequested)
+                {
+                    ReleasePartial();
+                    return;
+                }
+
                 full = complete;
                 var target = askedPage ?? Math.Max(1, railState.CurrentPage);
                 DiagnosticLog.Write(
