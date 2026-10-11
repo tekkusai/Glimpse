@@ -96,9 +96,17 @@ ends turned up. `BrandMark` draws it, and nothing else does.
   the tile. The tile sits on the square keyline of Microsoft's 48 px icon
   grid, 42 of 48.
 - The tray shows the sign alone, in the taskbar's own light or dark ink.
-- The sizes Windows asks for (16 to 64 px for the icon, 16 to 48 px for the
-  tray) are hinted by hand, so every straight edge lands on a whole pixel.
-  Larger sizes draw the vectors.
+- The icon carries every size Microsoft lists for an app icon. The thirteen
+  from 16 to 96 px are hinted by hand, so every straight edge lands on a
+  whole pixel. The 256 px frame draws the vectors.
+- The tray glyph is hinted the same way at the sizes for 100, 125, 150, 175,
+  200, 225, 250 and 300 percent, 16 to 48 px. It sits a little above
+  center, as the system's chevron does. Any other scale draws the vectors.
+- The welcome's tile is the 64, 80 or 96 px row at 100, 125 or 150 percent,
+  and the vectors at any other scale.
+- On the tile the stroke rounds up, never thinner than the shape. In the
+  tray it is a twelfth of the square to the nearest pixel and at least
+  2 px, about the weight of the system's glyphs beside it.
 - `scripts/render-icon.ps1` writes `Glimpse.ico` from `BrandMark`, and a test
   fails when the two disagree.
 

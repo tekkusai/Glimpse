@@ -9,8 +9,10 @@ namespace SpacePreview.Services;
 /// top-level window, never a message-only one: the taskbar announces a
 /// fresh start (Explorer restarted, or the primary display changed scale)
 /// by broadcasting TaskbarCreated to top-level windows, the taskbar's light
-/// or dark switch arrives as a broadcast WM_SETTINGCHANGE, and a
-/// message-only window receives no broadcasts at all.
+/// or dark switch arrives as a broadcast WM_SETTINGCHANGE, a new resolution
+/// as a broadcast WM_DISPLAYCHANGE, and a message-only window receives no
+/// broadcasts at all. It has no owner, and only <see cref="Dispose"/> ends
+/// it.
 /// </summary>
 internal sealed class TrayWindow : IDisposable
 {
@@ -20,14 +22,15 @@ internal sealed class TrayWindow : IDisposable
     private readonly NativeMethods.WndProc _wndProc;
     private readonly Action _clicked;
     private readonly Action _taskbarCreated;
-    private readonly Action _settingChanged;
+    private readonly Action _redraw;
     private readonly Action _balloonClicked;
 
-    public TrayWindow(Action clicked, Action taskbarCreated, Action settingChanged, Action balloonClicked)
+    /// <param name="redraw">The taskbar's theme, scale or resolution may have changed.</param>
+    public TrayWindow(Action clicked, Action taskbarCreated, Action redraw, Action balloonClicked)
     {
         _clicked = clicked;
         _taskbarCreated = taskbarCreated;
-        _settingChanged = settingChanged;
+        _redraw = redraw;
         _balloonClicked = balloonClicked;
         _wndProc = WindowProc;
 
@@ -98,9 +101,19 @@ internal sealed class TrayWindow : IDisposable
             return IntPtr.Zero;
         }
 
-        if (msg == NativeMethods.WM_SETTINGCHANGE)
+        // DefWindowProc would destroy the window, and the tray icon with
+        // it, while Glimpse stays running. Nothing outside may close it.
+        if (msg == NativeMethods.WM_CLOSE)
         {
-            _settingChanged();
+            return IntPtr.Zero;
+        }
+
+        // The window sits on the primary display, where the tray is, so a
+        // new scale there arrives as WM_DPICHANGED even when the taskbar
+        // is not recreated.
+        if (msg is NativeMethods.WM_SETTINGCHANGE or NativeMethods.WM_DPICHANGED or NativeMethods.WM_DISPLAYCHANGE)
+        {
+            _redraw();
         }
 
         return NativeMethods.DefWindowProc(hwnd, msg, wParam, lParam);

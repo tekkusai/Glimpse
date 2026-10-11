@@ -30,8 +30,9 @@ public sealed class BrandMarkTests
             sizes.Add(size);
         }
 
-        // Every size Windows asks for from 100 to 300 percent, then 64 and 256.
-        Assert.Equal([16, 20, 24, 30, 32, 36, 40, 48, 64, 256], sizes.Order());
+        // Every target size Microsoft lists for an app icon: the title bar,
+        // the taskbar and Start from 100 to 400 percent.
+        Assert.Equal(IconSizes, sizes.Order());
         return Task.CompletedTask;
     });
 
@@ -44,13 +45,30 @@ public sealed class BrandMarkTests
             var side = pixels - (2 * exactInset);
             Assert.InRange(inset - exactInset, -1, 1);
             Assert.InRange(corner - (side * BrandMark.TileCorner), -1, 1);
-            AssertNear(BrandMark.OnTile.Scaled(side, exactInset), sign, pixels);
+            var exact = BrandMark.OnTile.Scaled(side, exactInset);
+            AssertNear(exact, sign, pixels);
+
+            // Rounded up, so no size draws the sign thinner than the shape.
+            Assert.InRange(sign.Stroke - exact.Stroke, -1e-9, 1);
         }
 
         foreach (var (pixels, sign) in BrandMark.HintedGlyphs)
         {
             AssertNear(BrandMark.Alone.Scaled(pixels, 0), sign, pixels);
+
+            // The nearest pixel to a twelfth, at least 2: about the weight of
+            // the system's glyphs beside it.
+            Assert.Equal(Math.Max(2, Math.Round(pixels / 12.0)), sign.Stroke);
         }
+    }
+
+    [Fact]
+    public void EverySizeWindowsAsksForIsHinted()
+    {
+        // The app icon below 256, and the tray at 100, 125, 150, 175, 200,
+        // 225, 250 and 300 percent.
+        Assert.Equal(IconSizes.Where(size => size < 256), BrandMark.HintedTiles.Keys.Order());
+        Assert.Equal([16, 20, 24, 28, 32, 36, 40, 48], BrandMark.HintedGlyphs.Keys.Order());
     }
 
     [Fact]
@@ -74,18 +92,26 @@ public sealed class BrandMarkTests
         return Task.CompletedTask;
     });
 
-    [Fact]
-    public Task TheWelcomeShowsTheAppTile() => WpfApp.RunAsync(() =>
+    [Theory]
+    [InlineData(96, 64)]
+    [InlineData(120, 80)]
+    [InlineData(144, 96)]
+    public Task TheWelcomeShowsTheTileHintedForItsDevicePixels(int dpi, int pixels) => WpfApp.RunAsync(() =>
     {
+        // 64 across on the screen's own scale: the row for the pixels it
+        // covers, pixel for pixel, not the 64 row stretched.
         var mark = BrandMark.Create(64);
+        VisualTreeHelper.SetRootDpi(mark, new DpiScale(dpi / 96.0, dpi / 96.0));
         mark.Measure(new Size(64, 64));
         mark.Arrange(new Rect(0, 0, 64, 64));
-        var bitmap = new RenderTargetBitmap(64, 64, 96, 96, PixelFormats.Pbgra32);
+        var bitmap = new RenderTargetBitmap(pixels, pixels, dpi, dpi, PixelFormats.Pbgra32);
         bitmap.Render(mark);
 
-        Assert.True(Bgra(BrandMark.RenderTile(64)).SequenceEqual(Bgra(bitmap)));
+        Assert.True(Bgra(BrandMark.RenderTile(pixels)).SequenceEqual(Bgra(bitmap)), $"the welcome tile at {dpi} dpi is not the {pixels} row");
         return Task.CompletedTask;
     });
+
+    private static readonly int[] IconSizes = [16, 20, 24, 30, 32, 36, 40, 48, 60, 64, 72, 80, 96, 256];
 
     private static void AssertNear(BrandMark.Sign exact, BrandMark.Sign hinted, int pixels)
     {

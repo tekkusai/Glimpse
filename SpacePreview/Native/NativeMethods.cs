@@ -21,7 +21,10 @@ internal static class NativeMethods
     public const uint PM_NOREMOVE = 0x0000;
     public const int WM_CONTEXTMENU = 0x007B;
     public const uint WM_GETTEXT = 0x000D;
+    public const uint WM_CLOSE = 0x0010;
     public const uint WM_SETTINGCHANGE = 0x001A;
+    public const uint WM_DISPLAYCHANGE = 0x007E;
+    public const uint WM_DPICHANGED = 0x02E0;
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_OBJECT_FOCUS = 0x8005;
     public const uint EVENT_OBJECT_SELECTIONWITHIN = 0x8009;
@@ -441,6 +444,7 @@ internal static class NativeMethods
 
     public const uint GW_HWNDNEXT = 2;
     public const uint GW_HWNDPREV = 3;
+    public const uint GW_OWNER = 4;
     public const uint GW_CHILD = 5;
 
     [DllImport("user32.dll")]

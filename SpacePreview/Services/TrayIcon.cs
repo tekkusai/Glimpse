@@ -63,7 +63,7 @@ internal sealed class TrayIcon : IDisposable
                 RebuildIcon();
                 AddIcon();
             },
-            settingChanged: () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIconForTheme)),
+            redraw: () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIcon)),
             balloonClicked: OnBalloonClicked);
         RebuildIcon();
         AddIcon();
@@ -71,9 +71,9 @@ internal sealed class TrayIcon : IDisposable
     }
 
     // The taskbar's own theme (a separate setting from app theme) picks the
-    // glyph color. Its broadcast holds up the app that sent it, so the
-    // redraw waits for this thread's next turn.
-    private void RefreshIconForTheme()
+    // glyph color, and its scale the glyph's size. A broadcast holds up the
+    // app that sent it, so the redraw waits for this thread's next turn.
+    private void RefreshIcon()
     {
         if (_disposed)
         {
@@ -85,7 +85,7 @@ internal sealed class TrayIcon : IDisposable
         {
             var data = NewIconData();
             data.uFlags = NativeMethods.NIF_ICON;
-            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+            ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data);
         }
     }
 
@@ -233,7 +233,7 @@ internal sealed class TrayIcon : IDisposable
         data.dwInfoFlags = NativeMethods.NIIF_INFO
             | NativeMethods.NIIF_NOSOUND
             | NativeMethods.NIIF_RESPECT_QUIET_TIME;
-        if (_disposed || !_iconVisible || !NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data))
+        if (_disposed || !_iconVisible || !ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data))
         {
             DiagnosticLog.Write("update notice failed");
             return;
@@ -351,7 +351,7 @@ internal sealed class TrayIcon : IDisposable
         data.dwInfoFlags = NativeMethods.NIIF_INFO
             | NativeMethods.NIIF_NOSOUND
             | NativeMethods.NIIF_RESPECT_QUIET_TIME;
-        if (NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data))
+        if (ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data))
         {
             DiagnosticLog.Write($"preview access warning shown kind={warning.Kind} process={warning.DisplayName} pid={warning.ProcessId}");
             return true;
@@ -363,15 +363,20 @@ internal sealed class TrayIcon : IDisposable
 
     // ---- Shell notification icon --------------------------------------------
 
+    internal delegate bool ShellNotify(int message, ref NativeMethods.NOTIFYICONDATA data);
+
+    /// <summary>Every call to the shell about the icon. Tests swap in a fake; production asks the shell.</summary>
+    internal static ShellNotify ShellNotifyIcon { get; set; } = NativeMethods.Shell_NotifyIcon;
+
     private void AddIcon()
     {
         var data = NewIconData();
 
         // An icon still in place refuses the add; the change carries the new
         // drawing instead.
-        if (!NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_ADD, ref data))
+        if (!ShellNotifyIcon(NativeMethods.NIM_ADD, ref data))
         {
-            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+            ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data);
         }
 
         _iconVisible = true;
@@ -390,7 +395,7 @@ internal sealed class TrayIcon : IDisposable
             hWnd = _window.Handle,
             uID = IconId
         };
-        NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_DELETE, ref data);
+        ShellNotifyIcon(NativeMethods.NIM_DELETE, ref data);
         _iconVisible = false;
     }
 
