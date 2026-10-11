@@ -4,7 +4,7 @@
 
 **Faster where you wait.** Opening a file again right after closing it is quicker for nearly every type. On the same machine, Markdown went from 199 to 66 ms, PDFs from 454 to 263 ms, PowerPoint from 536 to 251 ms and video from 361 to 87 ms.
 
-**Lighter on your PC.** In our tests, previewing 26 files of every kind took about a third less CPU than in 2.0, Office conversion aside, and an open PDF takes about half the CPU and 100 to 300 MB less memory. Glimpse listens to the keyboard only while Explorer, the desktop or a file dialog is in front, no longer wakes the processor while it waits in the tray, and stops converting an Office file as soon as you move on.
+**Lighter on your PC.** In our tests, previewing 26 files of every kind took about a third less CPU than in 2.0, Office conversion aside, and an open PDF takes about half the CPU and 100 to 300 MB less memory. Glimpse listens to the keyboard only while Explorer, the desktop or a file dialog is in front, and no longer wakes the processor while it waits in the tray.
 
 **Updates take care of themselves.** Glimpse now installs updates while you're away from your PC: only after a few minutes without keyboard or mouse input, and never while a preview is open or something is full screen. There is no update window to click through. Glimpse checks each update's signature and installs only releases signed by its developer. Settings shows the update status in one line, with Check for updates and Install now, and has a switch to turn automatic installs off.
 
