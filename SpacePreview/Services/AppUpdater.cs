@@ -67,6 +67,7 @@ internal sealed class AppUpdater : IDisposable
     internal static readonly TimeSpan ReleaseAgeBeforeInstall = TimeSpan.FromHours(48);
     internal static readonly TimeSpan IdleBeforeInstall = TimeSpan.FromMinutes(3);
     internal static readonly TimeSpan RetryInstallAfter = TimeSpan.FromHours(24);
+    private static readonly TimeSpan CheckIsFreshFor = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan FirstCheckDelay = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan GateInterval = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SetupQuitsWithin = TimeSpan.FromMinutes(2);
@@ -254,18 +255,26 @@ internal sealed class AppUpdater : IDisposable
             && InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow)
             && IsAway(_observe());
 
-        if (!InstallsNow())
-        {
-            return;
-        }
-
-        // A release pulled late in its two days must not install: GitHub
-        // still offers this one, signed, or it is no longer pending.
-        if (await CheckAsync(asked: false) && State.Pending == release && State.Installer is { } installer && InstallsNow())
+        // A release pulled late in its two days must not install.
+        if (InstallsNow() && await ConfirmAsync(release) && State.Installer is { } installer && InstallsNow())
         {
             await LaunchAsync(release, installer, asked: false);
         }
     }
+
+    /// <summary>
+    /// The test before any launch: GitHub still offers this release,
+    /// signed, or it is no longer pending. A check that found it within
+    /// the last minute is that answer, so a scheduled check that opens the
+    /// gate does not ask twice. A clock set back is no answer.
+    /// </summary>
+    private async Task<bool> ConfirmAsync(AppUpdateRelease release) =>
+        State.Pending == release
+        && (!State.Unanswered
+            && DateTimeOffset.UtcNow - Settings.Current.LastUpdateCheckUtc is { } age
+            && age >= TimeSpan.Zero
+            && age < CheckIsFreshFor
+            || await CheckAsync(asked: false) && State.Pending == release);
 
     /// <summary>
     /// The release's half of an automatic install, and what Settings says

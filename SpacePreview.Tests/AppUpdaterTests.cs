@@ -287,7 +287,8 @@ public sealed class AppUpdaterTests
         await updates.TickAsync();
         Assert.Empty(launches);
 
-        // Away: GitHub still offers it, signed, and then it installs.
+        // Away an hour later: GitHub still offers it, signed, and then it installs.
+        AgeTheLastCheck();
         pc = Away;
         await updates.TickAsync();
         Assert.Equal(("3.1.0", installer), Assert.Single(launches));
@@ -298,6 +299,59 @@ public sealed class AppUpdaterTests
 
         await updates.TickAsync();
         Assert.Single(launches);
+    });
+
+    [Fact]
+    public Task ACheckThatOpensTheGateIsTheAnswerItsLaunchNeeds() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => pc,
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        // Downloaded while the user was here.
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // Hours later, away: the check finds the gate open and launches without asking again.
+        AgeTheLastCheck();
+        pc = Away;
+        await updates.CheckNowAsync();
+        Assert.Equal(1, launches);
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+    });
+
+    [Fact]
+    public Task AClockSetBackIsNoAnswerFromGitHub() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // The last check now reads as an hour from now, and the release is gone.
+        Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow.AddHours(1) });
+        release.NoRelease = true;
+        pc = Away;
+        await updates.TickAsync();
+
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.Null(updates.State.Pending);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
     });
 
     [Fact]
@@ -657,6 +711,7 @@ public sealed class AppUpdaterTests
         Assert.NotNull(updates.State.Installer);
 
         // Pulled late in its two days, while the user was at the keyboard.
+        AgeTheLastCheck();
         release.NoRelease = true;
         pc = Away;
         await updates.TickAsync();
@@ -679,6 +734,7 @@ public sealed class AppUpdaterTests
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
 
+        AgeTheLastCheck();
         release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
         pc = Away;
         await updates.TickAsync();
@@ -698,6 +754,7 @@ public sealed class AppUpdaterTests
         using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
 
         await updates.CheckNowAsync();
+        AgeTheLastCheck();
         release.Offline = true;
         pc = Away;
         await updates.TickAsync();
@@ -727,6 +784,7 @@ public sealed class AppUpdaterTests
         Assert.Equal("3.1.0 installs the next time you step away.", Caption());
 
         // Away, the check before the launch gets no answer: every launch needs one.
+        AgeTheLastCheck();
         release.Offline = true;
         pc = Away;
         await updates.TickAsync();
@@ -818,6 +876,10 @@ public sealed class AppUpdaterTests
             TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowMajorUpdateNoticeOnReturn"),
             StringComparison.Ordinal);
     }
+
+    // A minute on, a launch asks GitHub again.
+    private static void AgeTheLastCheck() =>
+        Settings.Update(settings => settings with { LastUpdateCheckUtc = settings.LastUpdateCheckUtc - TimeSpan.FromMinutes(1) });
 
     private static AppUpdateRelease Release(string version) => new(
         new Version(version),
