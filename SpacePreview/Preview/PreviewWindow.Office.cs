@@ -28,6 +28,9 @@ public partial class PreviewWindow
                 return BuildConvertedOfficePreview(cached, null, version, token);
             }
 
+            // A conversion takes a second or more and ends in a page: the
+            // browser starts alongside it instead of after it.
+            WarmBrowserForNextGlance();
             var job = OfficeDocumentPdfConverter.Convert(path, kind, token);
             if (OfficeDocumentPdfConverter.EngineName is { } engine)
             {

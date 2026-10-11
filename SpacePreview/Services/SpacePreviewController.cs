@@ -984,6 +984,13 @@ internal sealed class SpacePreviewController : IDisposable
         UpdatePinCapacity();
         SyncMouseHook();
         DiagnosticLog.Write($"pinned preview closed ({_pinnedWindows.Count} of {MaxPinnedPreviews})");
+
+        // The last pin was what held the trim off; a hidden glance and its
+        // browser would otherwise wait for the next Space.
+        if (!_previewVisible)
+        {
+            ScheduleIdleTrim();
+        }
     }
 
     private void OnBrowseRequested(PreviewWindow window, PreviewBrowseDirection direction)

@@ -109,27 +109,35 @@ internal sealed class StagedWebView : WebView2
 /// WebView2 shuts its browser process down when the last controller closes,
 /// so without help every Space press after a hide pays a cold browser start
 /// (100 to 250 ms). One parked, invisible about:blank controller keeps the
-/// browser warm for as long as its preview window lives.
+/// browser warm while its window may serve another glance. It costs six
+/// processes and about 80 MB, so it starts with the window's first web
+/// surface and stops when the window is pinned or closed.
 /// </summary>
-internal sealed class WarmBrowser : IDisposable
+internal sealed class WarmBrowser
 {
     private CoreWebView2Controller? _controller;
     private bool _started;
-    private bool _disposed;
+    private int _generation;
 
     public async void Start(IntPtr parentHwnd)
     {
-        if (_started || _disposed || parentHwnd == IntPtr.Zero)
+        if (_started || parentHwnd == IntPtr.Zero)
         {
             return;
         }
 
         _started = true;
+        var generation = _generation;
         try
         {
             var environment = await WebViewEnvironment.GetAsync();
+            if (generation != _generation)
+            {
+                return;
+            }
+
             var controller = await environment.CreateCoreWebView2ControllerAsync(parentHwnd);
-            if (_disposed)
+            if (generation != _generation)
             {
                 controller.Close();
                 return;
@@ -149,9 +157,11 @@ internal sealed class WarmBrowser : IDisposable
         }
     }
 
-    public void Dispose()
+    /// <summary>Lets the browser go; a later Start parks a new controller.</summary>
+    public void Stop()
     {
-        _disposed = true;
+        _generation++;
+        _started = false;
         try
         {
             _controller?.Close();
