@@ -57,7 +57,10 @@ public partial class PreviewWindow
     private OpenTarget _openTarget = new(null, null);
     private HeaderTool _headerTool;
     private int _selectedCount = 1;
-    // What the content learned after the header went up: a PDF's pages.
+    // The item the details describe, read once per item, and the one fact
+    // beside its size: an image's pixels, or what the content learned later,
+    // such as a PDF's pages. A fact that lands re-renders without the disk.
+    private FileSystemInfo? _headerItem;
     private string? _headerFact;
 
     /// <summary>
@@ -100,6 +103,7 @@ public partial class PreviewWindow
         }
 
         _selectedCount = selectedCount;
+        _headerItem = null;
         _headerFact = null;
         ApplyHeaderSubtitle(path, _shortcutTarget);
 
@@ -459,7 +463,7 @@ public partial class PreviewWindow
         SubtitleText.ToolTip = null;
         if (shortcutTarget is null)
         {
-            var (details, modified) = DescribeHeaderItem(path, _headerFact);
+            var (details, modified) = DescribeHeaderItem(path);
             SubtitleText.Text = pickerCount > 1 ? $"{details} · {pickerCount} selected" : details;
             if (modified is { } when)
             {
@@ -498,24 +502,26 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The details line and the time it names, from the directory entry. An
-    /// image adds its pixel size from its header bytes; anything else adds
-    /// only a fact its content already found. Nothing when the item is gone.
+    /// The details line and the time it names. The directory entry, and an
+    /// image's pixel size from its header bytes, are read on the item's first
+    /// line only. Nothing when the item is gone.
     /// </summary>
-    private static (string Details, DateTime? Modified) DescribeHeaderItem(string path, string? fact)
+    private (string Details, DateTime? Modified) DescribeHeaderItem(string path)
     {
         try
         {
-            FileSystemInfo item = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
-            if (fact is null
-                && (FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
-                && LooksLikeLocalDrivePath(path)
-                && ImageHeader.TryRead(path) is { } image)
+            if (_headerItem is null)
             {
-                fact = $"{image.Width}×{image.Height}";
+                _headerItem = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
+                if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
+                    && LooksLikeLocalDrivePath(path)
+                    && ImageHeader.TryRead(path) is { } image)
+                {
+                    _headerFact = $"{image.Width}×{image.Height}";
+                }
             }
 
-            return (FileKinds.Describe(item, fact, DateTime.Now, CultureInfo.CurrentCulture), item.LastWriteTime);
+            return (FileKinds.Describe(_headerItem, _headerFact, DateTime.Now, CultureInfo.CurrentCulture), _headerItem.LastWriteTime);
         }
         catch
         {

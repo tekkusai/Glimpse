@@ -289,6 +289,9 @@ public sealed class ChromeHeaderTests
             Fields.Call(window, "ShowHeaderFact", "81 pages", version - 1);
             Assert.DoesNotContain("pages", window.SubtitleText.Text, StringComparison.Ordinal);
 
+            // The line is rebuilt from what the header already read: the
+            // late fact costs no trip to the disk.
+            File.Delete(pdf);
             Fields.Call(window, "ShowHeaderFact", "81 pages", version);
             Assert.StartsWith($"{pdfSize} · 81 pages · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
         }
