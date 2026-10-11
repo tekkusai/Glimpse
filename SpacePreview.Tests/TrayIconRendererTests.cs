@@ -5,9 +5,10 @@ using SpacePreview.Services;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// The tray glyph at 100, 125 and 150 percent: the size the tray asks for,
-/// the Space sign alone with every edge on a whole pixel, and centered in
-/// the square, never a cropped corner.
+/// The tray glyph at every scale Windows offers from 100 to 300 percent:
+/// the size the tray asks for, the Space sign alone with every edge on a
+/// whole pixel, centered across, a little above center as the system's
+/// chevron is, and never a cropped corner.
 /// </summary>
 [Collection(WpfCollection.Name)]
 public sealed class TrayIconRendererTests
@@ -15,7 +16,12 @@ public sealed class TrayIconRendererTests
     [Theory]
     [InlineData(96u, 16, 2)]
     [InlineData(120u, 20, 2)]
-    [InlineData(144u, 24, 3)]
+    [InlineData(144u, 24, 2)]
+    [InlineData(168u, 28, 2)]
+    [InlineData(192u, 32, 3)]
+    [InlineData(216u, 36, 3)]
+    [InlineData(240u, 40, 3)]
+    [InlineData(288u, 48, 4)]
     public Task TheGlyphIsCrispAndCenteredInTheTraysSize(uint dpi, int pixels, int stroke) => WpfApp.RunAsync(() =>
     {
         foreach (var light in new[] { false, true })
@@ -44,11 +50,12 @@ public sealed class TrayIconRendererTests
                 }
             }
 
-            // Inside with room to spare, and centered: exactly across, within
-            // a pixel down.
+            // Inside with room to spare, centered across, and half a pixel
+            // to a pixel above center: the bar weighs the sign down, and
+            // the system's chevron sits as high.
             Assert.True(left >= 1 && top >= 1 && right <= pixels - 2 && bottom <= pixels - 2, $"bounds {left},{top},{right},{bottom} in {pixels}");
             Assert.Equal(pixels - 1 - right, left);
-            Assert.InRange(top + bottom - (pixels - 1), -1, 1);
+            Assert.InRange(top + bottom - (pixels - 1), -2, -1);
 
             // The sign, not a plate: wide and low.
             Assert.True(right - left + 1 >= pixels * 0.7, $"width {right - left + 1} of {pixels}");

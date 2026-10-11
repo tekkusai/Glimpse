@@ -25,8 +25,10 @@ internal static class BrandMark
     internal static readonly Sign OnTile = new(0.22, 0.35, 0.78, 0.625, 1 / 12.0);
 
     // Alone in the tray it spans three quarters of the square, as the
-    // system's own glyphs do, with the stroke at an eighth.
-    internal static readonly Sign Alone = new(0.125, 0.28, 0.875, 0.72, 0.125);
+    // system's own glyphs do, with the stroke a twelfth. It sits a little
+    // above center, as the system's chevron does; centered, the bar at its
+    // foot makes it look low.
+    internal static readonly Sign Alone = new(0.125, 0.25, 0.875, 0.70, 1 / 12.0);
 
     // The tile stands on the square keyline of Microsoft's 48 px icon grid,
     // 42 of 48, so it weighs the same as a round icon beside it.
@@ -53,16 +55,19 @@ internal static class BrandMark
             [64] = (4, 11, new(16, 24, 48, 39, 5)),
         };
 
-    // The tray at 100 to 300 percent.
+    // The tray at every scale Windows offers from 100 to 300 percent. The
+    // stroke is the nearest whole pixel to a twelfth, and never under 2,
+    // so the sign weighs about what the system's glyphs beside it do.
     internal static readonly IReadOnlyDictionary<int, Sign> HintedGlyphs = new Dictionary<int, Sign>
     {
-        [16] = new(2, 5, 14, 12, 2),
-        [20] = new(2, 6, 18, 15, 2),
-        [24] = new(3, 7, 21, 18, 3),
-        [28] = new(4, 8, 24, 20, 3),
-        [32] = new(4, 9, 28, 23, 4),
-        [40] = new(5, 11, 35, 29, 5),
-        [48] = new(6, 13, 42, 35, 6),
+        [16] = new(2, 4, 14, 11, 2),
+        [20] = new(2, 5, 18, 14, 2),
+        [24] = new(3, 6, 21, 17, 2),
+        [28] = new(4, 7, 24, 19, 2),
+        [32] = new(4, 8, 28, 22, 3),
+        [36] = new(4, 9, 32, 25, 3),
+        [40] = new(5, 10, 35, 28, 3),
+        [48] = new(6, 12, 42, 34, 4),
     };
 
     /// <summary>The app tile in a square of <paramref name="size"/>: hinted where a row exists, vectors otherwise.</summary>

@@ -50,7 +50,18 @@ public sealed class BrandMarkTests
         foreach (var (pixels, sign) in BrandMark.HintedGlyphs)
         {
             AssertNear(BrandMark.Alone.Scaled(pixels, 0), sign, pixels);
+
+            // The nearest pixel to a twelfth, at least 2: about the weight of
+            // the system's glyphs beside it.
+            Assert.Equal(Math.Max(2, Math.Round(pixels / 12.0)), sign.Stroke);
         }
+    }
+
+    [Fact]
+    public void EverySizeWindowsAsksForIsHinted()
+    {
+        // The tray at 100, 125, 150, 175, 200, 225, 250 and 300 percent.
+        Assert.Equal([16, 20, 24, 28, 32, 36, 40, 48], BrandMark.HintedGlyphs.Keys.Order());
     }
 
     [Fact]
