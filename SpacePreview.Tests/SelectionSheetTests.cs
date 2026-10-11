@@ -79,7 +79,7 @@ public sealed class SelectionSheetTests
     }
 
     /// <summary>The page once its load has finished and its navigation completed.</summary>
-    private static async Task<StagedWebView> ShownPageAsync(PreviewWindow window)
+    internal static async Task<StagedWebView> ShownPageAsync(PreviewWindow window)
     {
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(20);
         while (true)

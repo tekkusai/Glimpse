@@ -108,8 +108,7 @@ public partial class PreviewWindow
             // The text box insets its text 2 px on each side of its own. Its
             // padding does not scroll, so the bottom stays open: a band there
             // would cut lines off above the window's edge.
-            new Thickness(22, 18, 22, 0),
-            Theme.Current.CanvasBg);
+            new Thickness(22, 18, 22, 0));
         TextBlock.SetLineHeight(textBox, fontSize * 1.6);
         TextBlock.SetLineStackingStrategy(textBox, LineStackingStrategy.BlockLineHeight);
         return textBox;
@@ -120,19 +119,13 @@ public partial class PreviewWindow
         FontFamily fontFamily,
         double fontSize,
         bool wrap,
-        Thickness padding,
-        Color background)
+        Thickness padding)
     {
-        var palette = Theme.Current;
         var textBox = new TextBox
         {
             Text = text,
             IsReadOnly = true,
             BorderThickness = new Thickness(0),
-            Background = Theme.Brush(background),
-            Foreground = Theme.Brush(palette.TextPrimary),
-            CaretBrush = Theme.Brush(palette.TextPrimary),
-            SelectionBrush = Theme.Brush(palette.Accent),
             SelectionOpacity = 0.55,
             Padding = padding,
             FontFamily = fontFamily,
@@ -147,6 +140,11 @@ public partial class PreviewWindow
             Focusable = true,
             ClipToBounds = true
         };
+        // By resource, so an open preview repaints with the theme.
+        textBox.SetResourceReference(TextBox.BackgroundProperty, "Theme.CanvasBg");
+        textBox.SetResourceReference(TextBox.ForegroundProperty, "Theme.TextPrimary");
+        textBox.SetResourceReference(TextBox.CaretBrushProperty, "Theme.TextPrimary");
+        textBox.SetResourceReference(TextBox.SelectionBrushProperty, "Theme.Accent");
         TextOptions.SetTextFormattingMode(textBox, TextFormattingMode.Display);
         TextOptions.SetTextRenderingMode(textBox, TextRenderingMode.ClearType);
         AttachMiddleAutoScroll(textBox, () => FindVisualChild<ScrollViewer>(textBox), horizontal: !wrap);

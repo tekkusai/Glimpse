@@ -1303,13 +1303,31 @@ public partial class PreviewWindow
     }
 
     // ---------------------------------------------------------------------
-    // Theme. Brushes follow the application's resources by themselves; the
-    // frame's dark mode is the one thing to re-apply.
+    // Theme. Brushes follow the application's resources by themselves. The
+    // frame's dark mode is re-applied, and every browser here is told the
+    // new scheme: the pages Glimpse writes and the PDF viewer follow it.
     // ---------------------------------------------------------------------
 
     private void FollowTheme()
     {
-        Action repaint = () => WindowFrame.ApplyThemeMode(Hwnd);
+        Action repaint = () =>
+        {
+            WindowFrame.ApplyThemeMode(Hwnd);
+            foreach (var webView in FindVisualChildren<WebView2>(this))
+            {
+                try
+                {
+                    if (webView.CoreWebView2 is { } core)
+                    {
+                        WebViewTheme.Apply(core);
+                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    // A browser that closed or crashed has nothing to repaint.
+                }
+            }
+        };
         Theme.Changed += repaint;
         Closed += (_, _) => Theme.Changed -= repaint;
     }

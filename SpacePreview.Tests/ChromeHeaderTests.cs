@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shell;
+using Microsoft.Web.WebView2.Core;
 using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Services;
@@ -415,10 +416,74 @@ public sealed class ChromeHeaderTests
             Assert.Equal(Theme.Light.ChromeBg, Color(window.HeaderBar.Background));
             Assert.Equal(Theme.Light.CanvasBg, Color(window.RootChrome.Background));
             Assert.Equal(Theme.Light.Accent, Color(window.PinButton.Foreground));
+            AssertImageCanvas(window, Theme.Light);
 
             Theme.Use(ThemePreference.Dark);
             Assert.Equal(Theme.Dark.ChromeBg, Color(window.HeaderBar.Background));
             Assert.Equal(Theme.Dark.Accent, Color(window.PinButton.Foreground));
+            AssertImageCanvas(window, Theme.Dark);
+        }
+        finally
+        {
+            Theme.Use(ThemePreference.Dark);
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AThemeChangeRepaintsPinnedText() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var notes = temp.CreateFile("notes.txt", "Plain words, no grammar.");
+        var window = OpenStage(900, 650);
+        try
+        {
+            window.ShowPreview(notes, IntPtr.Zero);
+            await WaitForRevealAsync(window);
+            window.SetPinned(true);
+            var text = Find<TextBox>(window.PreviewContent)!;
+
+            foreach (var palette in new[] { Theme.Light, Theme.Dark })
+            {
+                Theme.Use(palette.IsDark ? ThemePreference.Dark : ThemePreference.Light);
+                Assert.Equal(palette.CanvasBg, Color(text.Background));
+                Assert.Equal(palette.TextPrimary, Color(text.Foreground));
+                Assert.Equal(palette.Accent, Color(text.SelectionBrush));
+            }
+        }
+        finally
+        {
+            Theme.Use(ThemePreference.Dark);
+            window.Close();
+        }
+    });
+
+    // The browser's scheme turns, and the page Glimpse wrote turns with it:
+    // its canvas, its text and its syntax colors, with no reload.
+    [Fact]
+    public Task AThemeChangeRepaintsAPinnedPage() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var notes = temp.CreateFile("notes.md", "Words and `code`.");
+        var window = OpenStage(900, 650);
+        try
+        {
+            window.ShowPreview(notes, IntPtr.Zero);
+            var page = await SelectionSheetTests.ShownPageAsync(window);
+            window.SetPinned(true);
+            await page.CoreWebView2.ExecuteScriptAsync("window.stillHere = true;");
+
+            foreach (var palette in new[] { Theme.Light, Theme.Dark })
+            {
+                Theme.Use(palette.IsDark ? ThemePreference.Dark : ThemePreference.Light);
+                Assert.Equal(
+                    palette.IsDark ? CoreWebView2PreferredColorScheme.Dark : CoreWebView2PreferredColorScheme.Light,
+                    page.CoreWebView2.Profile.PreferredColorScheme);
+
+                var expected = $"{Rgb(palette.CanvasBg)}|{Rgb(palette.TextPrimary)}|{(palette.IsDark ? "#7FA3F0" : "#2F5FD0")}|true";
+                await WaitUntilAsync(async () => await PageColorsAsync(page) == expected, TimeSpan.FromSeconds(5));
+                Assert.Equal(expected, await PageColorsAsync(page));
+            }
         }
         finally
         {
@@ -506,6 +571,49 @@ public sealed class ChromeHeaderTests
         {
             await Task.Delay(20);
         }
+    }
+
+    private static async Task WaitUntilAsync(Func<Task<bool>> condition, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (!await condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(50);
+        }
+    }
+
+    /// <summary>The image canvas and the checkerboard under transparent pixels.</summary>
+    private static void AssertImageCanvas(PreviewWindow window, ThemePalette palette)
+    {
+        var canvas = (Panel)window.PreviewContent.Content;
+        Assert.Equal(palette.CanvasBg, Color(canvas.Background));
+        var frame = (Border)((Canvas)canvas.Children[0]).Children[0];
+        var squares = (DrawingGroup)((DrawingBrush)frame.Background).Drawing;
+        Assert.Equal(palette.RaisedBg, Color(((GeometryDrawing)squares.Children[0]).Brush));
+        Assert.Equal(palette.RaisedBorder, Color(((GeometryDrawing)squares.Children[1]).Brush));
+    }
+
+    /// <summary>The page's canvas, text and keyword colors, and whether it is the same page.</summary>
+    private static async Task<string> PageColorsAsync(Microsoft.Web.WebView2.Wpf.WebView2 page) =>
+        JsonSerializer.Deserialize<string>(await page.CoreWebView2.ExecuteScriptAsync(
+            "(() => { const s = getComputedStyle(document.documentElement);"
+            + " return [s.backgroundColor, s.color, s.getPropertyValue('--tk-keyword').trim(), window.stillHere === true].join('|'); })()"))!;
+
+    private static string Rgb(System.Windows.Media.Color c) => $"rgb({c.R}, {c.G}, {c.B})";
+
+    private static T? Find<T>(DependencyObject root)
+        where T : DependencyObject
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            if ((child as T ?? Find<T>(child)) is { } found)
+            {
+                return found;
+            }
+        }
+
+        return null;
     }
 
     private static JsonDocument Audit(PreviewWindow window) => JsonDocument.Parse(window.ProbeAuditState("test"));

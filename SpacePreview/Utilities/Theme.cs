@@ -16,9 +16,12 @@ internal enum ThemePreference
 /// <summary>
 /// Two fixed palettes that track the Windows app theme. The brushes live once,
 /// in the application's resources, so every window and popup that reads a
-/// "Theme.*" dynamic resource repaints the moment the palette changes.
-/// Code-built content reads <see cref="Theme.Current"/> directly and catches
-/// up on its next build. docs/DESIGN.md names each token's job.
+/// "Theme.*" dynamic resource repaints the moment the palette changes,
+/// preview text and image canvases included. Pages Glimpse writes carry both
+/// palettes and follow the browser's color scheme, which the preview window
+/// sets on <see cref="Theme.Changed"/>. Other code-built content reads
+/// <see cref="Theme.Current"/> directly and catches up on its next build.
+/// docs/DESIGN.md names each token's job.
 /// </summary>
 internal sealed record ThemePalette(
     bool IsDark,
