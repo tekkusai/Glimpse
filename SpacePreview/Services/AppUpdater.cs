@@ -479,11 +479,16 @@ internal sealed class AppUpdater : IDisposable
         }
         finally
         {
-            // A newer download may already own the state.
+            // A newer download may already own the state. One the switch
+            // stopped while Install now waits on it hands over still
+            // Downloading: the footer never says Installing in between.
             if (_downloadCancel == cancel)
             {
                 _downloadCancel = null;
-                Set(State with { Downloading = false });
+                if (!cancel.IsCancellationRequested || !State.Installing)
+                {
+                    Set(State with { Downloading = false });
+                }
             }
         }
     }
