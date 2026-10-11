@@ -213,6 +213,40 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void TheNextSessionClearsOnlyAbandonedSavesOfItsOwnFile()
+    {
+        using var temp = new TempDirectory();
+        var original = temp.CreateFile("deal.pdf", "original");
+        var now = DateTime.UtcNow;
+        string Temp(string name, TimeSpan age)
+        {
+            var file = temp.CreateFile(name, "partial");
+            File.SetAttributes(file, FileAttributes.Hidden);
+            File.SetLastWriteTimeUtc(file, now - age);
+            return file;
+        }
+
+        var abandoned = Temp(Path.GetFileName(PreviewWindow.SigningTempPath(original)), TimeSpan.FromHours(1));
+        var saving = Temp(Path.GetFileName(PreviewWindow.SigningTempPath(original)), TimeSpan.FromSeconds(5));
+        var otherFile = Temp(".other.pdf.0123abcd.signing", TimeSpan.FromHours(1));
+        var lookalike = Temp(".deal.pdf.notatag!.signing", TimeSpan.FromHours(1));
+
+        PreviewWindow.ClearAbandonedSigningTemps(original, now);
+
+        Assert.False(File.Exists(abandoned));
+        Assert.True(File.Exists(saving));
+        Assert.True(File.Exists(otherFile));
+        Assert.True(File.Exists(lookalike));
+        Assert.Equal("original", File.ReadAllText(original));
+
+        // Without the original, a temporary file may be the one copy left.
+        var lostOriginal = Temp(Path.GetFileName(PreviewWindow.SigningTempPath(original)), TimeSpan.FromHours(1));
+        File.Delete(original);
+        PreviewWindow.ClearAbandonedSigningTemps(original, now);
+        Assert.True(File.Exists(lostOriginal));
+    }
+
+    [Fact]
     public void EverySaveStagesItsOwnFile()
     {
         var original = Path.Combine(Path.GetTempPath(), "deal.pdf");

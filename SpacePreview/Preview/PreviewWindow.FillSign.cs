@@ -318,7 +318,48 @@ public partial class PreviewWindow
         var session = new SignSession(this, key, _loadVersion, cancellation);
         SignSessions[key] = session;
         _signSession = session;
+        _ = Task.Run(() => ClearAbandonedSigningTemps(path, DateTime.UtcNow));
         return session;
+    }
+
+    /// <summary>
+    /// A save that died midway (a crash, a power cut) leaves its hidden
+    /// temporary file beside the PDF. The next session on the file clears
+    /// them: only exact names, only once older than any save takes, and only
+    /// while the original is there, since a failed replace can leave the
+    /// temporary file as the one copy.
+    /// </summary>
+    internal static void ClearAbandonedSigningTemps(string path, DateTime nowUtc)
+    {
+        try
+        {
+            var folder = Path.GetDirectoryName(path);
+            var name = Path.GetFileName(path);
+            if (string.IsNullOrEmpty(folder) || !File.Exists(path))
+            {
+                return;
+            }
+
+            foreach (var temp in Directory.EnumerateFiles(folder, $".{name}.*.signing"))
+            {
+                var stem = Path.GetFileName(temp);
+                var tag = stem.Length == name.Length + 18 ? stem.Substring(name.Length + 2, 8) : string.Empty;
+                if (tag.Length != 8
+                    || !tag.All(char.IsAsciiHexDigitLower)
+                    || !stem.StartsWith($".{name}.", StringComparison.OrdinalIgnoreCase)
+                    || nowUtc - File.GetLastWriteTimeUtc(temp) < TimeSpan.FromMinutes(10))
+                {
+                    continue;
+                }
+
+                File.Delete(temp);
+                DiagnosticLog.Write("fill-sign cleared an abandoned save");
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"fill-sign temp sweep failed: {ex.GetType().Name}");
+        }
     }
 
     /// <summary>
