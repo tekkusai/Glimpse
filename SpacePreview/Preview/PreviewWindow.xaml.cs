@@ -126,6 +126,8 @@ public partial class PreviewWindow : Window
         StateChanged += (_, _) => SyncNativeWindowState();
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
         Closed += (_, _) => _warmBrowser.Dispose();
+        // A close past the leave gate is the app ending: placed work goes to its draft now.
+        Closed += (_, _) => _signDraft?.Flush();
 
         // One line per click: where it landed and who owned the capture.
         // This is the first question for any "clicks stopped working" report.
@@ -496,6 +498,10 @@ public partial class PreviewWindow : Window
             _fillSignPath = fillSignPath;
             SyncHeaderTools();
             SetPreviewContent(content, disposable);
+            if (fillSignPath is not null)
+            {
+                _ = FindSignDraftAsync(fillSignPath, version);
+            }
         }
         catch (OperationCanceledException)
         {

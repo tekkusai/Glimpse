@@ -26,9 +26,13 @@ public partial class App : Application
         DiagnosticLog.TagProcess(e.Args.Length > 0 ? e.Args[0].TrimStart('-', '/') : null);
 
         // A crash must name itself: a log that simply stops points at
-        // native code, a FATAL line points at ours.
+        // native code, a FATAL line points at ours. Placed work still
+        // waiting for its draft is written on the way down.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
             DiagnosticLog.Write($"FATAL unhandled: {args.ExceptionObject}");
+            SignDraftKeeper.FlushAll();
+        };
         DispatcherUnhandledException += (_, args) =>
             DiagnosticLog.Write($"FATAL dispatcher: {args.Exception}");
 
@@ -119,17 +123,34 @@ public partial class App : Application
 
     /// <summary>
     /// Setup's --quit cannot wait for an answer: setup force-kills a resident
-    /// still running five seconds later, so refusing would lose the work all
-    /// the same. The log says what went.
+    /// still running five seconds later. Unsaved signing work goes to its
+    /// draft and comes back as Resume signing.
     /// </summary>
     private void QuitForSetup()
     {
+        KeepSigningWork("installer quit");
+        Shutdown();
+    }
+
+    /// <summary>
+    /// Windows closes every window past any question when the session ends.
+    /// Placed work goes to its draft in milliseconds, and the session is
+    /// never held up.
+    /// </summary>
+    protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
+    {
+        KeepSigningWork("session ending");
+        base.OnSessionEnding(e);
+    }
+
+    private void KeepSigningWork(string reason)
+    {
         if (_controller?.HoldsSigningWork == true)
         {
-            DiagnosticLog.Write("installer quit discarded unsaved signing work");
+            DiagnosticLog.Write($"{reason} kept unsaved signing work as a draft");
         }
 
-        Shutdown();
+        SignDraftKeeper.FlushAll();
     }
 
     private TrayIcon CreateTrayIcon()
@@ -150,6 +171,10 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        // First, before anything that can wait: whatever ends the app,
+        // placed work is on disk.
+        SignDraftKeeper.FlushAll();
+
         // Helpers, the probe and installer commands exit through here too,
         // but only the resident has hooks, a tray and a shell session to
         // tear down. A helper's exit was 'app exiting' in the user's log and

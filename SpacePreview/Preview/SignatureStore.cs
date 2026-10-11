@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -169,12 +170,13 @@ internal static class SignatureStore
     }
 
     /// <summary>
-    /// A stored image's PNG as a placement snapshot. A stamp imported before
-    /// imports were bounded is scaled down here, so no placement carries
-    /// more pixels than a printed page can use.
+    /// A stored image's PNG as a placement snapshot, and where it came from.
+    /// A stamp imported before imports were bounded is scaled down here, so
+    /// no placement carries more pixels than a printed page can use.
     /// </summary>
-    public static byte[]? TryReadForPlacement(string path)
+    public static byte[]? TryReadForPlacement(string path, out SignInkSource? source)
     {
+        source = null;
         try
         {
             var png = File.ReadAllBytes(path);
@@ -183,6 +185,7 @@ internal static class SignatureStore
                 return null;
             }
 
+            source = new SignInkSource(path, Convert.ToHexString(SHA256.HashData(png)));
             return Math.Max(image.PixelWidth, image.PixelHeight) <= MaxPlacedEdge ? png : EncodePng(Bounded(image));
         }
         catch

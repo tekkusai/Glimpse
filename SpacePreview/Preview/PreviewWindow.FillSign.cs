@@ -36,6 +36,10 @@ public partial class PreviewWindow
     // user's explicit second choice.
     // ---------------------------------------------------------------------
 
+    // The session's draft, and whether the loaded PDF has one waiting.
+    private SignDraftKeeper? _signDraft;
+    private bool _hasSignDraft;
+
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
     internal void RequestFillSignEscape() => _fillSignSurface?.HandleEscape();
@@ -53,6 +57,20 @@ public partial class PreviewWindow
     /// <summary>Placed ink not yet saved. Unlike TryLeaveFillSign, it never brings up the save choice.</summary>
     internal bool HoldsSigningWork => _fillSignSurface?.HasWork == true;
 
+    /// <summary>
+    /// Looks for work kept from last time on the PDF that just loaded, off
+    /// the UI thread, and lets the Sign pill offer to resume it.
+    /// </summary>
+    private async Task FindSignDraftAsync(string path, long version)
+    {
+        var (_, draft) = await Task.Run(() => SignDrafts.Load(path));
+        if (version == _loadVersion && _fillSignPath == path && _fillSignSurface is null)
+        {
+            _hasSignDraft = draft is not null;
+            SyncHeaderTools();
+        }
+    }
+
     private async Task EnterFillSignModeAsync()
     {
         if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))
@@ -61,16 +79,20 @@ public partial class PreviewWindow
         }
 
         var version = _loadVersion;
+        // Read again rather than trusted from the load: the file, or another
+        // window's work on it, may have moved on since.
+        var draftLoad = Task.Run(() => SignDrafts.Load(path));
         // Asked of the viewer now: a document scrolled by wheel alone has a
         // stale rail page.
         var (currentPage, totalPages) = await ReadPdfPositionAsync();
+        var (file, draft) = await draftLoad;
         if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null)
         {
             return;
         }
 
         int? viewerPages = totalPages > 0 ? totalPages : null;
-        var pageIndex = Math.Max(0, currentPage - 1);
+        var pageIndex = draft?.PageIndex ?? Math.Max(0, currentPage - 1);
         var pages = new SignPageCache(path, viewerPages ?? pageIndex + 1);
         var page = await pages.Get(pageIndex);
         if (page is null)
@@ -90,15 +112,24 @@ public partial class PreviewWindow
         }
 
         var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
+        if (draft is not null)
+        {
+            surface.Restore(draft.Placements);
+        }
+
+        var keeper = file is { } stamp ? new SignDraftKeeper(path, stamp, restored: draft is not null) : null;
+        surface.WorkChanged += () => keeper?.Update(surface.PageIndex, surface.Placements);
         surface.ExitRequested += ExitFillSignMode;
-        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, placements, overwrite);
+        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
         surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, pages, target);
 
         _fillSignParkedContent = current;
         _fillSignSurface = surface;
+        _signDraft = keeper;
+        _hasSignDraft = false;
         PreviewContent.Content = surface;
         SyncHeaderTools();
-        DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}");
+        DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}" + (draft is null ? "" : $" restored={draft.Placements.Count}"));
 
         // The writer reads the file exactly as a save would. A PDF it cannot
         // update says why before any work goes onto it, and the page count
@@ -117,7 +148,9 @@ public partial class PreviewWindow
 
         if (check.Problem is not null)
         {
+            // Work this file can never save is not worth keeping.
             DiagnosticLog.Write($"fill-sign unavailable: {check.Problem}");
+            keeper?.Discard();
         }
 
         surface.ApplyCheck(check);
@@ -198,6 +231,10 @@ public partial class PreviewWindow
             return;
         }
 
+        // The mode ends only with no work, work this file can never save,
+        // or Discard: nothing is left to keep.
+        _signDraft?.Discard();
+        _signDraft = null;
         _fillSignSurface = null;
         if (_fillSignParkedContent is not { } parked)
         {
@@ -223,7 +260,7 @@ public partial class PreviewWindow
         deferredFailure?.Invoke();
     }
 
-    private async Task SaveFillSignAsync(FillSignSurface surface, IReadOnlyList<SignPlacement> placements, bool overwrite)
+    private async Task SaveFillSignAsync(FillSignSurface surface, SignDraftKeeper? keeper, IReadOnlyList<SignPlacement> placements, bool overwrite)
     {
         if (_fillSignPath is not { } path
             || !ReferenceEquals(_fillSignSurface, surface)
@@ -285,6 +322,7 @@ public partial class PreviewWindow
         }
 
         DiagnosticLog.Write($"fill-sign saved {(overwrite ? "in place" : "as copy")} placements={placements.Count}");
+        keeper?.Discard();
         if (!StillOwnsSurface())
         {
             // Saving is file work and still completes; navigation is UI
@@ -295,6 +333,7 @@ public partial class PreviewWindow
 
         _fillSignSurface = null;
         _fillSignParkedContent = null;
+        _signDraft = null;
         SyncHeaderTools();
 
         // The saved file is the honest outcome: show it.

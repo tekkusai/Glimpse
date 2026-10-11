@@ -210,6 +210,12 @@ public partial class PreviewWindow
         ZoomControls.IsEnabled = !settled || _zoomWebView is not null;
         ContentActions.IsEnabled = !settled || _rotationSession is not null;
         SignButton.IsEnabled = _fillSignSurface is null && (!settled || _fillSignPath is not null);
+
+        // Work kept from last time: the pill offers it back, at the same width.
+        SignLabel.Visibility = _hasSignDraft ? Visibility.Hidden : Visibility.Visible;
+        ResumeSigningLabel.Visibility = _hasSignDraft ? Visibility.Visible : Visibility.Hidden;
+        SignButton.ToolTip = _hasSignDraft ? "Resume signing" : "Fill and sign";
+        AutomationProperties.SetName(SignButton, (string)SignButton.ToolTip);
     }
 
     private void SignButton_Click(object sender, RoutedEventArgs e) => _ = EnterFillSignModeAsync();

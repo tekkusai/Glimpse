@@ -175,21 +175,40 @@
                             </StackPanel>
                         </Border>
 
+                        <!-- Work kept from last time turns Sign into Resume
+                             signing. Both labels are laid out, so the pill
+                             keeps one width for every PDF. -->
                         <Button x:Name="SignButton"
                                 Style="{StaticResource Pill}"
                                 Visibility="Collapsed"
                                 Click="SignButton_Click"
                                 AutomationProperties.Name="Fill and sign"
                                 ToolTip="Fill and sign">
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="&#xE70F;"
-                                           Margin="0,0,6,0"
-                                           VerticalAlignment="Center"
-                                           FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
-                                           FontSize="12"
-                                           FontWeight="Normal" />
-                                <TextBlock Text="Sign" VerticalAlignment="Center" />
-                            </StackPanel>
+                            <Grid>
+                                <StackPanel x:Name="SignLabel"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Center">
+                                    <TextBlock Text="&#xE70F;"
+                                               Margin="0,0,6,0"
+                                               VerticalAlignment="Center"
+                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                               FontSize="12"
+                                               FontWeight="Normal" />
+                                    <TextBlock Text="Sign" VerticalAlignment="Center" />
+                                </StackPanel>
+                                <StackPanel x:Name="ResumeSigningLabel"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Center"
+                                            Visibility="Hidden">
+                                    <TextBlock Text="&#xE70F;"
+                                               Margin="0,0,6,0"
+                                               VerticalAlignment="Center"
+                                               FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                               FontSize="12"
+                                               FontWeight="Normal" />
+                                    <TextBlock Text="Resume signing" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Grid>
                         </Button>
                     </Grid>
 

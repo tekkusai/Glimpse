@@ -442,7 +442,7 @@ public sealed class FillSignBehaviorTests
             // A stamp stored at full size before imports were bounded is
             // scaled on its way into a placement.
             File.WriteAllBytes(SignatureStore.StampPath, SolidPng(3000, 1500));
-            var placed = SignatureStore.TryLoad(SignatureStore.TryReadForPlacement(SignatureStore.StampPath)!)!;
+            var placed = SignatureStore.TryLoad(SignatureStore.TryReadForPlacement(SignatureStore.StampPath, out _)!)!;
             Assert.Equal(1200, Math.Max(placed.PixelWidth, placed.PixelHeight));
         }
         finally
