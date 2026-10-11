@@ -111,7 +111,8 @@ internal sealed class StagedWebView : WebView2
 /// (100 to 250 ms). One parked, invisible about:blank controller keeps the
 /// browser warm while its window may serve another glance. It costs six
 /// processes and about 80 MB, so it starts with the window's first web
-/// surface and stops when the window is pinned or closed.
+/// surface, or once an item shows in a folder that holds a page, and stops
+/// when the window is pinned or closed.
 /// </summary>
 internal sealed class WarmBrowser
 {
