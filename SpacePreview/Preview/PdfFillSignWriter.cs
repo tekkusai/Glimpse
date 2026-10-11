@@ -291,7 +291,15 @@ internal static class PdfFillSignWriter
         return ReplaceOrAddDictionaryValue(body, name, scaled);
     }
 
-    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes)
+    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes) =>
+        FindName(bytes, "PatternType", "ShadingType", "Annots", "ObjStm", "UserUnit", "ByteRange");
+
+    /// <summary>
+    /// The first of <paramref name="names"/> spelled anywhere in the file,
+    /// read as a viewer reads names: any character may be written as #xx,
+    /// so a raw substring is not a gate.
+    /// </summary>
+    private static string? FindName(ReadOnlySpan<byte> bytes, params string[] names)
     {
         Span<byte> decoded = stackalloc byte[16];
         for (var index = 0; index < bytes.Length; index++)
@@ -323,37 +331,17 @@ internal static class PdfFillSignWriter
                 length++;
             }
 
-            if (length <= decoded.Length)
+            foreach (var name in names)
             {
-                var name = decoded[..length];
-                if (name.SequenceEqual("PatternType"u8))
+                var same = name.Length == length && length <= decoded.Length;
+                for (var at = 0; same && at < length; at++)
                 {
-                    return "PatternType";
+                    same = decoded[at] == name[at];
                 }
 
-                if (name.SequenceEqual("ShadingType"u8))
+                if (same)
                 {
-                    return "ShadingType";
-                }
-
-                if (name.SequenceEqual("Annots"u8))
-                {
-                    return "Annots";
-                }
-
-                if (name.SequenceEqual("ObjStm"u8))
-                {
-                    return "ObjStm";
-                }
-
-                if (name.SequenceEqual("UserUnit"u8))
-                {
-                    return "UserUnit";
-                }
-
-                if (name.SequenceEqual("ByteRange"u8))
-                {
-                    return "ByteRange";
+                    return name;
                 }
             }
 
@@ -1199,12 +1187,12 @@ internal static class PdfFillSignWriter
                 throw new InvalidOperationException("This file isn't a PDF that can be signed here.");
             }
 
-            var text = Encoding.Latin1.GetString(bytes);
-            if (text.Contains("/Encrypt", StringComparison.Ordinal))
+            if (FindName(bytes, "Encrypt") is not null)
             {
                 throw new InvalidOperationException("This PDF is encrypted, so it can't be signed here.");
             }
 
+            var text = Encoding.Latin1.GetString(bytes);
             var previousXref = ReadPreviousXrefOffset(text);
             var objects = ReadObjects(text);
             if (!TryReadLastReference(text, "Root", out var root))
