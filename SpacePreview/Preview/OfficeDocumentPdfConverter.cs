@@ -32,9 +32,9 @@ internal sealed record OfficeProgressiveConversionPlan(int FirstPageCount, int E
 internal sealed record OfficeRunRequest(string SourcePath, string ConvertTo, string OutputDirectory, OfficeRunControl Control);
 
 /// <summary>
-/// The running engine's priority. A job nobody waits for drops to
-/// BelowNormal; soffice.exe is only a launcher, so the change has to reach
-/// its soffice.bin child too.
+/// The running engine's priority. Work no preview is blocked on (the rest
+/// of a document whose first pages show) drops to BelowNormal; soffice.exe
+/// is only a launcher, so the change has to reach its soffice.bin child too.
 /// </summary>
 internal sealed class OfficeRunControl
 {
@@ -156,9 +156,10 @@ internal sealed class OfficeRunControl
 }
 
 /// <summary>
-/// One conversion, keyed by its cache entry. It outlives the preview that
-/// asked for it: a preview stops waiting, the job finishes (at BelowNormal)
-/// unless a preview of another file needs the engine first.
+/// One conversion, keyed by its cache entry, shared by every preview of the
+/// file. It runs while one of them still waits for it. When the last one
+/// leaves, the engine stops; finished first pages stay cached, so a revisit
+/// shows them at once and converts only the rest.
 /// </summary>
 internal sealed class OfficeConversionJob
 {
@@ -185,8 +186,6 @@ internal sealed class OfficeConversionJob
     public Task<ConvertedOfficeDocument?> Complete => _complete.Task;
 
     // Guarded by the converter's lane lock.
-    internal bool Background;
-    internal bool Started;
     internal int Waiters;
     internal bool Finished;
     internal string? PartialDirectory;
@@ -224,6 +223,9 @@ internal static class OfficeDocumentPdfConverter
     // The pipeline version is the cache's invalidation: bump it whenever
     // conversion or sheet styling changes, or old output keeps being served.
     private const string PipelineVersion = "v14";
+
+    // The cache key of a big document's first pages, beside its whole-document formats.
+    private const string PartialFormat = "first-pages";
 
     private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
 
@@ -280,10 +282,10 @@ internal static class OfficeDocumentPdfConverter
 
     /// <summary>
     /// The job for this file: the one already running when there is one,
-    /// otherwise a new one. A foreground caller waits until its token is
-    /// cancelled; the job runs on after that, demoted.
+    /// otherwise a new one. The caller waits until its token is cancelled;
+    /// once no caller waits, the job stops.
     /// </summary>
-    public static OfficeConversionJob Convert(string path, OfficeKind kind, CancellationToken waitToken, bool foreground = true)
+    public static OfficeConversionJob Convert(string path, OfficeKind kind, CancellationToken waitToken)
     {
         var key = GetCacheDirectory(path, Formats(kind)[0]);
         OfficeConversionJob job;
@@ -291,32 +293,26 @@ internal static class OfficeDocumentPdfConverter
         lock (Lane)
         {
             started = !Jobs.TryGetValue(key, out var running);
-            job = running ?? new OfficeConversionJob(key, path, kind) { Background = !foreground };
+            job = running ?? new OfficeConversionJob(key, path, kind);
             if (started)
             {
                 Jobs[key] = job;
             }
 
-            if (foreground)
-            {
-                job.Waiters++;
-            }
+            job.Waiters++;
         }
 
         DiagnosticLog.Write(started ? $"office job start {path}" : $"office job attach {path}");
-        if (foreground)
+        var registration = waitToken.Register(() => Detach(job));
+        lock (Lane)
         {
-            var registration = waitToken.Register(() => Detach(job));
-            lock (Lane)
+            if (job.Finished)
             {
-                if (job.Finished)
-                {
-                    registration.Dispose();
-                }
-                else
-                {
-                    job.Registrations.Add(registration);
-                }
+                registration.Dispose();
+            }
+            else
+            {
+                job.Registrations.Add(registration);
             }
         }
 
@@ -332,11 +328,8 @@ internal static class OfficeDocumentPdfConverter
         return job;
     }
 
-    /// <summary>
-    /// Blocking form for callers that only want the finished document. A
-    /// background caller never holds the engine against a preview.
-    /// </summary>
-    public static ConvertedOfficeDocument? TryConvert(string path, CancellationToken cancellationToken, bool background = false)
+    /// <summary>Blocking form for callers that only want the finished document.</summary>
+    public static ConvertedOfficeDocument? TryConvert(string path, CancellationToken cancellationToken)
     {
         var kind = FileKinds.GetOfficeKind(path);
         if (kind == OfficeKind.None)
@@ -351,7 +344,7 @@ internal static class OfficeDocumentPdfConverter
 
         try
         {
-            var job = Convert(path, kind, cancellationToken, foreground: !background);
+            var job = Convert(path, kind, cancellationToken);
             return job.Complete.WaitAsync(cancellationToken).GetAwaiter().GetResult();
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException)
@@ -408,16 +401,32 @@ internal static class OfficeDocumentPdfConverter
             var restStage = false;
             if (TryCreateProgressivePlan(job.SourcePath, job.Kind) is { } plan)
             {
-                var partialDirectory = Path.Combine(AppPaths.DataRoot, "DocumentCache", ".partial-" + Guid.NewGuid().ToString("N"));
-                lock (Lane)
+                // The first pages keep an entry of their own, apart from the
+                // document's: a user who leaves stops the rest, and a
+                // revisit shows these at once while the rest converts again.
+                var partialDirectory = GetCacheDirectory(job.SourcePath, PartialFormat);
+                string? partial = Path.Combine(partialDirectory, OutputName(job.SourcePath, "pdf"));
+                if (File.Exists(partial))
                 {
-                    job.PartialDirectory = partialDirectory;
+                    TryTouch(partialDirectory);
                 }
-
-                var (partial, dropped) = await RunStageAsync(job, firstStage: true, plan.Filter, partialDirectory);
-                if (dropped)
+                else
                 {
-                    return;
+                    var staging = Path.Combine(partialDirectory, ".staging-" + Guid.NewGuid().ToString("N"));
+                    try
+                    {
+                        var (output, dropped) = await RunStageAsync(job, firstStage: true, plan.Filter, staging);
+                        if (dropped)
+                        {
+                            return;
+                        }
+
+                        partial = output is null ? null : Publish(job.SourcePath, "pdf", output, staging, partialDirectory)?.DocumentPath;
+                    }
+                    finally
+                    {
+                        TryDeleteDirectory(staging);
+                    }
                 }
 
                 if (partial is not null)
@@ -428,7 +437,13 @@ internal static class OfficeDocumentPdfConverter
                         // app.xml counts go stale: the "first pages" were the
                         // whole document, so they are the cache entry.
                         complete = PromotePdfToCache(job.SourcePath, partial);
+                        TryDeleteDirectory(partialDirectory);
                         return;
+                    }
+
+                    lock (Lane)
+                    {
+                        job.PartialDirectory = partialDirectory;
                     }
 
                     DiagnosticLog.Write($"office progressive partial ready {job.SourcePath} pages={pages ?? plan.FirstPageCount}/{plan.ExpectedPageCount}");
@@ -478,9 +493,9 @@ internal static class OfficeDocumentPdfConverter
     }
 
     /// <summary>
-    /// One engine run under the lane. A run preempted for another file's
-    /// preview goes back in line while anyone still waits for it, and is
-    /// dropped otherwise.
+    /// One engine run under the lane. A killed run goes back in line while
+    /// anyone still waits for it (another file's preview took the engine),
+    /// and is dropped otherwise.
     /// </summary>
     private static async Task<(string? Output, bool Dropped)> RunStageAsync(
         OfficeConversionJob job,
@@ -581,21 +596,18 @@ internal static class OfficeDocumentPdfConverter
     private static void Grant(LaneTicket ticket)
     {
         _holder = ticket;
-        ticket.Job.Started = true;
         ticket.Granted.TrySetResult(true);
     }
 
-    /// <summary>
-    /// A job that never started and that nobody waits for any more: the
-    /// user moved past the file before the engine got to it.
-    /// </summary>
-    private static bool IsUnwanted(OfficeConversionJob job) => !job.Started && job.Waiters == 0 && !job.Background;
+    /// <summary>Every preview of the file has left: the user moved on or closed it.</summary>
+    private static bool IsUnwanted(OfficeConversionJob job) => job.Waiters == 0;
 
     /// <summary>
     /// The holder runs at Normal only while a preview waits for its first
-    /// content. Otherwise it yields: BelowNormal, and killed outright when a
-    /// preview of another file is waiting for the engine. A started job
-    /// finishes; queued work nobody waits for never starts.
+    /// content, and at BelowNormal while its previews read what arrived. It
+    /// is killed when nobody waits for it any more, or when a preview of
+    /// another file waits for the engine. Queued work nobody waits for never
+    /// starts.
     /// </summary>
     private static void Rebalance()
     {
@@ -613,7 +625,9 @@ internal static class OfficeDocumentPdfConverter
                 }
 
                 holder = _holder;
-                if (holder is not null && !IsUrgent(holder) && !holder.Preempted && Waiting.Any(IsUrgent))
+                if (holder is not null
+                    && !holder.Preempted
+                    && (IsUnwanted(holder.Job) || (!IsUrgent(holder) && Waiting.Any(IsUrgent))))
                 {
                     holder.Preempted = true;
                     preempt = holder;
@@ -670,7 +684,14 @@ internal static class OfficeDocumentPdfConverter
 
             registrations = [.. job.Registrations];
             job.Registrations.Clear();
-            if (job.PartialHolds == 0)
+
+            // First pages give way to the whole document once nobody shows
+            // them. Without it they are what a revisit shows, so they stay.
+            if (complete is null)
+            {
+                job.PartialDirectory = null;
+            }
+            else if (job.PartialHolds == 0)
             {
                 partialToDelete = job.PartialDirectory;
                 job.PartialDirectory = null;

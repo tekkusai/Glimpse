@@ -6,9 +6,10 @@ namespace SpacePreview.Tests;
 
 /// <summary>
 /// The conversion job against a fake engine: one run per file however many
-/// previews ask, a dismissed preview never kills its file's run, a preview
-/// of another file takes the engine back from work nobody waits for, and the
-/// first pages of a big deck are never the cache entry.
+/// previews ask, the last preview of a file to leave stops its run, a
+/// preview of another file takes the engine back from work nobody waits
+/// for, and the first pages of a big deck are never the cache entry but are
+/// what a revisit shows at once.
 /// </summary>
 [Collection(ProcessEnvironmentCollection.Name)]
 public sealed class OfficeConversionJobTests
@@ -34,7 +35,7 @@ public sealed class OfficeConversionJobTests
     }
 
     [Fact]
-    public async Task ADismissedPreviewLeavesItsConversionRunningDemoted()
+    public async Task LeavingAFileStopsItsConversion()
     {
         using var temp = new TempDirectory();
         using var engine = new FakeEngine();
@@ -46,12 +47,33 @@ public sealed class OfficeConversionJobTests
         Assert.False(run.Request.Control.Background);
 
         preview.Cancel();
-        Assert.True(run.Request.Control.Background);
-        run.Finish();
 
-        Assert.NotNull(await job.Complete.WaitAsync(Patience));
+        Assert.Null(await job.Complete.WaitAsync(Patience));
+        Assert.True(run.Killed);
+        Assert.Null(OfficeDocumentPdfConverter.TryGetCached(path));
+        Assert.Equal(1, engine.RunCount);
+    }
+
+    [Fact]
+    public async Task AnotherPreviewOfTheFileKeepsItsConversionGoing()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var path = temp.CreateFile("report.docx");
+        using var glance = new CancellationTokenSource();
+        using var pinned = new CancellationTokenSource();
+
+        var job = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, glance.Token);
+        var run = await engine.RunAsync(0);
+        OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, pinned.Token);
+
+        glance.Cancel();
+        await Task.Delay(150);
         Assert.False(run.Killed);
-        Assert.NotNull(OfficeDocumentPdfConverter.TryGetCached(path));
+
+        pinned.Cancel();
+        Assert.Null(await job.Complete.WaitAsync(Patience));
+        Assert.True(run.Killed);
     }
 
     [Fact]
@@ -133,7 +155,7 @@ public sealed class OfficeConversionJobTests
     }
 
     [Fact]
-    public async Task ADeckWhosePreviewLeftAfterTheFirstPagesStillFinishes()
+    public async Task LeavingADeckStopsTheRestAndARevisitShowsTheFirstPagesAtOnce()
     {
         using var temp = new TempDirectory();
         using var engine = new FakeEngine();
@@ -141,25 +163,65 @@ public sealed class OfficeConversionJobTests
         OfficeDocumentPdfConverterTests.WriteOfficeAppProperties(path, "Slides", 51);
         using var preview = new CancellationTokenSource();
 
+        var job = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, preview.Token);
+        (await engine.RunAsync(0)).Finish(pages: 6);
+        await job.FirstContent.WaitAsync(Patience);
+        var rest = await engine.RunAsync(1);
+        preview.Cancel();
+
+        Assert.Null(await job.Complete.WaitAsync(Patience));
+        Assert.True(rest.Killed);
+        Assert.Null(OfficeDocumentPdfConverter.TryGetCached(path));
+
+        var revisit = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, CancellationToken.None);
+        var partial = await revisit.FirstContent.WaitAsync(Patience);
+        Assert.NotNull(partial);
+        Assert.True(partial.IsPartial);
+        Assert.Equal(6, partial.PartialPages);
+        Assert.Equal(51, partial.ExpectedPages);
+
+        // Only the rest runs again.
+        var again = await engine.RunAsync(2);
+        Assert.Equal("pdf", again.Request.ConvertTo);
+        again.Finish(pages: 51);
+        Assert.NotNull(await revisit.Complete.WaitAsync(Patience));
+        Assert.NotNull(OfficeDocumentPdfConverter.TryGetCached(path));
+        Assert.Equal(3, engine.RunCount);
+
+        // Nobody shows the first pages, so the whole deck replaces them,
+        // just after it is published.
+        var deadline = DateTime.UtcNow + Patience;
+        while (Directory.Exists(Path.GetDirectoryName(partial.DocumentPath)))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "The first pages outlived the whole deck.");
+            await Task.Delay(10);
+        }
+    }
+
+    [Fact]
+    public async Task TheRestOfALeftDeckNeverStartsBehindAnotherPreview()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var path = Path.Combine(temp.Path, "deck.pptx");
+        OfficeDocumentPdfConverterTests.WriteOfficeAppProperties(path, "Slides", 51);
         var other = temp.CreateFile("other.docx");
+        using var preview = new CancellationTokenSource();
 
         var job = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, preview.Token);
         var firstPages = await engine.RunAsync(0);
         // Another preview queues behind the deck's first pages, so the rest
-        // of the deck has to wait its turn after the user leaves.
+        // of the deck waits its turn, and the user leaves meanwhile.
         var otherJob = OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
         firstPages.Finish(pages: 6);
         await job.FirstContent.WaitAsync(Patience);
         var otherRun = await engine.RunAsync(1);
         preview.Cancel();
         otherRun.Finish();
-        await otherJob.Complete.WaitAsync(Patience);
-        var rest = await engine.RunAsync(2);
-        rest.Finish(pages: 51);
 
-        Assert.Equal(path, rest.Request.SourcePath);
-        Assert.NotNull(await job.Complete.WaitAsync(Patience));
-        Assert.NotNull(OfficeDocumentPdfConverter.TryGetCached(path));
+        Assert.NotNull(await otherJob.Complete.WaitAsync(Patience));
+        Assert.Null(await job.Complete.WaitAsync(Patience));
+        Assert.Equal(2, engine.RunCount);
     }
 
     [Fact]
