@@ -125,6 +125,12 @@ internal static class ProbeRunner
                 window.UpdateLayout();
                 break;
 
+            case "grid":
+                // Opens the selection sheet, or closes it; needs a multiselect first.
+                window.ToggleGridView();
+                await Task.Delay(250);
+                break;
+
             case "audit":
                 DiagnosticLog.Write($"probe audit {window.ProbeAuditState(value)}");
                 break;
