@@ -1086,10 +1086,8 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The page the reader is on, asked of the viewer now. Page sync waits
-    /// for signs of reading, so a document scrolled by wheel alone has a
-    /// stale CurrentPage; Fill &amp; Sign reads the page this way on entry.
-    /// Returns the one-based page and the page count (0 when unknown).
+    /// Fill &amp; Sign's entry point: the one-based page the reader is on and
+    /// the page count (0 when unknown).
     /// </summary>
     private async Task<(int Page, int TotalPages)> ReadPdfPositionAsync()
     {
@@ -1099,12 +1097,21 @@ public partial class PreviewWindow
         }
 
         MarkPdfReading(state, "fill and sign");
+        await ReadPdfPageFromViewerAsync(state);
+        return (state.CurrentPage, state.Document?.TotalPages ?? 0);
+    }
+
+    /// <summary>
+    /// Asks the viewer which page the reader is on, now. Page sync waits for
+    /// signs of reading, so a document scrolled by wheel alone has a stale
+    /// CurrentPage. A viewer that cannot answer leaves it as it was.
+    /// </summary>
+    private async Task ReadPdfPageFromViewerAsync(PdfPageRailState state)
+    {
         if (await ProbePdfPageAsync(state) is { Page: > 0 } result && state.Version == _loadVersion)
         {
             SetPdfCurrentPageFromViewer(state, result.Page, logChange: false);
         }
-
-        return (state.CurrentPage, state.Document?.TotalPages ?? 0);
     }
 
     private void SetPdfCurrentPageFromViewer(

@@ -118,6 +118,7 @@ public partial class PreviewWindow
 
         var host = (Grid)PreviewContent.Parent;
         host.Children.Add(grid.Root);
+        ShowPreviewUnderSheet(false);
         grid.Root.Opacity = 0;
         grid.Root.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120))
         {
@@ -139,8 +140,22 @@ public partial class PreviewWindow
         _gridView = null;
         grid.Detach();
         ((Grid)PreviewContent.Parent).Children.Remove(grid.Root);
+        ShowPreviewUnderSheet(true);
         GridButton.ClearValue(ForegroundProperty);
         DiagnosticLog.Write("grid view closed");
+    }
+
+    /// <summary>
+    /// A browser's window paints over every WPF sibling, the sheet too, so
+    /// the preview hides while the sheet is up. Hidden, not released: the
+    /// page keeps its place and its playback, and content that lands
+    /// meanwhile lands hidden.
+    /// </summary>
+    private void ShowPreviewUnderSheet(bool show)
+    {
+        var visibility = show ? Visibility.Visible : Visibility.Hidden;
+        PreviewContent.Visibility = visibility;
+        OutgoingContent.Visibility = visibility;
     }
 
     /// <summary>Arrow keys walk the sheet while it is up.</summary>

@@ -12,7 +12,7 @@ public sealed class ProbeGrammarTests
     private static readonly string[] DocumentedVerbs =
     [
         "delay", "shot", "fullshot", "size", "show", "evaljs", "welcome", "settingsshot", "warningshot",
-        "warningfinalshot", "audit", "buttonaudit", "webshot", "zoomin", "multiselect", "pinnedoff",
+        "warningfinalshot", "audit", "buttonaudit", "webshot", "zoomin", "multiselect", "grid", "pinnedoff",
         "overlayrace", "sign", "signdate", "signpress", "zoomkey", "imagetoggle", "meshspin", "hide", "framesshot"
     ];
 

@@ -6,8 +6,10 @@ namespace SpacePreview.Preview;
 
 /// <summary>
 /// The CSS every page Glimpse writes is built from. The tokens come from the
-/// live palette, so a web page cannot drift from the WPF chrome beside it.
-/// docs/DESIGN.md ("Web pages") is the contract.
+/// app's palettes, so a web page cannot drift from the WPF chrome beside it.
+/// A page opens in the palette it was written with and turns to the other
+/// when the browser's color scheme does, which the preview window sets from
+/// the app theme. docs/DESIGN.md ("Web pages") is the contract.
 /// </summary>
 internal static class GeneratedHtmlTheme
 {
@@ -21,24 +23,8 @@ internal static class GeneratedHtmlTheme
     /// Tokens, the canvas, the in-page reveal, scrollbars, selection and the
     /// font stacks. Every page starts here.
     /// </summary>
-    public static string PageCss(ThemePalette p) => $$"""
+    public static string PageCss(ThemePalette p) => BothThemes(p, PaletteTokens) + """
 :root {
-  color-scheme: {{(p.IsDark ? "dark" : "light")}};
-  --canvas: {{Hex(p.CanvasBg)}};
-  --chrome: {{Hex(p.ChromeBg)}};
-  --raised: {{Hex(p.RaisedBg)}};
-  --raised-border: {{Hex(p.RaisedBorder)}};
-  --border: {{Hex(p.Border)}};
-  --hover: {{Rgba(p.HoverBg, p.HoverBg.A / 255.0)}};
-  --pressed: {{Rgba(p.PressedBg, p.PressedBg.A / 255.0)}};
-  --text: {{Hex(p.TextPrimary)}};
-  --text-2: {{Hex(p.TextSecondary)}};
-  --text-3: {{Hex(p.TextTertiary)}};
-  --accent: {{Hex(p.Accent)}};
-  --warning: {{Hex(p.Warning)}};
-  --thumb: {{Rgba(p.ScrollThumb, 0.6)}};
-  --thumb-hover: {{Rgba(p.ScrollThumb, 0.95)}};
-  --selection: {{Rgba(p.Accent, 0.55)}};
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   --font-mono: "Cascadia Mono", Consolas, monospace;
@@ -78,7 +64,37 @@ html {
 """;
 
     /// <summary>Markdown, code and EPUB documents.</summary>
-    public static string DocumentCss(ThemePalette p) => DocumentRules + SyntaxTokens(p);
+    public static string DocumentCss(ThemePalette p) => DocumentRules + BothThemes(p, SyntaxTokens);
+
+    private static string BothThemes(ThemePalette p, Func<ThemePalette, string> tokens) => $$"""
+:root {
+{{tokens(p)}}}
+@media (prefers-color-scheme: {{(p.IsDark ? "light" : "dark")}}) {
+:root {
+{{tokens(p.IsDark ? Theme.Light : Theme.Dark)}}}
+}
+
+""";
+
+    private static string PaletteTokens(ThemePalette p) => $$"""
+  color-scheme: {{(p.IsDark ? "dark" : "light")}};
+  --canvas: {{Hex(p.CanvasBg)}};
+  --chrome: {{Hex(p.ChromeBg)}};
+  --raised: {{Hex(p.RaisedBg)}};
+  --raised-border: {{Hex(p.RaisedBorder)}};
+  --border: {{Hex(p.Border)}};
+  --hover: {{Rgba(p.HoverBg, p.HoverBg.A / 255.0)}};
+  --pressed: {{Rgba(p.PressedBg, p.PressedBg.A / 255.0)}};
+  --text: {{Hex(p.TextPrimary)}};
+  --text-2: {{Hex(p.TextSecondary)}};
+  --text-3: {{Hex(p.TextTertiary)}};
+  --accent: {{Hex(p.Accent)}};
+  --warning: {{Hex(p.Warning)}};
+  --thumb: {{Rgba(p.ScrollThumb, 0.6)}};
+  --thumb-hover: {{Rgba(p.ScrollThumb, 0.95)}};
+  --selection: {{Rgba(p.Accent, 0.55)}};
+
+""";
 
     private const string DocumentRules = """
 * { box-sizing: border-box; }
@@ -309,7 +325,6 @@ pre.block > code {
     // (comments, operators, punctuation) still come from the palette.
     private static string SyntaxTokens(ThemePalette p) => p.IsDark
         ? $$"""
-:root {
   --tk-comment: {{Hex(p.TextTertiary)}};
   --tk-keyword: #7FA3F0;
   --tk-string: #D7A97C;
@@ -323,11 +338,9 @@ pre.block > code {
   --tk-operator: {{Hex(p.TextSecondary)}};
   --tk-punct: {{Hex(p.TextTertiary)}};
   --tk-invalid: #E2807C;
-}
 
 """
         : $$"""
-:root {
   --tk-comment: {{Hex(p.TextTertiary)}};
   --tk-keyword: #2F5FD0;
   --tk-string: #A9622F;
@@ -341,7 +354,6 @@ pre.block > code {
   --tk-operator: {{Hex(p.TextSecondary)}};
   --tk-punct: {{Hex(p.TextTertiary)}};
   --tk-invalid: #BE4B43;
-}
 
 """;
 
