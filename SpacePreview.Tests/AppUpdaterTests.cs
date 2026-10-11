@@ -714,6 +714,36 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task WhileGitHubGivesNoAnswerTheUpdateIsOnlyReady() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+
+        // Away, the check before the launch gets no answer: every launch needs one.
+        release.Offline = true;
+        pc = Away;
+        await updates.TickAsync();
+        Assert.Equal("3.1.0 is ready to install.", Caption());
+
+        release.Offline = false;
+        pc = Away with { PreviewOpen = true };
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+
+        // Check for updates with no answer says the same.
+        release.Offline = true;
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 is ready to install.", Caption());
+    });
+
+    [Fact]
     public Task ASetupThatFailedAndRestartedGlimpseWaitsADay() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope(settings => settings with

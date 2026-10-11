@@ -46,6 +46,9 @@ internal sealed record UpdateState
     /// <summary>The last Check for updates got no answer, and no check has since.</summary>
     public bool CheckFailed { get; init; }
 
+    /// <summary>The most recent check, scheduled or asked, got no answer. Nothing installs on its own until one does.</summary>
+    public bool Unanswered { get; init; }
+
     /// <summary>Install now is downloading, or setup is on its way and Glimpse closes for a few seconds.</summary>
     public bool Installing { get; init; }
 }
@@ -81,7 +84,6 @@ internal sealed class AppUpdater : IDisposable
     private CancellationTokenSource? _downloadCancel;
     private Task<string?>? _download;
     private DateTimeOffset _downloadRetryAt;
-    private DateTimeOffset _checkRetryAt;
     private bool _disposed;
 
     /// <param name="observe">The PC's half, <see cref="InstallState"/>: what is open, full screen, the shell's notification state and idle.</param>
@@ -151,8 +153,7 @@ internal sealed class AppUpdater : IDisposable
             var latest = await _service.CheckForUpdateAsync(_lifetime.Token);
             var pending = latest is null ? null : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
-            _checkRetryAt = default;
-            Set(State with { Checking = false, CheckFailed = false, UpToDate = latest is null, Pending = pending });
+            Set(State with { Checking = false, CheckFailed = false, Unanswered = false, UpToDate = latest is null, Pending = pending });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
                 : $"update available current={_service.CurrentVersionText} latest={pending.VersionText}");
@@ -166,8 +167,7 @@ internal sealed class AppUpdater : IDisposable
         catch (Exception ex)
         {
             DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
-            _checkRetryAt = DateTimeOffset.UtcNow + RetryAfterFailure;
-            Set(State with { Checking = false, CheckFailed = State.CheckFailed || asked });
+            Set(State with { Checking = false, CheckFailed = State.CheckFailed || asked, Unanswered = true });
             _retryTimer?.Start();
             return false;
         }
@@ -254,7 +254,7 @@ internal sealed class AppUpdater : IDisposable
             && InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow)
             && IsAway(_observe());
 
-        if (!InstallsNow() || DateTimeOffset.UtcNow < _checkRetryAt)
+        if (!InstallsNow())
         {
             return;
         }
@@ -270,13 +270,16 @@ internal sealed class AppUpdater : IDisposable
     /// <summary>
     /// The release's half of an automatic install, and what Settings says
     /// about it: the switch is on, the verified installer is on disk, the
+    /// most recent check reached GitHub (the launch asks it again), the
     /// release has been public for 48 hours or the user pressed Install
     /// now, and no setup of this version ran in the last day. When this
-    /// holds, the update installs the next time the user is away.
+    /// holds, the update installs the next time the user is away. A check
+    /// with no answer closes it until one answers; the next is 30 minutes on.
     /// </summary>
     internal static bool InstallsWhenAway(UpdateState state, Settings settings, DateTimeOffset now) =>
         state.Pending is { } release
         && state.Installer is not null
+        && !state.Unanswered
         && settings.InstallUpdatesAutomatically
         && (state.InstallNowPressed || release.PublishedAt is { } published && now - published >= ReleaseAgeBeforeInstall)
         && !TriedRecently(settings, release, now);

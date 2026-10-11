@@ -75,6 +75,13 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
+    public void WithoutAnAnswerFromGitHubItIsOnlyReady() =>
+        // Every launch asks GitHub first, so the promise waits for an answer.
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
+            Describe(new UpdateState { Pending = Release, Installer = Installer, Unanswered = true }, Checked));
+
+    [Fact]
     public void WithAutomaticInstallsOffItWaitsForTheUser() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
