@@ -161,9 +161,11 @@ internal sealed partial class AppUpdateService : IDisposable
     /// used, for the price of the sidecar and .sig, and null comes back
     /// when there is none.
     /// </param>
+    /// <param name="fetching">Called just before the installer's own bytes are requested.</param>
     public async Task<string?> DownloadAndVerifyAsync(
         AppUpdateRelease release,
         bool download,
+        Action? fetching,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -197,6 +199,7 @@ internal sealed partial class AppUpdateService : IDisposable
         TryDelete(partial);
         try
         {
+            fetching?.Invoke();
             using var request = NewRequest(HttpMethod.Get, release.InstallerUri, json: false);
             using var response = await _httpClient.SendAsync(
                 request,

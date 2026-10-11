@@ -492,6 +492,34 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task AnInstallerAlreadyOnDiskIsNeverCalledADownload() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        await File.WriteAllBytesAsync(Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe"), release.Installer);
+
+        // Metered, and then unmetered: either way the look fetches the
+        // sidecar and .sig and hashes the file, and no installer bytes.
+        foreach (var metered in new[] { true, false })
+        {
+            using var updates = new AppUpdater(
+                release.Service(root.Path),
+                () => Away with { PreviewOpen = true },
+                isMetered: () => metered,
+                launch: NeverLaunch);
+            var downloading = false;
+            updates.Changed += () => downloading |= updates.State.Downloading;
+
+            await updates.CheckNowAsync();
+            Assert.NotNull(updates.State.Installer);
+            Assert.False(downloading, metered ? "metered" : "unmetered");
+        }
+
+        Assert.Equal(0, release.RequestsFor(".exe"));
+    });
+
+    [Fact]
     public Task WithTheSwitchOffNothingDownloadsOrInstallsUntilInstallNow() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope(settings => settings with { InstallUpdatesAutomatically = false });

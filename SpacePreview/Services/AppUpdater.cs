@@ -419,10 +419,15 @@ internal sealed class AppUpdater : IDisposable
     {
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _downloadCancel = cancel;
-        Set(State with { Downloading = true });
         try
         {
-            var installer = await _service.DownloadAndVerifyAsync(release, download, cancel.Token);
+            // Downloading only once the installer itself is on its way: the
+            // sidecar, the .sig and a look at one already on disk are not.
+            var installer = await _service.DownloadAndVerifyAsync(
+                release,
+                download,
+                () => Set(State with { Downloading = true }),
+                cancel.Token);
             if (installer is null || State.Pending != release)
             {
                 return null;
