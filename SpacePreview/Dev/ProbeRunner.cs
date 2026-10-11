@@ -167,6 +167,10 @@ internal static class ProbeRunner
                 await CaptureSettingsAsync(value);
                 break;
 
+            case "framesshot":
+                await CaptureFramesOnScreenAsync(window, value);
+                break;
+
             case "warningshot":
             case "warningfinalshot":
                 await CaptureWarningAsync(value, finalReminder: verb == "warningfinalshot");
@@ -238,6 +242,122 @@ internal static class ProbeRunner
         CaptureWindow(settings, outputPng);
         settings.Close();
     }
+
+    /// <summary>
+    /// The window frame (rounded corners, edge, shadow) is drawn by DWM
+    /// outside the client area, so no off-screen render can show it. This
+    /// puts the preview and Settings on screen for a moment, side by side
+    /// over a plain backdrop, without taking focus, and copies the screen:
+    /// once over a dark backdrop (-dark.png) and once over a light one
+    /// (-light.png).
+    /// </summary>
+    private static async Task CaptureFramesOnScreenAsync(PreviewWindow window, string outputPng)
+    {
+        const double Gap = 48;
+        var area = SystemParameters.WorkArea;
+        var settings = new SettingsWindow(() => null, () => { }, _ => { })
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual,
+            ShowActivated = false
+        };
+        var backdrop = new Window
+        {
+            WindowStyle = WindowStyle.None,
+            ResizeMode = ResizeMode.NoResize,
+            ShowInTaskbar = false,
+            ShowActivated = false,
+            Topmost = true,
+            Left = area.Left + Gap,
+            Top = area.Top + Gap
+        };
+
+        var previewLeft = window.Left;
+        try
+        {
+            backdrop.Width = Gap + window.Width + Gap + settings.Width + Gap;
+            backdrop.Height = Gap + Math.Max(window.Height, 320) + Gap;
+            backdrop.Show();
+            window.Left = backdrop.Left + Gap;
+            window.Top = backdrop.Top + Gap;
+            // Re-entering the topmost band raises it over the backdrop.
+            window.Topmost = false;
+            window.Topmost = true;
+            settings.Left = window.Left + window.Width + Gap;
+            settings.Top = window.Top;
+            settings.Topmost = true;
+            settings.Show();
+
+            var stem = Path.Combine(Path.GetDirectoryName(outputPng) ?? ".", Path.GetFileNameWithoutExtension(outputPng));
+            foreach (var (name, color) in new[] { ("dark", Color.FromRgb(0x1E, 0x1E, 0x1E)), ("light", Color.FromRgb(0xE6, 0xE6, 0xE6)) })
+            {
+                backdrop.Background = new SolidColorBrush(color);
+                await Task.Delay(600);
+                CopyScreen(backdrop, $"{stem}-{name}.png");
+            }
+        }
+        finally
+        {
+            settings.Close();
+            backdrop.Close();
+            window.Topmost = false;
+            window.Left = previewLeft;
+        }
+    }
+
+    private static void CopyScreen(Window area, string outputPng)
+    {
+        var toDevice = PresentationSource.FromVisual(area)?.CompositionTarget?.TransformToDevice ?? Matrix.Identity;
+        var topLeft = toDevice.Transform(new Point(area.Left, area.Top));
+        var size = toDevice.Transform(new Point(area.ActualWidth, area.ActualHeight));
+        int x = (int)topLeft.X, y = (int)topLeft.Y, width = (int)size.X, height = (int)size.Y;
+
+        var screen = GetDC(IntPtr.Zero);
+        var memory = CreateCompatibleDC(screen);
+        var bitmap = CreateCompatibleBitmap(screen, width, height);
+        var previous = SelectObject(memory, bitmap);
+        try
+        {
+            // SRCCOPY | CAPTUREBLT: layered windows (the preview while it fades) included.
+            BitBlt(memory, 0, 0, width, height, screen, x, y, 0x40CC0020);
+            SelectObject(memory, previous);
+            var source = System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                bitmap, IntPtr.Zero, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(source));
+            using var stream = File.Create(outputPng);
+            encoder.Save(stream);
+        }
+        finally
+        {
+            DeleteObject(bitmap);
+            DeleteDC(memory);
+            ReleaseDC(IntPtr.Zero, screen);
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr dc);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr dc, int width, int height);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr dc, IntPtr gdiObject);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr dest, int x, int y, int width, int height, IntPtr source, int sourceX, int sourceY, int rop);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr gdiObject);
+
+    [System.Runtime.InteropServices.DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr dc);
 
     /// <summary>Renders either access-notice state off screen.</summary>
     private static async Task CaptureWarningAsync(string outputPng, bool finalReminder)

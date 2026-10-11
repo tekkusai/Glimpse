@@ -4,9 +4,9 @@
 
 **Faster where you wait.** Opening a file again right after closing it is quicker for nearly every type. On the same machine, Markdown went from 199 to 66 ms, PDFs from 454 to 263 ms, PowerPoint from 536 to 251 ms and video from 361 to 87 ms.
 
-**One look.** The header, menus, Settings and every page Glimpse draws share one set of colors, type and scrollbars, in dark and light. In light theme the PDF toolbar is light too. The Open button shows your default app's icon, keeps the same width for every file, and its menu starts with Open with. Shortcuts named in tooltips, such as F11, Ctrl+R and Ctrl+Plus, work without clicking into the preview first.
+**One look.** The header, menus, Settings and every page Glimpse draws share one set of colors, type and scrollbars, in dark and light. In light theme the PDF toolbar is light too. The Open button shows your default app's icon, keeps the same width for every file, and its menu starts with Open with. F11 and the zoom shortcuts work without clicking into the preview first.
 
-**Fill & Sign you can trust.** Signatures, dates and stamps save exactly where the screen showed them, including on A4 and rotated pages. A PDF that can't be signed says so before you start. Leaving with unsaved work always asks first, whether you press Esc, Space or an arrow, close the preview or unpin it. Pages render in a separate process, so a difficult PDF can no longer take Glimpse down.
+**Fill & Sign you can trust.** Signatures, dates and stamps save exactly where the screen showed them, including on A4 and rotated pages. A PDF that can't be signed says so before you start. Leaving with unsaved work always asks first, whether you press Esc, Space or an arrow, close the preview, unpin it or quit Glimpse. Pages render in a separate process, so a difficult PDF can no longer take Glimpse down.
 
 **Documents.** The page rail no longer stops at the first ten pages of a long PDF. Large PowerPoint decks open on their first slides while the rest converts, then switch to the whole deck at the slide you're on. Templates, slide shows, macro-enabled and OpenDocument files all convert now, links in Office documents still work, and spreadsheets follow the app theme. A one-page document fits its window whole.
 
