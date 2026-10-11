@@ -213,7 +213,7 @@ public partial class PreviewWindow
 
         // Work kept from last time: the pill offers it back, at the same width.
         SignLabel.Visibility = _hasSignDraft ? Visibility.Hidden : Visibility.Visible;
-        ResumeSigningLabel.Visibility = _hasSignDraft ? Visibility.Visible : Visibility.Hidden;
+        ResumeLabel.Visibility = _hasSignDraft ? Visibility.Visible : Visibility.Hidden;
         SignButton.ToolTip = _hasSignDraft ? "Resume signing" : "Fill and sign";
         AutomationProperties.SetName(SignButton, (string)SignButton.ToolTip);
     }

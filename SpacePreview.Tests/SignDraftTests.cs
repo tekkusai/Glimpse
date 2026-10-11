@@ -321,8 +321,11 @@ public sealed class SignDraftTests
                     WriteDateDraft(pdf);
                     await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
 
+                    // The pen says what is resumed; the name says it in full.
                     Assert.Equal("Resume signing", AutomationProperties.GetName(window.SignButton));
-                    Assert.Equal(Visibility.Visible, window.ResumeSigningLabel.Visibility);
+                    Assert.Equal("Resume signing", window.SignButton.ToolTip);
+                    Assert.Equal(Visibility.Visible, window.ResumeLabel.Visibility);
+                    Assert.Equal("Resume", window.ResumeLabel.Children.OfType<TextBlock>().Last().Text);
                     Assert.Equal(Visibility.Hidden, window.SignLabel.Visibility);
                     Assert.Equal(signWidth, Width(window.SignButton));
                 }

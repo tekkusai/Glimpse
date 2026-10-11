@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -88,6 +89,56 @@ public sealed class ChromeHeaderTests
         }
         finally
         {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task TheSignPillStaysBesideTheNameAtTheSmallestStageWithOrWithoutADraft() => WpfApp.RunAsync(async () =>
+    {
+        // Multi-page portrait PDFs open on a 640 px stage on 1080p laptops
+        // at 125 and 150 percent, with the browse arrows showing.
+        using var temp = new TempDirectory();
+        var image = WritePng(temp.Path, "cover.png", 400, 300);
+        var pdf = Path.Combine(temp.Path, "Lease for the flat on Elm Street.pdf");
+        File.WriteAllText(pdf, "%PDF-1.4 a lease");
+        var window = OpenStage(640, 480);
+        try
+        {
+            // A real stage, then a PDF's header on it; the PDF viewer itself
+            // never starts in a test.
+            window.ShowPreview(image, IntPtr.Zero);
+            await WaitForRevealAsync(window);
+            var version = Fields.Get<long>(window, "_loadVersion");
+            Fields.Call(window, "ResetForNewItem");
+            Fields.Call(window, "ShowHeader", pdf, pdf, 1, false, version, CancellationToken.None);
+            Fields.Set(window, "_fillSignPath", pdf);
+            Assert.Equal(Visibility.Visible, window.BrowseControls.Visibility);
+
+            var widths = new List<double>();
+            foreach (var draft in new[] { false, true })
+            {
+                if (draft)
+                {
+                    SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 0, [new SignPlacement(SignPlacementKind.Date, 0, 0.4, 0.2, 0.14, 0.028, "10/10/2026")]);
+                }
+
+                await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
+                window.UpdateLayout();
+
+                Assert.Equal(draft ? "Resume signing" : "Fill and sign", AutomationProperties.GetName(window.SignButton));
+                Assert.Equal(Visibility.Visible, window.ContentToolsSlot.Visibility);
+                Assert.True(window.SignButton.IsVisible);
+                Assert.True(window.IdentityPanel.ActualWidth >= Metrics.HeaderNameMinWidth, $"{window.IdentityPanel.ActualWidth} with draft={draft}");
+                widths.Add(window.SignButton.ActualWidth);
+            }
+
+            // One width for both labels: finding a draft never moves the header.
+            Assert.Equal(widths[0], widths[1]);
+        }
+        finally
+        {
+            SignDrafts.Delete(pdf);
             window.Close();
         }
     });
