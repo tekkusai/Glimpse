@@ -146,11 +146,16 @@ internal sealed class StandIn : Panel
         var native = Size.Empty;
 
         // Every page-shaped preview (PDF, Illustrator, converted documents)
-        // lands in the PDF viewer.
+        // lands in the PDF viewer, and a lone page lands with no rail beside
+        // it, as the stage reserved none.
         if (hint is { Kind: StageFitHint.FitKind.PageAspect } page)
         {
             kind = LandingKind.ViewerPage;
             aspect = page.Aspect;
+            if (page.SinglePage)
+            {
+                railWidth = 0;
+            }
         }
         else if (hint is { Kind: StageFitHint.FitKind.Pixels or StageFitHint.FitKind.ImagePixels } pixels)
         {

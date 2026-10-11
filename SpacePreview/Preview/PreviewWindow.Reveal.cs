@@ -300,13 +300,16 @@ public partial class PreviewWindow
             : null;
     }
 
-    /// <summary>A document the rail cache knows has one page shows no rail, so its page lands further left.</summary>
-    private static bool KnownSinglePage(string path)
+    /// <summary>
+    /// A one-page document shows no rail, so its page lands further left.
+    /// The PDF lane's outline counts the pages; the rail cache alone never
+    /// could, since one page renders no rail.
+    /// </summary>
+    internal static bool KnownSinglePage(string path)
     {
         try
         {
-            return RailDocumentPath(path) is { } pdf
-                && TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { TotalPages: 1 };
+            return RailDocumentPath(path) is { } pdf && KnownPdfOutline(pdf) is { PageCount: 1 };
         }
         catch
         {
