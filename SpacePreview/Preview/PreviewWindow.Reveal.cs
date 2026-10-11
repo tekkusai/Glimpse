@@ -202,6 +202,17 @@ public partial class PreviewWindow
         _standIn = standIn;
         _standInOwner = p;
         StandInLayer.Content = standIn;
+
+        // A held item steps under the stand-in, which takes its place: the
+        // wait and its sheen and reason show over it, not behind it.
+        var dissolve = StandInLayer.Visibility != Visibility.Visible;
+        if (p.Holding is { } held && ReferenceEquals(PreviewContent.Content, held))
+        {
+            p.Holding = null;
+            MoveShownToOutgoing();
+            dissolve = true;
+        }
+
         if (withWindow)
         {
             Motion.Settle(StandInLayer, 1);
@@ -210,7 +221,7 @@ public partial class PreviewWindow
         {
             // One stand-in replaces another where it stands; a new one
             // dissolves in over what shows.
-            if (StandInLayer.Visibility != Visibility.Visible)
+            if (dissolve)
             {
                 Motion.Settle(StandInLayer, 0);
             }
@@ -300,13 +311,16 @@ public partial class PreviewWindow
             : null;
     }
 
-    /// <summary>A document the rail cache knows has one page shows no rail, so its page lands further left.</summary>
-    private static bool KnownSinglePage(string path)
+    /// <summary>
+    /// A one-page document shows no rail, so its page lands further left.
+    /// The PDF lane's outline counts the pages; the rail cache alone never
+    /// could, since one page renders no rail.
+    /// </summary>
+    internal static bool KnownSinglePage(string path)
     {
         try
         {
-            return RailDocumentPath(path) is { } pdf
-                && TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { TotalPages: 1 };
+            return RailDocumentPath(path) is { } pdf && KnownPdfOutline(pdf) is { PageCount: 1 };
         }
         catch
         {
@@ -363,11 +377,14 @@ public partial class PreviewWindow
             ClearPreviewContent();
         }
 
+        // An item held under the next one is on screen too, until that one
+        // has dissolved over it.
         var shown = PreviewContent.Content as FrameworkElement;
+        var under = OutgoingContent.Content as UIElement;
         var standInShows = StandInLayer.Visibility == Visibility.Visible;
         var shownIsWeb = shown is not null && FindVisualChild<WebView2>(shown) is not null;
         var style = RevealPlan.ChooseSwap(
-            outgoingVisible: shown is not null || standInShows,
+            outgoingVisible: shown is not null || standInShows || under is not null,
             outgoingIsWeb: shownIsWeb,
             stageChanges);
         p.Plan.Swap = style;
@@ -408,6 +425,11 @@ public partial class PreviewWindow
                 if (standInShows)
                 {
                     Motion.Fade(StandInLayer, 0, Motion.Leave, easeIn: true);
+                }
+
+                if (under is not null)
+                {
+                    Motion.Fade(under, 0, Motion.Leave, easeIn: true);
                 }
 
                 RunAfter(Motion.Leave, () => EndBeat(p));

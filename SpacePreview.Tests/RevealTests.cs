@@ -1,4 +1,7 @@
+using System.Text;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
@@ -241,6 +244,30 @@ public sealed class StandInTests
     }
 
     [Fact]
+    public void ALonePageLandsWithNoRailBesideIt() => Sta.Run(() =>
+    {
+        // The stage reserves no rail for a one-page document and the viewer
+        // shows none, so the ghost takes the viewer's whole width.
+        Assert.Equal(new Rect(5, 48, 975, 975 / 0.75), Ghost(StageFitHint.PageAspect(0.75, singlePage: true)));
+        Assert.Equal(new Rect(137, 48, 843, 843 / 0.75), Ghost(StageFitHint.PageAspect(0.75)));
+    });
+
+    [Fact]
+    public void AOnePageDocumentIsKnownWithoutARailCache()
+    {
+        // One page renders no rail, so no rail cache ever counts it. The
+        // probe the stage fit ran as the item opened does.
+        using var temp = new TempDirectory();
+        var one = WritePdf(temp, "one.pdf", pages: 1);
+        var three = WritePdf(temp, "three.pdf", pages: 3);
+        PdfPageSizeProbe.Read(one);
+        PdfPageSizeProbe.Read(three);
+
+        Assert.True(PreviewWindow.KnownSinglePage(one));
+        Assert.False(PreviewWindow.KnownSinglePage(three));
+    }
+
+    [Fact]
     public void PixelsLandCenteredAndImagesNeverUpscale()
     {
         var area = new Size(1000, 800);
@@ -270,6 +297,191 @@ public sealed class StandInTests
 
     private static BitmapSource Bitmap(int width, int height) =>
         BitmapSource.Create(width, height, 96, 96, PixelFormats.Gray8, null, new byte[width * height], width);
+
+    /// <summary>Where a stand-in draws its ghost in a 1000 x 800 area under a 40 px toolbar, beside a 132 px rail.</summary>
+    private static Rect Ghost(StageFitHint hint)
+    {
+        var standIn = StandIn.Create(hint, 1, 132, 40, null);
+        standIn.Measure(new Size(1000, 800));
+        standIn.Arrange(new Rect(0, 0, 1000, 800));
+        return LayoutInformation.GetLayoutSlot((FrameworkElement)standIn.Children[0]);
+    }
+
+    /// <summary>A document of letter pages with a classic cross-reference table.</summary>
+    private static string WritePdf(TempDirectory temp, string name, int pages)
+    {
+        var kids = string.Join(' ', Enumerable.Range(3, pages).Select(number => $"{number} 0 R"));
+        string[] objects =
+        [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            $"<< /Type /Pages /Kids [{kids}] /Count {pages} >>",
+            .. Enumerable.Repeat("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>", pages)
+        ];
+        var text = new StringBuilder("%PDF-1.4\n");
+        var offsets = new List<int>();
+        for (var i = 0; i < objects.Length; i++)
+        {
+            offsets.Add(text.Length);
+            text.Append($"{i + 1} 0 obj\n{objects[i]}\nendobj\n");
+        }
+
+        var xref = text.Length;
+        text.Append($"xref\n0 {objects.Length + 1}\n0000000000 65535 f \n");
+        foreach (var offset in offsets)
+        {
+            text.Append($"{offset:0000000000} 00000 n \n");
+        }
+
+        text.Append($"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
+        var path = Path.Combine(temp.Path, name);
+        File.WriteAllText(path, text.ToString(), Encoding.ASCII);
+        return path;
+    }
+}
+
+/// <summary>
+/// The beat and the wait on the real window. The next item's lane is held
+/// back, and hands its content over when the test says, so each moment the
+/// user sees can be checked in turn.
+/// </summary>
+[Collection(WpfCollection.Name)]
+public sealed class RevealWindowTests
+{
+    [Fact]
+    public Task AStandInTakesTheHeldItemsPlace() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            Assert.Same(held, window.PreviewContent.Content);
+
+            // At 120 ms the stand-in shows over the held item, so its sheen
+            // and reason line show too.
+            await WaitUntilAsync(() => window.StandInLayer.Visibility == Visibility.Visible);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Null(window.PreviewContent.Content);
+
+            // The content dissolves in over the stand-in, then both leave.
+            var next = new Border();
+            Fields.Call(window, "SetPreviewContent", next, null);
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+            Assert.Same(next, window.PreviewContent.Content);
+            Assert.Equal(Visibility.Collapsed, window.StandInLayer.Visibility);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task APressBeforeTheStandInKeepsTheItemHeldUnderAStagedDocument() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            var document = Web(WebSurfaceKind.PdfViewer);
+            Fields.Call(window, "SetPreviewContent", document, null);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Equal(Visibility.Hidden, document.Visibility);
+
+            // The held item is all that shows, so it holds for the next item
+            // instead of dropping to a blank canvas.
+            Browse(window, Png(temp, "third.png"));
+            Assert.Same(held, window.OutgoingContent.Content);
+
+            var next = new Border();
+            Fields.Call(window, "SetPreviewContent", next, null);
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+            Assert.Same(next, window.PreviewContent.Content);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AFadeOutTakesTheItemHeldUnderAPageWithIt() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = (UIElement)window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            var page = Web(WebSurfaceKind.Page);
+            Fields.Call(window, "SetPreviewContent", page, null);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Equal(Visibility.Visible, page.Visibility);
+
+            // A page cannot be held, so the next press fades it out. The item
+            // under it fades with it rather than showing through.
+            Browse(window, Png(temp, "third.png"));
+            Assert.Equal(0.0, (double)held.GetAnimationBaseValue(UIElement.OpacityProperty));
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// Opens a parked, frozen stage on an item and waits until it has fully
+    /// arrived and the window has faded in, so the next show is a browse step.
+    /// </summary>
+    private static async Task<PreviewWindow> OpenAsync(string path)
+    {
+        var window = new PreviewWindow { Left = -30000, Top = 0, Width = 900, Height = 650 };
+        window.MarkGeometryUserPinnedForProbe();
+        window.ShowPreview(path, IntPtr.Zero);
+        await WaitUntilAsync(() =>
+            Fields.Get<bool>(window, "_loadFinished")
+            && Fields.Get<byte>(window, "_windowAlpha") == 255
+            && window.StandInLayer.Visibility == Visibility.Collapsed
+            && window.OutgoingContent.Content is null);
+        return window;
+    }
+
+    /// <summary>A browse step whose lane is still working: it hands its content over only when the test does.</summary>
+    private static void Browse(PreviewWindow window, string path)
+    {
+        window.ShowPreview(path, IntPtr.Zero);
+        Fields.Get<CancellationTokenSource>(window, "_loadCancellation").Cancel();
+    }
+
+    private static Grid Web(WebSurfaceKind kind) => new() { Children = { new StagedWebView(kind) } };
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Timed out waiting for the window.");
+            await Task.Delay(10);
+        }
+    }
+
+    private static string Png(TempDirectory temp, string name)
+    {
+        const int width = 400;
+        const int height = 300;
+        var pixels = Enumerable.Repeat((byte)0x80, width * height * 4).ToArray();
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
+        var path = Path.Combine(temp.Path, name);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(path);
+        encoder.Save(stream);
+        return path;
+    }
 }
 
 /// <summary>Traps in the reveal path that only a source check can see.</summary>
