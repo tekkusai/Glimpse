@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -391,6 +392,32 @@ public sealed class AppUpdateServiceTests
         Assert.Equal(
             TwoPointZeroParserHash,
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalized))));
+    }
+
+    [Fact]
+    public async Task WindowsStartsAnInstallerWhileGlimpseHoldsItAgainstSwaps()
+    {
+        // A harmless program held the way setup is held from its last hash
+        // until it has started, and started the way setup is.
+        using var temp = new TempDirectory();
+        var program = Path.Combine(temp.Path, "harmless.exe");
+        File.Copy(Path.Combine(Environment.SystemDirectory, "cmd.exe"), program);
+
+        await using (AppUpdateService.OpenToHash(program))
+        {
+            Assert.ThrowsAny<IOException>(() => File.WriteAllBytes(program, [0x4D, 0x5A]));
+            Assert.ThrowsAny<IOException>(() => File.Delete(program));
+
+            using var started = Process.Start(new ProcessStartInfo(program)
+            {
+                Arguments = "/d /c exit 7",
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            })!;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            await started.WaitForExitAsync(timeout.Token);
+            Assert.Equal(7, started.ExitCode);
+        }
     }
 
     [Fact]

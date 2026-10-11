@@ -79,7 +79,6 @@ internal sealed class AppUpdater : IDisposable
     private readonly Func<InstallState> _observe;
     private readonly Func<bool> _canQuit;
     private readonly Func<bool> _isMetered;
-    private readonly Func<AppUpdateRelease, string, CancellationToken, Task> _launch;
     private readonly CancellationTokenSource _lifetime = new();
     private Dispatcher? _dispatcher;
     private DispatcherTimer? _checkTimer;
@@ -93,19 +92,16 @@ internal sealed class AppUpdater : IDisposable
 
     /// <param name="observe">The PC's half, <see cref="InstallState"/>: what is open, full screen, the shell's notification state and idle.</param>
     /// <param name="canQuit">Unsaved signing work comes forward and says no.</param>
-    /// <param name="launch">Starts the verified installer; tests stand in for it.</param>
     public AppUpdater(
         AppUpdateService service,
         Func<InstallState>? observe = null,
         Func<bool>? canQuit = null,
-        Func<bool>? isMetered = null,
-        Func<AppUpdateRelease, string, CancellationToken, Task>? launch = null)
+        Func<bool>? isMetered = null)
     {
         _service = service;
         _observe = observe ?? (() => new InstallState { PreviewOpen = true });
         _canQuit = canQuit ?? (() => true);
         _isMetered = isMetered ?? ConnectionIsMetered;
-        _launch = launch ?? service.LaunchInstallerAsync;
     }
 
     public UpdateState State { get; private set; } = new();
@@ -205,10 +201,9 @@ internal sealed class AppUpdater : IDisposable
         var installer = State.Installer ?? await DownloadAsync(release, download: true);
 
         // A release pulled or unsigned since the last check does not
-        // install, and the footer says what is true now. Signing may have
-        // started meanwhile. Only a failed download or no answer from
-        // GitHub is a failed install.
-        if (installer is null || !await ConfirmAsync(release) || !_canQuit())
+        // install, and the footer says what is true now. Only a failed
+        // download or no answer from GitHub is a failed install.
+        if (installer is null || !await ConfirmAsync(release))
         {
             Set(State with { Installing = false, InstallFailed = State.Pending == release && (installer is null || State.Unanswered) });
             return;
@@ -496,18 +491,17 @@ internal sealed class AppUpdater : IDisposable
 
     private async Task LaunchAsync(AppUpdateRelease release, string installer, bool asked)
     {
-        DiagnosticLog.Write($"update install starting version={release.VersionText} by={(asked ? "install now" : "away")}");
-
-        // Written first: setup ends this process within seconds.
-        Settings.Update(settings => settings with
-        {
-            UpdateAttemptVersion = release.VersionText,
-            UpdateAttemptUtc = DateTimeOffset.UtcNow
-        });
-        Set(State with { Installing = true, SetupStarted = true });
+        Set(State with { Installing = true });
         try
         {
-            await _launch(release, installer, _lifetime.Token);
+            if (!await _service.LaunchInstallerAsync(release, installer, () => SetupMayStart(release, asked), _lifetime.Token))
+            {
+                // Not a failure: the next moment the rules hold installs it.
+                DiagnosticLog.Write($"update install held version={release.VersionText}");
+                Set(State with { Installing = false });
+                return;
+            }
+
             _ = NoticeSetupThatNeverQuitAsync(release, asked);
         }
         catch (UpdateRejectedException ex)
@@ -521,6 +515,33 @@ internal sealed class AppUpdater : IDisposable
             DiagnosticLog.Write($"update install failed version={release.VersionText}: {ex.GetType().Name}: {ex.Message}");
             Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
         }
+    }
+
+    /// <summary>
+    /// The last word, after the last hash and with nothing awaited before
+    /// setup starts. The user may have come back, turned the switch off or
+    /// started signing while the installer was checked.
+    /// </summary>
+    private bool SetupMayStart(AppUpdateRelease release, bool asked)
+    {
+        var mayStart = asked
+            ? _canQuit()
+            : Settings.Current.InstallUpdatesAutomatically && IsAway(_observe());
+        if (!mayStart)
+        {
+            return false;
+        }
+
+        DiagnosticLog.Write($"update install starting version={release.VersionText} by={(asked ? "install now" : "away")}");
+
+        // Written first: setup ends this process within seconds.
+        Settings.Update(settings => settings with
+        {
+            UpdateAttemptVersion = release.VersionText,
+            UpdateAttemptUtc = DateTimeOffset.UtcNow
+        });
+        Set(State with { SetupStarted = true });
+        return true;
     }
 
     // Setup quits Glimpse within seconds; still here means it failed early.
