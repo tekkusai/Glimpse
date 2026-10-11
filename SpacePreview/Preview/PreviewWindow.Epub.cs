@@ -234,17 +234,16 @@ public partial class PreviewWindow
             return;
         }
 
-        var palette = Theme.Current;
         if (state.SelectedChapterTile is not null)
         {
-            ApplyRailTileState(state.SelectedChapterTile, palette, selected: false);
+            ApplyRailTileState(state.SelectedChapterTile, selected: false);
         }
 
         state.SelectedChapterTile = null;
         if (state.ChapterTiles.TryGetValue(spineIndex, out var tile))
         {
             state.SelectedChapterTile = tile;
-            ApplyRailTileState(tile, palette, selected: true);
+            ApplyRailTileState(tile, selected: true);
         }
     }
 
@@ -257,7 +256,6 @@ public partial class PreviewWindow
         Action<int, Border, bool> registerTile,
         Action hide)
     {
-        var palette = Theme.Current;
         var stack = new StackPanel { Margin = new Thickness(8, 0, 8, 12) };
 
         var header = new Grid { Margin = new Thickness(12, 8, 8, 8) };
@@ -267,10 +265,9 @@ public partial class PreviewWindow
         {
             Text = "Contents",
             VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextTertiary),
             FontSize = Metrics.FontCaption,
             FontWeight = FontWeights.SemiBold
-        });
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
         var hideButton = BuildRailChromeButton("", "Hide contents", hide);
         Grid.SetColumn(hideButton, 1);
         header.Children.Add(hideButton);
@@ -282,18 +279,16 @@ public partial class PreviewWindow
             {
                 Text = title,
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextSecondary),
                 TextTrimming = TextTrimming.CharacterEllipsis
-            });
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary"));
             if (caption is not null)
             {
                 lines.Children.Add(new TextBlock
                 {
                     Text = caption,
                     FontSize = Metrics.FontCaption,
-                    Foreground = Theme.Brush(palette.TextTertiary),
                     TextTrimming = TextTrimming.CharacterEllipsis
-                });
+                }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
             }
 
             return new Border
@@ -313,14 +308,14 @@ public partial class PreviewWindow
         foreach (var section in contents.Sections)
         {
             var tile = Tile(section.Title, null, section.Title);
-            ConfigureRailTile(tile, section.SpineIndex, section.SpineIndex == selectedSpineIndex, palette, navigate, registerTile);
+            ConfigureRailTile(tile, section.SpineIndex, section.SpineIndex == selectedSpineIndex, navigate, registerTile);
             stack.Children.Add(tile);
         }
 
         if (contents.Truncated)
         {
             var rest = Tile("Rest of the book", "Open it in your reader", "Opens the book in its app");
-            ConfigureRailTile(rest, EpubRestOfBookTile, selected: false, palette, navigate, (_, _, _) => { });
+            ConfigureRailTile(rest, EpubRestOfBookTile, selected: false, navigate, (_, _, _) => { });
             stack.Children.Add(rest);
         }
 

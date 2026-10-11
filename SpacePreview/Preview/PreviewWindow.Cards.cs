@@ -157,10 +157,9 @@ public partial class PreviewWindow
         {
             Text = label,
             FontSize = Metrics.FontBody,
-            Foreground = Theme.Brush(Theme.Current.TextSecondary),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary");
         var row = new Grid();
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -180,7 +179,7 @@ public partial class PreviewWindow
         };
         if (!locked)
         {
-            container.MouseEnter += (_, _) => container.Background = Theme.Brush(Theme.Current.HoverBg);
+            container.MouseEnter += (_, _) => container.Themed(Border.BackgroundProperty, "Theme.HoverBg");
             container.MouseLeave += (_, _) => container.Background = Brushes.Transparent;
             container.MouseLeftButtonDown += (_, e) => e.Handled = true;
             container.MouseLeftButtonUp += (_, e) =>
@@ -343,7 +342,7 @@ public partial class PreviewWindow
     {
         if (image is null)
         {
-            return GlyphTile("\uE7C3", Theme.Current.TextTertiary);
+            return GlyphTile("\uE7C3", "Theme.TextTertiary");
         }
 
         return image.IsThumbnail
@@ -383,49 +382,42 @@ public partial class PreviewWindow
         };
         RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
         image.SizeChanged += (_, e) => image.Clip = new RectangleGeometry(new Rect(e.NewSize), Metrics.RadiusSurface, Metrics.RadiusSurface);
-        return new Border
+        var shadow = new DropShadowEffect
+        {
+            BlurRadius = 20,
+            ShadowDepth = 4,
+            Direction = 270,
+            Color = Colors.Black
+        };
+        var lifted = new Border
         {
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Effect = CardShadow(),
+            Effect = shadow,
             Child = image
         };
+        Theme.Follow(lifted, () => shadow.Opacity = Theme.Current.IsDark ? 0.32 : 0.14);
+        return lifted;
     }
-
-    private static DropShadowEffect CardShadow() => new()
-    {
-        BlurRadius = 20,
-        ShadowDepth = 4,
-        Direction = 270,
-        Color = Colors.Black,
-        Opacity = Theme.Current.IsDark ? 0.32 : 0.14
-    };
 
     /// <summary>The quiet tile that stands in for a picture: a glyph on a raised square.</summary>
-    private static Border GlyphTile(string glyph, Color color)
+    private static Border GlyphTile(string glyph, string colorToken) => new Border
     {
-        var palette = Theme.Current;
-        return new Border
+        Width = CardTileSide,
+        Height = CardTileSide,
+        CornerRadius = Metrics.CardCorner,
+        BorderThickness = new Thickness(1),
+        HorizontalAlignment = HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Center,
+        Child = new TextBlock
         {
-            Width = CardTileSide,
-            Height = CardTileSide,
-            CornerRadius = Metrics.CardCorner,
-            BorderThickness = new Thickness(1),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            Background = Theme.Brush(palette.RaisedBg),
+            Text = glyph,
+            FontFamily = GlyphFont,
+            FontSize = 48,
             HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Child = new TextBlock
-            {
-                Text = glyph,
-                FontFamily = GlyphFont,
-                FontSize = 48,
-                Foreground = Theme.Brush(color),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            }
-        };
-    }
+            VerticalAlignment = VerticalAlignment.Center
+        }.Themed(TextBlock.ForegroundProperty, colorToken)
+    }.Themed(Border.BorderBrushProperty, "Theme.RaisedBorder").Themed(Border.BackgroundProperty, "Theme.RaisedBg");
 
     private static FrameworkElement BuildFileCard(FrameworkElement visual, string title, IReadOnlyList<string> facts, FrameworkElement? footer = null) =>
         BuildFileCard(visual, title, facts.Take(2).Select(FactLine).ToList(), footer);
@@ -436,37 +428,31 @@ public partial class PreviewWindow
     /// </summary>
     private static FrameworkElement BuildFileCard(FrameworkElement visual, string title, IReadOnlyList<TextBlock> facts, FrameworkElement? footer)
     {
-        var palette = Theme.Current;
         var body = new StackPanel();
         body.Children.Add(new TextBlock
         {
             Text = title,
             FontSize = Metrics.FontTitle,
             FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(palette.TextPrimary),
             TextAlignment = TextAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis
-        });
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextPrimary"));
         foreach (var fact in facts)
         {
             body.Children.Add(fact);
         }
 
-        return new FileCardLayout(visual, body, footer)
-        {
-            Background = Theme.Brush(palette.CanvasBg)
-        };
+        return new FileCardLayout(visual, body, footer).Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
     }
 
-    private static TextBlock FactLine(string text, int index) => new()
+    private static TextBlock FactLine(string text, int index) => new TextBlock
     {
         Text = text,
         Margin = new Thickness(0, 4, 0, 0),
         FontSize = Metrics.FontBody,
-        Foreground = Theme.Brush(index == 0 ? Theme.Current.TextSecondary : Theme.Current.TextTertiary),
         TextAlignment = TextAlignment.Center,
         TextTrimming = TextTrimming.CharacterEllipsis
-    };
+    }.Themed(TextBlock.ForegroundProperty, index == 0 ? "Theme.TextSecondary" : "Theme.TextTertiary");
 
     // ---------------------------------------------------------------------
     // Errors: the same card with a warning glyph, one sentence and at most
@@ -477,7 +463,7 @@ public partial class PreviewWindow
 
     private static FrameworkElement BuildErrorPreview(string title, string detail, PreviewAction? action = null) =>
         BuildFileCard(
-            GlyphTile("\uE7BA", Theme.Current.Warning),
+            GlyphTile("\uE7BA", "Theme.Warning"),
             title,
             [detail],
             action is null ? null : BuildActionPill(action));
@@ -600,7 +586,6 @@ public partial class PreviewWindow
 
     private static FrameworkElement BuildAppPackageCard(AppPackageInfo info)
     {
-        var palette = Theme.Current;
         var footer = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
 
         // Reserved at its final height, so the line arriving moves nothing.
@@ -620,9 +605,8 @@ public partial class PreviewWindow
                 Text = "Capabilities",
                 Margin = new Thickness(0, 16, 0, 0),
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 TextAlignment = TextAlignment.Center
-            });
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
 
             var chips = new CenteredWrapPanel
             {
@@ -637,7 +621,7 @@ public partial class PreviewWindow
 
             if (info.CapabilityOverflow > 0)
             {
-                chips.Children.Add(BuildAppChip($"{info.CapabilityOverflow:N0} more", palette.TextTertiary, palette.RaisedBorder));
+                chips.Children.Add(BuildAppChip($"{info.CapabilityOverflow:N0} more", "Theme.TextTertiary", "Theme.RaisedBorder"));
             }
 
             footer.Children.Add(chips);
@@ -672,27 +656,24 @@ public partial class PreviewWindow
             return;
         }
 
-        var palette = Theme.Current;
         var (text, warning) = AppPackagePreviewLoader.DescribeSignature(signature, signer);
-        var brush = Theme.Brush(warning ? palette.Warning : palette.TextSecondary);
+        var token = warning ? "Theme.Warning" : "Theme.TextSecondary";
         row.Children.Add(new TextBlock
         {
             Text = warning ? "\uE7BA" : "\uE73E",
             FontFamily = GlyphFont,
             FontSize = 13,
-            Foreground = brush,
             Margin = new Thickness(0, 1, 7, 0),
             VerticalAlignment = VerticalAlignment.Center
-        });
+        }.Themed(TextBlock.ForegroundProperty, token));
         row.Children.Add(new TextBlock
         {
             Text = text,
             FontSize = Metrics.FontBody,
-            Foreground = brush,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = 440
-        });
+        }.Themed(TextBlock.ForegroundProperty, token));
 
         if (!Motion.Enabled)
         {
@@ -736,34 +717,30 @@ public partial class PreviewWindow
             }
         }
 
-        return GlyphTile("\uE7B8", Theme.Current.TextTertiary);
+        return GlyphTile("\uE7B8", "Theme.TextTertiary");
     }
 
     private static FrameworkElement BuildAppCapabilityChip(string capability)
     {
-        var palette = Theme.Current;
         var (label, known, warning) = DescribeAppCapability(capability);
         return BuildAppChip(
             label,
-            warning ? palette.Warning : known ? palette.TextSecondary : palette.TextTertiary,
-            warning ? palette.Warning : palette.RaisedBorder);
+            warning ? "Theme.Warning" : known ? "Theme.TextSecondary" : "Theme.TextTertiary",
+            warning ? "Theme.Warning" : "Theme.RaisedBorder");
     }
 
-    private static Border BuildAppChip(string label, Color foreground, Color border) => new()
+    private static Border BuildAppChip(string label, string foregroundToken, string borderToken) => new Border
     {
         CornerRadius = Metrics.RowCorner,
-        Background = Theme.Brush(Theme.Current.RaisedBg),
-        BorderBrush = Theme.Brush(border),
         BorderThickness = new Thickness(1),
         Padding = Metrics.ChipPadding,
         Margin = new Thickness(3),
         Child = new TextBlock
         {
             Text = label,
-            FontSize = Metrics.FontCaption,
-            Foreground = Theme.Brush(foreground)
-        }
-    };
+            FontSize = Metrics.FontCaption
+        }.Themed(TextBlock.ForegroundProperty, foregroundToken)
+    }.Themed(Border.BackgroundProperty, "Theme.RaisedBg").Themed(Border.BorderBrushProperty, borderToken);
 
     /// <summary>A wrap panel whose rows are centered, so a short last row sits under the middle.</summary>
     private sealed class CenteredWrapPanel : Panel

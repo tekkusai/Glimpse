@@ -136,8 +136,7 @@ public partial class PreviewWindow
 
     private FrameworkElement BuildPdfWebPreview(string path, long version, CancellationToken token)
     {
-        var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        var grid = new Grid().Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
 
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
@@ -743,7 +742,6 @@ public partial class PreviewWindow
     /// </summary>
     private FrameworkElement BuildPdfPageRail(PdfPageRailState state, PdfPreviewDocument document)
     {
-        var palette = Theme.Current;
         // 131 px inside the hairline, less the 7 px scrollbar column, less
         // these margins and a tile's 1 px border and 6 px padding, leaves 98:
         // room for a 92 px sheet. A wider sheet is clipped at its sides.
@@ -757,9 +755,8 @@ public partial class PreviewWindow
         {
             Text = "Pages",
             VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextTertiary),
             FontSize = Metrics.FontCaption
-        });
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
         var hideButton = BuildRailChromeButton("", "Hide pages", () =>
         {
             state.IsVisible = false;
@@ -778,10 +775,8 @@ public partial class PreviewWindow
                 HorizontalAlignment = HorizontalAlignment.Center,
                 CornerRadius = Metrics.SurfaceCorner,
                 BorderThickness = new Thickness(1),
-                BorderBrush = Theme.Brush(palette.RaisedBorder),
-                Background = Theme.Brush(palette.RaisedBg),
                 Child = new Image { Stretch = Stretch.Fill, SnapsToDevicePixels = true }
-            };
+            }.Themed(Border.BorderBrushProperty, "Theme.RaisedBorder").Themed(Border.BackgroundProperty, "Theme.RaisedBg");
             RenderOptions.SetBitmapScalingMode(sheet.Child, BitmapScalingMode.HighQuality);
             if (pageNumber <= document.Pages.Count)
             {
@@ -807,9 +802,8 @@ public partial class PreviewWindow
                             Text = pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture),
                             Margin = new Thickness(0, 4, 0, 0),
                             HorizontalAlignment = HorizontalAlignment.Center,
-                            Foreground = Theme.Brush(palette.TextSecondary),
                             FontSize = Metrics.FontCaption
-                        }
+                        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary")
                     }
                 }
             };
@@ -820,7 +814,6 @@ public partial class PreviewWindow
                 tile,
                 pageNumber,
                 selected,
-                palette,
                 page =>
                 {
                     MarkPdfReading(state, "rail click");
@@ -856,10 +849,9 @@ public partial class PreviewWindow
                 Text = $"First {shown} of {document.TotalPages} pages",
                 TextAlignment = TextAlignment.Center,
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(4, 4, 4, 0)
-            });
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
         }
 
         var surface = BuildRailSurface(
@@ -1148,17 +1140,16 @@ public partial class PreviewWindow
             return;
         }
 
-        var palette = Theme.Current;
         if (state.SelectedPageTile is not null)
         {
-            ApplyRailTileState(state.SelectedPageTile, palette, selected: false);
+            ApplyRailTileState(state.SelectedPageTile, selected: false);
         }
 
         state.SelectedPageTile = null;
         if (state.PageTiles.TryGetValue(target, out var tile))
         {
             state.SelectedPageTile = tile;
-            ApplyRailTileState(tile, palette, selected: true);
+            ApplyRailTileState(tile, selected: true);
 
             // A selection nobody can see reads as no selection at all. Keep
             // the highlighted tile in view when the document moves it - but

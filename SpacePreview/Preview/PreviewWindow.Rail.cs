@@ -93,7 +93,6 @@ public partial class PreviewWindow
         Border tile,
         int index,
         bool selected,
-        ThemePalette palette,
         Action<int> navigate,
         Action<int, Border, bool> register)
     {
@@ -101,7 +100,7 @@ public partial class PreviewWindow
         {
             if (!IsRailTileSelected(tile))
             {
-                tile.Background = Theme.Brush(palette.HoverBg);
+                tile.Themed(Border.BackgroundProperty, "Theme.HoverBg");
             }
         };
         tile.MouseLeave += (_, _) =>
@@ -119,7 +118,7 @@ public partial class PreviewWindow
 
         if (selected)
         {
-            ApplyRailTileState(tile, palette, selected: true);
+            ApplyRailTileState(tile, selected: true);
         }
 
         register(index, tile, selected);
@@ -133,7 +132,6 @@ public partial class PreviewWindow
         Action<ScrollViewer>? registerScroll = null,
         Action<ScrollViewer>? onLoaded = null)
     {
-        var palette = Theme.Current;
         var scroll = new ScrollViewer
         {
             Content = content,
@@ -170,21 +168,16 @@ public partial class PreviewWindow
 
         return new Border
         {
-            Background = Theme.Brush(palette.ChromeBg),
-            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = surface
-        };
+        }.Themed(Border.BackgroundProperty, "Theme.ChromeBg").Themed(Border.BorderBrushProperty, "Theme.Border");
     }
 
     private static FrameworkElement BuildCollapsedRail(int count, string tooltip, Action show)
     {
-        var palette = Theme.Current;
         var button = BuildRailChromeButton("", tooltip, show);
         return new Border
         {
-            Background = Theme.Brush(palette.ChromeBg),
-            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 0, 1, 0),
             Child = new StackPanel
             {
@@ -197,17 +190,15 @@ public partial class PreviewWindow
                         Text = count.ToString(System.Globalization.CultureInfo.InvariantCulture),
                         Margin = new Thickness(0, 6, 0, 0),
                         HorizontalAlignment = HorizontalAlignment.Center,
-                        Foreground = Theme.Brush(palette.TextTertiary),
                         FontSize = Metrics.FontCaption
-                    }
+                    }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary")
                 }
             }
-        };
+        }.Themed(Border.BackgroundProperty, "Theme.ChromeBg").Themed(Border.BorderBrushProperty, "Theme.Border");
     }
 
     private static Border BuildRailChromeButton(string glyph, string tooltip, Action action)
     {
-        var palette = Theme.Current;
         var button = new Border
         {
             Width = 24,
@@ -222,21 +213,28 @@ public partial class PreviewWindow
                 FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
                 FontSize = 10,
                 HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Theme.Brush(palette.TextSecondary)
-            }
+                VerticalAlignment = VerticalAlignment.Center
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary")
         };
         System.Windows.Automation.AutomationProperties.SetName(button, tooltip);
-        button.MouseEnter += (_, _) => button.Background = Theme.Brush(palette.HoverBg);
+        button.MouseEnter += (_, _) => button.Themed(Border.BackgroundProperty, "Theme.HoverBg");
         button.MouseLeave += (_, _) => button.Background = Brushes.Transparent;
         button.MouseLeftButtonDown += (_, e) =>
         {
-            button.Background = Theme.Brush(palette.PressedBg);
+            button.Themed(Border.BackgroundProperty, "Theme.PressedBg");
             e.Handled = true;
         };
         button.MouseLeftButtonUp += (_, e) =>
         {
-            button.Background = button.IsMouseOver ? Theme.Brush(palette.HoverBg) : Brushes.Transparent;
+            if (button.IsMouseOver)
+            {
+                button.Themed(Border.BackgroundProperty, "Theme.HoverBg");
+            }
+            else
+            {
+                button.Background = Brushes.Transparent;
+            }
+
             action();
             e.Handled = true;
         };
@@ -244,11 +242,18 @@ public partial class PreviewWindow
     }
 
     /// <summary>The selected row: the hover surface, ringed in the accent.</summary>
-    private static void ApplyRailTileState(Border tile, ThemePalette palette, bool selected)
+    private static void ApplyRailTileState(Border tile, bool selected)
     {
         tile.Tag = selected;
-        tile.Background = selected ? Theme.Brush(palette.HoverBg) : Brushes.Transparent;
-        tile.BorderBrush = selected ? Theme.Brush(palette.Accent) : Brushes.Transparent;
+        if (selected)
+        {
+            tile.Themed(Border.BackgroundProperty, "Theme.HoverBg").Themed(Border.BorderBrushProperty, "Theme.Accent");
+        }
+        else
+        {
+            tile.Background = Brushes.Transparent;
+            tile.BorderBrush = Brushes.Transparent;
+        }
     }
 
     private static bool IsRailTileSelected(Border tile) => tile.Tag is true;

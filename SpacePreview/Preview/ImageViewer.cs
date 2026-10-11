@@ -108,13 +108,7 @@ internal sealed class ImageViewer : IZoomableImage
         // The canvas follows the theme by resource; the checkerboard is
         // drawn from the palette, so a theme change draws it again.
         _root.SetResourceReference(Panel.BackgroundProperty, "Theme.CanvasBg");
-        _root.Loaded += (_, _) =>
-        {
-            Theme.Changed -= ShowTransparency;
-            Theme.Changed += ShowTransparency;
-        };
-        _root.Unloaded += (_, _) => Theme.Changed -= ShowTransparency;
-        ShowTransparency();
+        Theme.Follow(_root, ShowTransparency);
         _root.SizeChanged += (_, _) => Layout();
         _image.DpiChanged += (_, _) => Layout();
         _root.MouseWheel += (_, e) =>

@@ -203,6 +203,13 @@ internal static class ProbeRunner
                 DiagnosticLog.Write($"probe {verb} -> {await window.ProbeFillSignAsync(verb, value)}");
                 break;
 
+            case "theme":
+                // Switches the palette live, the way Settings does, so a
+                // capture shows an open preview following it.
+                Theme.Use(Enum.Parse<ThemePreference>(value, ignoreCase: true));
+                await Task.Delay(120);
+                break;
+
             case "show":
                 window.ShowPreview(value, IntPtr.Zero);
                 window.Left = -30000;

@@ -122,8 +122,6 @@ public partial class PreviewWindow
     /// </summary>
     private static FrameworkElement BuildFontPreview(FontSpecimen specimen)
     {
-        var palette = Theme.Current;
-
         // Lines too long for the stage run on into the right inset and fade
         // out at the window's edge instead of being cut through a letter.
         // Anything that fits ends before the fade starts.
@@ -136,7 +134,7 @@ public partial class PreviewWindow
                 new GradientStop(Colors.Transparent, 1)
             }
         };
-        TextBlock Specimen(string text, double size, Color color) => new()
+        TextBlock Specimen(string text, double size, string colorToken) => new TextBlock
         {
             Text = text,
             FontFamily = specimen.Family,
@@ -144,9 +142,8 @@ public partial class PreviewWindow
             FontWeight = specimen.Weight,
             FontStretch = specimen.Stretch,
             FontSize = size,
-            Foreground = Theme.Brush(color),
             TextWrapping = TextWrapping.NoWrap
-        };
+        }.Themed(TextBlock.ForegroundProperty, colorToken);
 
         var title = new TextBlock
         {
@@ -154,22 +151,20 @@ public partial class PreviewWindow
             Margin = new Thickness(0, 0, SpecimenInset, 0),
             FontSize = Metrics.FontTitle,
             FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(palette.TextPrimary),
             TextTrimming = TextTrimming.CharacterEllipsis
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextPrimary");
         var details = new TextBlock
         {
             Text = specimen.Details,
             Margin = new Thickness(0, 4, SpecimenInset, 0),
             FontSize = Metrics.FontBody,
-            Foreground = Theme.Brush(palette.TextSecondary),
             TextTrimming = TextTrimming.CharacterEllipsis
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
-        var hero = Specimen(specimen.Hero, 140, palette.TextPrimary);
+        var hero = Specimen(specimen.Hero, 140, "Theme.TextPrimary");
         hero.Margin = new Thickness(0, 0, 40, 0);
         hero.VerticalAlignment = VerticalAlignment.Center;
-        var alphabet = Specimen(specimen.Alphabet, 28, palette.TextSecondary);
+        var alphabet = Specimen(specimen.Alphabet, 28, "Theme.TextSecondary");
         alphabet.VerticalAlignment = VerticalAlignment.Center;
         alphabet.LineHeight = 28 * 1.3;
         alphabet.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
@@ -191,10 +186,9 @@ public partial class PreviewWindow
                 Text = $"{size:0}",
                 Width = 40,
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 VerticalAlignment = VerticalAlignment.Center
-            };
-            var line = Specimen(specimen.Sample, size, palette.TextPrimary);
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary");
+            var line = Specimen(specimen.Sample, size, "Theme.TextPrimary");
             var row = new DockPanel { Margin = new Thickness(0, 0, 0, size / 3), LastChildFill = true };
             DockPanel.SetDock(label, Dock.Left);
             row.Children.Add(label);
@@ -211,7 +205,7 @@ public partial class PreviewWindow
                 title,
                 details,
                 showcase,
-                new Border { Height = 1, Margin = new Thickness(0, 28, SpecimenInset, 0), Background = Theme.Brush(palette.Border) },
+                new Border { Height = 1, Margin = new Thickness(0, 28, SpecimenInset, 0) }.Themed(Border.BackgroundProperty, "Theme.Border"),
                 ladder
             }
         };
@@ -228,6 +222,8 @@ public partial class PreviewWindow
             alphabet.LineHeight = alphabet.FontSize * 1.3;
         };
 
-        return BuildScrollSurface(page, new Thickness(0), horizontal: false, palette.CanvasBg);
+        // The surface takes a fixed color; the resource lets it follow the theme.
+        return BuildScrollSurface(page, new Thickness(0), horizontal: false, Theme.Current.CanvasBg)
+            .Themed(Control.BackgroundProperty, "Theme.CanvasBg");
     }
 }

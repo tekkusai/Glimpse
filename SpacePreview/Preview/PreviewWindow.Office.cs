@@ -66,8 +66,9 @@ public partial class PreviewWindow
     private FrameworkElement BuildConvertedOfficePreview(ConvertedOfficeDocument document, OfficeConversionJob? job, long version, CancellationToken token)
     {
         var isHtml = document.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
-        var palette = Theme.Current;
-        var grid = new Grid { Background = isHtml ? Brushes.Transparent : Theme.Brush(palette.CanvasBg) };
+        var grid = isHtml
+            ? new Grid { Background = Brushes.Transparent }
+            : new Grid().Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
         var initialPath = document.Sheets is { Count: > 1 } sheets ? sheets[0].Path : document.DocumentPath;
         if (!isHtml && PdfPageSizeProbe.TryReadFirstPageSize(initialPath, out var pageWidth, out var pageHeight))
         {
@@ -344,26 +345,22 @@ public partial class PreviewWindow
 
     private static FrameworkElement BuildArrivingPagesNote(ConvertedOfficeDocument partial, OfficeKind kind)
     {
-        var palette = Theme.Current;
         var unit = kind == OfficeKind.Presentation ? "slides" : "pages";
         var text = partial.ExpectedPages > partial.PartialPages
             ? $"{char.ToUpperInvariant(unit[0])}{unit[1..]} {partial.PartialPages + 1} to {partial.ExpectedPages}"
             : $"More {unit}";
         return new Border
         {
-            Background = Theme.Brush(Color.FromArgb(180, palette.ChromeBg.R, palette.ChromeBg.G, palette.ChromeBg.B)),
-            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 1, 1, 0),
             Padding = new Thickness(12, 10, 12, 12),
             Child = new TextBlock
             {
                 Text = text + "\nare on the way",
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 TextWrapping = TextWrapping.Wrap,
                 TextAlignment = TextAlignment.Center
-            }
-        };
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary")
+        }.Themed(Border.BackgroundProperty, "Theme.ChromeVeil").Themed(Border.BorderBrushProperty, "Theme.Border");
     }
 
     /// <summary>Links in a converted page open in the browser, as they do in the PDF viewer.</summary>
@@ -387,7 +384,6 @@ public partial class PreviewWindow
     /// </summary>
     private static FrameworkElement BuildSheetTabBar(IReadOnlyList<SpreadsheetSheet> sheets, WebView2 webView)
     {
-        var palette = Theme.Current;
         var strip = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(8, 6, 8, 6) };
         var tabs = new List<(Border Chrome, TextBlock Label)>();
         var activeIndex = 0;
@@ -396,10 +392,18 @@ public partial class PreviewWindow
         {
             for (var i = 0; i < tabs.Count; i++)
             {
-                var active = i == activeIndex;
-                tabs[i].Chrome.Background = active ? Theme.Brush(palette.RaisedBg) : Brushes.Transparent;
-                tabs[i].Chrome.BorderBrush = active ? Theme.Brush(palette.RaisedBorder) : Brushes.Transparent;
-                tabs[i].Label.Foreground = Theme.Brush(active ? palette.TextPrimary : palette.TextSecondary);
+                var (chrome, label) = tabs[i];
+                if (i == activeIndex)
+                {
+                    chrome.Themed(Border.BackgroundProperty, "Theme.RaisedBg").Themed(Border.BorderBrushProperty, "Theme.RaisedBorder");
+                    label.Themed(TextBlock.ForegroundProperty, "Theme.TextPrimary");
+                }
+                else
+                {
+                    chrome.Background = Brushes.Transparent;
+                    chrome.BorderBrush = Brushes.Transparent;
+                    label.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary");
+                }
             }
         }
 
@@ -431,7 +435,7 @@ public partial class PreviewWindow
             {
                 if (index != activeIndex)
                 {
-                    chrome.Background = Theme.Brush(palette.HoverBg);
+                    chrome.Themed(Border.BackgroundProperty, "Theme.HoverBg");
                 }
             };
             chrome.MouseLeave += (_, _) => RefreshTabs();
@@ -439,7 +443,7 @@ public partial class PreviewWindow
             {
                 if (index != activeIndex)
                 {
-                    chrome.Background = Theme.Brush(palette.PressedBg);
+                    chrome.Themed(Border.BackgroundProperty, "Theme.PressedBg");
                 }
 
                 e.Handled = true;
@@ -474,11 +478,9 @@ public partial class PreviewWindow
 
         return new Border
         {
-            Background = Theme.Brush(palette.ChromeBg),
-            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 1, 0, 0),
             Child = scroller
-        };
+        }.Themed(Border.BackgroundProperty, "Theme.ChromeBg").Themed(Border.BorderBrushProperty, "Theme.Border");
     }
 
     /// <summary>Offered here and in Settings while this PC has no engine.</summary>
@@ -490,7 +492,6 @@ public partial class PreviewWindow
     /// </summary>
     private static FrameworkElement WithLibreOfficeSuggestion(FrameworkElement content)
     {
-        var palette = Theme.Current;
         var pill = HousePill.Build(LibreOfficeFix.Label, () => OpenExternalUri(LibreOfficeFix.Uri));
         pill.Margin = new Thickness(16, 0, 0, 0);
         pill.ToolTip = LibreOfficeFix.Tooltip;
@@ -498,8 +499,6 @@ public partial class PreviewWindow
 
         var bar = new Border
         {
-            Background = Theme.Brush(palette.ChromeBg),
-            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(0, 1, 0, 0),
             Padding = new Thickness(16, 10, 12, 10),
             Child = new DockPanel
@@ -512,15 +511,14 @@ public partial class PreviewWindow
                     {
                         Text = "Preview without formatting. Install LibreOffice to see this file as designed.",
                         FontSize = Metrics.FontBody,
-                        Foreground = Theme.Brush(palette.TextSecondary),
                         TextTrimming = TextTrimming.CharacterEllipsis,
                         VerticalAlignment = VerticalAlignment.Center
-                    }
+                    }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary")
                 }
             }
-        };
+        }.Themed(Border.BackgroundProperty, "Theme.ChromeBg").Themed(Border.BorderBrushProperty, "Theme.Border");
 
-        var host = new Grid { Background = Theme.Brush(palette.CanvasBg), Tag = content.Tag };
+        var host = new Grid { Tag = content.Tag }.Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
         host.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         host.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         host.Children.Add(content);
