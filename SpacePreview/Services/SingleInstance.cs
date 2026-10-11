@@ -43,8 +43,7 @@ internal sealed class SingleInstance : IDisposable
 
     /// <summary>
     /// Launching the app while it already runs means "show yourself": the
-    /// second instance signals the primary (which restores a hidden tray
-    /// icon) and exits.
+    /// second instance signals the primary, which opens Settings, and exits.
     /// </summary>
     public static bool SignalShow()
     {

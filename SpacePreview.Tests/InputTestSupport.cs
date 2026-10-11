@@ -1,66 +1,22 @@
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Threading;
 
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// Runs WPF work on one STA thread that hosts an Application carrying the
-/// app's own theme dictionaries, the resources the preview window looks up
-/// when it is built. A failure is rethrown on the calling thread.
+/// Runs WPF work on the test run's one WPF application (<see cref="WpfApp"/>).
+/// A process holds one Application, so every STA test shares it.
 /// </summary>
 internal static class Sta
 {
-    private static readonly Lazy<Dispatcher> Ui = new(StartUiThread);
-
-    public static void Run(Action action)
-    {
-        ExceptionDispatchInfo? failure = null;
-        Ui.Value.Invoke(() =>
+    public static void Run(Action action) =>
+        WpfApp.RunAsync(() =>
         {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ExceptionDispatchInfo.Capture(ex);
-            }
-        });
-        failure?.Throw();
-    }
-
-    private static Dispatcher StartUiThread()
-    {
-        Dispatcher? dispatcher = null;
-        using var ready = new ManualResetEventSlim();
-        var thread = new Thread(() =>
-        {
-            dispatcher = Dispatcher.CurrentDispatcher;
-            var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
-            foreach (var source in new[] { "Themes/Scrollbars.xaml", "Themes/Menus.xaml", "Themes/Chrome.xaml" })
-            {
-                app.Resources.MergedDictionaries.Add(new ResourceDictionary
-                {
-                    Source = new Uri($"pack://application:,,,/Glimpse;component/{source}")
-                });
-            }
-
-            ready.Set();
-            Dispatcher.Run();
-        })
-        {
-            IsBackground = true,
-            Name = "Input tests UI"
-        };
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        ready.Wait();
-        return dispatcher!;
-    }
+            action();
+            return Task.CompletedTask;
+        }).GetAwaiter().GetResult();
 }
 
 /// <summary>Reads and writes private state the input tests set up or check.</summary>

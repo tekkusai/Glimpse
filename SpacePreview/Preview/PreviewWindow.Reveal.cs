@@ -1051,15 +1051,14 @@ public partial class PreviewWindow
 
     private void ClearPreviewContent()
     {
-        HideZoomControls();
-        HideContentActions();
+        ReleaseZoomTarget();
         // Mode state dies with the content; the path does NOT - the staging
         // beat clears the outgoing content AFTER the new item's lane tagged
         // it, and ShowPreview owns the per-item reset.
         _fillSignSurface = null;
         _fillSignParkedContent = null;
         _deferredWebFailure = null;
-        UpdateFillSignPill();
+        SyncHeaderTools();
         _folderHover?.Reset();
         _folderHover = null;
         _activePdfRail = null;

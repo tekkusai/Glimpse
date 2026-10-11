@@ -411,7 +411,7 @@ public partial class PreviewWindow
             {
                 Height = 30,
                 CornerRadius = Metrics.PillCorner,
-                Padding = Metrics.PillPadding,
+                Padding = new Thickness(12, 0, 12, 0),
                 Margin = new Thickness(0, 0, 4, 0),
                 BorderThickness = new Thickness(1),
                 Background = Brushes.Transparent,

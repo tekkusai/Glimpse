@@ -30,9 +30,10 @@ namespace SpacePreview.Preview;
 public partial class PreviewWindow
 {
     // ---------------------------------------------------------------------
-    // Fill and sign. Sign mode swaps in our own page surface (the embedded
-    // viewer is a closed world), and saving never touches the original
-    // except by the user's explicit second choice.
+    // Fill and sign. The header's Sign pill comes with every native PDF;
+    // sign mode swaps in our own page surface (the embedded viewer is a
+    // closed world), and saving never touches the original except by the
+    // user's explicit second choice.
     // ---------------------------------------------------------------------
 
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
@@ -47,35 +48,6 @@ public partial class PreviewWindow
     internal bool TryLeaveFillSign()
     {
         return _fillSignSurface?.TryLeave() != false;
-    }
-
-    private void UpdateFillSignPill()
-    {
-        // Built once per palette: a theme change between files repaints it.
-        if (!ReferenceEquals(_fillSignPill?.Tag, Theme.Current))
-        {
-            if (_fillSignPill is not null)
-            {
-                ContentToolsSlot.Children.Remove(_fillSignPill);
-            }
-
-            _fillSignPill = HousePill.Build("Sign", () => _ = EnterFillSignModeAsync());
-            _fillSignPill.Tag = Theme.Current;
-            _fillSignPill.Margin = new Thickness(0);
-            _fillSignPill.HorizontalAlignment = HorizontalAlignment.Right;
-            _fillSignPill.ToolTip = "Fill and sign";
-            AutomationProperties.SetName(_fillSignPill, "Fill and sign");
-            ContentToolsSlot.Children.Add(_fillSignPill);
-        }
-
-        // Visible from the moment a native PDF loads: discoverability beat
-        // the engagement gate in tester hands, and the reserved slot means
-        // no reflow either way.
-        _fillSignPill.Visibility =
-            !_isFileDialogMode && _fillSignPath is not null && _fillSignSurface is null
-                ? Visibility.Visible
-                : Visibility.Collapsed;
-        UpdateContentToolsSlotVisibility();
     }
 
     private async Task EnterFillSignModeAsync()
@@ -113,7 +85,7 @@ public partial class PreviewWindow
         _fillSignParkedContent = current;
         _fillSignSurface = surface;
         PreviewContent.Content = surface;
-        UpdateFillSignPill();
+        SyncHeaderTools();
         DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}");
 
         // The writer reads the file exactly as a save would. A PDF it cannot
@@ -181,7 +153,7 @@ public partial class PreviewWindow
         parked.Visibility = Visibility.Visible;
         parked.UpdateLayout();
         _fillSignParkedContent = null;
-        UpdateFillSignPill();
+        SyncHeaderTools();
         DiagnosticLog.Write("fill-sign exited");
         var deferredFailure = _deferredWebFailure;
         _deferredWebFailure = null;
@@ -260,7 +232,7 @@ public partial class PreviewWindow
 
         _fillSignSurface = null;
         _fillSignParkedContent = null;
-        UpdateFillSignPill();
+        SyncHeaderTools();
 
         // The saved file is the honest outcome: show it.
         if (!ShowPreview(finalPath, Hwnd))

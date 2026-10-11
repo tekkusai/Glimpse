@@ -45,7 +45,8 @@ internal static class ShellThumbnailProvider
 
     public static BitmapSource? TryGetIcon(string path, int size = 40)
     {
-        if (!File.Exists(path) && !Directory.Exists(path))
+        // A Store app is a shell item (shell:AppsFolder\...), not a file.
+        if (!path.StartsWith("shell:", StringComparison.OrdinalIgnoreCase) && !File.Exists(path) && !Directory.Exists(path))
         {
             return null;
         }

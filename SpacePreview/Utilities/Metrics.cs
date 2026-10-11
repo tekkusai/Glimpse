@@ -26,21 +26,21 @@ internal static class Metrics
     public static readonly CornerRadius PillCorner = new(RadiusPill);
     public static readonly CornerRadius CardCorner = new(RadiusCard);
 
-    // Halves of a split pill hug the outer radius minus its 1px border.
-    public static readonly CornerRadius PillLeftCorner = new(RadiusPill - 1, 0, 0, RadiusPill - 1);
-    public static readonly CornerRadius PillRightCorner = new(0, RadiusPill - 1, RadiusPill - 1, 0);
+    // A pill's hover tint sits inside its 1 px border; a segment of a split
+    // pill tints an inset capsule, so one template serves every position.
+    public static readonly CornerRadius PillInnerCorner = new(RadiusPill - 1);
+    public static readonly CornerRadius SegmentCorner = new(RadiusPill - 3);
 
     // Padding.
-    public static readonly Thickness PillPadding = new(13, 5, 13, 6);
     public static readonly Thickness ChipPadding = new(10, 4, 10, 5); // small labelled chips: tabs, badges, capability chips
     public static readonly Thickness MenuPadding = new(5);
     public static readonly Thickness MenuItemPadding = new(8, 7, 12, 8);
 
-    // Inner horizontal padding where a pill half meets its divider.
-    public const double PillInnerPadding = 11;
-
     // The gap between an anchor and its flyout.
     public const double FlyoutGap = 6;
+
+    // The header file name's floor (docs/DESIGN.md, Header).
+    public const double HeaderNameMinWidth = 160;
 
     // Type ramp (docs/DESIGN.md, Type). Glyph fonts size to their icon, and
     // content rendering (documents, font specimens) keeps its own scale;

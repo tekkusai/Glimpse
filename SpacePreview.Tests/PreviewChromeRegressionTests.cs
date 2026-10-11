@@ -253,17 +253,6 @@ public sealed class PreviewChromeRegressionTests
     }
 
     [Fact]
-    public void ShareLivesInTheOpenMenuNotTheHeaderRow()
-    {
-        var xaml = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml");
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-
-        Assert.DoesNotContain("ShareButton", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain("ShareButton_Click", windowSource, StringComparison.Ordinal);
-        Assert.Contains("(\"Share\", () => SharePath(sharePath))", windowSource, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ShareManagerUsesTheWinRtProjection()
     {
         var source = ReadSource(@"SpacePreview\Services\ShareService.cs");
@@ -273,34 +262,15 @@ public sealed class PreviewChromeRegressionTests
     }
 
     [Fact]
-    public void HeaderMotionDoesNotReflowDuringGeometryChanges()
+    public void WebRevealAndGeometryKeepTheirOrdering()
     {
-        var xaml = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml");
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var stageBody = ReadMethod(windowSource, "private void StagePreviewContent");
         var revealBody = ReadMethod(windowSource, "private void RevealStagedWebContent");
         var paintBody = ReadMethod(windowSource, "private static async Task<bool> WaitForWebPaintReadyAsync");
         var geometryBody = ReadMethod(windowSource, "private void ApplyStageGeometry");
 
-        Assert.DoesNotContain("Width=\"216\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"ContentToolsSlot\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Width=\"104\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"ZoomControls\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"ContentActions\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Visibility=\"Hidden\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("Width=\"60\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"RotateLeftButton\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("x:Name=\"RotateRightButton\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("FontFamily=\"{TemplateBinding FontFamily}\"", xaml, StringComparison.Ordinal);
-        // One Fluent rotate glyph, mirrored for the opposite direction, so
-        // the pair stays inside the header's icon family.
-        Assert.Contains("Content=\"&#xE7AD;\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("MirroredPillIconButton", xaml, StringComparison.Ordinal);
-        Assert.Contains("ScaleTransform ScaleX=\"-1\"", xaml, StringComparison.Ordinal);
-        Assert.Contains("MeasureOpenPillWidth", windowSource, StringComparison.Ordinal);
         Assert.DoesNotContain("ShouldHoldSwapGeometry", windowSource, StringComparison.Ordinal);
-        Assert.Contains("UpdateContentToolsSlotVisibility", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ContentToolsSlot.Visibility", windowSource, StringComparison.Ordinal);
         Assert.Contains("SetGeometry(", geometryBody, StringComparison.Ordinal);
         Assert.DoesNotContain("CompositionTarget.Rendering", geometryBody, StringComparison.Ordinal);
         Assert.DoesNotContain("SetGeometryNative", windowSource, StringComparison.Ordinal);

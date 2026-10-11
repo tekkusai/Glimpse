@@ -57,7 +57,7 @@ public partial class App : Application
         _instance = SingleInstance.Acquire();
         if (!_instance.IsPrimary)
         {
-            // Relaunching restores a hidden tray icon on the running instance.
+            // Launching again opens Settings in the running instance.
             SingleInstance.SignalShow();
             Shutdown();
             return;
@@ -66,13 +66,9 @@ public partial class App : Application
         DiagnosticLog.TagProcess(null);
         DiagnosticLog.Write("app starting");
 
-        // Persisted preferences apply before anything renders so the first preview
-        // (and the tray menu) already reflect the user's theme choice. The palette
-        // also lands in application resources as a safety net for popup trees
-        // (tooltips) whose DynamicResource lookup might miss a window.
-        Theme.Preference = Settings.Current.Theme;
-        Theme.Refresh();
-        Theme.ApplyResources(Resources);
+        // The palette reaches application resources before anything renders,
+        // and every window and popup reads it from there.
+        Theme.Use(Settings.Current.Theme);
         _ = WebViewEnvironment.WarmAsync();
         _ = Task.Run(GeneratedHtmlPreview.WarmSyntax);
 
@@ -87,7 +83,7 @@ public partial class App : Application
         _showEvent = SingleInstance.CreateShowEvent();
         _showRegistration = ThreadPool.RegisterWaitForSingleObject(
             _showEvent,
-            (_, _) => Dispatcher.BeginInvoke(() => _trayIcon?.RestoreIcon()),
+            (_, _) => Dispatcher.BeginInvoke(() => _trayIcon?.OpenSettings()),
             null,
             Timeout.Infinite,
             executeOnlyOnce: false);
@@ -128,10 +124,7 @@ public partial class App : Application
 
         tray.ThemeChanged += preference =>
         {
-            Theme.Preference = preference;
-            // The next preview open re-resolves the palette; forcing a refresh here
-            // keeps Theme.Current current for anything that reads it in between.
-            Theme.Refresh();
+            Theme.Use(preference);
             Settings.Update(settings => settings with { Theme = preference });
         };
 

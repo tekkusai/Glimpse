@@ -1,7 +1,7 @@
-using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -455,28 +455,7 @@ public sealed class FillSignBehaviorTests
     // Helpers.
     // ------------------------------------------------------------------
 
-    private static void OnSta(Action action)
-    {
-        Exception? failure = null;
-        var thread = new Thread(() =>
-        {
-            try
-            {
-                action();
-            }
-            catch (Exception ex)
-            {
-                failure = ex;
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.Start();
-        thread.Join();
-        if (failure is not null)
-        {
-            ExceptionDispatchInfo.Capture(failure).Throw();
-        }
-    }
+    private static void OnSta(Action action) => Sta.Run(action);
 
     private static PdfPreviewPage BlankPage()
     {
@@ -497,8 +476,10 @@ public sealed class FillSignBehaviorTests
         }
     }
 
-    private static Border Pill(FrameworkElement root, string label) =>
-        Descendants(root).OfType<Border>().First(border => border.Child is TextBlock { Text: var text } && text == label);
+    private static FrameworkElement Pill(FrameworkElement root, string label) =>
+        Descendants(root).OfType<FrameworkElement>().First(element =>
+            element is ButtonBase { Content: string content } ? content == label
+            : element is Border { Child: TextBlock { Text: var text } } && text == label);
 
     private static TextBlock? Text(FrameworkElement root, string text) =>
         Descendants(root).OfType<TextBlock>().FirstOrDefault(block => block.Text == text);
@@ -519,6 +500,12 @@ public sealed class FillSignBehaviorTests
 
     private static void Click(UIElement element)
     {
+        if (element is ButtonBase button)
+        {
+            button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+            return;
+        }
+
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonDownEvent });
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
     }

@@ -26,7 +26,7 @@ internal static class ProbeRunner
         if (args.Length >= 3 && IsSwitch(args[0], "--probe"))
         {
             // Probes render what the user would see, in the saved theme.
-            Theme.Preference = Settings.Current.Theme;
+            Theme.Use(Settings.Current.Theme);
             _ = RunProbeSafelyAsync(app, args[1], args[2], args[3..]);
             return true;
         }

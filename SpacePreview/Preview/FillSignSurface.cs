@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
@@ -51,14 +52,14 @@ internal sealed class FillSignSurface : Grid
     private readonly List<Polyline> _inkVisuals = [];
     private readonly List<Action> _toolRefreshers = [];
     private StackPanel _tools = null!;
-    private Border _signaturePill = null!;
-    private Border _newStampPill = null!;
+    private ButtonBase _signaturePill = null!;
+    private ButtonBase _newStampPill = null!;
     private TextBlock _centerText = null!;
     private TextBlock _pageLabel = null!;
     private Border _previousPageChip = null!;
     private Border _nextPageChip = null!;
-    private Border _cancelPill = null!;
-    private Border _savePill = null!;
+    private ButtonBase _cancelPill = null!;
+    private ButtonBase _savePill = null!;
     private TextBlock _saveStatus = null!;
     private TextBlock _inkTitle = null!;
     private int _pageIndex;
@@ -301,7 +302,7 @@ internal sealed class FillSignSurface : Grid
         HideSaveChoice();
         _tools.Visibility = Visibility.Collapsed;
         _savePill.Visibility = Visibility.Collapsed;
-        ((TextBlock)_cancelPill.Child).Text = "Close";
+        _cancelPill.Content = "Close";
         UpdateWorkState();
     }
 
@@ -449,7 +450,7 @@ internal sealed class FillSignSurface : Grid
     }
 
     /// <summary>A tool pill; only these three ever repaint for the armed tool.</summary>
-    private Border BuildToolPill(string label, SignPlacementKind kind)
+    private ButtonBase BuildToolPill(string label, SignPlacementKind kind)
     {
         var pill = HousePill.Build(label, () => ArmTool(kind), out var refresh, PillRole.Surface, () => _armedTool == kind);
         AutomationProperties.SetName(pill, label);

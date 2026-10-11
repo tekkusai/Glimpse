@@ -39,14 +39,6 @@ public partial class PreviewWindow
 
     internal bool IsSlideshowActive => _slideshowTimer?.IsEnabled == true;
 
-    internal void SetSelectionCount(int selectedCount)
-    {
-        if (CurrentPath is { } path)
-        {
-            ApplyHeaderSubtitle(path, _shortcutTarget, Math.Max(1, selectedCount));
-        }
-    }
-
     /// <summary>
     /// The controller hands over the captured selection set (null when
     /// browsing left it or the selection collapsed to one item).
@@ -56,18 +48,16 @@ public partial class PreviewWindow
         var setChanged = !ReferenceEquals(_multiSelectionPaths, paths);
         _multiSelectionPaths = paths;
         _multiSelectionIndex = index;
+        UpdateSelectionPosition();
+        ShowOptionalLanes();
 
         if (paths is null)
         {
             CloseGridView();
             StopSlideshow(restoreSize: true);
-            GridButton.Visibility = Visibility.Collapsed;
-            PlayButton.Visibility = Visibility.Collapsed;
             return;
         }
 
-        GridButton.Visibility = Visibility.Visible;
-        PlayButton.Visibility = Visibility.Visible;
         if (setChanged)
         {
             // A different selection means a different sheet.
@@ -80,6 +70,7 @@ public partial class PreviewWindow
     internal void SetMultiSelectionIndex(int index)
     {
         _multiSelectionIndex = index;
+        UpdateSelectionPosition();
         _gridView?.SetCurrentIndex(index);
         if (IsSlideshowActive)
         {
@@ -88,6 +79,19 @@ public partial class PreviewWindow
             _slideshowTimer!.Stop();
             _slideshowTimer.Start();
         }
+    }
+
+    /// <summary>"2 of 14" beside the arrows, while a set is open.</summary>
+    private void UpdateSelectionPosition()
+    {
+        if (_multiSelectionPaths is not { Count: > 1 } paths)
+        {
+            SelectionPositionText.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        SelectionPositionText.Text = $"{Math.Clamp(_multiSelectionIndex, 0, paths.Count - 1) + 1} of {paths.Count}";
+        SelectionPositionText.Visibility = Visibility.Visible;
     }
 
     internal void ToggleGridView()
@@ -121,7 +125,7 @@ public partial class PreviewWindow
         });
 
         _gridView = grid;
-        GridButton.Foreground = Theme.Brush(Theme.Current.Accent);
+        GridButton.SetResourceReference(ForegroundProperty, "Theme.Accent");
         DiagnosticLog.Write($"grid view open ({paths.Count} items)");
     }
 
@@ -147,7 +151,9 @@ public partial class PreviewWindow
 
     private void GridButton_Click(object sender, RoutedEventArgs e) => ToggleGridView();
 
-    private void PlayButton_Click(object sender, RoutedEventArgs e)
+    private void PlayButton_Click(object sender, RoutedEventArgs e) => ToggleSlideshow();
+
+    private void ToggleSlideshow()
     {
         if (IsSlideshowActive)
         {

@@ -37,8 +37,8 @@ public partial class PreviewAccessWarningWindow : Window
     {
         _warning = warning;
         InitializeComponent();
-        Theme.ApplyResources(this);
-        AccentBar.Background = Theme.Brush(Theme.Current.Accent);
+        Title = $"{Branding.Name} notification";
+        WindowFrame.AttachDialog(this, titleArea: null);
         HeadingText.Text = Heading;
         BodyText.Text = BuildMessage(warning);
         FooterText.Text = BuildReminderMessage(finalReminder);
@@ -151,8 +151,8 @@ public partial class PreviewAccessWarningWindow : Window
         if (hwnd != IntPtr.Zero)
         {
             // WPF can rewrite extended styles between SourceInitialized and
-            // Loaded, especially for transparent windows. Reassert the style
-            // against the final HWND before placing it topmost.
+            // Loaded. Reassert the style against the final HWND before
+            // placing it topmost.
             ApplyNoActivateStyle(hwnd);
             NativeMethods.SetWindowPos(
                 hwnd,
