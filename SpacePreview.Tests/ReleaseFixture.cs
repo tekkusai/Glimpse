@@ -69,7 +69,7 @@ internal sealed class ReleaseFixture : IDisposable
 
     /// <summary>A never-started updater with no network: Settings before any check.</summary>
     public static AppUpdater QuietUpdater() =>
-        new(new ReleaseFixture { Offline = true }.Service(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "GlimpseUpdateTest-quiet")));
+        new(new ReleaseFixture { Offline = true }.Service(System.IO.Path.Combine(TestDataRoot.RunRoot, "update-quiet")));
 
     public HttpClient Client() => new(new Handler(this));
 

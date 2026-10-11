@@ -175,7 +175,7 @@ public sealed class AppUpdateServiceTests
         using var service = new AppUpdateService(
             client,
             new Version(1, 0, 0),
-            Path.Combine(Path.GetTempPath(), $"GlimpseUpdateTest-{Guid.NewGuid():N}"));
+            Path.Combine(TestDataRoot.RunRoot, $"update-{Guid.NewGuid():N}"));
 
         var update = await service.CheckForUpdateAsync(CancellationToken.None);
 
@@ -431,7 +431,7 @@ public sealed class AppUpdateServiceTests
     [Fact]
     public void StartupCleanupDropsPartialsAndOldInstallersButKeepsANewerVerifiedCandidate()
     {
-        var root = Path.Combine(Path.GetTempPath(), $"GlimpseUpdateTest-{Guid.NewGuid():N}");
+        var root = Path.Combine(TestDataRoot.RunRoot, $"update-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         var partial = Path.Combine(root, "Glimpse-Setup-1.2.0.exe.partial");
         var current = Path.Combine(root, "Glimpse-Setup-1.1.0.exe");

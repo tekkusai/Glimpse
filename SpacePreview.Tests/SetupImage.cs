@@ -18,7 +18,7 @@ internal static class SetupImage
     /// <param name="size">Zeros after the image bring it to this length, as Inno's payload does.</param>
     public static byte[] Create(string productVersion, long size = 0)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"GlimpseSetupImage-{Guid.NewGuid():N}.exe");
+        var path = Path.Combine(TestDataRoot.RunRoot, $"setup-{Guid.NewGuid():N}.exe");
         File.Copy(Path.Combine(Environment.SystemDirectory, "whoami.exe"), path);
         try
         {

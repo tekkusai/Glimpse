@@ -4,7 +4,8 @@ internal sealed class TempDirectory : IDisposable
 {
     public TempDirectory()
     {
-        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "SpacePreview.Tests", Guid.NewGuid().ToString("N"));
+        // Under the run's folder, so a file still held at Dispose goes with the run.
+        Path = System.IO.Path.Combine(TestDataRoot.RunRoot, "files", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path);
     }
 
@@ -26,16 +27,10 @@ internal sealed class TempDirectory : IDisposable
 
     public void Dispose()
     {
-        try
+        // Best effort: temp files should never hide the real test failure.
+        if (Directory.Exists(Path))
         {
-            if (Directory.Exists(Path))
-            {
-                Directory.Delete(Path, recursive: true);
-            }
-        }
-        catch
-        {
-            // Best effort: temp files should never hide the real test failure.
+            TestDataRoot.TryDelete(Path);
         }
     }
 }
