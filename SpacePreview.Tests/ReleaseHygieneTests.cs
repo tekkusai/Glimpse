@@ -173,6 +173,22 @@ public sealed class ReleaseHygieneTests
     }
 
     [Fact]
+    public void ASilentUpdateThatDoesNotFinishStartsTheOldGlimpseAgain()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+        var deinitialize = installer[installer.IndexOf("procedure DeinitializeSetup();", StringComparison.Ordinal)..];
+
+        Assert.Contains("if CurStep = ssPostInstall then", installer, StringComparison.Ordinal);
+        Assert.Contains("InstallFinished := True;", installer, StringComparison.Ordinal);
+        Assert.Contains("AutoUpdateRequested()", deinitialize, StringComparison.Ordinal);
+        Assert.Contains("and not InstallFinished", deinitialize, StringComparison.Ordinal);
+        // Setup failed before quitting a running Glimpse: a second launch would only open Settings.
+        Assert.Contains("and not CheckForMutexes('{#MyMutexName}')", deinitialize, StringComparison.Ordinal);
+        Assert.Contains(@"{localappdata}\Programs\{#MyAppName}\{#MyAppExeName}", deinitialize, StringComparison.Ordinal);
+        Assert.Contains("Exec(ExePath, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);", deinitialize, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InAppUpdateUsesTheExistingInstallerWithoutASecondLibreOfficeDownload()
     {
         var updater = TestSource.Read(@"SpacePreview\Services\AppUpdateService.cs");
