@@ -502,6 +502,67 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task InstallNowAfterTheSwitchStoppedADownloadStartsItsOwn() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture { HoldInstaller = new() };
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        // Off while the background download is held, then Install now at once.
+        var check = updates.CheckNowAsync();
+        await WaitUntilAsync(() => updates.State.Downloading);
+        updates.SetInstallAutomatically(false);
+        var install = updates.InstallNowAsync();
+        await check;
+        await WaitUntilAsync(() => release.RequestsFor(".exe") == 2);
+        Assert.True(updates.State is { Installing: true, Downloading: true });
+
+        release.HoldInstaller.SetResult();
+        await install;
+        Assert.Equal(1, launches);
+        Assert.False(updates.State.InstallFailed);
+    });
+
+    [Fact]
+    public Task AnInstallNowThatFailsSaysSoAndCanBePressedAgain() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope(settings => settings with { InstallUpdatesAutomatically = false });
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away,
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        await updates.CheckNowAsync();
+        release.Offline = true;
+        await updates.InstallNowAsync();
+        Assert.True(updates.State is { InstallFailed: true, Installing: false, Downloading: false });
+        Assert.NotNull(updates.State.Pending);
+
+        release.Offline = false;
+        await updates.InstallNowAsync();
+        Assert.Equal(1, launches);
+        Assert.False(updates.State.InstallFailed);
+    });
+
+    [Fact]
     public Task APulledReleaseIsDropped() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
@@ -579,6 +640,9 @@ public sealed class AppUpdaterTests
         Assert.NotNull(updates.State.Pending);
         Assert.False(updates.State.Installing);
 
+        // Only the Check for updates link reports a failed check.
+        Assert.False(updates.State.CheckFailed);
+
         // The next minute does not ask again.
         await updates.TickAsync();
         Assert.Equal(2, release.RequestsFor("/releases/latest"));
@@ -628,12 +692,14 @@ public sealed class AppUpdaterTests
         Assert.True(retry.IsEnabled);
         Assert.Equal(TimeSpan.FromMinutes(30), retry.Interval);
         Assert.Null(Settings.Current.LastUpdateCheckUtc);
+        Assert.True(updates.State.CheckFailed);
 
         release.Offline = false;
         release.NoRelease = true;
         await updates.CheckNowAsync();
         Assert.False(retry.IsEnabled);
         Assert.True(updates.State.UpToDate);
+        Assert.False(updates.State.CheckFailed);
         Assert.Equal(TimeSpan.FromHours(6), Fields.Get<DispatcherTimer>(updates, "_checkTimer").Interval);
     });
 

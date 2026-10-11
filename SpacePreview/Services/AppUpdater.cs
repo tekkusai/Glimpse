@@ -40,6 +40,12 @@ internal sealed record UpdateState
     /// <summary>The user pressed Install now for the pending release, which waives its two days.</summary>
     public bool InstallNowPressed { get; init; }
 
+    /// <summary>The last Install now ended without starting setup.</summary>
+    public bool InstallFailed { get; init; }
+
+    /// <summary>The last Check for updates got no answer, and no check has since.</summary>
+    public bool CheckFailed { get; init; }
+
     /// <summary>Setup is on its way; Glimpse closes for a few seconds.</summary>
     public bool Installing { get; init; }
 }
@@ -106,18 +112,20 @@ internal sealed class AppUpdater : IDisposable
     {
         _dispatcher = Dispatcher.CurrentDispatcher;
         _service.CleanupStaleDownloads();
-        _checkTimer = NewTimer(CheckInterval, () => _ = CheckNowAsync());
+        _checkTimer = NewTimer(CheckInterval, () => _ = CheckThenTickAsync(asked: false));
         _checkTimer.Start();
-        _retryTimer = NewTimer(RetryAfterFailure, () => _ = CheckNowAsync());
+        _retryTimer = NewTimer(RetryAfterFailure, () => _ = CheckThenTickAsync(asked: false));
         _gateTimer = NewTimer(GateInterval, () => _ = TickAsync());
         SystemEvents.PowerModeChanged += OnPowerModeChanged;
         _ = CheckSoonAsync();
     }
 
-    /// <summary>The Check for updates link, and every scheduled check.</summary>
-    public async Task CheckNowAsync()
+    /// <summary>The Check for updates link: a check that gets no answer says so.</summary>
+    public Task CheckNowAsync() => CheckThenTickAsync(asked: true);
+
+    private async Task CheckThenTickAsync(bool asked)
     {
-        if (await CheckAsync() && State.Pending is not null)
+        if (await CheckAsync(asked) && State.Pending is not null)
         {
             await TickAsync();
         }
@@ -128,7 +136,7 @@ internal sealed class AppUpdater : IDisposable
     /// time: a release pulled, replaced or unsigned since the last check
     /// stops being pending. True when GitHub answered.
     /// </summary>
-    private async Task<bool> CheckAsync()
+    private async Task<bool> CheckAsync(bool asked)
     {
         if (_disposed || State.Checking || State.Installing)
         {
@@ -143,7 +151,7 @@ internal sealed class AppUpdater : IDisposable
             var pending = latest is null ? null : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
             _checkRetryAt = default;
-            Set(State with { Checking = false, UpToDate = latest is null, Pending = pending });
+            Set(State with { Checking = false, CheckFailed = false, UpToDate = latest is null, Pending = pending });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
                 : $"update available current={_service.CurrentVersionText} latest={pending.VersionText}");
@@ -158,7 +166,7 @@ internal sealed class AppUpdater : IDisposable
         {
             DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
             _checkRetryAt = DateTimeOffset.UtcNow + RetryAfterFailure;
-            Set(State with { Checking = false });
+            Set(State with { Checking = false, CheckFailed = State.CheckFailed || asked });
             _retryTimer?.Start();
             return false;
         }
@@ -175,7 +183,7 @@ internal sealed class AppUpdater : IDisposable
             return;
         }
 
-        Set(State with { InstallNowPressed = true });
+        Set(State with { InstallNowPressed = true, InstallFailed = false });
         if (!_canQuit())
         {
             return;
@@ -184,10 +192,11 @@ internal sealed class AppUpdater : IDisposable
         Set(State with { Installing = true });
         var installer = State.Installer ?? await DownloadAsync(release, download: true);
 
-        // Signing may have started while it downloaded.
-        if (installer is null || !_canQuit())
+        // Signing may have started while it downloaded. A release that
+        // failed verification meanwhile is skipped, and says so.
+        if (installer is null || State.Pending != release || !_canQuit())
         {
-            Set(State with { Installing = false });
+            Set(State with { Installing = false, InstallFailed = installer is null && State.Pending == release });
             return;
         }
 
@@ -251,7 +260,7 @@ internal sealed class AppUpdater : IDisposable
 
         // A release pulled late in its two days must not install: GitHub
         // still offers this one, signed, or it is no longer pending.
-        if (await CheckAsync() && State.Pending == release && State.Installer is { } installer && InstallsNow())
+        if (await CheckAsync(asked: false) && State.Pending == release && State.Installer is { } installer && InstallsNow())
         {
             await LaunchAsync(release, installer, asked: false);
         }
@@ -383,9 +392,25 @@ internal sealed class AppUpdater : IDisposable
         }
     }
 
+    /// <summary>
+    /// One download at a time. Install now waits out one that ends with
+    /// nothing (the switch cancelled it, or it only looked on disk) and
+    /// starts its own.
+    /// </summary>
     /// <param name="download">False: use only an installer already on disk.</param>
-    private Task<string?> DownloadAsync(AppUpdateRelease release, bool download) =>
-        _download is { IsCompleted: false } running ? running : _download = RunDownloadAsync(release, download);
+    private async Task<string?> DownloadAsync(AppUpdateRelease release, bool download)
+    {
+        while (_download is { IsCompleted: false } running)
+        {
+            var installer = await running;
+            if (installer is not null || !download)
+            {
+                return installer;
+            }
+        }
+
+        return State.Pending == release ? await (_download = RunDownloadAsync(release, download)) : null;
+    }
 
     private async Task<string?> RunDownloadAsync(AppUpdateRelease release, bool download)
     {
@@ -444,7 +469,7 @@ internal sealed class AppUpdater : IDisposable
         try
         {
             await _launch(release, installer, _lifetime.Token);
-            _ = NoticeSetupThatNeverQuitAsync(release);
+            _ = NoticeSetupThatNeverQuitAsync(release, asked);
         }
         catch (UpdateRejectedException ex)
         {
@@ -455,12 +480,12 @@ internal sealed class AppUpdater : IDisposable
         {
             // The file vanished or changed on disk: fetch it again.
             DiagnosticLog.Write($"update install failed version={release.VersionText}: {ex.GetType().Name}: {ex.Message}");
-            Set(State with { Installer = null, Installing = false });
+            Set(State with { Installer = null, Installing = false, InstallFailed = asked });
         }
     }
 
     // Setup quits Glimpse within seconds; still here means it failed early.
-    private async Task NoticeSetupThatNeverQuitAsync(AppUpdateRelease release)
+    private async Task NoticeSetupThatNeverQuitAsync(AppUpdateRelease release, bool asked)
     {
         try
         {
@@ -472,7 +497,7 @@ internal sealed class AppUpdater : IDisposable
         }
 
         DiagnosticLog.Write($"update setup did not finish version={release.VersionText}");
-        Set(State with { Installer = null, Installing = false });
+        Set(State with { Installer = null, Installing = false, InstallFailed = asked });
     }
 
     private void Skip(AppUpdateRelease release, Exception reason)
@@ -488,13 +513,13 @@ internal sealed class AppUpdater : IDisposable
     private void Set(UpdateState state)
     {
         // Another release, or none, starts clean: the download, the
-        // installer and the press belonged to the old one.
+        // installer, the press and its failure belonged to the old one.
         if (state.Pending != State.Pending)
         {
             _downloadCancel?.Cancel();
             _download = null;
             _downloadRetryAt = default;
-            state = state with { Installer = null, InstallNowPressed = false };
+            state = state with { Installer = null, InstallNowPressed = false, InstallFailed = false };
         }
 
         if (state == State)
@@ -516,7 +541,7 @@ internal sealed class AppUpdater : IDisposable
         try
         {
             await Task.Delay(FirstCheckDelay, _lifetime.Token);
-            await CheckNowAsync();
+            await CheckThenTickAsync(asked: false);
         }
         catch (OperationCanceledException)
         {

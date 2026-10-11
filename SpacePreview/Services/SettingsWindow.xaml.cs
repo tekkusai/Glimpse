@@ -552,20 +552,26 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         if (state.Pending is { } pending)
         {
             var version = pending.VersionText;
-            return state.Installing
-                ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
-                : new(null, FooterLink.InstallNow, state.Downloading && settings.InstallUpdatesAutomatically
-                    ? $"Downloading {version} in the background."
-                    : AppUpdater.InstallsWhenAway(state, settings, now)
-                        ? $"{version} installs the next time you step away."
-                        : $"{version} is ready to install.");
+            if (state.Installing)
+            {
+                return new(null, FooterLink.None, state.Downloading
+                    ? $"Downloading {version}."
+                    : $"Installing {version}. Back in a few seconds.");
+            }
+
+            return new(null, FooterLink.InstallNow, state.InstallFailed ? $"Couldn't install {version}."
+                : state.Downloading && settings.InstallUpdatesAutomatically ? $"Downloading {version} in the background."
+                : AppUpdater.InstallsWhenAway(state, settings, now) ? $"{version} installs the next time you step away."
+                : $"{version} is ready to install.");
         }
 
         var stale = settings.LastUpdateCheckUtc is { } last && now - last >= StaleAfter
             ? $"Couldn't check for updates since {ShortDate(last, now, culture)}."
             : null;
+        // Gone while a new check runs: that one answers.
+        var failed = state.CheckFailed && !state.Checking ? "Couldn't check for updates." : null;
         // A skipped release that is no longer the latest needs no word.
-        var caption = stale
+        var caption = stale ?? failed
             ?? (!state.UpToDate && AppUpdateService.TryParseVersion(settings.SkippedUpdateVersion, out var skipped) && skipped > current
                 ? $"{skipped.ToString(3)} failed verification and was skipped."
                 : null);
@@ -580,7 +586,7 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         }
 
         // Up to date only on the word of a check that reached GitHub.
-        return new(state.UpToDate && stale is null ? "Up to date" : null, FooterLink.CheckForUpdates, caption);
+        return new(state.UpToDate && stale is null && failed is null ? "Up to date" : null, FooterLink.CheckForUpdates, caption);
     }
 
     private static string UpdatedOn(DateTimeOffset updated, DateTimeOffset now, CultureInfo culture) =>

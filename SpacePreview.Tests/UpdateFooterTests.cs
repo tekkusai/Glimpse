@@ -83,10 +83,40 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked with { InstallUpdatesAutomatically = false }));
 
     [Fact]
-    public void InstallNowSaysGlimpseWillBeBack() =>
+    public void InstallNowSaysWhileItDownloadsAndThatGlimpseWillBeBack()
+    {
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.None, "Downloading 3.1.0."),
+            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
         Assert.Equal(
             new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds."),
-            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
+            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer }, Checked));
+    }
+
+    [Fact]
+    public void AnInstallNowThatFailedSaysSoAndOffersItAgain()
+    {
+        var failed = new UpdateState { Pending = Release, InstallFailed = true };
+
+        Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."), Describe(failed, Checked));
+        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer }, Checked).Caption);
+    }
+
+    [Fact]
+    public void ACheckThatGotNoAnswerSaysSoUntilOneDoes()
+    {
+        var failed = new UpdateState { UpToDate = true, CheckFailed = true };
+
+        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "Couldn't check for updates."), Describe(failed, Checked));
+
+        // Asking again shows only the new check.
+        Assert.Equal(new UpdateFooter("Checking for updates", FooterLink.None, null), Describe(failed with { Checking = true }, Checked));
+
+        // After three days the since line takes over.
+        Assert.Equal(
+            "Couldn't check for updates since Oct 7.",
+            Describe(failed, Checked with { LastUpdateCheckUtc = Now.AddDays(-3) }).Caption);
+    }
 
     [Fact]
     public void ThreeDaysWithoutACheckSaysSinceWhenAndNeverUpToDate()
@@ -147,6 +177,9 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installing = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, InstallFailed = true }, Checked).Caption,
+            Describe(new UpdateState { CheckFailed = true }, Checked).Caption,
             Describe(new UpdateState(), Checked with { LastUpdateCheckUtc = Now.AddDays(-9) }).Caption,
             Describe(new UpdateState(), Checked with { SkippedUpdateVersion = "3.1.0" }).Caption
         };
