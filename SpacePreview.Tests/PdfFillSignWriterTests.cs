@@ -1,4 +1,5 @@
 using System.Text;
+using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
@@ -10,6 +11,8 @@ public sealed class PdfFillSignWriterTests
     private const string Catalog = "<< /Type /Catalog /Pages 2 0 R >>";
     private const string OnePage = "<< /Type /Pages /Kids [3 0 R] /Count 1 >>";
     private const string WidePage = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>";
+    private const string BlackPage = "<< /Type /Page /MediaBox [0 0 200 100] /Resources << >> /Contents 5 0 R >>";
+    private const string BlackInk = "0 0 0 rg 0 0 200 100 re f";
 
     [Fact]
     public void TextPlacementCreatesIncrementalUpdateWithoutTouchingSource()
@@ -149,6 +152,76 @@ public sealed class PdfFillSignWriterTests
     }
 
     // ------------------------------------------------------------------
+    // Which page: a save puts ink on the page the user saw, or refuses.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void ATwoPageFileWhoseTreeIsPackedAwayIsRefusedBeforeAnythingIsWritten()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "packed.pdf");
+
+        // The catalog and page tree sit in an object stream. The two pages
+        // are plain objects, stored second page first.
+        new PdfBuilder("1.5")
+            .Object(4, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] /Resources << >> /Contents 5 0 R >>")
+            .Object(3, WidePage.Replace("4 0 R", "5 0 R"))
+            .Stream(5, "")
+            .Packed(6, (1, Catalog), (2, "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>"))
+            .XrefStream(7, "/Size 8 /Root 1 0 R")
+            .Save(source);
+
+        // The viewer reads the tree: page 1 is the wide one.
+        var first = PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None);
+        Assert.NotNull(first);
+        Assert.True(first!.Width > first.Height, "the fixture's first page is the wide one");
+
+        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+    }
+
+    [Fact]
+    public void APageTreeWithAPageOutOfReachIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "mixed.pdf");
+
+        // Page 1 is packed in an object stream, page 2 is a plain object.
+        new PdfBuilder("1.5")
+            .Object(1, Catalog)
+            .Object(2, "<< /Type /Pages /Kids [9 0 R 3 0 R] /Count 2 >>")
+            .Object(3, WidePage)
+            .Stream(4, "")
+            .Packed(5, (9, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] /Resources << >> /Contents 4 0 R >>"))
+            .XrefStream(6, "/Size 10 /Root 1 0 R")
+            .Save(source);
+
+        var first = PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None);
+        Assert.NotNull(first);
+        Assert.True(first!.Height > first.Width, "the fixture's first page is the packed, tall one");
+
+        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+    }
+
+    [Fact]
+    public void ASinglePageWhoseTreeIsPackedAwayStillSigns()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "packed-one.pdf");
+        var output = Path.Combine(temp.Path, "packed-one-signed.pdf");
+        new PdfBuilder("1.5")
+            .Object(3, WidePage)
+            .Stream(4, "")
+            .Packed(5, (1, Catalog), (2, OnePage))
+            .XrefStream(6, "/Size 7 /Root 1 0 R")
+            .Save(source);
+
+        Assert.Equal(new PdfSignCheck(1, null), PdfFillSignWriter.Preflight(source));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    // ------------------------------------------------------------------
     // Protection: a file that forbids the change is refused, not changed.
     // ------------------------------------------------------------------
 
@@ -173,6 +246,166 @@ public sealed class PdfFillSignWriterTests
     }
 
     // ------------------------------------------------------------------
+    // Where on the page: keys are read from the dictionary they belong to.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void NewInkJoinsThePagesOwnAnnotsNotANestedOne()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "private.pdf");
+        var output = Path.Combine(temp.Path, "private-signed.pdf");
+        const string nested = "/PieceInfo << /Vendor << /LastModified (D:20261011000000Z) /Private << /Annots [] >> >> >>";
+        WritePdf(source, $"<< /Type /Page /Parent 2 0 R {nested} /Annots [] /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>");
+
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+
+        AssertInkWherePlaced(output, stamp);
+        var page = LastDefinition(output, 3);
+        Assert.Contains(nested, page, StringComparison.Ordinal);
+        Assert.Matches(@"/Annots \[\d+ 0 R\]", page);
+    }
+
+    [Fact]
+    public void APageThatNamesAnnotsTwiceIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "twice.pdf");
+        WritePdf(source, "<< /Type /Page /Parent 2 0 R /Annots [] /MediaBox [0 0 200 100] /Annots [] /Resources << >> /Contents 4 0 R >>");
+
+        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+    }
+
+    [Fact]
+    public void NestingPastTheLimitIsRefusedAndOrdinaryNestingStillReads()
+    {
+        using var temp = new TempDirectory();
+        var deep = Path.Combine(temp.Path, "deep.pdf");
+        var ordinary = Path.Combine(temp.Path, "ordinary.pdf");
+        static string Page(int depth) =>
+            "<< /Type /Page /Parent 2 0 R /PieceInfo "
+            + string.Concat(Enumerable.Repeat("<< /A ", depth)) + "1" + string.Concat(Enumerable.Repeat(" >>", depth))
+            + " /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>";
+
+        // The writer walks at most 64 containers deep.
+        WritePdf(deep, Page(64 + 50));
+        WritePdf(ordinary, Page(32));
+
+        Assert.Equal(new PdfSignCheck(1, null), PdfFillSignWriter.Preflight(ordinary));
+        AssertRefusedBeforeWriting(temp, deep, PdfFillSignWriter.UnsupportedStructure);
+    }
+
+    [Theory]
+    [InlineData("/PieceInfo << /App << /Private << /MediaBox [0 0 400 400] >> >> >>")]
+    [InlineData("/PieceInfo << /App << /Private << /CropBox [100 50 200 100] >> >> >>")]
+    [InlineData("/Annots [<< /Type /Annot /Subtype /Square /Rect [0 0 1 1] /F 2 /Rotate 90 >>]")]
+    [InlineData("/Note (/MediaBox [0 0 400 400] /Rotate 90)")]
+    public void PageGeometryComesFromThePagesOwnKeys(string decoy)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "decoy.pdf");
+        var output = Path.Combine(temp.Path, "decoy-signed.pdf");
+        WritePdf(source, $"<< /Type /Page /Parent 2 0 R {decoy} /MediaBox [0 0 200 100] /Resources << >> /Contents 4 0 R >>");
+
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    [Theory]
+    [InlineData("<< /Type /Catalog /Names << /Pages 7 0 R >> /Pages 2 0 R >>", OnePage)]
+    [InlineData(Catalog, "<< /Type /Pages /Resources << /Properties << /P0 << /Kids [9 0 R] >> >> >> /Kids [3 0 R] /Count 1 >>")]
+    [InlineData(Catalog, "<< /PieceInfo << /App << /Type /Page >> >> /Type /Pages /Kids [3 0 R] /Count 1 >>")]
+    public void ThePageTreeComesFromItsOwnKeys(string catalog, string pages)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "tree.pdf");
+        var output = Path.Combine(temp.Path, "tree-signed.pdf");
+
+        // Objects 7 to 9 are a page tree nobody points at: a black page,
+        // stored ahead of the real one.
+        new PdfBuilder()
+            .Object(1, catalog)
+            .Object(2, pages)
+            .Object(7, "<< /Type /Pages /Kids [9 0 R] /Count 1 >>")
+            .Object(9, BlackPage)
+            .Stream(5, BlackInk)
+            .Object(3, WidePage)
+            .Stream(4, "")
+            .Table("/Size 10 /Root 1 0 R")
+            .Save(source);
+
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    [Fact]
+    public void TheRootComesFromTheTrailerNotAStringInIt()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "root.pdf");
+        var output = Path.Combine(temp.Path, "root-signed.pdf");
+
+        // Signing must not swap the document: a /Root inside a string after
+        // the real one names a second, black document.
+        new PdfBuilder()
+            .Object(1, Catalog)
+            .Object(2, OnePage)
+            .Object(3, WidePage)
+            .Stream(4, "")
+            .Stream(5, BlackInk)
+            .Object(7, "<< /Type /Catalog /Pages 8 0 R >>")
+            .Object(8, "<< /Type /Pages /Kids [9 0 R] /Count 1 >>")
+            .Object(9, BlackPage.Replace("/Type /Page ", "/Type /Page /Parent 8 0 R "))
+            .Table("/Size 10 /Root 1 0 R /Note (/Root 7 0 R)")
+            .Save(source);
+
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    [Fact]
+    public void NewObjectsAreNumberedPastTheLatestSectionsSize()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "linearized.pdf");
+        var output = Path.Combine(temp.Path, "linearized-signed.pdf");
+
+        // Laid out the way a linearized file is: the newest xref section
+        // comes first and covers the packed page tree, objects 12 and 13.
+        // The older section at the end of the file says /Size 6.
+        PdfBuilder.SaveTwice(source, file => file
+            .XrefStream(10, $"/Size 14 /Root 1 0 R /Prev {file.OffsetOf(5):0000000000}", 10, 11, 12, 13)
+            .Packed(11, (12, "<< /Type /Pages /Kids [3 0 R] /Count 1 >>"), (13, "<< /Producer (test) >>"))
+            .Object(1, "<< /Type /Catalog /Pages 12 0 R >>")
+            .Object(3, WidePage.Replace("2 0 R", "12 0 R"))
+            .Stream(4, "")
+            .XrefStream(5, "/Size 6 /Root 1 0 R", 0, 1, 2, 3, 4, 5)
+            .StartAt(10));
+
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    [Fact]
+    public void ARotationBetweenQuarterTurnsIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "askew.pdf");
+
+        // The viewer shows /Rotate 135 as a quarter turn; the writer would
+        // have placed ink as though the page were upright.
+        WritePdf(source, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Rotate 135 /Resources << >> /Contents 4 0 R >>");
+
+        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+    }
+
+    // ------------------------------------------------------------------
     // Helpers.
     // ------------------------------------------------------------------
 
@@ -193,8 +426,62 @@ public sealed class PdfFillSignWriterTests
         Assert.Equal(original, File.ReadAllBytes(source));
     }
 
+    /// <summary>The saved page, as the viewer draws it: dark ink filling the placed frame and nowhere else.</summary>
+    private static void AssertInkWherePlaced(string output, SignPlacement placement)
+    {
+        var page = PdfPreviewRenderer.TryRenderPage(output, placement.PageIndex, CancellationToken.None);
+        Assert.NotNull(page);
+        var frame = new Rect(
+            placement.X * page!.Width,
+            placement.Y * page.Height,
+            placement.Width * page.Width,
+            placement.Height * page.Height);
+        var ink = InkBounds(page.Bitmap);
+        Assert.True(ink is { } found
+            && Math.Abs(found.Left - frame.Left) <= 2
+            && Math.Abs(found.Top - frame.Top) <= 2
+            && Math.Abs(found.Right - frame.Right) <= 2
+            && Math.Abs(found.Bottom - frame.Bottom) <= 2,
+            $"ink {ink?.ToString() ?? "none"} is not the placed frame {frame}");
+    }
+
     private static SignPlacement BlackStamp(int page) =>
         new(SignPlacementKind.Stamp, page, 0.5, 0.2, 0.3, 0.5, null, OpaqueBlackPng());
+
+    /// <summary>The bounding box of dark pixels, in bitmap pixels.</summary>
+    private static Rect? InkBounds(BitmapSource bitmap)
+    {
+        var source = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+        var stride = source.PixelWidth * 4;
+        var pixels = new byte[stride * source.PixelHeight];
+        source.CopyPixels(pixels, stride, 0);
+        int left = int.MaxValue, top = int.MaxValue, right = -1, bottom = -1;
+        for (var y = 0; y < source.PixelHeight; y++)
+        {
+            for (var x = 0; x < source.PixelWidth; x++)
+            {
+                var i = y * stride + x * 4;
+                if (pixels[i] < 128 && pixels[i + 1] < 128 && pixels[i + 2] < 128)
+                {
+                    left = Math.Min(left, x);
+                    top = Math.Min(top, y);
+                    right = Math.Max(right, x);
+                    bottom = Math.Max(bottom, y);
+                }
+            }
+        }
+
+        return right < 0 ? null : new Rect(left, top, right - left + 1, bottom - top + 1);
+    }
+
+    /// <summary>The text of the newest definition of object <paramref name="number"/>.</summary>
+    private static string LastDefinition(string path, int number)
+    {
+        var text = File.ReadAllText(path, Encoding.Latin1);
+        var start = text.LastIndexOf($"\n{number} 0 obj", StringComparison.Ordinal);
+        Assert.True(start >= 0, $"object {number} is not in the file");
+        return text[start..text.IndexOf("endobj", start, StringComparison.Ordinal)];
+    }
 
     private static byte[] TransparentRedPng()
     {
