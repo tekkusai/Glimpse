@@ -24,28 +24,53 @@ internal sealed record AppUpdateRelease(
     public string VersionText => Version.ToString(3);
 
     public string InstallerFileName => $"Glimpse-Setup-{VersionText}.exe";
+
+    /// <summary>The release key's signature over the sidecar. A release without one is skipped.</summary>
+    public Uri? SignatureUri { get; init; }
+
+    /// <summary>When GitHub published the release. Automatic installs wait on it.</summary>
+    public DateTimeOffset? PublishedAt { get; init; }
 }
 
 /// <summary>
+/// A release that can never install: its signature, checksum or identity
+/// failed. Trying again cannot help, so its version is skipped.
+/// </summary>
+internal sealed class UpdateRejectedException(string message) : Exception(message);
+
+/// <summary>
 /// Checks Glimpse's public GitHub release and downloads only the installer
-/// whose version, name, size, URL, GitHub digest, and checksum sidecar agree.
-/// Network failures are deliberately left to the tray UI to handle quietly.
+/// whose version, name, size, URL, GitHub digest and checksum sidecar agree,
+/// and whose sidecar is signed with the maintainer's release key.
 /// </summary>
 internal sealed partial class AppUpdateService : IDisposable
 {
     internal static readonly Uri LatestReleaseUri = new(
         "https://api.github.com/repos/tekkusai/Glimpse/releases/latest");
 
+    /// <summary>
+    /// The public half of the maintainer's release key (ECDSA P-256). The
+    /// private half never touches GitHub, so a stolen account cannot ship code.
+    /// </summary>
+    internal const string ReleasePublicKey = """
+        -----BEGIN PUBLIC KEY-----
+        MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEQH1GH3d4xhGWICFol2t/gwGEx15L
+        asX0TBrY0tVeuOTzGUDwaDOpGM0UbNzJYAeTLeIv20j+wPENSUw1CynCLg==
+        -----END PUBLIC KEY-----
+        """;
+
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan DownloadTimeout = TimeSpan.FromMinutes(15);
     private const int MaxMetadataBytes = 1024 * 1024;
     private const int MaxChecksumBytes = 4096;
+    private const int MaxSignatureBytes = 512;
     private const long MinInstallerBytes = 1024 * 1024;
     private const long MaxInstallerBytes = 1024L * 1024 * 1024;
 
     private readonly HttpClient _httpClient;
     private readonly bool _ownsHttpClient;
     private readonly string _downloadRoot;
+    private readonly string _publicKey;
 
     public Version CurrentVersion { get; }
 
@@ -56,16 +81,19 @@ internal sealed partial class AppUpdateService : IDisposable
     {
     }
 
+    /// <param name="publicKey">Tests sign with a throwaway key; the app always uses <see cref="ReleasePublicKey"/>.</param>
     internal AppUpdateService(
         HttpClient httpClient,
         Version currentVersion,
         string downloadRoot,
-        bool ownsHttpClient = false)
+        bool ownsHttpClient = false,
+        string publicKey = ReleasePublicKey)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         CurrentVersion = NormalizeVersion(currentVersion ?? throw new ArgumentNullException(nameof(currentVersion)));
         _downloadRoot = Path.GetFullPath(downloadRoot ?? throw new ArgumentNullException(nameof(downloadRoot)));
         _ownsHttpClient = ownsHttpClient;
+        _publicKey = publicKey;
     }
 
     public async Task<AppUpdateRelease?> CheckForUpdateAsync(CancellationToken cancellationToken)
@@ -93,7 +121,39 @@ internal sealed partial class AppUpdateService : IDisposable
         var release = JsonSerializer.Deserialize<GitHubRelease>(json)
             ?? throw new InvalidDataException("GitHub returned an empty release.");
 
-        return ParseRelease(release, CurrentVersion);
+        var update = ParseRelease(release, CurrentVersion);
+        return update is null ? null : update with
+        {
+            SignatureUri = FindSignatureUri(release, update),
+            PublishedAt = release.PublishedAt
+        };
+    }
+
+    /// <summary>
+    /// Proves the maintainer released this: the release key signed the exact
+    /// sidecar bytes, and the sidecar names the installer GitHub hashed.
+    /// Throws <see cref="UpdateRejectedException"/> for a release that can
+    /// never pass, and anything else for a network that may recover.
+    /// </summary>
+    public async Task VerifyAsync(AppUpdateRelease release, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(release);
+        ValidateRelease(release);
+        if (release.SignatureUri is null)
+        {
+            throw new UpdateRejectedException("The release has no signature.");
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(MetadataTimeout);
+        var sidecar = await DownloadSmallAsync(release.ChecksumUri, MaxChecksumBytes, timeout.Token);
+        var signature = await DownloadSmallAsync(release.SignatureUri, MaxSignatureBytes, timeout.Token);
+        if (!SignatureMatches(sidecar, signature, _publicKey))
+        {
+            throw new UpdateRejectedException("The release signature did not verify.");
+        }
+
+        ValidateChecksumSidecar(Encoding.ASCII.GetString(sidecar), release.InstallerFileName, release.InstallerSha256);
     }
 
     public async Task<string> DownloadAndVerifyAsync(
@@ -111,11 +171,7 @@ internal sealed partial class AppUpdateService : IDisposable
         var destination = GetInstallerPath(release);
         var partial = destination + ".partial";
 
-        var sidecar = await DownloadSmallTextAsync(
-            release.ChecksumUri,
-            MaxChecksumBytes,
-            timeout.Token);
-        ValidateChecksumSidecar(sidecar, release.InstallerFileName, release.InstallerSha256);
+        await VerifyAsync(release, timeout.Token);
 
         if (File.Exists(destination)
             && new FileInfo(destination).Length == release.InstallerSize
@@ -179,7 +235,7 @@ internal sealed partial class AppUpdateService : IDisposable
 
             if (!await FileMatchesSha256Async(partial, release.InstallerSha256, timeout.Token))
             {
-                throw new InvalidDataException("The installer checksum did not match the release.");
+                throw new UpdateRejectedException("The installer checksum did not match the release.");
             }
 
             File.Move(partial, destination, overwrite: true);
@@ -218,10 +274,9 @@ internal sealed partial class AppUpdateService : IDisposable
             versionInfo.ProductVersion,
             release.Version);
 
-        var logPath = AppPaths.InDataRoot("update-install.log");
         using var process = Process.Start(new ProcessStartInfo(actualPath)
         {
-            Arguments = $"/VERYSILENT /NORESTART /GLIMPSEUPDATE /LOG=\"{logPath}\"",
+            Arguments = InstallerArguments(AppPaths.InDataRoot("update-install.log")),
             UseShellExecute = true,
             WorkingDirectory = _downloadRoot
         });
@@ -233,6 +288,17 @@ internal sealed partial class AppUpdateService : IDisposable
 
         DiagnosticLog.Write($"update installer launched version={release.VersionText}");
     }
+
+    /// <summary>
+    /// Silent, no message boxes, no reboot. /GLIMPSEUPDATE tells setup to
+    /// skip the LibreOffice download and to relaunch Glimpse either way.
+    /// </summary>
+    internal static string InstallerArguments(string logPath) =>
+        $"/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /GLIMPSEUPDATE /LOG=\"{logPath}\"";
+
+    /// <summary>The release's page on GitHub, where its notes live.</summary>
+    internal static Uri ReleasePageUri(Version version) =>
+        new($"https://github.com/tekkusai/Glimpse/releases/tag/v{NormalizeVersion(version).ToString(3)}");
 
     public void CleanupStaleDownloads()
     {
@@ -325,6 +391,46 @@ internal sealed partial class AppUpdateService : IDisposable
             checksumUri);
     }
 
+    /// <summary>
+    /// The signature asset, when the release has exactly one at the pinned
+    /// URL. Missing is not a failed check: the release is skipped by name.
+    /// </summary>
+    internal static Uri? FindSignatureUri(GitHubRelease release, AppUpdateRelease update)
+    {
+        var name = update.InstallerFileName + ".sha256.sig";
+        var matches = release.Assets
+            .OfType<GitHubAsset>()
+            .Where(asset => string.Equals(asset.Name, name, StringComparison.Ordinal)
+                && string.Equals(asset.State, "uploaded", StringComparison.Ordinal))
+            .ToArray();
+        return matches is [{ Size: > 0 and <= MaxSignatureBytes } signature]
+            && Uri.TryCreate(signature.BrowserDownloadUrl, UriKind.Absolute, out var uri)
+            && IsExpectedReleaseAssetUri(uri, update.Tag, name)
+            ? uri
+            : null;
+    }
+
+    /// <summary>
+    /// The .sig file is base64 of an IEEE P1363 ECDSA P-256 signature over
+    /// the SHA-256 of the sidecar's exact bytes: what ECDsa.SignData returns.
+    /// </summary>
+    internal static bool SignatureMatches(byte[] sidecar, byte[] signatureFile, string publicKey)
+    {
+        byte[] signature;
+        try
+        {
+            signature = Convert.FromBase64String(Encoding.ASCII.GetString(signatureFile).Trim());
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        using var key = ECDsa.Create();
+        key.ImportFromPem(publicKey);
+        return signature.Length == 64 && key.VerifyData(sidecar, signature, HashAlgorithmName.SHA256);
+    }
+
     internal static bool TryParseVersion(string? value, out Version version)
     {
         version = new Version(0, 0, 0);
@@ -347,7 +453,7 @@ internal sealed partial class AppUpdateService : IDisposable
             || !TryParseVersion(productVersion, out var parsedVersion)
             || NormalizeVersion(parsedVersion) != NormalizeVersion(expectedVersion))
         {
-            throw new InvalidDataException(
+            throw new UpdateRejectedException(
                 "The downloaded installer did not identify as the expected Glimpse Setup version.");
         }
     }
@@ -375,7 +481,7 @@ internal sealed partial class AppUpdateService : IDisposable
             .Split('\n', StringSplitOptions.RemoveEmptyEntries);
         if (lines.Length != 1)
         {
-            throw new InvalidDataException("The release checksum file was malformed.");
+            throw new UpdateRejectedException("The release checksum file was malformed.");
         }
 
         var match = ChecksumLineRegex().Match(lines[0]);
@@ -383,7 +489,7 @@ internal sealed partial class AppUpdateService : IDisposable
             || !match.Groups["file"].Value.Equals(expectedFileName, StringComparison.Ordinal)
             || !match.Groups["hash"].Value.Equals(expectedSha256, StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidDataException("The release checksum file did not match the installer.");
+            throw new UpdateRejectedException("The release checksum file did not match the installer.");
         }
     }
 
@@ -438,7 +544,7 @@ internal sealed partial class AppUpdateService : IDisposable
         return request;
     }
 
-    private async Task<string> DownloadSmallTextAsync(
+    private async Task<byte[]> DownloadSmallAsync(
         Uri uri,
         int maxBytes,
         CancellationToken cancellationToken)
@@ -450,8 +556,7 @@ internal sealed partial class AppUpdateService : IDisposable
             cancellationToken);
         response.EnsureSuccessStatusCode();
         ValidateFinalDownloadUri(response.RequestMessage?.RequestUri);
-        var bytes = await ReadLimitedAsync(response.Content, maxBytes, cancellationToken);
-        return Encoding.ASCII.GetString(bytes);
+        return await ReadLimitedAsync(response.Content, maxBytes, cancellationToken);
     }
 
     private static async Task<byte[]> ReadLimitedAsync(
@@ -541,6 +646,8 @@ internal sealed partial class AppUpdateService : IDisposable
             || release.InstallerSize is < MinInstallerBytes or > MaxInstallerBytes
             || !IsExpectedReleaseAssetUri(release.InstallerUri, release.Tag, release.InstallerFileName)
             || !IsExpectedReleaseAssetUri(release.ChecksumUri, release.Tag, release.InstallerFileName + ".sha256")
+            || release.SignatureUri is { } signature
+                && !IsExpectedReleaseAssetUri(signature, release.Tag, release.InstallerFileName + ".sha256.sig")
             || release.InstallerSha256.Length != 64
             || release.InstallerSha256.Any(character => !Uri.IsHexDigit(character)))
         {
@@ -626,6 +733,9 @@ internal sealed partial class AppUpdateService : IDisposable
 
         [JsonPropertyName("prerelease")]
         public bool Prerelease { get; init; }
+
+        [JsonPropertyName("published_at")]
+        public DateTimeOffset? PublishedAt { get; init; }
 
         [JsonPropertyName("assets")]
         public List<GitHubAsset> Assets { get; init; } = [];
