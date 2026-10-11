@@ -92,16 +92,22 @@ public sealed class BrandMarkTests
         return Task.CompletedTask;
     });
 
-    [Fact]
-    public Task TheWelcomeShowsTheAppTile() => WpfApp.RunAsync(() =>
+    [Theory]
+    [InlineData(96, 64)]
+    [InlineData(120, 80)]
+    [InlineData(144, 96)]
+    public Task TheWelcomeShowsTheTileHintedForItsDevicePixels(int dpi, int pixels) => WpfApp.RunAsync(() =>
     {
+        // 64 across on the screen's own scale: the row for the pixels it
+        // covers, pixel for pixel, not the 64 row stretched.
         var mark = BrandMark.Create(64);
+        VisualTreeHelper.SetRootDpi(mark, new DpiScale(dpi / 96.0, dpi / 96.0));
         mark.Measure(new Size(64, 64));
         mark.Arrange(new Rect(0, 0, 64, 64));
-        var bitmap = new RenderTargetBitmap(64, 64, 96, 96, PixelFormats.Pbgra32);
+        var bitmap = new RenderTargetBitmap(pixels, pixels, dpi, dpi, PixelFormats.Pbgra32);
         bitmap.Render(mark);
 
-        Assert.True(Bgra(BrandMark.RenderTile(64)).SequenceEqual(Bgra(bitmap)));
+        Assert.True(Bgra(BrandMark.RenderTile(pixels)).SequenceEqual(Bgra(bitmap)), $"the welcome tile at {dpi} dpi is not the {pixels} row");
         return Task.CompletedTask;
     });
 

@@ -99,18 +99,34 @@ internal static class BrandMark
         return Render(pixels, new GeometryDrawing(Frozen(new SolidColorBrush(ink)), null, shape));
     }
 
-    /// <summary>The tile fitted to a square of <paramref name="size"/>.</summary>
+    /// <summary>
+    /// The tile fitted to a square of <paramref name="size"/>, drawn from the
+    /// row for the device pixels it covers, since a row scaled to another
+    /// size blurs: the welcome's 64 is the 64 row at 100 percent, the 80 row
+    /// at 125 and the 96 row at 150. Other scales draw the vectors.
+    /// </summary>
     public static FrameworkElement Create(double size)
     {
-        var image = new DrawingImage(TileDrawing(size));
-        image.Freeze();
-        return new Image
+        var image = new Image
         {
-            Source = image,
             Width = size,
             Height = size,
             Stretch = Stretch.Uniform
         };
+
+        void Draw()
+        {
+            var source = new DrawingImage(TileDrawing(Math.Round(size * VisualTreeHelper.GetDpi(image).DpiScaleX)));
+            source.Freeze();
+            image.Source = source;
+        }
+
+        // The scale is known for certain only once the image is in a window,
+        // and it changes when the window moves to another monitor.
+        image.Loaded += (_, _) => Draw();
+        image.DpiChanged += (_, _) => Draw();
+        Draw();
+        return image;
     }
 
     private static DrawingGroup Tile(double size, double inset, double corner, Sign sign, bool rounded)
