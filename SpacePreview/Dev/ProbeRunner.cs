@@ -157,6 +157,7 @@ internal static class ProbeRunner
                 // Leaves the window pinned with Always on top off through the
                 // final capture, so a live pass can verify the reveal visuals
                 // and taskbar/Alt+Tab reachability from outside the process.
+                // Like a click, it becomes the next pin's default.
                 window.SetPinned(true);
                 window.AlwaysOnTopButton.IsChecked = false;
                 window.UpdateLayout();
