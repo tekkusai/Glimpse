@@ -225,6 +225,55 @@ public sealed class PdfFillSignWriterTests
     // Protection: a file that forbids the change is refused, not changed.
     // ------------------------------------------------------------------
 
+    [Theory]
+    [InlineData("/P 1")]
+    [InlineData("/P 2")]
+    [InlineData("")]
+    public void ACertificationThatForbidsAnnotationsIsRefused(string permission)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "certified.pdf");
+        WriteSignedPdf(source, certification: permission);
+
+        AssertRefusedBeforeWriting(temp, source, "This PDF is certified against changes, so it can't be signed here.");
+    }
+
+    [Fact]
+    public void ACertificationThatAllowsAnnotationsStillSigns()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "certified-p3.pdf");
+        var output = Path.Combine(temp.Path, "certified-p3-signed.pdf");
+        WriteSignedPdf(source, certification: "/P 3");
+
+        Assert.Equal(new PdfSignCheck(1, null), PdfFillSignWriter.Preflight(source));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
+    [Fact]
+    public void AnApprovalSignedPdfSignsAsAnAppendedRevision()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "approved.pdf");
+        var output = Path.Combine(temp.Path, "approved-signed.pdf");
+        WriteSignedPdf(source, certification: null);
+        var original = File.ReadAllBytes(source);
+
+        Assert.Equal(new PdfSignCheck(1, null), PdfFillSignWriter.Preflight(source));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+
+        // Every byte the signature covers is still there, unchanged, ahead
+        // of the new revision; the signature field stays on the page.
+        var written = File.ReadAllBytes(output);
+        Assert.True(written.AsSpan(0, original.Length).SequenceEqual(original), "the signed revision was rewritten");
+        var appended = Encoding.Latin1.GetString(written, original.Length, written.Length - original.Length);
+        Assert.Matches(@"/Annots \[5 0 R \d+ 0 R\]", appended);
+        AssertInkWherePlaced(output, stamp);
+    }
+
     [Fact]
     public void AnEscapedEncryptKeyIsStillRefused()
     {
@@ -481,6 +530,29 @@ public sealed class PdfFillSignWriterTests
         var start = text.LastIndexOf($"\n{number} 0 obj", StringComparison.Ordinal);
         Assert.True(start >= 0, $"object {number} is not in the file");
         return text[start..text.IndexOf("endobj", start, StringComparison.Ordinal)];
+    }
+
+    /// <summary>
+    /// A one-page PDF with a signature field. Certification is the DocMDP
+    /// entry of its transform parameters, or null for an approval signature.
+    /// The widget's own /P, its page, is there to be mistaken for one.
+    /// </summary>
+    private static void WriteSignedPdf(string path, string? certification)
+    {
+        var perms = certification is null ? string.Empty : " /Perms << /DocMDP 6 0 R >>";
+        var reference = certification is null
+            ? string.Empty
+            : $" /Reference [<< /Type /SigRef /TransformMethod /DocMDP /TransformParams << /Type /TransformParams {certification} /V /1.2 >> >>]";
+        new PdfBuilder()
+            .Object(1, $"<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [5 0 R] /SigFlags 3 >>{perms} >>")
+            .Object(2, OnePage)
+            .Object(3, WidePage.Replace("/Contents 4 0 R", "/Contents 4 0 R /Annots [5 0 R]"))
+            .Stream(4, "")
+            .Object(5, "<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature1) /Rect [0 0 0 0] /F 132 /P 3 0 R /V 6 0 R >>")
+            .Object(6, "<< /Type /Sig /Filter /Adobe.PPKLite /SubFilter /adbe.pkcs7.detached /ByteRange [0 10 20 30] "
+                + $"/Contents <0000000000000000>{reference} /M (D:20261011000000Z) >>")
+            .Table("/Size 7 /Root 1 0 R")
+            .Save(path);
     }
 
     private static byte[] TransparentRedPng()

@@ -1308,6 +1308,14 @@ internal static class PdfFillSignWriter
                     ? size
                     : 0;
             var objects = ReadObjects(text);
+
+            // Ink is a change a no-changes certification forbids: the saved
+            // copy would carry a broken certificate.
+            if (FindName(bytes, "DocMDP") is not null && ReadCertificationPermission(objects, root) is not 3)
+            {
+                throw new InvalidOperationException("This PDF is certified against changes, so it can't be signed here.");
+            }
+
             var objectMax = objects.Keys.Select(item => item.Number).DefaultIfEmpty(0).Max();
             var maxObjectNumber = Math.Max(objectMax, trailerSize - 1);
             var pages = ReadPages(objects, root);
@@ -1353,6 +1361,32 @@ internal static class PdfFillSignWriter
             }
 
             throw new InvalidOperationException(UnsupportedStructure);
+        }
+
+        /// <summary>
+        /// The certification's /P, found as a viewer finds it: catalog
+        /// /Perms /DocMDP, then the signature's DocMDP reference. Unset is 2.
+        /// Null when a step is out of reach; only a /P read as 3 allows ink.
+        /// </summary>
+        private static int? ReadCertificationPermission(Dictionary<PdfRef, PdfObject> objects, PdfRef root)
+        {
+            var catalog = objects.TryGetValue(root, out var rootObject) ? rootObject.Body : null;
+            var signature = Resolve(objects, ValueOf(Resolve(objects, ValueOf(catalog, "Perms")), "DocMDP"));
+            foreach (var item in ArrayItems(Resolve(objects, ValueOf(signature, "Reference"))) ?? [])
+            {
+                var reference = Resolve(objects, item);
+                if (NameValue(ValueOf(reference, "TransformMethod")) != "DocMDP")
+                {
+                    continue;
+                }
+
+                var permission = Resolve(objects, ValueOf(Resolve(objects, ValueOf(reference, "TransformParams")), "P"));
+                return permission is null ? 2
+                    : int.TryParse(permission, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value
+                    : null;
+            }
+
+            return null;
         }
 
         private static Dictionary<PdfRef, PdfObject> ReadObjects(string text)
