@@ -889,6 +889,7 @@ internal static class OfficeDocumentPdfConverter
 
             var profileDirectory = Path.Combine(AppPaths.DataRoot, "LibreOfficeProfile");
             PrepareNetworkIsolatedProfile(profileDirectory);
+            Directory.CreateDirectory(EngineTempDirectory(request.OutputDirectory));
             using var process = new Process
             {
                 StartInfo = BuildStartInfo(soffice, preparedSource.Path, request.ConvertTo, request.OutputDirectory, profileDirectory)
@@ -949,6 +950,8 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
+    private static string EngineTempDirectory(string outputDirectory) => Path.Combine(outputDirectory, "engine-tmp");
+
     internal static ProcessStartInfo BuildStartInfo(
         string soffice,
         string sourcePath,
@@ -975,6 +978,12 @@ internal static class OfficeDocumentPdfConverter
 
         startInfo.Environment["NO_PROXY"] = string.Empty;
         startInfo.Environment["no_proxy"] = string.Empty;
+
+        // LibreOffice's own scratch (lu*.tmp) lands in the run's staging
+        // folder, which goes when the run ends. In %TEMP% every stopped run
+        // left one behind for good.
+        startInfo.Environment["TMP"] = EngineTempDirectory(outputDirectory);
+        startInfo.Environment["TEMP"] = EngineTempDirectory(outputDirectory);
         foreach (var argument in new[]
                  {
                      "--headless", "--nologo", "--nodefault", "--nofirststartwizard", "--norestore", "--nolockcheck",

@@ -62,6 +62,9 @@ public sealed class OfficeDocumentPdfConverterTests
 
         Assert.Equal(string.Empty, startInfo.Environment["NO_PROXY"]);
         Assert.Equal(string.Empty, startInfo.Environment["no_proxy"]);
+        // The engine's scratch goes with the run's staging folder, not into %TEMP%.
+        Assert.Equal(@"C:\cache\entry\engine-tmp", startInfo.Environment["TMP"]);
+        Assert.Equal(@"C:\cache\entry\engine-tmp", startInfo.Environment["TEMP"]);
         Assert.Contains("--headless", startInfo.ArgumentList);
         Assert.Contains("--nolockcheck", startInfo.ArgumentList);
         Assert.Contains("-env:UserInstallation=file:///C:/data/LibreOfficeProfile/", startInfo.ArgumentList);
