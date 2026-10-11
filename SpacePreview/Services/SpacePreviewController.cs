@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Services;
 
@@ -33,6 +34,12 @@ internal sealed class SpacePreviewController : IDisposable
     // says so. While a pin is open, the window in front is looked at again.
     private static readonly TimeSpan FullscreenRecheckInterval = TimeSpan.FromMilliseconds(500);
 
+    // A moment after a preview shows, the Office files beside it in the
+    // folder convert in the background, so arrowing onto a big deck shows it
+    // whole. 2.0 did this; it ends with the glance.
+    private const int OfficeNeighborLimit = 4;
+    private static readonly TimeSpan OfficeNeighborDelay = TimeSpan.FromMilliseconds(900);
+
     private readonly Dispatcher _dispatcher;
     private readonly KeyboardHook _keyboardHook;
     private readonly MouseHook _mouseHook;
@@ -57,6 +64,8 @@ internal sealed class SpacePreviewController : IDisposable
     private IntPtr _previewOwnerRootHwnd;
     private SelectionSource _lastSelectionSource = SelectionSource.Explorer;
     private volatile bool _previewVisible;
+    private ExplorerSelection? _officeNeighborSelection;
+    private CancellationTokenSource? _officeNeighbors;
     private readonly SpaceKeyLatch _spaceKey = new(SpaceKeyLatch.RepeatWindowFor(SystemParameters.KeyboardDelay));
     private bool _refreshInFlight;
     private SelectionRefreshRequest? _queuedRefreshRequest;
@@ -812,6 +821,7 @@ internal sealed class SpacePreviewController : IDisposable
         window.BrowseRequested += (sender, direction) => OnBrowseRequested((PreviewWindow)sender!, direction);
         window.SelectionItemRequested += (sender, index) => OnSelectionItemRequested((PreviewWindow)sender!, index);
         window.SlideshowAdvanceRequested += (sender, _) => OnSlideshowAdvanceRequested((PreviewWindow)sender!);
+        window.ContentReady += (sender, _) => OnPreviewContentReady((PreviewWindow)sender!);
         window.PresentationFailed += OnPreviewPresentationFailed;
         window.Closing += (sender, args) => OnPreviewWindowClosing((PreviewWindow)sender!, args);
         window.Closed += (sender, _) => OnPreviewWindowClosed((PreviewWindow)sender!);
@@ -1107,14 +1117,91 @@ internal sealed class SpacePreviewController : IDisposable
         if (fileDialogMode)
         {
             ApplyCommonFileDialogContext(selection);
+            _officeNeighborSelection = null;
         }
         else
         {
             ApplySelectionBrowseContext(selection);
+            _officeNeighborSelection = _multiSelection is null ? selection : null;
         }
 
         _previewVisible = true;
         SyncMouseHook();
+    }
+
+    private void OnPreviewContentReady(PreviewWindow window)
+    {
+        if (window != _previewWindow
+            || !_previewVisible
+            || _officeNeighborSelection is not { } selection
+            || !string.Equals(selection.Path, window.CurrentPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        // The last file's warm-up gives way only now: if it was converting
+        // this file, this preview has already joined that job.
+        _officeNeighborSelection = null;
+        CancelOfficeNeighbors();
+        if (!OfficeDocumentPdfConverter.IsAvailable)
+        {
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _officeNeighbors = cts;
+        _ = WarmOfficeNeighborsAsync(
+            selection.ExplorerHwnd,
+            _lastSelectionSource == SelectionSource.Desktop,
+            selection.Path,
+            cts.Token);
+    }
+
+    /// <summary>
+    /// One at a time, nearest first, below normal priority: a preview that
+    /// asks for the engine takes it, and the warm-up waits its turn.
+    /// </summary>
+    private static async Task WarmOfficeNeighborsAsync(IntPtr explorerHwnd, bool isDesktop, string currentPath, CancellationToken token)
+    {
+        try
+        {
+            await Task.Delay(OfficeNeighborDelay, token);
+            var neighbors = await StaTask.Run(() =>
+                ExplorerSelectionService.TryGetNeighborPaths(explorerHwnd, isDesktop, currentPath, OfficeNeighborLimit));
+            foreach (var path in neighbors ?? [])
+            {
+                token.ThrowIfCancellationRequested();
+                var kind = FileKinds.GetOfficeKind(path);
+                if (kind == OfficeKind.None
+                    || await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), token) is not null)
+                {
+                    continue;
+                }
+
+                var job = OfficeDocumentPdfConverter.Convert(path, kind, token, background: true);
+                await job.Complete.WaitAsync(token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The glance ended or moved on.
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"office neighbor warm-up failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void CancelOfficeNeighbors()
+    {
+        var cts = Interlocked.Exchange(ref _officeNeighbors, null);
+        if (cts is null)
+        {
+            return;
+        }
+
+        cts.Cancel();
+        cts.Dispose();
     }
 
     private void ApplyCommonFileDialogContext(ExplorerSelection selection)
@@ -1177,6 +1264,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         _multiIndex = target;
+        _officeNeighborSelection = null;
         DiagnosticLog.Write($"browse within selection -> {path} ({_multiIndex + 1} of {set.Count})");
         if (changes)
         {
@@ -1726,6 +1814,8 @@ internal sealed class SpacePreviewController : IDisposable
         _multiSelection = null;
         _multiSelectionSelectedCount = 0;
         _multiIndex = 0;
+        _officeNeighborSelection = null;
+        CancelOfficeNeighbors();
     }
 
     private void ClearNavigationRefreshTokens() => Array.Clear(_navigationKeyRefreshTokens);
@@ -2067,6 +2157,7 @@ internal sealed class SpacePreviewController : IDisposable
         _idleTrimTimer.Stop();
         _ownerLossTimer.Stop();
         _fullscreenRecheckTimer.Stop();
+        CancelOfficeNeighbors();
         if (_foregroundHook != IntPtr.Zero)
         {
             NativeMethods.UnhookWinEvent(_foregroundHook);

@@ -340,6 +340,48 @@ internal static class ExplorerSelectionService
         }
     }
 
+    /// <summary>
+    /// The files nearest the previewed one in its window's view order, for
+    /// the Office warm-up. Shell STA only. Null when the view is gone or no
+    /// longer holds the file.
+    /// </summary>
+    public static IReadOnlyList<string>? TryGetNeighborPaths(IntPtr explorerHwnd, bool isDesktop, string currentPath, int max)
+    {
+        try
+        {
+            if (!isDesktop)
+            {
+                return WithExplorerView(explorerHwnd, view => ShellViews.ReadNeighbors(view, currentPath, max));
+            }
+
+            if (!StaTask.IsWorkerThread)
+            {
+                return null;
+            }
+
+            _desktopSessionCache ??= new DesktopShellSessionCache();
+            if (_desktopSessionCache.GetOrCreate(out _) is not { } session
+                || ShellViews.GetFolderView(session.Desktop, out _) is not { } view)
+            {
+                return null;
+            }
+
+            try
+            {
+                return ShellViews.ReadNeighbors(view, currentPath, max);
+            }
+            finally
+            {
+                ShellViews.Release(view);
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"neighbor lookup failed: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     /// <summary>Dev test only: grows the selection, reads it back in view order.</summary>
     public static string? DescribeMultiSelectionForTest(IntPtr explorerHwnd, int addIndexA, int addIndexB)
     {

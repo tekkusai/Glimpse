@@ -385,6 +385,67 @@ internal static class ShellViews
         return (next, count);
     }
 
+    /// <summary>
+    /// Paths of the items nearest <paramref name="currentPath"/> in view
+    /// order, after then before it at each step out, at most
+    /// <paramref name="max"/>. The current item is found by path, so the
+    /// view's own index never has to agree with the list's. Null when the
+    /// view does not hold it.
+    /// </summary>
+    public static List<string>? ReadNeighbors(IFolderView view, string currentPath, int max)
+    {
+        const int MaxScan = 5000;
+        var iid = ShellItemArrayIid;
+        if (max <= 0 || view.Items(SvgioAllView | SvgioFlagViewOrder, ref iid, out var arrayPtr) != 0 || arrayPtr == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IShellItemArray? items = null;
+        try
+        {
+            items = (IShellItemArray)Marshal.GetUniqueObjectForIUnknown(arrayPtr);
+            if (items.GetCount(out var count) != 0 || count <= 1 || count > MaxScan)
+            {
+                return null;
+            }
+
+            bool Is(int index) =>
+                string.Equals(TryReadPath(items, (uint)index), currentPath, StringComparison.OrdinalIgnoreCase);
+
+            var focused = AnchorIndex(view);
+            var current = focused >= 0 && focused < count && Is(focused) ? focused : -1;
+            for (var i = 0; current < 0 && i < count; i++)
+            {
+                current = Is(i) ? i : -1;
+            }
+
+            if (current < 0)
+            {
+                return null;
+            }
+
+            var paths = new List<string>(max);
+            for (var step = 1; paths.Count < max && (current + step < count || current - step >= 0); step++)
+            {
+                foreach (var index in new[] { current + step, current - step })
+                {
+                    if (paths.Count < max && index >= 0 && index < count && TryReadPath(items, (uint)index) is { } path)
+                    {
+                        paths.Add(path);
+                    }
+                }
+            }
+
+            return paths;
+        }
+        finally
+        {
+            Release(items);
+            Marshal.Release(arrayPtr);
+        }
+    }
+
     public static bool SelectIndex(IFolderView view, int index) =>
         view.ItemCount(SvgioAllView, out var count) == 0
         && index >= 0

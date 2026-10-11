@@ -49,6 +49,23 @@ public sealed class PreviewWindowSizingTests
     }
 
     [Fact]
+    public void WebPagesOpenAtADesktopBrowsersSize()
+    {
+        // 2.0 and 3.0.0 gave them the 900 x 675 default, where a page built
+        // for a desktop browser falls back to its tablet layout.
+        var work1440 = new Rect(0, 0, 2560, 1392);
+        var page = Fit(StageFitHint.WebPage(), work1440);
+        Assert.Equal(StageFit.WebPageMaxWidth, page.Width, 1);
+        Assert.Equal(1392 * StageFit.Band, page.Height, 1);
+        Assert.True(page.Width > PreviewWindow.StageSize(work1440).Width);
+
+        var laptop = new Rect(0, 0, 1366, 728);
+        var small = Fit(StageFitHint.WebPage(), laptop);
+        Assert.Equal(1366 * StageFit.Band, small.Width, 1);
+        Assert.Equal(728 * StageFit.Band, small.Height, 1);
+    }
+
+    [Fact]
     public void ImagesOpenAtNativePixelsWithChromeAround()
     {
         var size = Fit(StageFitHint.ImagePixels(800, 600), Desktop4K);

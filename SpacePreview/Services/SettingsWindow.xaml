@@ -161,9 +161,11 @@
                        Margin="0,9,0,8"
                        Text="Saved signatures"
                        Style="{StaticResource RowLabel}" />
-            <!-- Four tiles, then the list scrolls: the dialog never outgrows a small screen. -->
-            <ScrollViewer MaxHeight="208"
-                          Margin="0,0,0,5"
+            <!-- Three tiles, then the list scrolls: the dialog never outgrows
+                 a small screen. The viewer reaches into the right padding so
+                 a trash button's hover lines up with Close above, unclipped. -->
+            <ScrollViewer MaxHeight="232"
+                          Margin="0,0,-8,5"
                           VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled"
                           Focusable="False">
@@ -172,6 +174,10 @@
                 </ScrollViewer.Resources>
                 <StackPanel x:Name="SignaturesList" />
             </ScrollViewer>
+            <TextBlock Margin="0,0,0,4"
+                       Text="To add one, open a PDF and press Sign."
+                       FontSize="{x:Static u:Metrics.FontCaption}"
+                       Foreground="{DynamicResource Theme.TextTertiary}" />
         </StackPanel>
 
         <Border Style="{StaticResource Divider}" />

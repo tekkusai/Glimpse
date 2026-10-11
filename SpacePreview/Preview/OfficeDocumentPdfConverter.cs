@@ -158,9 +158,11 @@ internal sealed class OfficeRunControl
 
 /// <summary>
 /// One conversion, keyed by its cache entry, shared by every preview of the
-/// file. It runs while one of them still waits for it. When the last one
-/// leaves, the engine stops; finished first pages stay cached, so a revisit
-/// shows them at once and converts only the rest.
+/// file and by the neighbor warm-up. It runs while one of them still waits
+/// for it. When the last one leaves, the engine stops, except for the rest
+/// of a document whose first pages a preview showed: a run already under way
+/// lands, so the next look is the whole document. Finished first pages stay
+/// cached, so a revisit shows them at once and converts only the rest.
 /// </summary>
 internal sealed class OfficeConversionJob
 {
@@ -188,6 +190,11 @@ internal sealed class OfficeConversionJob
 
     // Guarded by the converter's lane lock.
     internal int Waiters;
+    // Previews, as opposed to the neighbor warm-up; only they make work urgent.
+    internal int ForegroundWaiters;
+    internal bool RestStarted;
+    // A preview showed the first pages while the rest converts.
+    internal bool Finishing;
     internal bool Finished;
     internal string? PartialDirectory;
     internal int PartialHolds;
@@ -284,9 +291,11 @@ internal static class OfficeDocumentPdfConverter
     /// <summary>
     /// The job for this file: the one already running when there is one,
     /// otherwise a new one. The caller waits until its token is cancelled;
-    /// once no caller waits, the job stops.
+    /// once no caller waits, the job stops. A <paramref name="background"/>
+    /// caller (the neighbor warm-up) never makes the work urgent: it runs
+    /// below normal and gives the engine to any preview that asks.
     /// </summary>
-    public static OfficeConversionJob Convert(string path, OfficeKind kind, CancellationToken waitToken)
+    public static OfficeConversionJob Convert(string path, OfficeKind kind, CancellationToken waitToken, bool background = false)
     {
         var key = GetCacheDirectory(path, Formats(kind)[0]);
         OfficeConversionJob job;
@@ -301,10 +310,16 @@ internal static class OfficeDocumentPdfConverter
             }
 
             job.Waiters++;
+            if (!background)
+            {
+                job.ForegroundWaiters++;
+                job.Finishing |= job.RestStarted;
+            }
         }
 
-        DiagnosticLog.Write(started ? $"office job start {path}" : $"office job attach {path}");
-        var registration = waitToken.Register(() => Detach(job));
+        var who = background ? " (neighbor)" : string.Empty;
+        DiagnosticLog.Write(started ? $"office job start{who} {path}" : $"office job attach{who} {path}");
+        var registration = waitToken.Register(() => Detach(job, background));
         lock (Lane)
         {
             if (job.Finished)
@@ -445,6 +460,8 @@ internal static class OfficeDocumentPdfConverter
                     lock (Lane)
                     {
                         job.PartialDirectory = partialDirectory;
+                        job.RestStarted = true;
+                        job.Finishing = job.ForegroundWaiters > 0;
                     }
 
                     DiagnosticLog.Write($"office progressive partial ready {job.SourcePath} pages={pages ?? plan.FirstPageCount}/{plan.ExpectedPageCount}");
@@ -646,10 +663,13 @@ internal static class OfficeDocumentPdfConverter
                     (unwatched ??= []).Add(ticket);
                 }
 
+                // A run nobody waits for stops, unless it is the rest of a
+                // document a preview showed: that one lands, but still gives
+                // the engine to any preview that asks.
                 holder = _holder;
                 if (holder is not null
                     && !holder.Preempted
-                    && (IsUnwanted(holder.Job) || (!IsUrgent(holder) && Waiting.Any(IsUrgent))))
+                    && ((IsUnwanted(holder.Job) && !holder.Job.Finishing) || (!IsUrgent(holder) && Waiting.Any(IsUrgent))))
                 {
                     holder.Preempted = true;
                     preempt = holder;
@@ -674,10 +694,11 @@ internal static class OfficeDocumentPdfConverter
         }
     }
 
-    private static bool IsUrgent(LaneTicket ticket) => ticket.FirstStage && ticket.Job.Waiters > 0;
+    private static bool IsUrgent(LaneTicket ticket) => ticket.FirstStage && ticket.Job.ForegroundWaiters > 0;
 
-    private static void Detach(OfficeConversionJob job)
+    private static void Detach(OfficeConversionJob job, bool background)
     {
+        bool landing;
         lock (Lane)
         {
             if (job.Finished || job.Waiters == 0)
@@ -686,6 +707,17 @@ internal static class OfficeDocumentPdfConverter
             }
 
             job.Waiters--;
+            if (!background)
+            {
+                job.ForegroundWaiters = Math.Max(0, job.ForegroundWaiters - 1);
+            }
+
+            landing = job.Waiters == 0 && job.Finishing && ReferenceEquals(_holder?.Job, job);
+        }
+
+        if (landing)
+        {
+            DiagnosticLog.Write($"office job finishing after its preview left {job.SourcePath}");
         }
 
         Rebalance();

@@ -3,7 +3,9 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
@@ -115,7 +117,83 @@ public partial class PreviewWindow
         var dpi = PixelsPerDip();
         var iconPixels = DevicePixels(CardIconSide, dpi);
         var data = await Task.Run(() => CollectFileCardData(path, iconPixels, token), token);
-        return BuildFileCard(BuildCardVisual(data.Image, dpi), data.Title, data.Facts);
+        return BuildFileCard(BuildCardVisual(data.Image, dpi), data.Title, data.Facts, BuildExecutableSwitches(path));
+    }
+
+    /// <summary>
+    /// A program's two compatibility settings, the same bits as its
+    /// Properties > Compatibility tab, drawn as the switches they are. Only
+    /// the user's own (HKCU) bit is written; one set for all users needs
+    /// elevation, so it shows on and locked instead of a switch that snaps back.
+    /// </summary>
+    private FrameworkElement? BuildExecutableSwitches(string path)
+    {
+        if (!Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        {
+            return null;
+        }
+
+        var list = new StackPanel { Width = 320, Margin = new Thickness(0, 20, 0, 0) };
+        list.Children.Add(CompatSwitch(path, "Always run as administrator", ExecutableTweaks.RunAsAdminFlag));
+        list.Children.Add(CompatSwitch(path, "Disable fullscreen optimizations", ExecutableTweaks.DisableFullscreenOptimizationsFlag));
+        return list;
+    }
+
+    private FrameworkElement CompatSwitch(string path, string label, string flag)
+    {
+        var locked = ExecutableTweaks.IsMachineEnforced(path, flag);
+        var toggle = new ToggleButton
+        {
+            Style = (Style)FindResource("HouseToggle"),
+            IsChecked = ExecutableTweaks.HasFlag(path, flag),
+            IsEnabled = !locked,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        AutomationProperties.SetName(toggle, label);
+        // The registry has the last word: a write that failed shows as such.
+        toggle.Click += (_, _) => toggle.IsChecked = ExecutableTweaks.ToggleFlag(path, flag);
+
+        var text = new TextBlock
+        {
+            Text = label,
+            FontSize = Metrics.FontBody,
+            Foreground = Theme.Brush(Theme.Current.TextSecondary),
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        var row = new Grid();
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.Children.Add(text);
+        Grid.SetColumn(toggle, 1);
+        row.Children.Add(toggle);
+
+        // The whole row is the target, as in Settings.
+        var container = new Border
+        {
+            CornerRadius = Metrics.RowCorner,
+            Padding = new Thickness(10, 7, 10, 7),
+            Background = Brushes.Transparent,
+            Child = row,
+            Opacity = locked ? 0.62 : 1,
+            ToolTip = locked ? "Set for all users in the file's Properties" : null
+        };
+        if (!locked)
+        {
+            container.MouseEnter += (_, _) => container.Background = Theme.Brush(Theme.Current.HoverBg);
+            container.MouseLeave += (_, _) => container.Background = Brushes.Transparent;
+            container.MouseLeftButtonDown += (_, e) => e.Handled = true;
+            container.MouseLeftButtonUp += (_, e) =>
+            {
+                if (!toggle.IsMouseOver)
+                {
+                    toggle.IsChecked = ExecutableTweaks.ToggleFlag(path, flag);
+                    e.Handled = true;
+                }
+            };
+        }
+
+        return container;
     }
 
     private double PixelsPerDip() => VisualTreeHelper.GetDpi(this).PixelsPerDip;

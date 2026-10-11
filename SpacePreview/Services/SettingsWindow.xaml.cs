@@ -301,13 +301,13 @@ public partial class SettingsWindow : Window
     private Grid BuildSignatureRow(string path)
     {
         var what = string.Equals(path, SignatureStore.StampPath, StringComparison.OrdinalIgnoreCase) ? "stamp" : "signature";
-        var ink = new Image { Stretch = Stretch.Uniform, Margin = new Thickness(8, 4, 8, 4) };
+        var ink = new Image { Stretch = Stretch.Uniform, Margin = new Thickness(12, 6, 12, 6) };
         _ = LoadInkAsync(ink, path);
+        // Wide enough to read the ink: the paper takes the row, less the
+        // trash or the Keep/Delete pair beside it.
         var paper = new Border
         {
-            Width = 160,
-            Height = 48,
-            HorizontalAlignment = HorizontalAlignment.Left,
+            Height = 72,
             Background = Brushes.White,
             BorderThickness = new Thickness(1),
             CornerRadius = Metrics.SurfaceCorner,
@@ -322,15 +322,14 @@ public partial class SettingsWindow : Window
             Focusable = true,
             Content = "\uE74D",
             ToolTip = $"Delete this {what}",
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 0, -8, 0)
+            Margin = new Thickness(8, 0, 0, 0)
         };
         AutomationProperties.SetName(trash, $"Delete this {what}");
 
         var confirm = new StackPanel
         {
             Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(8, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Visibility = Visibility.Collapsed
         };
@@ -379,6 +378,10 @@ public partial class SettingsWindow : Window
         };
 
         var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(trash, 1);
+        Grid.SetColumn(confirm, 1);
         row.Children.Add(paper);
         row.Children.Add(trash);
         row.Children.Add(confirm);

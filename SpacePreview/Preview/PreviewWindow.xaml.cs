@@ -935,6 +935,12 @@ public partial class PreviewWindow : Window
                 return;
             }
 
+            if (FileKinds.IsHtml(contentPath))
+            {
+                SetStageFitHint(StageFitHint.WebPage(), version);
+                return;
+            }
+
             if (FileKinds.IsSvg(contentPath) && SvgSizeProbe.TryReadCanvasSize(contentPath, out var svgSize))
             {
                 SetStageFitHint(StageFitHint.ImagePixels(svgSize.Width, svgSize.Height), version);

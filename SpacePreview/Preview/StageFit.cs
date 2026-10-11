@@ -18,6 +18,7 @@ internal readonly struct StageFitHint
         ImagePixels,
         PageAspect,
         Sheet,
+        WebPage,
         Compact
     }
 
@@ -64,6 +65,12 @@ internal readonly struct StageFitHint
     /// </summary>
     public static StageFitHint Sheet() => new(FitKind.Sheet, 0, 0, 0);
 
+    /// <summary>
+    /// A web page: laid out by its own CSS for a desktop browser window, so
+    /// it gets one. Narrower, and its responsive layout falls back to tablet.
+    /// </summary>
+    public static StageFitHint WebPage() => new(FitKind.WebPage, 0, 0, 0);
+
     public static StageFitHint Compact() => new(FitKind.Compact, 0, 0, 0);
 
     private static double SafePixelDimension(double value) =>
@@ -74,6 +81,7 @@ internal readonly struct StageFitHint
         FitKind.Pixels or FitKind.ImagePixels => $"{Width:0}x{Height:0} px",
         FitKind.PageAspect => SinglePage ? $"page {Aspect:0.00}, one page" : $"page {Aspect:0.00}",
         FitKind.Sheet => "sheet",
+        FitKind.WebPage => "web page",
         _ => "compact"
     };
 }
@@ -119,6 +127,12 @@ internal static class StageFit
     internal const double SheetMaxWidth = 1200;
 
     internal const double SheetMaxHeight = 900;
+
+    /// <summary>
+    /// A desktop browser's width: pages designed at 1280 to 1440 show their
+    /// desktop layout. Taller is simply more page.
+    /// </summary>
+    internal const double WebPageMaxWidth = 1440;
 
     /// <summary>
     /// Dead zone for rounding churn only. Meaningfully different shapes are
@@ -198,6 +212,12 @@ internal static class StageFit
                 return Clamp(new Size(
                     Math.Min(workArea.Width * SheetBand, SheetMaxWidth),
                     Math.Min(workArea.Height * SheetHeightBand, SheetMaxHeight)),
+                    workArea, minWindow);
+
+            case StageFitHint.FitKind.WebPage:
+                return Clamp(new Size(
+                    Math.Min(workArea.Width * Band, WebPageMaxWidth),
+                    workArea.Height * Band),
                     workArea, minWindow);
 
             default:
