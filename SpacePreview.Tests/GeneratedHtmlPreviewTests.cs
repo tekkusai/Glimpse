@@ -48,6 +48,26 @@ tags:
     }
 
     [Fact]
+    public void CodeChipsStayWholeAndOnlyLongOnesMayWrap()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "chips.md");
+        var forty = new string('x', 40);
+        File.WriteAllText(path, $"Run `collab.py <command> --help`, `{forty}` or `SpacePreview/Preview/GeneratedHtmlPreview.cs`.\n\n```\nfenced\n```\n");
+
+        var html = File.ReadAllText(GeneratedHtmlPreview.TryBuildMarkdown(path)!.HtmlPath);
+
+        // A command keeps its hyphens and spaces on one line; past the
+        // threshold a chip may wrap rather than run off the page.
+        Assert.Matches(@":not\(pre\) > code \{[^}]*white-space: nowrap;", html);
+        Assert.Contains(":not(pre) > code.long { white-space: normal; }", html, StringComparison.Ordinal);
+        Assert.Contains("<code>collab.py &lt;command&gt; --help</code>", html, StringComparison.Ordinal);
+        Assert.Contains($"<code>{forty}</code>", html, StringComparison.Ordinal);
+        Assert.Contains("<code class=\"long\">SpacePreview/Preview/GeneratedHtmlPreview.cs</code>", html, StringComparison.Ordinal);
+        Assert.Contains("<pre class=\"block\"><code>fenced", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void MarkdownTreatsRawHtmlAsTextInsteadOfBrowserInstructions()
     {
         using var temp = new TempDirectory();

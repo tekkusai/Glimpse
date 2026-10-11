@@ -5,6 +5,9 @@ using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
 using Markdig;
+using Markdig.Renderers.Html;
+using Markdig.Syntax;
+using Markdig.Syntax.Inlines;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
 using TextMateSharp.Grammars;
@@ -74,7 +77,7 @@ internal static partial class GeneratedHtmlPreview
                 $"{path}|{StableTextContentToken(preview)}|{ThemeKey(palette)}",
                 () =>
                 {
-                    var rendered = Markdown.ToHtml(MarkdownSourceWithoutLoaderNotice(preview), MarkdownPipeline);
+                    var rendered = RenderMarkdown(MarkdownSourceWithoutLoaderNotice(preview));
                     var notice = preview.Truncated ? MarkdownTruncationNotice(preview) : string.Empty;
                     return BuildShell($"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered, host)}{notice}</div>", palette);
                 });
@@ -86,6 +89,21 @@ internal static partial class GeneratedHtmlPreview
             DiagnosticLog.Write($"markdown preview failed {path}: {ex.GetType().Name}: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>Markdig's HTML, with code spans too long to stay whole marked so they may wrap.</summary>
+    internal static string RenderMarkdown(string source)
+    {
+        var document = Markdown.Parse(source, MarkdownPipeline);
+        foreach (var code in document.Descendants<CodeInline>())
+        {
+            if (code.Content.Length > GeneratedHtmlTheme.LongChip)
+            {
+                code.GetAttributes().AddClass("long");
+            }
+        }
+
+        return document.ToHtml(MarkdownPipeline);
     }
 
     /// <summary>

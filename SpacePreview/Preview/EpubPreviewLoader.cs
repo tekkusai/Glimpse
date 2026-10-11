@@ -324,6 +324,11 @@ internal static partial class EpubPreviewLoader
         var tag = IsHeading(name) ? DemoteHeading(name) : AllowedTag(name) ? name : "span";
         builder.Append('<');
         builder.Append(tag);
+        if (tag == "code" && CollapsedText(element).Length > GeneratedHtmlTheme.LongChip)
+        {
+            builder.Append(" class=\"long\"");
+        }
+
         builder.Append('>');
         foreach (var child in element.Nodes())
         {
