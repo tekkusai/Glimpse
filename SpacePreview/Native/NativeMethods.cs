@@ -40,6 +40,7 @@ internal static class NativeMethods
     public const uint NIIF_RESPECT_QUIET_TIME = 0x00000080;
     public const uint WM_APP = 0x8000;
     public const uint WM_TRAYICON = WM_APP + 1;
+    public const int NIN_BALLOONUSERCLICK = 0x0405;
 
     public static readonly IntPtr HWND_MESSAGE = new(-3);
 

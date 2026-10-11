@@ -87,6 +87,68 @@ public sealed class AppUpdaterTests
     }
 
     [Fact]
+    public void AFirstLaunchIsAnInstallNotAnUpdate()
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        var launched = AppUpdater.RecordLaunch(new Settings(), new Version(3, 0, 0), now);
+
+        Assert.Equal("3.0.0", launched.LastVersionSeen);
+        Assert.Null(launched.UpdatedAtUtc);
+        Assert.False(launched.MajorUpdateNoticeDue);
+        Assert.Equal(now, launched.LastUpdateCheckUtc);
+    }
+
+    [Fact]
+    public void A2xUserArrivesAsAMajorUpdate()
+    {
+        // 2.x kept no version, and its users have seen the welcome.
+        var now = DateTimeOffset.UtcNow;
+
+        var launched = AppUpdater.RecordLaunch(new Settings { WelcomeShown = true }, new Version(3, 0, 0), now);
+
+        Assert.Equal(now, launched.UpdatedAtUtc);
+        Assert.True(launched.MajorUpdateNoticeDue);
+        Assert.Equal("3.0.0", launched.LastVersionSeen);
+    }
+
+    [Fact]
+    public void AnyNewerVersionIsAnUpdateHoweverItWasInstalled()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var before = new Settings { WelcomeShown = true, LastVersionSeen = "3.0.0", LastUpdateCheckUtc = now.AddDays(-1) };
+
+        var minor = AppUpdater.RecordLaunch(before, new Version(3, 1, 0), now);
+        var major = AppUpdater.RecordLaunch(before, new Version(4, 0, 0), now);
+
+        Assert.Equal(now, minor.UpdatedAtUtc);
+        Assert.False(minor.MajorUpdateNoticeDue);
+        Assert.True(major.MajorUpdateNoticeDue);
+        Assert.Equal(now.AddDays(-1), minor.LastUpdateCheckUtc);
+    }
+
+    [Fact]
+    public void LaterLaunchesOfTheSameVersionKeepItsUpdateAndADowngradeIsNone()
+    {
+        var landed = DateTimeOffset.UtcNow.AddDays(-2);
+        var updated = new Settings
+        {
+            WelcomeShown = true,
+            LastVersionSeen = "3.1.0",
+            UpdatedAtUtc = landed,
+            MajorUpdateNoticeDue = true,
+            LastUpdateCheckUtc = landed
+        };
+
+        Assert.Equal(updated, AppUpdater.RecordLaunch(updated, new Version(3, 1, 0), DateTimeOffset.UtcNow));
+
+        var downgraded = AppUpdater.RecordLaunch(updated, new Version(3, 0, 0), DateTimeOffset.UtcNow);
+        Assert.Null(downgraded.UpdatedAtUtc);
+        Assert.False(downgraded.MajorUpdateNoticeDue);
+        Assert.Equal("3.0.0", downgraded.LastVersionSeen);
+    }
+
+    [Fact]
     public void AutomaticInstallsAreOnWhenSettingsPredateTheSwitch()
     {
         using var temp = new TempDirectory();
@@ -390,6 +452,26 @@ public sealed class AppUpdaterTests
         Assert.True(updates.State.UpToDate);
         Assert.Equal(TimeSpan.FromHours(6), Fields.Get<DispatcherTimer>(updates, "_checkTimer").Interval);
     });
+
+    [Fact]
+    public void AMajorUpdateGetsOneQuietTrayNoticeThatOpensItsReleasePage()
+    {
+        Assert.Equal(("Glimpse is now 3.0", "Select to see what's new."), TrayIcon.MajorUpdateNotice(new Version(3, 0, 0)));
+        Assert.Equal("Glimpse is now 4.1", TrayIcon.MajorUpdateNotice(new Version(4, 1, 2)).Title);
+        Assert.Equal(
+            "https://github.com/tekkusai/Glimpse/releases/tag/v3.0.0",
+            AppUpdateService.ReleasePageUri(new Version(3, 0, 0)).AbsoluteUri);
+
+        var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
+        var notice = TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowMajorUpdateNotice");
+        Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", notice, StringComparison.Ordinal);
+        Assert.Contains("MajorUpdateNoticeDue = false", notice, StringComparison.Ordinal);
+        Assert.Contains("case NativeMethods.NIN_BALLOONUSERCLICK:", tray, StringComparison.Ordinal);
+        Assert.Contains(
+            "NativeMethods.TimeSinceLastInput() >= running",
+            TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowMajorUpdateNoticeOnReturn"),
+            StringComparison.Ordinal);
+    }
 
     private static AppUpdateRelease Release(string version) => new(
         new Version(version),

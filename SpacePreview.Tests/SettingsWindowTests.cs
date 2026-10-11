@@ -126,6 +126,26 @@ public sealed class SettingsWindowTests
     });
 
     [Fact]
+    public Task AFreshUpdateNamesItselfAndLinksItsReleaseNotes() => WpfApp.RunAsync(() =>
+    {
+        using var scope = new UpdateSettingsScope(settings => settings with { UpdatedAtUtc = DateTimeOffset.Now });
+        var settings = Open();
+        try
+        {
+            Assert.Equal("Updated today", settings.UpdateStatusText.Text);
+            Assert.Equal("What's new", settings.UpdateLink.Content);
+            Assert.Equal("See what's new in 3.0.0", AutomationProperties.GetName(settings.UpdateLink));
+            Assert.Equal(Visibility.Collapsed, settings.CheckLink.Visibility);
+        }
+        finally
+        {
+            settings.Close();
+        }
+
+        return Task.CompletedTask;
+    });
+
+    [Fact]
     public Task TheAutomaticInstallToggleStartsOnAndSavesTheChoice() => WpfApp.RunAsync(() =>
     {
         using var scope = new UpdateSettingsScope();
@@ -194,13 +214,17 @@ public sealed class SettingsWindowTests
             await pending.CheckNowAsync();
             Measure(Open2(pending));
 
-            Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.Now.AddDays(-30) });
+            Settings.Update(settings => settings with { UpdatedAtUtc = DateTimeOffset.Now.AddDays(-1) });
+            Measure(Open2());
+
+            Settings.Update(settings => settings with { UpdatedAtUtc = null, LastUpdateCheckUtc = DateTimeOffset.Now.AddDays(-30) });
             Measure(Open2());
 
             var content = first.Width - 40;
             Assert.All(footers, footer => Assert.True(footer.Width <= content, $"\"{footer.Words}\" needs {footer.Width:0} of {content:0} px"));
-            Assert.Equal(5, footers.Count);
+            Assert.Equal(6, footers.Count);
             Assert.Contains(footers, footer => footer.Words.StartsWith("Up to date | Check for updates", StringComparison.Ordinal));
+            Assert.Contains(footers, footer => footer.Words.StartsWith("Updated yesterday | What's new", StringComparison.Ordinal));
             Assert.Contains(footers, footer => footer.Words.StartsWith("Couldn't check for updates since", StringComparison.Ordinal) || footer.Words.Contains("| Couldn't check", StringComparison.Ordinal));
         }
         finally

@@ -178,7 +178,9 @@ internal sealed class UpdateSettingsScope : IDisposable
             LastUpdateCheckUtc = null,
             SkippedUpdateVersion = null,
             UpdateAttemptVersion = null,
-            UpdateAttemptUtc = null
+            UpdateAttemptUtc = null,
+            UpdatedAtUtc = null,
+            MajorUpdateNoticeDue = false
         }));
     }
 

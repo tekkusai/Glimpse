@@ -206,9 +206,7 @@
                         FontSize="{x:Static u:Metrics.FontLabel}"
                         FontWeight="SemiBold"
                         Foreground="{DynamicResource Theme.Accent}"
-                        Content="Install now"
-                        Visibility="Collapsed"
-                        AutomationProperties.Name="Install update now" />
+                        Visibility="Collapsed" />
                 <Button x:Name="CheckLink"
                         Margin="6,0,0,0"
                         Padding="6,2"

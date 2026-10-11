@@ -96,6 +96,23 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
+    public void AnUpdateIsNamedForSevenDaysWithItsReleaseNotes()
+    {
+        UpdateFooter Landed(DateTimeOffset at) => Describe(new UpdateState { UpToDate = true }, Checked with { UpdatedAtUtc = at });
+
+        Assert.Equal(new UpdateFooter("Updated today", FooterLink.WhatsNew, null), Landed(Now.AddHours(-14)));
+        Assert.Equal("Updated yesterday", Landed(Now.AddHours(-16)).Status);
+        Assert.Equal("Updated Oct 4", Landed(Now.AddDays(-6)).Status);
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(Now.AddDays(-7)));
+    }
+
+    [Fact]
+    public void APendingUpdateOutranksTheUpdatedLine() =>
+        Assert.Equal(
+            FooterLink.InstallNow,
+            Describe(new UpdateState { Pending = Release }, Checked with { UpdatedAtUtc = Now.AddHours(-1) }).Link);
+
+    [Fact]
     public void NoFooterWordUsesAnEmDash()
     {
         var words = new[]

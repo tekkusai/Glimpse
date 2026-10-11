@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using Windows.Networking.Connectivity;
@@ -266,6 +267,27 @@ internal sealed class AppUpdater : IDisposable
         && settings.UpdateAttemptUtc is { } attempt
         && now - attempt < RetryInstallAfter;
 
+    /// <summary>
+    /// Once per launch, before the welcome. A version newer than the last
+    /// one seen means an update landed, however it was installed. 2.x kept
+    /// no version, so someone who has seen the welcome came from 2.x.
+    /// </summary>
+    internal static Settings RecordLaunch(Settings settings, Version current, DateTimeOffset now)
+    {
+        var seen = AppUpdateService.TryParseVersion(settings.LastVersionSeen, out var last) ? last
+            : settings.WelcomeShown ? new Version(2, 0, 0)
+            : null;
+        var updated = seen is not null && current > seen;
+        var same = seen == current;
+        return settings with
+        {
+            LastVersionSeen = current.ToString(3),
+            LastUpdateCheckUtc = settings.LastUpdateCheckUtc ?? now,
+            UpdatedAtUtc = updated ? now : same ? settings.UpdatedAtUtc : null,
+            MajorUpdateNoticeDue = updated ? current.Major > seen!.Major : same && settings.MajorUpdateNoticeDue
+        };
+    }
+
     internal static bool CheckIsDueOnResume(DateTimeOffset? lastCheck, DateTimeOffset now) =>
         lastCheck is not { } last || now - last > CheckInterval;
 
@@ -281,6 +303,18 @@ internal sealed class AppUpdater : IDisposable
         {
             DiagnosticLog.Write($"connection cost unavailable: {ex.GetType().Name}: {ex.Message}");
             return false;
+        }
+    }
+
+    internal static void OpenReleasePage(Version version)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(AppUpdateService.ReleasePageUri(version).AbsoluteUri) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"release page did not open: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

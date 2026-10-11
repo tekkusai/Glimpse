@@ -94,6 +94,13 @@ public partial class App : Application
             Timeout.Infinite,
             executeOnlyOnce: false);
 
+        // Before the welcome: a first launch is an install, not an update.
+        var launch = AppUpdater.RecordLaunch(Settings.Current, AppUpdateService.DetectCurrentVersion(), DateTimeOffset.UtcNow);
+        if (launch != Settings.Current)
+        {
+            Settings.Update(_ => launch);
+        }
+
         try
         {
             _controller = new SpacePreviewController(Dispatcher);

@@ -29,6 +29,7 @@ public partial class SettingsWindow : Window
     private IReadOnlyList<(string Path, DateTime Written)> _signatures = [];
     private Task _missingPiecesChecked = Task.CompletedTask;
     private bool _findingMissingPieces;
+    private FooterLink _footerLink;
     private bool _closed;
     private bool _syncing;
 
@@ -65,7 +66,7 @@ public partial class SettingsWindow : Window
         ThemeLight.Checked += (_, _) => PickTheme(ThemePreference.Light);
         ThemeDark.Checked += (_, _) => PickTheme(ThemePreference.Dark);
 
-        UpdateLink.Click += (_, _) => _ = _updates.InstallNowAsync();
+        UpdateLink.Click += (_, _) => FollowUpdateLink();
         CheckLink.Click += (_, _) => _ = _updates.CheckNowAsync();
         _copiedTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Normal, (_, _) => EndCopiedFeedback(), Dispatcher);
         _copiedTimer.Stop();
@@ -154,13 +155,34 @@ public partial class SettingsWindow : Window
         ShowText(UpdateStatusText, footer.Status);
         ShowText(UpdateCaption, footer.Caption);
         CheckLink.Visibility = footer.Link == FooterLink.CheckForUpdates ? Visibility.Visible : Visibility.Collapsed;
-        UpdateLink.Visibility = footer.Link == FooterLink.InstallNow ? Visibility.Visible : Visibility.Collapsed;
+        _footerLink = footer.Link;
+        var (link, name) = footer.Link switch
+        {
+            FooterLink.InstallNow => ("Install now", "Install update now"),
+            FooterLink.WhatsNew => ("What's new", $"See what's new in {current.ToString(3)}"),
+            _ => ((string?)null, (string?)null)
+        };
+        UpdateLink.Content = link;
+        AutomationProperties.SetName(UpdateLink, name ?? string.Empty);
+        UpdateLink.Visibility = link is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private static void ShowText(TextBlock block, string? text)
     {
         block.Text = text ?? string.Empty;
         block.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void FollowUpdateLink()
+    {
+        if (_footerLink == FooterLink.WhatsNew)
+        {
+            AppUpdater.OpenReleasePage(_updates.CurrentVersion);
+        }
+        else if (_footerLink == FooterLink.InstallNow)
+        {
+            _ = _updates.InstallNowAsync();
+        }
     }
 
     private static string CurrentVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
@@ -506,7 +528,8 @@ internal enum FooterLink
 {
     None,
     CheckForUpdates,
-    InstallNow
+    InstallNow,
+    WhatsNew
 }
 
 /// <summary>
@@ -516,6 +539,7 @@ internal enum FooterLink
 internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Caption)
 {
     internal static readonly TimeSpan StaleAfter = TimeSpan.FromDays(3);
+    internal static readonly TimeSpan UpdatedNoteFor = TimeSpan.FromDays(7);
 
     /// <param name="now">Local time: "today" is the user's day.</param>
     public static UpdateFooter Describe(
@@ -545,6 +569,11 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
             ?? (!state.UpToDate && AppUpdateService.TryParseVersion(settings.SkippedUpdateVersion, out var skipped) && skipped > current
                 ? $"{skipped.ToString(3)} failed verification and was skipped."
                 : null);
+        if (settings.UpdatedAtUtc is { } updated && now - updated < UpdatedNoteFor)
+        {
+            return new(UpdatedOn(updated, now, culture), FooterLink.WhatsNew, caption);
+        }
+
         if (state.Checking)
         {
             return new("Checking for updates", FooterLink.None, caption);
@@ -553,6 +582,14 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         // Up to date only on the word of a check that reached GitHub.
         return new(state.UpToDate && stale is null ? "Up to date" : null, FooterLink.CheckForUpdates, caption);
     }
+
+    private static string UpdatedOn(DateTimeOffset updated, DateTimeOffset now, CultureInfo culture) =>
+        (now.Date - updated.ToOffset(now.Offset).Date).Days switch
+        {
+            0 => "Updated today",
+            1 => "Updated yesterday",
+            _ => $"Updated {ShortDate(updated, now, culture)}"
+        };
 
     // The culture's month and day with the month abbreviated: Oct 7, 7 Oct.
     private static string ShortDate(DateTimeOffset when, DateTimeOffset now, CultureInfo culture) =>

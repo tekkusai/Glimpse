@@ -21,6 +21,7 @@ namespace SpacePreview.Services;
 internal sealed class TrayIcon : IDisposable
 {
     private const int IconId = 1;
+    private static readonly TimeSpan PresencePollInterval = TimeSpan.FromSeconds(5);
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly uint _taskbarCreatedMessage;
@@ -36,6 +37,10 @@ internal sealed class TrayIcon : IDisposable
     private DateTime _menuClosedAt;
     private bool _iconVisible;
     private bool _disposed;
+    private DispatcherTimer? _presenceTimer;
+
+    // A click on the balloon opens the release page while the balloon is ours.
+    private bool _balloonIsUpdateNotice;
 
     private PreviewAccessWarningWindow? _previewAccessWarningWindow;
     private SettingsWindow? _settingsWindow;
@@ -58,6 +63,7 @@ internal sealed class TrayIcon : IDisposable
         CreateMessageWindow();
         RebuildIcon();
         AddIcon();
+        ShowMajorUpdateNoticeOnReturn();
 
         // The taskbar's own theme (a separate setting from app theme) picks
         // the glyph color; broadcasts never reach a message-only window, so
@@ -192,6 +198,68 @@ internal sealed class TrayIcon : IDisposable
         _menu.IsOpen = true;
     }
 
+    /// <summary>The one notice a new major version gets. A click opens its release page.</summary>
+    internal static (string Title, string Text) MajorUpdateNotice(Version version) => (
+        $"{Branding.Name} is now {version.Major}.{version.Minor}",
+        "Select to see what's new.");
+
+    /// <summary>
+    /// An update usually lands while the user is away, so the notice waits
+    /// for the first keyboard or mouse input after Glimpse starts.
+    /// </summary>
+    private void ShowMajorUpdateNoticeOnReturn()
+    {
+        if (!Settings.Current.MajorUpdateNoticeDue)
+        {
+            return;
+        }
+
+        var startedAt = Environment.TickCount64;
+        _presenceTimer = new DispatcherTimer(DispatcherPriority.Background) { Interval = PresencePollInterval };
+        _presenceTimer.Tick += (_, _) =>
+        {
+            var running = TimeSpan.FromMilliseconds(Environment.TickCount64 - startedAt);
+            if (NativeMethods.TimeSinceLastInput() >= running)
+            {
+                return;
+            }
+
+            _presenceTimer.Stop();
+            ShowMajorUpdateNotice();
+        };
+        _presenceTimer.Start();
+    }
+
+    private void ShowMajorUpdateNotice()
+    {
+        var (title, text) = MajorUpdateNotice(_updates.CurrentVersion);
+        var data = NewIconData();
+        data.uFlags = NativeMethods.NIF_INFO;
+        data.szInfoTitle = title;
+        data.szInfo = text;
+        data.dwInfoFlags = NativeMethods.NIIF_INFO
+            | NativeMethods.NIIF_NOSOUND
+            | NativeMethods.NIIF_RESPECT_QUIET_TIME;
+        if (_disposed || !_iconVisible || !NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data))
+        {
+            DiagnosticLog.Write("update notice failed");
+            return;
+        }
+
+        _balloonIsUpdateNotice = true;
+        Settings.Update(settings => settings with { MajorUpdateNoticeDue = false });
+        DiagnosticLog.Write($"update notice shown version={_updates.CurrentVersion.ToString(3)}");
+    }
+
+    private void OnBalloonClicked()
+    {
+        if (_balloonIsUpdateNotice)
+        {
+            _balloonIsUpdateNotice = false;
+            AppUpdater.OpenReleasePage(_updates.CurrentVersion);
+        }
+    }
+
     public void ShowPreviewAccessWarning(PreviewAccessWarningInfo warning)
     {
         if (_disposed)
@@ -282,6 +350,7 @@ internal sealed class TrayIcon : IDisposable
         PreviewAccessWarningInfo warning,
         bool finalReminder)
     {
+        _balloonIsUpdateNotice = false;
         var data = NewIconData();
         data.uFlags = NativeMethods.NIF_INFO;
         data.szInfoTitle = PreviewAccessWarningWindow.Heading;
@@ -348,6 +417,10 @@ internal sealed class TrayIcon : IDisposable
                 case NativeMethods.WM_RBUTTONUP:
                 case NativeMethods.WM_CONTEXTMENU:
                     ShowMenu();
+                    break;
+
+                case NativeMethods.NIN_BALLOONUSERCLICK:
+                    OnBalloonClicked();
                     break;
             }
 
@@ -428,6 +501,7 @@ internal sealed class TrayIcon : IDisposable
         }
 
         _disposed = true;
+        _presenceTimer?.Stop();
         _settingsWindow?.Close();
         _settingsWindow = null;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;

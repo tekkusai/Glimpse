@@ -61,6 +61,15 @@ internal sealed record Settings
 
     public DateTimeOffset? UpdateAttemptUtc { get; init; }
 
+    /// <summary>The version that last ran. A newer one running means an update landed.</summary>
+    public string? LastVersionSeen { get; init; }
+
+    /// <summary>When the running version first ran as an update.</summary>
+    public DateTimeOffset? UpdatedAtUtc { get; init; }
+
+    /// <summary>A new major version landed and its one tray notice has not shown yet.</summary>
+    public bool MajorUpdateNoticeDue { get; init; }
+
     // Stage size is deliberately not persisted: content shapes the stage,
     // and a border-drag holds only until the preview closes.
 
