@@ -184,7 +184,59 @@ public sealed class ReleaseHygieneTests
         using var temp = new TempDirectory();
         using var throwaway = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var key = temp.CreateFile("throwaway.pem", throwaway.ExportPkcs8PrivateKeyPem());
-        var setup = temp.CreateFile("Glimpse-Setup-3.0.0.exe", "Stands in for the installer.");
+        var setup = Path.Combine(temp.Path, "Glimpse-Setup-3.0.0.exe");
+        File.WriteAllBytes(setup, SetupImage.Create("3.0.0"));
+
+        var (exitCode, output) = await SignAsync(TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"), setup, key);
+
+        Assert.NotEqual(0, exitCode);
+        Assert.Contains("is not the release key", output, StringComparison.Ordinal);
+        Assert.Equal([key], Directory.GetFiles(temp.Path));
+    }
+
+    /// <summary>
+    /// Every copy of Glimpse skips for good a release whose installer says it
+    /// is another version. The signer runs from a copy beside a stand-in
+    /// project and app source that carry a throwaway key.
+    /// </summary>
+    [Theory]
+    [InlineData("Glimpse-Setup-3.1.0.exe", "3.1.0", "3.1.0", true)]
+    [InlineData("Glimpse-Setup-3.1.0.exe", "3.0.9", "3.1.0", false)]
+    [InlineData("Glimpse-Setup-3.1.0.exe", "3.1.0", "3.2.0", false)]
+    [InlineData("Glimpse-Setup.exe", "3.1.0", "3.1.0", false)]
+    public async Task OnlyAnInstallerNamedAndVersionedAsTheProjectIsSigned(
+        string name,
+        string installerVersion,
+        string projectVersion,
+        bool signs)
+    {
+        using var temp = new TempDirectory();
+        using var throwaway = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var script = Path.Combine(temp.CreateDirectory("scripts"), "sign-installer.ps1");
+        File.Copy(TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"), script);
+        File.WriteAllText(Path.Combine(temp.CreateDirectory("Services"), "AppUpdateService.cs"), throwaway.ExportSubjectPublicKeyInfoPem());
+        temp.CreateFile("SpacePreview.csproj", $"<Project><PropertyGroup><Version>{projectVersion}</Version></PropertyGroup></Project>");
+        var key = temp.CreateFile("throwaway.pem", throwaway.ExportPkcs8PrivateKeyPem());
+        var artifacts = temp.CreateDirectory("artifacts");
+        var setup = Path.Combine(artifacts, name);
+        File.WriteAllBytes(setup, SetupImage.Create(installerVersion));
+
+        var (exitCode, output) = await SignAsync(script, setup, key);
+
+        if (signs)
+        {
+            Assert.True(exitCode == 0, output);
+            Assert.Equal([setup, setup + ".sha256", setup + ".sha256.sig"], Directory.GetFiles(artifacts).Order(StringComparer.Ordinal));
+        }
+        else
+        {
+            Assert.NotEqual(0, exitCode);
+            Assert.Empty(Directory.GetFiles(artifacts));
+        }
+    }
+
+    private static async Task<(int ExitCode, string Output)> SignAsync(string script, string setup, string key)
+    {
         var start = new ProcessStartInfo("pwsh")
         {
             RedirectStandardOutput = true,
@@ -194,7 +246,7 @@ public sealed class ReleaseHygieneTests
             ArgumentList =
             {
                 "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                "-File", TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"),
+                "-File", script,
                 "-Setup", setup,
                 "-Key", key
             }
@@ -214,9 +266,7 @@ public sealed class ReleaseHygieneTests
             Assert.Fail("sign-installer.ps1 did not finish in a minute.");
         }
 
-        Assert.NotEqual(0, pwsh.ExitCode);
-        Assert.Contains("is not the release key", await output + await error, StringComparison.Ordinal);
-        Assert.Equal([key], Directory.GetFiles(temp.Path));
+        return (pwsh.ExitCode, await output + await error);
     }
 
     [Fact]
