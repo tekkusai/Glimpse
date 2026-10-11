@@ -76,8 +76,8 @@ internal sealed class SelectionGridView
             stack.Children.Add(new TextBlock
             {
                 Text = $"Showing the first {tileCount} of {paths.Count} selected items.",
-                FontSize = 12,
-                Foreground = Theme.Brush(palette.TextSecondary),
+                FontSize = Metrics.FontCaption,
+                Foreground = Theme.Brush(palette.TextTertiary),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 4, 0, 22)
             });

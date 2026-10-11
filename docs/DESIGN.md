@@ -66,6 +66,11 @@ Segoe UI Variable for words, Cascadia Mono for code and plain text.
 
 Nothing else. A size not in this table is a bug.
 
+Two things are not chrome type and keep their own sizes: documents Glimpse
+sets for reading (markdown and EPUB use a reading scale, 15 px body with
+28, 21 and 17 px headings), and icon glyphs, which are sized to the button
+or tile they sit in.
+
 ## Shape
 
 | Radius | Used for |
