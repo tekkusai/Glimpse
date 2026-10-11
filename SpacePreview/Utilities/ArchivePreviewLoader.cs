@@ -93,14 +93,14 @@ internal static class ArchivePreviewLoader
             return "Empty archive";
         }
 
-        var files = FolderScanner.Count(listing.TotalEntries, "file", "files");
+        // Size first, as on a folder's card: the two read as one card.
+        var summary = $"{FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed · {FolderScanner.Count(listing.TotalEntries, "file", "files")}";
         if (listing.Stopped)
         {
-            files = $"At least {files}";
+            return $"At least {summary}";
         }
 
-        var summary = $"{files} · {FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed";
-        return listing.Truncated && !listing.Stopped ? $"{summary} · Partial list" : summary;
+        return listing.Truncated ? $"{summary} · Partial list" : summary;
     }
 
     private static ArchiveListing? TryWalkCompressedTar(string path, TimeSpan budget, CancellationToken token)

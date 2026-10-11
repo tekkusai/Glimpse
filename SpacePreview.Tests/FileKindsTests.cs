@@ -133,15 +133,22 @@ public sealed class FileKindsTests
         Assert.Equal(expected, FileKinds.DescribeWhen(time, Now, new System.Globalization.CultureInfo("en-US")));
     }
 
-    [Fact]
-    public void TimesSpeakTheUsersCulture()
+    // The words stay the interface's English in every region; only the clock
+    // is the user's. Calendars and scripts never leak into the line.
+    [Theory]
+    [InlineData("de-DE", "Today 16:35", "Wednesday 18:05")]
+    [InlineData("ja-JP", "Today 16:35", "Wednesday 18:05")]
+    [InlineData("ar-EG", "Today 4:35 PM", "Wednesday 6:05 PM")]
+    [InlineData("th-TH", "Today 16:35", "Wednesday 18:05")]
+    [InlineData("fa-IR", "Today 16:35", "Wednesday 18:05")]
+    public void TimesUseTheUsersClockAndTheInterfacesWords(string name, string today, string thisWeek)
     {
-        var german = new System.Globalization.CultureInfo("de-DE");
+        var culture = new System.Globalization.CultureInfo(name);
 
-        Assert.Equal("Today 16:35", FileKinds.DescribeWhen(new DateTime(2026, 10, 10, 16, 35, 0), Now, german));
-        Assert.Equal("Mittwoch 18:05", FileKinds.DescribeWhen(new DateTime(2026, 10, 7, 18, 5, 0), Now, german));
-        Assert.Equal("27. Aug.", FileKinds.DescribeWhen(new DateTime(2026, 8, 27, 11, 0, 0), Now, german));
-        Assert.Equal("27. Aug. 2025", FileKinds.DescribeWhen(new DateTime(2025, 8, 27, 11, 0, 0), Now, german));
+        Assert.Equal(today, FileKinds.DescribeWhen(new DateTime(2026, 10, 10, 16, 35, 0), Now, culture));
+        Assert.Equal(thisWeek, FileKinds.DescribeWhen(new DateTime(2026, 10, 7, 18, 5, 0), Now, culture));
+        Assert.Equal("Aug 27", FileKinds.DescribeWhen(new DateTime(2026, 8, 27, 11, 0, 0), Now, culture));
+        Assert.Equal("Aug 27, 2025", FileKinds.DescribeWhen(new DateTime(2025, 8, 27, 11, 0, 0), Now, culture));
     }
 
     [Fact]

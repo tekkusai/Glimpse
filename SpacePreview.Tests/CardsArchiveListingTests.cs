@@ -29,7 +29,7 @@ public sealed class CardsArchiveListingTests
         Assert.Equal("src", src.Name);
         // Largest first, folders and files alike, as a folder ranks its rows.
         Assert.Equal(["b.md", "sub", "a.txt"], src.Children.Select(child => child.Name));
-        Assert.Equal("3 files · 26 B uncompressed", ArchivePreviewLoader.Describe(listing));
+        Assert.Equal("26 B uncompressed · 3 files", ArchivePreviewLoader.Describe(listing));
     }
 
     [Fact]
@@ -62,7 +62,7 @@ public sealed class CardsArchiveListingTests
 
         Assert.NotNull(listing);
         Assert.Equal(1, listing!.TotalEntries);
-        Assert.StartsWith("1 file · ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
+        Assert.EndsWith(" · 1 file", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -78,7 +78,7 @@ public sealed class CardsArchiveListingTests
 
         var listing = ArchivePreviewLoader.TryLoad(path);
 
-        Assert.Equal("1 file · 4 B uncompressed", ArchivePreviewLoader.Describe(listing!));
+        Assert.Equal("4 B uncompressed · 1 file", ArchivePreviewLoader.Describe(listing!));
     }
 
     [Fact]

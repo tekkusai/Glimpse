@@ -331,26 +331,23 @@ internal static partial class FileKinds
     /// <summary>
     /// A time as short as it can be: "Today 4:35 PM", "Yesterday 9:12 AM",
     /// the weekday within a week, then "Aug 27", with the year only when it
-    /// is not this one. Time and month names come from <paramref name="culture"/>.
+    /// is not this one. The words are the interface's English; only the
+    /// clock is <paramref name="culture"/>'s, so a 24-hour reader sees 16:35.
     /// </summary>
     public static string DescribeWhen(DateTime when, DateTime now, CultureInfo culture)
     {
-        var format = culture.DateTimeFormat;
-        var time = when.ToString("t", culture);
+        var time = when.ToString(culture.DateTimeFormat.ShortTimePattern, English);
         return (now.Date - when.Date).Days switch
         {
             0 => $"Today {time}",
             1 => $"Yesterday {time}",
-            > 1 and < 7 => $"{format.GetDayName(when.DayOfWeek)} {time}",
-            _ when when.Year == now.Year => when.ToString(ShortMonth(format.MonthDayPattern), culture),
-            _ => when.ToString(ShortMonth(WeekdayPattern().Replace(format.LongDatePattern, string.Empty)), culture)
+            > 1 and < 7 => $"{when.ToString("dddd", English)} {time}",
+            _ when when.Year == now.Year => when.ToString("MMM d", English),
+            _ => when.ToString("MMM d, yyyy", English)
         };
     }
 
-    private static string ShortMonth(string pattern) => pattern.Replace("MMMM", "MMM", StringComparison.Ordinal);
-
-    [GeneratedRegex(@"[\s,]*dddd[\s,]*")]
-    private static partial Regex WeekdayPattern();
+    private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
 }
 
 internal sealed record TextPreview(string Text, bool Truncated, long TotalBytes);

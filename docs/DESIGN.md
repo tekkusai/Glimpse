@@ -100,14 +100,14 @@ Left to right, in priority order when space runs out:
    Explorer, Share and the kind's extra actions.
 5. Pin, fill screen and close are icon buttons.
 
-The details give the size, then at most one fact the content already knows
-(an image's pixel size, a document's page count once the viewer has counted
-it), then when the item last changed. The name shows the extension, so a kind
-appears only where the name cannot say it: `Folder`, and `File` for a name
-with no extension. The time is as short as it can be: `Today 4:35 PM`,
-`Yesterday 9:12 AM`, the weekday within the last week, `Aug 27` this year and
-`Aug 27, 2025` before, with time and month names in the user's culture. The
-full time shows on hover.
+The details name a kind only where the name cannot say it (`Folder`, and
+`File` for a name with no extension), then give a file's size, then at most
+one fact the content already knows (an image's pixel size, a document's page
+count once the viewer has counted it), then when the item last changed. The
+time is as short as it can be: `Today 4:35 PM`, `Yesterday 9:12 AM`, the
+weekday within the last week, `Aug 27` this year and `Aug 27, 2025` before.
+The words are the interface's English; the clock follows the user's region,
+so a 24-hour reader sees `Today 16:35`. The full time shows on hover.
 
 Browse arrows sit before the identity when browsing is possible, with the
 position (`2 of 14`) beside them when a multi-selection is open.
