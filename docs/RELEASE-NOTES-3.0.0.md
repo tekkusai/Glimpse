@@ -4,11 +4,15 @@
 
 **Faster where you wait.** Opening a file again right after closing it is quicker for nearly every type. On the same machine, Markdown went from 199 to 66 ms, PDFs from 454 to 263 ms, PowerPoint from 536 to 251 ms and video from 361 to 87 ms.
 
-**One look.** The header, menus, Settings and every page Glimpse draws share one set of colors, type and scrollbars, in dark and light. In light theme the PDF toolbar is light too. The Open button shows your default app's icon, keeps the same width for every file, and its menu starts with Open with. F11 and the zoom shortcuts work without clicking into the preview first.
+**Lighter on your PC.** In our tests, previewing 26 files of every kind took about a third less CPU than in 2.0, Office conversion aside, and an open PDF takes about half the CPU and 100 to 300 MB less memory. Glimpse listens to the keyboard only while Explorer, the desktop or a file dialog is in front, no longer wakes the processor while it waits in the tray, and stops converting an Office file as soon as you move on.
+
+**Updates take care of themselves.** Glimpse now installs updates while you're away from your PC: only after a few minutes without keyboard or mouse input, and never while a preview is open or something is full screen. There is no update window to click through. Glimpse checks each update's signature and installs only releases signed by its developer. Settings shows the update status in one line, with Check for updates and Install now, and has a switch to turn automatic installs off.
+
+**One look.** The header, menus, Settings and every page Glimpse draws share one set of colors, type and scrollbars, in dark and light. In light theme the PDF toolbar is light too. The Open button shows your default app's icon, keeps the same width for every file, and its menu starts with Open with. The line under the file name says what the name can't: the size, the page count or pixel size, and a short time like Today 4:35 PM. F11 and the zoom shortcuts work without clicking into the preview first.
 
 **Fill & Sign you can trust.** Signatures, dates and stamps save exactly where the screen showed them, including on A4 and rotated pages. A PDF that can't be signed says so before you start. Leaving with unsaved work always asks first, whether you press Esc, Space or an arrow, close the preview, unpin it or quit Glimpse. Work you haven't saved also keeps itself: if Glimpse closes for an update, a restart, a sign-out or a crash, the Sign button reads Resume the next time you open that PDF and brings the work back on the page you left. Pages render in a separate process, so a difficult PDF can no longer take Glimpse down.
 
-**Documents.** The page rail no longer stops at the first ten pages of a long PDF. Large PowerPoint decks open on their first slides while the rest converts, then switch to the whole deck at the slide you're on. Templates, slide shows, macro-enabled and OpenDocument files all convert now, links in Office documents still work, and spreadsheets follow the app theme. A one-page document fits its window whole.
+**Documents.** The page rail no longer stops at the first ten pages of a long PDF. Large PowerPoint decks open on their first slides while the rest converts, then switch to the whole deck at the slide you're on. Templates, slide shows, macro-enabled and OpenDocument files all convert now, links in Office documents still work, and spreadsheets take the app theme around their cells. A one-page document fits its window whole.
 
 **Images, models and fonts.** Images never stretch past their real size, zoom around the cursor, and show transparency on a checkerboard; Ctrl+Plus, Ctrl+Minus and Ctrl+0 work here too. 3D models render as solid surfaces instead of scattered triangles, and GLB files open as models. Fonts preview as a full specimen in their own face.
 
@@ -16,7 +20,7 @@
 
 - A new icon: the Space key, the one key Glimpse asks you to learn, in the taskbar, the tray and the welcome
 - Files without a richer view share one card layout, so titles no longer jump between file types
-- Compressed tar archives list every file inside
+- Archives open as the same card as a folder, with the size of everything inside, compressed tar archives included
 - A damaged HEIC photo says it may be damaged instead of sending you to the Microsoft Store
 - Run as administrator appears only for files that can run that way
 - Audio shows the track's cover and tags; heading links in Markdown work
@@ -25,6 +29,7 @@
 - Settings lists anything this PC is missing for full previews, with one button to get each, and the signatures you've saved, which you can delete there
 - Copy diagnostics in Settings copies the version and recent log lines for a bug report
 - Settings are saved safely, and a damaged settings file is set aside instead of lost
+- Setup follows Windows' light or dark mode
 
 **Installing**
 
