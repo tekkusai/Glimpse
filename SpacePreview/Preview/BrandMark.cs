@@ -39,20 +39,25 @@ internal static class BrandMark
     private static readonly Color TileTop = Color.FromRgb(0x4E, 0x80, 0xF5);
     private static readonly Color TileBottom = Color.FromRgb(0x3B, 0x72, 0xE8);
 
-    // Hinted by hand for the sizes Windows asks for: whole-pixel edges, a
-    // 2 px stroke while 2 px is all there is room for. Inset, corner, sign.
+    // Hinted by hand for every size below 256 that Microsoft lists for an
+    // app icon: whole-pixel edges, and a stroke that rounds up, so no size
+    // draws the sign thinner than the shape. Inset, corner, sign.
     internal static readonly IReadOnlyDictionary<int, (int Inset, int Corner, Sign Sign)> HintedTiles =
         new Dictionary<int, (int, int, Sign)>
         {
             [16] = (1, 3, new(4, 5, 12, 10, 2)),
             [20] = (1, 4, new(5, 7, 15, 12, 2)),
             [24] = (1, 4, new(6, 9, 18, 15, 2)),
-            [30] = (2, 5, new(8, 11, 22, 18, 2)),
+            [30] = (2, 5, new(8, 11, 22, 18, 3)),
             [32] = (2, 6, new(8, 12, 24, 20, 3)),
             [36] = (2, 6, new(9, 13, 27, 22, 3)),
             [40] = (2, 7, new(10, 15, 30, 25, 3)),
             [48] = (3, 8, new(12, 18, 36, 29, 4)),
+            [60] = (4, 10, new(15, 22, 45, 37, 5)),
             [64] = (4, 11, new(16, 24, 48, 39, 5)),
+            [72] = (4, 13, new(18, 27, 54, 44, 6)),
+            [80] = (5, 14, new(20, 29, 60, 49, 6)),
+            [96] = (6, 17, new(24, 35, 72, 59, 7)),
         };
 
     // The tray at every scale Windows offers from 100 to 300 percent. The
