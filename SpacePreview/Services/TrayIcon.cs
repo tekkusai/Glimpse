@@ -117,7 +117,7 @@ internal sealed class TrayIcon : IDisposable
         {
             var data = NewIconData();
             data.uFlags = NativeMethods.NIF_ICON;
-            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+            ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data);
         }
     }
 
@@ -497,7 +497,7 @@ internal sealed class TrayIcon : IDisposable
         data.dwInfoFlags = NativeMethods.NIIF_INFO
             | NativeMethods.NIIF_NOSOUND
             | NativeMethods.NIIF_RESPECT_QUIET_TIME;
-        if (NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data))
+        if (ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data))
         {
             DiagnosticLog.Write($"preview access warning shown kind={warning.Kind} process={warning.DisplayName} pid={warning.ProcessId}");
             return true;
@@ -509,15 +509,20 @@ internal sealed class TrayIcon : IDisposable
 
     // ---- Shell notification icon --------------------------------------------
 
+    internal delegate bool ShellNotify(int message, ref NativeMethods.NOTIFYICONDATA data);
+
+    /// <summary>Every call to the shell about the icon. Tests swap in a fake; production asks the shell.</summary>
+    internal static ShellNotify ShellNotifyIcon { get; set; } = NativeMethods.Shell_NotifyIcon;
+
     private void AddIcon()
     {
         var data = NewIconData();
 
         // An icon still in place refuses the add; the change carries the new
         // drawing instead.
-        if (!NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_ADD, ref data))
+        if (!ShellNotifyIcon(NativeMethods.NIM_ADD, ref data))
         {
-            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+            ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data);
         }
 
         _iconVisible = true;
@@ -536,7 +541,7 @@ internal sealed class TrayIcon : IDisposable
             hWnd = _window.Handle,
             uID = IconId
         };
-        NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_DELETE, ref data);
+        ShellNotifyIcon(NativeMethods.NIM_DELETE, ref data);
         _iconVisible = false;
     }
 
