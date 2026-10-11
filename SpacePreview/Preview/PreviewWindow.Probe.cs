@@ -10,6 +10,7 @@ using System.Threading;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
@@ -376,10 +377,11 @@ public partial class PreviewWindow
         return $"placements={surface.Placements.Count}";
     }
 
+    /// <summary>Presses the button whose label or accessible name is <paramref name="label"/>.</summary>
     private static void PressPill(DependencyObject root, string label) =>
-        FindLogicalChildren<Border>(root)
-            .First(item => item.Child is TextBlock { Text: var text } && text == label)
-            .RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = MouseLeftButtonUpEvent });
+        FindLogicalChildren<ButtonBase>(root)
+            .First(button => button.Content as string == label || AutomationProperties.GetName(button) == label)
+            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
 
     private static IEnumerable<T> FindLogicalChildren<T>(DependencyObject root) where T : DependencyObject
     {

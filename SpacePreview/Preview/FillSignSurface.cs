@@ -56,8 +56,8 @@ internal sealed class FillSignSurface : Grid
     private ButtonBase _newStampPill = null!;
     private TextBlock _centerText = null!;
     private TextBlock _pageLabel = null!;
-    private Border _previousPageChip = null!;
-    private Border _nextPageChip = null!;
+    private Button _previousPageChip = null!;
+    private Button _nextPageChip = null!;
     private ButtonBase _cancelPill = null!;
     private ButtonBase _savePill = null!;
     private TextBlock _saveStatus = null!;
@@ -362,8 +362,8 @@ internal sealed class FillSignSurface : Grid
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(4, 0, 4, 0)
         };
-        _previousPageChip = BuildIconChip(palette, "\uE76B", "Previous page", () => RequestPage(_pageIndex - 1));
-        _nextPageChip = BuildIconChip(palette, "\uE76C", "Next page", () => RequestPage(_pageIndex + 1));
+        _previousPageChip = BuildIconChip("\uE76B", "Previous page", () => RequestPage(_pageIndex - 1));
+        _nextPageChip = BuildIconChip("\uE76C", "Next page", () => RequestPage(_pageIndex + 1));
         var pageCluster = new StackPanel
         {
             Orientation = Orientation.Horizontal,
@@ -459,48 +459,18 @@ internal sealed class FillSignSurface : Grid
     }
 
     /// <summary>A quiet icon button, the header's size and shape.</summary>
-    private static Border BuildIconChip(ThemePalette palette, string glyph, string name, Action onClick)
+    /// <summary>A page arrow in the house icon button.</summary>
+    private static Button BuildIconChip(string glyph, string name, Action onClick)
     {
-        var chip = new Border
+        var chip = new Button
         {
-            Width = 30,
-            Height = 30,
-            CornerRadius = Metrics.IconCorner,
-            Background = Brushes.Transparent,
-            Cursor = Cursors.Hand,
-            VerticalAlignment = VerticalAlignment.Center,
+            Content = glyph,
             ToolTip = name,
-            Child = new TextBlock
-            {
-                Text = glyph,
-                FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-                FontSize = 10,
-                Foreground = Theme.Brush(palette.TextSecondary),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            }
+            Style = (Style)Application.Current.FindResource("IconButton")
         };
         AutomationProperties.SetName(chip, name);
-        chip.MouseEnter += (_, _) => chip.Background = Theme.Brush(palette.HoverBg);
-        chip.MouseLeave += (_, _) => chip.Background = Brushes.Transparent;
-        chip.MouseLeftButtonDown += (_, e) =>
-        {
-            chip.Background = Theme.Brush(palette.PressedBg);
-            e.Handled = true;
-        };
-        chip.MouseLeftButtonUp += (_, e) =>
-        {
-            chip.Background = Theme.Brush(palette.HoverBg);
-            onClick();
-            e.Handled = true;
-        };
+        chip.Click += (_, _) => onClick();
         return chip;
-    }
-
-    private static void SetEnabled(FrameworkElement element, bool enabled)
-    {
-        element.IsEnabled = enabled;
-        element.Opacity = enabled ? 1 : 0.35;
     }
 
     private void SetSaveStatus(string? text, bool failed)
@@ -557,14 +527,14 @@ internal sealed class FillSignSurface : Grid
         var navigable = _totalPages > 1;
         _previousPageChip.Visibility = navigable ? Visibility.Visible : Visibility.Collapsed;
         _nextPageChip.Visibility = navigable ? Visibility.Visible : Visibility.Collapsed;
-        SetEnabled(_previousPageChip, _pageIndex > 0);
-        SetEnabled(_nextPageChip, _pageIndex < _totalPages - 1);
+        _previousPageChip.IsEnabled = _pageIndex > 0;
+        _nextPageChip.IsEnabled = _pageIndex < _totalPages - 1;
     }
 
     /// <summary>Save, the hint and the problem line follow the work on the page.</summary>
     private void UpdateWorkState()
     {
-        SetEnabled(_savePill, HasWork);
+        _savePill.IsEnabled = HasWork;
         _hintRetired |= HasWork;
         _centerText.Text = _problem ?? (_hintRetired ? string.Empty : Hint);
         _centerText.Foreground = Theme.Brush(_problem is null ? Theme.Current.TextTertiary : Theme.Current.Warning);

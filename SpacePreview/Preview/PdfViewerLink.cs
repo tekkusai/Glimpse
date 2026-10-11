@@ -230,25 +230,7 @@ internal static class PdfViewerLink
     /// </summary>
     private static ProofResult ProvedInHelper(string sourcePath, string staging)
     {
-        var helper = Environment.ProcessPath;
-        if (string.IsNullOrWhiteSpace(helper) || !File.Exists(helper))
-        {
-            DiagnosticLog.Write("pdf proof helper unavailable");
-            return ProofResult.Unavailable;
-        }
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = helper,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WindowStyle = ProcessWindowStyle.Hidden
-        };
-        startInfo.ArgumentList.Add("--prove-pdf-scale");
-        startInfo.ArgumentList.Add(sourcePath);
-        startInfo.ArgumentList.Add(staging);
-
-        using var process = Process.Start(startInfo);
+        using var process = PdfiumHelper.Start("--prove-pdf-scale", sourcePath, staging);
         if (process is null)
         {
             DiagnosticLog.Write("pdf proof helper did not start");
@@ -259,14 +241,7 @@ internal static class PdfViewerLink
         {
             // A proof that will not finish is a proof that failed. Artwork
             // this heavy is exactly what must not hold a preview open.
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch
-            {
-                // Already gone.
-            }
+            PdfiumHelper.Kill(process);
 
             DiagnosticLog.Write($"pdf proof timed out, linking instead: {sourcePath}");
             return ProofResult.Unavailable;

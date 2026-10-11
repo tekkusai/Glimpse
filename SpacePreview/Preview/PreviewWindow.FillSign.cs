@@ -68,7 +68,8 @@ public partial class PreviewWindow
 
         int? viewerPages = totalPages > 0 ? totalPages : null;
         var pageIndex = Math.Max(0, currentPage - 1);
-        var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
+        var pages = new SignPageCache(path, viewerPages ?? pageIndex + 1);
+        var page = await pages.Get(pageIndex);
         if (page is null)
         {
             if (version == _loadVersion && IsCurrentContentPath(path) && _fillSignSurface is null)
@@ -88,7 +89,7 @@ public partial class PreviewWindow
         var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
         surface.ExitRequested += ExitFillSignMode;
         surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, placements, overwrite);
-        surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, target);
+        surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, pages, target);
 
         _fillSignParkedContent = current;
         _fillSignSurface = surface;
@@ -117,23 +118,74 @@ public partial class PreviewWindow
         }
 
         surface.ApplyCheck(check);
+        if (check.Problem is null)
+        {
+            pages.PageCount = check.PageCount;
+            pages.KeepNeighbors(pageIndex);
+        }
     }
 
-    private async Task ShowFillSignPageAsync(FillSignSurface surface, int pageIndex)
+    private async Task ShowFillSignPageAsync(FillSignSurface surface, SignPageCache pages, int pageIndex)
     {
         if (_fillSignPath is not { } path || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
         {
             return;
         }
 
-        var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
+        var page = await pages.Get(pageIndex);
         if (page is null || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
         {
+            pages.Forget(pageIndex);
             DiagnosticLog.Write($"fill-sign page render failed page={pageIndex + 1}");
             return;
         }
 
         surface.ShowPage(pageIndex, page);
+        pages.KeepNeighbors(pageIndex);
+    }
+
+    /// <summary>
+    /// Sign-mode pages, each rendered once in a helper. The pages either side
+    /// of the one on screen render ahead, so turning a page is instant
+    /// instead of a helper's start; pages further away are let go. UI thread
+    /// only.
+    /// </summary>
+    private sealed class SignPageCache(string path, int pageCount)
+    {
+        private readonly Dictionary<int, Task<PdfPreviewPage?>> _pages = [];
+
+        public int PageCount { get; set; } = pageCount;
+
+        public Task<PdfPreviewPage?> Get(int index)
+        {
+            if (!_pages.TryGetValue(index, out var page))
+            {
+                page = PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
+                _pages[index] = page;
+            }
+
+            return page;
+        }
+
+        public void Forget(int index) => _pages.Remove(index);
+
+        public void KeepNeighbors(int index)
+        {
+            foreach (var far in _pages.Keys.Where(key => Math.Abs(key - index) > 1).ToList())
+            {
+                _pages.Remove(far);
+            }
+
+            if (index + 1 < PageCount)
+            {
+                _ = Get(index + 1);
+            }
+
+            if (index > 0)
+            {
+                _ = Get(index - 1);
+            }
+        }
     }
 
     private void ExitFillSignMode()

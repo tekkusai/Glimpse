@@ -525,12 +525,6 @@ public partial class PreviewWindow
             return cached;
         }
 
-        var helper = Environment.ProcessPath;
-        if (string.IsNullOrWhiteSpace(helper) || !File.Exists(helper))
-        {
-            return null;
-        }
-
         var root = Path.GetDirectoryName(cacheDir) ?? AppPaths.InDataRoot("PdfRail");
         Directory.CreateDirectory(root);
         var tempDir = Path.Combine(root, ".render-" + Guid.NewGuid().ToString("N"));
@@ -538,20 +532,12 @@ public partial class PreviewWindow
 
         try
         {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = helper,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-            startInfo.ArgumentList.Add("--render-pdf-thumbnails");
-            startInfo.ArgumentList.Add(path);
-            startInfo.ArgumentList.Add(tempDir);
-            startInfo.ArgumentList.Add(pageLimit.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            startInfo.ArgumentList.Add(startPage.ToString(System.Globalization.CultureInfo.InvariantCulture));
-
-            using var process = Process.Start(startInfo);
+            using var process = PdfiumHelper.Start(
+                "--render-pdf-thumbnails",
+                path,
+                tempDir,
+                pageLimit.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                startPage.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (process is null)
             {
                 return null;
@@ -575,7 +561,7 @@ public partial class PreviewWindow
             }
             catch (OperationCanceledException)
             {
-                TryKill(process);
+                PdfiumHelper.Kill(process);
                 throw;
             }
 
@@ -688,20 +674,6 @@ public partial class PreviewWindow
         return bitmap;
     }
 
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // The helper already ended.
-        }
-    }
 
     private static void TryDeleteDirectory(string directory)
     {

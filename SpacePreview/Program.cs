@@ -26,6 +26,11 @@ internal static class Program
             return ProvePdfScale(args);
         }
 
+        if (args.Length >= 4 && IsMode(args[0], "--render-pdf-page"))
+        {
+            return RenderPdfPage(args);
+        }
+
         return new App().Run();
     }
 
@@ -52,6 +57,27 @@ internal static class Program
         catch (Exception ex)
         {
             DiagnosticLog.Write($"pdf thumbnail helper failed: {ex.GetType().Name}: {ex.Message}");
+            return 1;
+        }
+    }
+
+    /// <summary>
+    /// --render-pdf-page pdf pageIndex png, one page for the sign surface.
+    /// Exits 0 once the PNG is written, 2 when the page cannot be rendered,
+    /// 1 on bad arguments.
+    /// </summary>
+    private static int RenderPdfPage(string[] args)
+    {
+        DiagnosticLog.TagProcess("render-pdf-page");
+        PdfPreviewRenderer.SkipDocumentTeardown = true;
+        try
+        {
+            var pageIndex = int.Parse(args[2], CultureInfo.InvariantCulture);
+            return PdfPreviewRenderer.TryRenderPageToFile(args[1], pageIndex, args[3], CancellationToken.None) ? 0 : 2;
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"pdf page helper failed: {ex.GetType().Name}: {ex.Message}");
             return 1;
         }
     }

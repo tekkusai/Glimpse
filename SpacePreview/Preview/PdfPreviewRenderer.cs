@@ -222,6 +222,19 @@ internal static class PdfPreviewRenderer
         }
     }
 
+    /// <summary>The page helper's job: <see cref="TryRenderPage"/> written to a PNG.</summary>
+    public static bool TryRenderPageToFile(string path, int pageIndex, string pngPath, CancellationToken cancellationToken)
+    {
+        var page = TryRenderPage(path, pageIndex, cancellationToken);
+        if (page is null)
+        {
+            return false;
+        }
+
+        SavePng(page.Bitmap, pngPath);
+        return true;
+    }
+
     internal static double PageScaleForRasterBudget(
         int width,
         int height,

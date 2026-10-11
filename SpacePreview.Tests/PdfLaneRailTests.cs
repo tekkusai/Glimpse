@@ -31,6 +31,28 @@ public sealed class PdfLaneRailTests
         Assert.Equal(30, Directory.EnumerateFiles(output, "page-*.png").Count());
     }
 
+    // Sign mode renders its pages the same way, so a page pdfium dies on
+    // costs the sign surface that page, not the resident app.
+    [Fact]
+    public void ThePageHelperWritesOnePageAndRefusesWhatItCannotRead()
+    {
+        using var temp = new TempDirectory();
+        var pdfPath = Path.Combine(temp.Path, "letter.pdf");
+        WriteTextPdf(pdfPath, 3, 612, 792);
+        var png = Path.Combine(temp.Path, "page.png");
+
+        Assert.Equal(0, RunHelper(temp.Path, "--render-pdf-page", pdfPath, "1", png));
+        var header = File.ReadAllBytes(png)[..24];
+        Assert.Equal(new byte[] { 0x89, (byte)'P', (byte)'N', (byte)'G' }, header[..4]);
+        var width = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(16));
+        var height = System.Buffers.Binary.BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(20));
+        Assert.InRange(width / (double)height, 612 / 792.0 - 0.01, 612 / 792.0 + 0.01);
+
+        Assert.Equal(2, RunHelper(temp.Path, "--render-pdf-page", pdfPath, "7", Path.Combine(temp.Path, "past-the-end.png")));
+        var notPdf = temp.CreateFile("notes.pdf", "not a pdf");
+        Assert.Equal(2, RunHelper(temp.Path, "--render-pdf-page", notPdf, "0", Path.Combine(temp.Path, "not-a-pdf.png")));
+    }
+
     // The plan the rail follows on an 81-page datasheet, run through the
     // helper: every page arrives, and no single call renders more than the
     // per-call cap.
@@ -109,12 +131,12 @@ public sealed class PdfLaneRailTests
     }
 
     /// <summary>
-    /// pdfium can die in native code on an ordinary document, so it runs in
-    /// helper processes. The one in-process exception is Fill &amp; Sign,
-    /// which renders one page per document it opens.
+    /// pdfium can die in native code on an ordinary document, and its
+    /// teardown faults once enough pages have rendered, so it runs only in
+    /// helper processes. Fill &amp; Sign pages included.
     /// </summary>
     [Fact]
-    public void PdfiumRunsOnlyInHelpersAndTheNamedException()
+    public void PdfiumRunsOnlyInHelpers()
     {
         var root = TestSource.FilePath("SpacePreview");
         var separator = Path.DirectorySeparatorChar;
@@ -126,7 +148,8 @@ public sealed class PdfLaneRailTests
         Assert.Equal(new[] { "PdfPreviewRenderer.cs" }, Callers(sources, "DocLib."));
         Assert.Equal(new[] { "Program.cs" }, Callers(sources, "PdfPreviewRenderer.TryRenderThumbnails"));
         Assert.Equal(new[] { "Program.cs" }, Callers(sources, "PdfPreviewRenderer.RendersLike"));
-        Assert.Equal(new[] { "PreviewWindow.FillSign.cs" }, Callers(sources, "PdfPreviewRenderer.TryRenderPage"));
+        Assert.Equal(new[] { "Program.cs" }, Callers(sources, "PdfPreviewRenderer.TryRenderPage"));
+        Assert.Equal(new[] { "PdfiumHelper.cs", "Program.cs" }, Callers(sources, "\"--render-pdf-page\""));
         Assert.Equal(new[] { "PreviewWindow.Pdf.cs", "Program.cs" }, Callers(sources, "\"--render-pdf-thumbnails\""));
         Assert.Equal(new[] { "PdfViewerLink.cs", "Program.cs" }, Callers(sources, "\"--prove-pdf-scale\""));
     }
