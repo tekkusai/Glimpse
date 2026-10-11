@@ -1,220 +1,188 @@
+using System.Globalization;
+using System.Windows.Media;
+using SpacePreview.Utilities;
+
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// The CSS every page Glimpse writes is built from. The tokens come from the
+/// live palette, so a web page cannot drift from the WPF chrome beside it.
+/// docs/DESIGN.md ("Web pages") is the contract.
+/// </summary>
 internal static class GeneratedHtmlTheme
 {
-    public const string Css = """
-/*
- * Glimpse generated-content theme.
- * One file serves Markdown previews, standalone code previews, and EPUB base styling.
- * The shell template stamps data-theme="dark" or data-theme="light" on <html>.
- * Color values are keyed to Utilities/Theme.cs; if a token changes there, change it here.
- */
-
+    /// <summary>
+    /// Tokens, the canvas, the in-page reveal, scrollbars, selection and the
+    /// font stacks. Every page starts here.
+    /// </summary>
+    public static string PageCss(ThemePalette p) => $$"""
 :root {
-  color-scheme: light;
-
-  /* Surface tokens (Theme.cs Light) */
-  --bg: #FFFFFF;              /* CanvasBg */
-  --text: #1D1E22;            /* TextPrimary */
-  --text-2: #5C6270;          /* TextSecondary */
-  --text-3: #878D99;          /* TextTertiary */
-  --border: #D8DADF;          /* Border */
-  --accent: #3B72E8;          /* Accent */
-  --thumb: #B4B8C2;           /* ScrollThumb */
-
-  /* Code surfaces */
-  --code-bg: #F4F5F8;
-  --code-border: #E4E6EB;
-  --code-text: #23252B;
-  --inline-code-bg: #EFF0F4;
-  --kbd-bg: #F5F5F8;          /* RaisedBg */
-  --kbd-border: #D9DBE2;      /* RaisedBorder */
-  --ln: #B3B8C2;
-
-  /* Code tokens, light */
-  --tk-comment: #9AA0AB;
-  --tk-keyword: #2F5FD0;
-  --tk-string: #A9622F;
-  --tk-number: #3E7D52;
-  --tk-function: #6E42BF;
-  --tk-type: #1D7A74;
-  --tk-constant: #205FB8;
-  --tk-property: #4A5B82;
-  --tk-tag: #2F5FD0;
-  --tk-attribute: #8A6A1F;
-  --tk-operator: #5C6270;
-  --tk-punct: #878D99;
-  --tk-invalid: #BE4B43;
+  color-scheme: {{(p.IsDark ? "dark" : "light")}};
+  --canvas: {{Hex(p.CanvasBg)}};
+  --chrome: {{Hex(p.ChromeBg)}};
+  --raised: {{Hex(p.RaisedBg)}};
+  --raised-border: {{Hex(p.RaisedBorder)}};
+  --border: {{Hex(p.Border)}};
+  --hover: {{Rgba(p.HoverBg, p.HoverBg.A / 255.0)}};
+  --pressed: {{Rgba(p.PressedBg, p.PressedBg.A / 255.0)}};
+  --text: {{Hex(p.TextPrimary)}};
+  --text-2: {{Hex(p.TextSecondary)}};
+  --text-3: {{Hex(p.TextTertiary)}};
+  --accent: {{Hex(p.Accent)}};
+  --warning: {{Hex(p.Warning)}};
+  --thumb: {{Rgba(p.ScrollThumb, 0.6)}};
+  --thumb-hover: {{Rgba(p.ScrollThumb, 0.95)}};
+  --selection: {{Rgba(p.Accent, 0.55)}};
+  --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Cascadia Mono", Consolas, monospace;
 }
 
-:root[data-theme="dark"] {
-  color-scheme: dark;
-
-  /* Surface tokens (Theme.cs Dark) */
-  --bg: #18191D;              /* CanvasBg */
-  --text: #F4F4F5;            /* TextPrimary */
-  --text-2: #A9ADB8;          /* TextSecondary */
-  --text-3: #8F95A0;          /* TextTertiary */
-  --border: #343741;          /* Border */
-  --accent: #7DA2F7;          /* Accent, lifted for dark-surface contrast */
-  --thumb: #5C616E;           /* ScrollThumb */
-
-  /* Code surfaces */
-  --code-bg: #121316;         /* CanvasBg: blocks recede below the page */
-  --code-border: #23252C;
-  --code-text: #DFE2E8;
-  --inline-code-bg: #26282F;  /* RaisedBg */
-  --kbd-bg: #26282F;          /* RaisedBg */
-  --kbd-border: #4B4E58;      /* RaisedBorder */
-  --ln: #565B66;
-
-  /* Code tokens, dark */
-  --tk-comment: #7E8490;
-  --tk-keyword: #7FA3F0;
-  --tk-string: #D7A97C;
-  --tk-number: #9FCBAB;
-  --tk-function: #BBA7EE;
-  --tk-type: #6FC4BE;
-  --tk-constant: #86BFF5;
-  --tk-property: #9BB2D8;
-  --tk-tag: #7FA3F0;
-  --tk-attribute: #D3BC8A;
-  --tk-operator: #A9ADB8;
-  --tk-punct: #8F95A0;
-  --tk-invalid: #E2807C;
-}
-
-/* ---------- Page ---------- */
-
-* { box-sizing: border-box; }
-
+/* The page dissolves itself in over whatever the host shows beneath it.
+   No forward fill: a finished fill would pin opacity and turn the host's
+   in-page exit fade into a cut. */
 html {
-  background: var(--bg);
-  scrollbar-width: thin;
-  scrollbar-color: var(--thumb) transparent;
+  background: var(--canvas);
+  color: var(--text);
+  font-family: var(--font-ui);
+  animation: glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards;
 }
+@keyframes glimpse-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  html { animation: none; }
+}
+
+::selection { background: var(--selection); }
+
+/* PreviewScrollBar's twin: 11 px, no arrows, a 7 px capsule thumb. The
+   standard scrollbar properties must stay unset on these pages, or
+   Chromium lets them override these. */
+::-webkit-scrollbar { width: 11px; height: 11px; background: transparent; }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-thumb {
+  min-width: 30px;
+  min-height: 30px;
+  border: 2px solid transparent;
+  border-radius: 6px;
+  background: var(--thumb) padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--thumb-hover) padding-box; }
+
+""";
+
+    /// <summary>Markdown, code and EPUB documents.</summary>
+    public static string DocumentCss(ThemePalette p) => DocumentRules + SyntaxTokens(p);
+
+    private const string DocumentRules = """
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
-  font-size: 16px;
-  line-height: 1.65;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+  line-height: 1.6;
   overflow-wrap: break-word;
 }
 
-/* ---------- Markdown document ---------- */
+/* ---------- Markdown and EPUB documents ---------- */
 
 .md-root {
-  max-width: 44rem;
+  max-width: 720px;
   margin: 0 auto;
-  padding: 44px clamp(20px, 6vw, 48px) 72px;
+  padding: 40px clamp(24px, 6vw, 48px) 64px;
 }
 
 .md-root > :first-child { margin-top: 0; }
 .md-root > :last-child { margin-bottom: 0; }
 
-/* Chapter anchors (EPUB rail): land with a breath of space above */
-.md-root section { scroll-margin-top: 10px; }
+/* Anchor landings (headings, EPUB chapters) keep a breath of space above. */
+.md-root section, .md-root [id] { scroll-margin-top: 16px; }
 
 h1, h2, h3, h4, h5, h6 {
-  font-family: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   font-weight: 600;
   line-height: 1.3;
-  margin: 1.7em 0 0.55em;
+  margin: 32px 0 12px;
   color: var(--text);
 }
 
+h1, h2 { font-family: var(--font-display); }
+
 h1 {
-  font-size: 1.75em;
-  font-weight: 650;
-  letter-spacing: -0.012em;
-  padding-bottom: 0.35em;
+  font-size: 28px;
+  letter-spacing: -0.01em;
+  padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
 }
 
 h2 {
-  font-size: 1.4em;
-  letter-spacing: -0.008em;
-  padding-bottom: 0.3em;
+  font-size: 21px;
+  padding-bottom: 6px;
   border-bottom: 1px solid var(--border);
 }
 
-h3 { font-size: 1.17em; }
-h4 { font-size: 1em; }
-h5 { font-size: 0.92em; }
-h6 { font-size: 0.85em; color: var(--text-2); }
+h3 { font-size: 17px; }
+h4 { font-size: 15px; }
+h5, h6 { font-size: 13px; }
+h6 { color: var(--text-2); }
 
-p { margin: 0 0 1.05em; }
+p { margin: 0 0 16px; }
 
-a {
-  color: var(--accent);
-  text-decoration: none;
-}
-
+a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
-strong { font-weight: 650; }
+strong { font-weight: 600; }
 
 hr {
   border: 0;
   border-top: 1px solid var(--border);
-  margin: 2.2em 0;
+  margin: 32px 0;
 }
 
-ul, ol {
-  margin: 0 0 1.05em;
-  padding-left: 1.7em;
-}
-
-li { margin: 0.22em 0; }
-
-li > ul, li > ol { margin-bottom: 0; }
+ul, ol { margin: 0 0 16px; padding-left: 24px; }
+li { margin: 4px 0; }
+li > ul, li > ol, li > p { margin-bottom: 0; }
 
 /* GFM task lists */
-li.task-list-item { list-style: none; margin-left: -1.45em; }
+li.task-list-item { list-style: none; margin-left: -20px; }
 li.task-list-item > input[type="checkbox"] {
-  margin: 0 0.55em 0.14em 0;
-  vertical-align: middle;
+  margin: 0 8px 0 0;
+  vertical-align: -2px;
   accent-color: var(--accent);
 }
 
 blockquote {
-  margin: 0 0 1.05em;
-  padding: 0.1em 0 0.1em 1.05em;
-  border-left: 3px solid var(--border);
+  margin: 0 0 16px;
+  padding: 0 0 0 16px;
+  border-left: 3px solid var(--raised-border);
   color: var(--text-2);
 }
 
 blockquote > :last-child { margin-bottom: 0; }
 
-img {
-  max-width: 100%;
-  height: auto;
-}
+img { max-width: 100%; height: auto; }
 
 /* Book covers (EPUB): natural proportions, bounded height, quiet frame */
 img.cover {
   max-height: 420px;
   width: auto;
   border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
-/* Tables: GitHub-calm, self-scrolling when wide */
+/* Tables: hairline rows, self-scrolling when wide */
 table {
   display: block;
   max-width: 100%;
+  width: max-content;
   overflow-x: auto;
   border-collapse: collapse;
-  margin: 0 0 1.15em;
-  font-size: 0.94em;
+  margin: 0 0 16px;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 th, td {
-  padding: 0.45em 0.85em;
+  padding: 6px 16px 6px 0;
   border-bottom: 1px solid var(--border);
   text-align: left;
   vertical-align: top;
@@ -222,66 +190,67 @@ th, td {
 
 th {
   font-weight: 600;
-  color: var(--text);
+  border-bottom-color: var(--raised-border);
 }
-
-td { color: var(--text); }
 
 kbd {
-  font-family: "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-size: 0.8em;
-  padding: 0.14em 0.45em 0.2em;
-  background: var(--kbd-bg);
-  border: 1px solid var(--kbd-border);
+  padding: 1px 6px 2px;
+  background: var(--raised);
+  border: 1px solid var(--raised-border);
   border-bottom-width: 2px;
-  border-radius: 5px;
+  border-radius: 6px;
   color: var(--text-2);
 }
+
+.notice { font-size: 13px; color: var(--text-3); }
 
 /* ---------- Code ---------- */
 
 code, pre, samp {
-  font-family: "Cascadia Mono", Consolas, monospace;
+  font-family: var(--font-mono);
   font-variant-ligatures: none;
 }
 
-/* Inline code in text */
+/* Inline code in prose; a chip that wraps stays a chip on each line. */
 :not(pre) > code {
-  font-size: 0.86em;
-  padding: 0.14em 0.4em;
-  background: var(--inline-code-bg);
-  border-radius: 4px;
-  color: var(--code-text);
+  font-size: 0.87em;
+  padding: 1px 6px;
+  background: var(--raised);
+  border: 1px solid var(--raised-border);
+  border-radius: 6px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
 }
 
 /* Fenced blocks in Markdown */
 pre.block {
-  margin: 0 0 1.15em;
-  padding: 14px 16px;
-  background: var(--code-bg);
-  border: 1px solid var(--code-border);
+  margin: 0 0 16px;
+  padding: 12px 16px;
+  background: var(--raised);
+  border: 1px solid var(--raised-border);
   border-radius: 8px;
   overflow-x: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--thumb) transparent;
 }
 
 pre.block > code {
   display: block;
-  font-size: 0.8125rem;
+  font-size: 13px;
   line-height: 1.6;
-  color: var(--code-text);
-  background: none;
-  padding: 0;
 }
 
 /* ---------- Standalone code document ---------- */
 
+/* The root scrolls both ways, so the horizontal bar sits at the window's
+   edge, and the gutter stays put while long lines slide under it. */
 .code-doc {
   display: flex;
   align-items: flex-start;
-  padding: 18px 0 48px;
-  font-size: 0.8125rem;
+  width: max-content;
+  min-width: 100%;
+  padding: 16px 0 48px;
+  font-size: 13px;
   line-height: 1.6;
 }
 
@@ -292,22 +261,19 @@ pre.block > code {
 }
 
 .code-doc .gutter {
+  position: sticky;
+  left: 0;
   flex: none;
-  padding: 0 14px 0 18px;
+  padding: 0 16px 0 20px;
   text-align: right;
-  color: var(--ln);
+  color: var(--text-3);
+  background: var(--canvas);
   user-select: none;
-  -webkit-user-select: none;
 }
 
 .code-doc .src {
   flex: 1;
-  min-width: 0;
   padding-right: 24px;
-  overflow-x: auto;
-  color: var(--code-text);
-  scrollbar-width: thin;
-  scrollbar-color: var(--thumb) transparent;
 }
 
 /* ---------- Syntax tokens ---------- */
@@ -327,4 +293,49 @@ pre.block > code {
 .tk-invalid   { color: var(--tk-invalid); }
 
 """;
+
+    // Syntax hues are the file's content, not chrome; the neutral roles
+    // (comments, operators, punctuation) still come from the palette.
+    private static string SyntaxTokens(ThemePalette p) => p.IsDark
+        ? $$"""
+:root {
+  --tk-comment: {{Hex(p.TextTertiary)}};
+  --tk-keyword: #7FA3F0;
+  --tk-string: #D7A97C;
+  --tk-number: #9FCBAB;
+  --tk-function: #BBA7EE;
+  --tk-type: #6FC4BE;
+  --tk-constant: #86BFF5;
+  --tk-property: #9BB2D8;
+  --tk-tag: #7FA3F0;
+  --tk-attribute: #D3BC8A;
+  --tk-operator: {{Hex(p.TextSecondary)}};
+  --tk-punct: {{Hex(p.TextTertiary)}};
+  --tk-invalid: #E2807C;
+}
+
+"""
+        : $$"""
+:root {
+  --tk-comment: {{Hex(p.TextTertiary)}};
+  --tk-keyword: #2F5FD0;
+  --tk-string: #A9622F;
+  --tk-number: #3E7D52;
+  --tk-function: #6E42BF;
+  --tk-type: #1D7A74;
+  --tk-constant: #205FB8;
+  --tk-property: #4A5B82;
+  --tk-tag: #2F5FD0;
+  --tk-attribute: #8A6A1F;
+  --tk-operator: {{Hex(p.TextSecondary)}};
+  --tk-punct: {{Hex(p.TextTertiary)}};
+  --tk-invalid: #BE4B43;
+}
+
+""";
+
+    internal static string Hex(Color c) => $"#{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    internal static string Rgba(Color c, double alpha) =>
+        $"rgba({c.R},{c.G},{c.B},{alpha.ToString("0.###", CultureInfo.InvariantCulture)})";
 }

@@ -125,7 +125,7 @@ tags:
         var path = Path.Combine(temp.Path, "settings.json");
         File.WriteAllText(path, "{\"b\":1,\"a\":[2,3]}");
 
-        var document = GeneratedHtmlPreview.TryBuildCode(path);
+        var document = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         Assert.NotNull(document);
         var html = File.ReadAllText(document!.HtmlPath);
@@ -140,12 +140,12 @@ tags:
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "cached.json");
         File.WriteAllText(path, "{\"ready\":true}");
-        var first = GeneratedHtmlPreview.TryBuildCode(path);
+        var first = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
         Assert.NotNull(first);
         const string marker = "<html>cache-sentinel</html>";
         File.WriteAllText(first!.HtmlPath, marker);
 
-        var second = GeneratedHtmlPreview.TryBuildCode(path);
+        var second = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         Assert.NotNull(second);
         Assert.Equal(first.HtmlPath, second!.HtmlPath);
@@ -159,11 +159,11 @@ tags:
         var path = Path.Combine(temp.Path, "preserved.json");
         File.WriteAllText(path, "{\"value\":\"AAAA\"}");
         var modified = File.GetLastWriteTimeUtc(path);
-        var first = GeneratedHtmlPreview.TryBuildCode(path);
+        var first = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         File.WriteAllText(path, "{\"value\":\"BBBB\"}");
         File.SetLastWriteTimeUtc(path, modified);
-        var second = GeneratedHtmlPreview.TryBuildCode(path);
+        var second = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         Assert.NotNull(first);
         Assert.NotNull(second);
@@ -181,7 +181,7 @@ tags:
         cancellation.Cancel();
 
         Assert.Throws<OperationCanceledException>(() =>
-            GeneratedHtmlPreview.TryBuildCode(path, cancellation.Token));
+            GeneratedHtmlPreview.TryBuildCodeForPreview(path, cancellation.Token));
     }
 
     [Fact]
@@ -251,11 +251,11 @@ tags:
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "repair.json");
         File.WriteAllText(path, "{\"ready\":true}");
-        var first = GeneratedHtmlPreview.TryBuildCode(path);
+        var first = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
         Assert.NotNull(first);
         File.WriteAllText(first!.HtmlPath, "<html>truncated");
 
-        var repaired = GeneratedHtmlPreview.TryBuildCode(path);
+        var repaired = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         Assert.NotNull(repaired);
         Assert.EndsWith("</html>", File.ReadAllText(repaired!.HtmlPath), StringComparison.Ordinal);
@@ -271,6 +271,6 @@ tags:
         var path = Path.Combine(temp.Path, fileName);
         File.WriteAllText(path, "one,two\nthree,four");
 
-        Assert.Null(GeneratedHtmlPreview.TryBuildCode(path));
+        Assert.Null(GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document);
     }
 }

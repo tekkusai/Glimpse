@@ -1,4 +1,5 @@
 ﻿using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -226,20 +227,20 @@ public sealed class PreviewChromeRegressionTests
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var toggleBody = ReadMethod(windowSource, "public bool TryToggleMediaPlayback");
         var messageBody = ReadMethod(windowSource, "private void OnMediaMessage");
-        var mediaHtmlBody = ReadMethod(windowSource, "private static Uri WriteMediaHtml");
 
-        Assert.Contains("window.glimpseToggleMedia", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.Contains("AbortError", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.Contains("NotAllowedError", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.Contains("document.body.classList.add('blocked')", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.Contains("window.chrome.webview.postMessage({ error: media.error ? media.error.code : 'play', reason })", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.Contains("media.addEventListener('error', () => reportPlayFailure", mediaHtmlBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("media.play().catch(() => {})", mediaHtmlBody, StringComparison.Ordinal);
+        // The player reports an engine failure to the host, which owns the
+        // failure card; the page never keeps a dead player of its own.
+        foreach (var page in new[] { MediaPlayerPage.Page(isAudio: true, Theme.Dark), MediaPlayerPage.Page(isAudio: false, Theme.Light) })
+        {
+            Assert.Contains("window.glimpseToggleMedia =", page, StringComparison.Ordinal);
+            Assert.Contains("media.addEventListener('error', () => post({ error:", page, StringComparison.Ordinal);
+        }
+
         Assert.Contains("window.glimpseToggleMedia", toggleBody, StringComparison.Ordinal);
         Assert.Contains("JsonValueKind.Number", messageBody, StringComparison.Ordinal);
         // The card names the outcome and gives codec-specific help only
         // after the media engine fails and the container confirms it.
-        Assert.Contains("Glimpse can't play this file", windowSource, StringComparison.Ordinal);
+        Assert.Contains("{Branding.Name} can't play this file", windowSource, StringComparison.Ordinal);
         Assert.Contains("Mp4CodecSniffer.TryRead(path)", messageBody, StringComparison.Ordinal);
         Assert.Contains("BuildMediaFailurePreview(path, codecs)", messageBody, StringComparison.Ordinal);
         Assert.Contains("MediaCodecStoreAction(codecs)", windowSource, StringComparison.Ordinal);
@@ -266,9 +267,7 @@ public sealed class PreviewChromeRegressionTests
     [Fact]
     public void MediaSkipButtonsUseDirectionalGlyphs()
     {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-
-        Assert.Contains("|v20", windowSource, StringComparison.Ordinal);
+        var windowSource = ReadSource(@"SpacePreview\Preview\MediaPlayerPage.cs");
 
         // The skip glyphs are true mirrors on a circle CONCENTRIC with the
         // "15" label (center 12,12.45 r 7). The old art fit a lopsided arc
@@ -404,7 +403,7 @@ public sealed class PreviewChromeRegressionTests
         var epubBody = ReadMethod(windowSource, "private FrameworkElement BuildEpubWebPreview");
         var pdfBody = ReadMethod(windowSource, "private FrameworkElement BuildPdfWebPreview");
         var convertedBody = ReadMethod(windowSource, "private FrameworkElement BuildConvertedOfficePreview");
-        var mediaBody = ReadMethod(windowSource, "private FrameworkElement BuildMediaPreview");
+        var mediaBody = ReadMethod(windowSource, "private async Task<FrameworkElement> BuildMediaPreviewAsync");
         var stagedPdfBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
         var paintBody = ReadMethod(windowSource, "private static async Task<bool> WaitForWebPaintReadyAsync");
         var revealBody = ReadMethod(windowSource, "private void RevealStagedWebContent");

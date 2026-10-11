@@ -217,7 +217,7 @@ public sealed class HookPathArchitectureTests
     public void WebPreviewsRejectStaleCallbacksAndReuseKnownVideoGeometry()
     {
         var createWebView = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CreateWebView");
-        var mediaBuilder = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildMediaPreview");
+        var mediaBuilder = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildMediaPreviewAsync");
         var mediaMessage = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "OnMediaMessage");
         var exitFillSign = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ExitFillSignMode");
 

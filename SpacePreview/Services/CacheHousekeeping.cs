@@ -14,7 +14,8 @@ namespace SpacePreview.Services;
 internal static class CacheHousekeeping
 {
     /// <summary>Every regenerable folder under the data root. One not listed here grows forever.</summary>
-    internal static readonly string[] Folders = ["DocumentCache", "OfficeMedia", "PdfRail", "MediaArtwork"];
+    internal static readonly string[] Folders =
+        ["DocumentCache", "OfficeMedia", "PdfRail", "MediaArtwork", "MarkdownHtml", "CodeHtml", "EpubHtml", "MediaHtml", "ImageHtml"];
 
     /// <summary>Folders earlier releases wrote and nothing reads any more.</summary>
     private static readonly string[] Retired = ["AppPackageHtml"];
