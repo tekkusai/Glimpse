@@ -35,6 +35,10 @@ internal static class PdfFillSignWriter
 {
     private const int MaxPages = 3000;
     private const int MaxObjects = 200000;
+
+    // An object stream inflates to this much at most; past it, its objects
+    // stay out of reach as before.
+    private const int MaxPackedBytes = 64 * 1024 * 1024;
     private const int MaxImagePixels = 24_000_000;
     private const long MaxPdfBytes = 256L * 1024 * 1024;
 
@@ -974,6 +978,12 @@ internal static class PdfFillSignWriter
             WriteAscii(output, "\nendobj\n");
         }
 
+        if (document.XrefIsStream)
+        {
+            WriteCrossReferenceStream(output, document, offsets);
+            return;
+        }
+
         var xrefOffset = output.Position;
         WriteAscii(output, "xref\n");
         foreach (var group in ConsecutiveGroups(offsets.Keys))
@@ -998,6 +1008,53 @@ internal static class PdfFillSignWriter
         }
 
         WriteAscii(output, $" /Prev {document.PreviousXrefOffset} >>\nstartxref\n{xrefOffset}\n%%EOF\n");
+    }
+
+    /// <summary>
+    /// The update's index as a cross-reference stream, for a file whose
+    /// newest section is one. pdfium does not let a table override an object
+    /// an older stream packed away, so ink placed on such a page vanished
+    /// in Chrome, Edge and Glimpse itself.
+    /// </summary>
+    private static void WriteCrossReferenceStream(Stream output, PdfDocumentModel document, SortedDictionary<PdfRef, long> offsets)
+    {
+        var self = new PdfRef(Math.Max(document.MaxObjectNumber, offsets.Keys.Max(item => item.Number)) + 1, 0);
+        offsets[self] = output.Position;
+        var index = new StringBuilder();
+        using var entries = new MemoryStream();
+        foreach (var group in ConsecutiveGroups(offsets.Keys))
+        {
+            index.Append(CultureInfo.InvariantCulture, $"{group[0].Number} {group.Count} ");
+            foreach (var reference in group)
+            {
+                // Type 1, an 8-byte offset, a 2-byte generation: /W [1 8 2].
+                entries.WriteByte(1);
+                for (var shift = 56; shift >= 0; shift -= 8)
+                {
+                    entries.WriteByte((byte)(offsets[reference] >> shift));
+                }
+
+                entries.WriteByte((byte)(reference.Generation >> 8));
+                entries.WriteByte((byte)reference.Generation);
+            }
+        }
+
+        var dictionary = new StringBuilder();
+        dictionary.Append(CultureInfo.InvariantCulture, $"<< /Type /XRef /Size {self.Number + 1} /W [1 8 2] /Index [{index.ToString().TrimEnd()}] /Root {document.Root} R");
+        if (document.Info is { } info)
+        {
+            dictionary.Append(CultureInfo.InvariantCulture, $" /Info {info} R");
+        }
+
+        if (!string.IsNullOrWhiteSpace(document.IdText))
+        {
+            dictionary.Append(CultureInfo.InvariantCulture, $" /ID {document.IdText}");
+        }
+
+        dictionary.Append(CultureInfo.InvariantCulture, $" /Prev {document.PreviousXrefOffset} /Length {entries.Length} >>");
+        WriteAscii(output, $"{self.Number} 0 obj\n{dictionary}\nstream\n");
+        output.Write(entries.GetBuffer(), 0, (int)entries.Length);
+        WriteAscii(output, $"\nendstream\nendobj\nstartxref\n{offsets[self]}\n%%EOF\n");
     }
 
     private static IEnumerable<List<PdfRef>> ConsecutiveGroups(IEnumerable<PdfRef> refs)
@@ -1249,6 +1306,7 @@ internal static class PdfFillSignWriter
             PdfRef? info,
             string? idText,
             long previousXrefOffset,
+            bool xrefIsStream,
             int maxObjectNumber,
             List<PdfPageInfo> pages)
         {
@@ -1258,6 +1316,7 @@ internal static class PdfFillSignWriter
             Info = info;
             IdText = idText;
             PreviousXrefOffset = previousXrefOffset;
+            XrefIsStream = xrefIsStream;
             MaxObjectNumber = maxObjectNumber;
             Pages = pages;
         }
@@ -1273,6 +1332,9 @@ internal static class PdfFillSignWriter
         public string? IdText { get; }
 
         public long PreviousXrefOffset { get; }
+
+        /// <summary>The newest cross-reference section is a stream, not a table.</summary>
+        public bool XrefIsStream { get; }
 
         public int MaxObjectNumber { get; }
 
@@ -1299,7 +1361,7 @@ internal static class PdfFillSignWriter
 
             var text = Encoding.Latin1.GetString(bytes);
             var previousXref = ReadPreviousXrefOffset(text);
-            var trailer = ReadTrailerStart(text, previousXref);
+            var (trailer, xrefIsStream) = ReadTrailerStart(text, previousXref);
             if (!TryReadNamedValue(text, trailer, "Root", out var rootText, out _)
                 || !TryParseReference(rootText, out var root))
             {
@@ -1339,6 +1401,7 @@ internal static class PdfFillSignWriter
                 info,
                 idText,
                 previousXref,
+                xrefIsStream,
                 maxObjectNumber,
                 pages);
         }
@@ -1348,7 +1411,7 @@ internal static class PdfFillSignWriter
         /// after an xref table, or the xref stream's own. Root and Size are
         /// read there alone, as the viewer reads them.
         /// </summary>
-        private static int ReadTrailerStart(string text, long xrefOffset)
+        private static (int Start, bool Stream) ReadTrailerStart(string text, long xrefOffset)
         {
             var at = xrefOffset > 0 && xrefOffset < text.Length ? SkipSpace(text, (int)xrefOffset) : -1;
             if (At(text, at, "xref"))
@@ -1356,7 +1419,7 @@ internal static class PdfFillSignWriter
                 var trailer = text.IndexOf("trailer", at, StringComparison.Ordinal);
                 if (trailer >= 0)
                 {
-                    return trailer + "trailer".Length;
+                    return (trailer + "trailer".Length, false);
                 }
             }
             else if (at >= 0 && ObjectHeaderRegex.Match(text, at) is { Success: true } header)
@@ -1364,7 +1427,7 @@ internal static class PdfFillSignWriter
                 var dictionary = header.Index + header.Length;
                 if (TryReadNamedValue(text, dictionary, "Type", out var type, out _) && NameValue(type) == "XRef")
                 {
-                    return dictionary;
+                    return (dictionary, true);
                 }
             }
 
@@ -1374,7 +1437,7 @@ internal static class PdfFillSignWriter
             var last = text.LastIndexOf("trailer", StringComparison.Ordinal);
             if (last >= 0 && At(text, SkipSpace(text, last + "trailer".Length), "<<"))
             {
-                return last + "trailer".Length;
+                return (last + "trailer".Length, false);
             }
 
             throw new InvalidOperationException(UnsupportedStructure);
@@ -1429,7 +1492,126 @@ internal static class PdfFillSignWriter
                 }
             }
 
+            foreach (var container in objects.Values.Where(item => TryReadType(item.Body, out var type) && type == "ObjStm").ToList())
+            {
+                ReadPackedObjects(objects, container);
+            }
+
             return objects;
+        }
+
+        /// <summary>
+        /// The objects packed in a compressed object stream. Acrobat and Word
+        /// keep a linearized file's page tree there, and without it the pages
+        /// have no order. Each takes its stream's place in the file, so a
+        /// later plain definition still wins. A stream that doesn't read
+        /// cleanly adds nothing.
+        /// </summary>
+        private static void ReadPackedObjects(Dictionary<PdfRef, PdfObject> objects, PdfObject container)
+        {
+            var body = container.Body;
+            var dictionaryStart = SkipSpace(body, 0);
+            var dictionaryEnd = SkipObject(body, dictionaryStart);
+            var dictionary = dictionaryEnd < 0 ? null : body[dictionaryStart..dictionaryEnd];
+            if (dictionary is null
+                || !int.TryParse(Resolve(objects, ValueOf(dictionary, "N")), NumberStyles.None, CultureInfo.InvariantCulture, out var count)
+                || !int.TryParse(Resolve(objects, ValueOf(dictionary, "First")), NumberStyles.None, CultureInfo.InvariantCulture, out var first)
+                || count <= 0
+                || count > MaxObjects
+                || ValueOf(dictionary, "DecodeParms") is not null
+                || NameValue(ValueOf(dictionary, "Filter")) is not ("FlateDecode" or null))
+            {
+                return;
+            }
+
+            var keyword = body.IndexOf("stream", dictionaryEnd, StringComparison.Ordinal);
+            if (keyword < 0)
+            {
+                return;
+            }
+
+            var dataStart = keyword + "stream".Length;
+            dataStart += At(body, dataStart, "\r\n") ? 2 : At(body, dataStart, "\n") ? 1 : 0;
+            var dataEnd = int.TryParse(Resolve(objects, ValueOf(dictionary, "Length")), NumberStyles.None, CultureInfo.InvariantCulture, out var length)
+                && length <= body.Length - dataStart
+                    ? dataStart + length
+                    : body.LastIndexOf("endstream", StringComparison.Ordinal);
+            if (dataEnd < dataStart)
+            {
+                return;
+            }
+
+            string data;
+            try
+            {
+                var raw = Encoding.Latin1.GetBytes(body[dataStart..dataEnd]);
+                if (ValueOf(dictionary, "Filter") is null)
+                {
+                    data = Encoding.Latin1.GetString(raw);
+                }
+                else
+                {
+                    using var zlib = new ZLibStream(new MemoryStream(raw), CompressionMode.Decompress);
+                    using var inflated = new MemoryStream();
+                    var buffer = new byte[16 * 1024];
+                    int read;
+                    while ((read = zlib.Read(buffer, 0, buffer.Length)) > 0)
+                    {
+                        inflated.Write(buffer, 0, read);
+                        if (inflated.Length > MaxPackedBytes)
+                        {
+                            return;
+                        }
+                    }
+
+                    data = Encoding.Latin1.GetString(inflated.GetBuffer(), 0, (int)inflated.Length);
+                }
+            }
+            catch (InvalidDataException)
+            {
+                return;
+            }
+
+            if (first <= 0 || first > data.Length)
+            {
+                return;
+            }
+
+            var header = data[..first].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+            if (header.Length < count * 2)
+            {
+                return;
+            }
+
+            var entries = new (int Number, int Offset)[count];
+            for (var i = 0; i < count; i++)
+            {
+                if (!int.TryParse(header[i * 2], NumberStyles.None, CultureInfo.InvariantCulture, out var number)
+                    || !int.TryParse(header[i * 2 + 1], NumberStyles.None, CultureInfo.InvariantCulture, out var offset)
+                    || offset > data.Length - first
+                    || (i > 0 && offset < entries[i - 1].Offset))
+                {
+                    return;
+                }
+
+                entries[i] = (number, offset);
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                var start = first + entries[i].Offset;
+                var end = i + 1 < count ? first + entries[i + 1].Offset : data.Length;
+                var packed = new PdfObject(new PdfRef(entries[i].Number, 0), data[start..end], container.Position);
+                if (!objects.TryGetValue(packed.Ref, out var prior) || packed.Position > prior.Position)
+                {
+                    if (objects.Count > MaxObjects)
+                    {
+                        throw new InvalidOperationException(UnsupportedStructure);
+                    }
+
+                    objects[packed.Ref] = packed;
+                }
+            }
         }
 
         private static long ReadPreviousXrefOffset(string text)

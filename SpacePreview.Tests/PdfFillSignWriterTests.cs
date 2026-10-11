@@ -155,11 +155,14 @@ public sealed class PdfFillSignWriterTests
     // Which page: a save puts ink on the page the user saw, or refuses.
     // ------------------------------------------------------------------
 
+    // Acrobat and Word lay files out this way: ten of Mark's PDFs that 2.0
+    // signed were refused by 3.0.0, and 2.0 took the pages in file order.
     [Fact]
-    public void ATwoPageFileWhoseTreeIsPackedAwayIsRefusedBeforeAnythingIsWritten()
+    public void ATwoPageFileWhoseTreeIsPackedAwaySignsThePageTheViewerShowsFirst()
     {
         using var temp = new TempDirectory();
         var source = Path.Combine(temp.Path, "packed.pdf");
+        var output = Path.Combine(temp.Path, "packed-signed.pdf");
 
         // The catalog and page tree sit in an object stream. The two pages
         // are plain objects, stored second page first.
@@ -176,14 +179,21 @@ public sealed class PdfFillSignWriterTests
         Assert.NotNull(first);
         Assert.True(first!.Width > first.Height, "the fixture's first page is the wide one");
 
-        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+        Assert.Equal(new PdfSignCheck(2, null), PdfFillSignWriter.Preflight(source));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
     }
 
+    // A page packed in an object stream is rewritten as a plain object. Only
+    // a cross-reference stream makes pdfium take the new one; under a table
+    // the ink vanished.
     [Fact]
-    public void APageTreeWithAPageOutOfReachIsRefused()
+    public void APackedPageSignsAndItsInkShows()
     {
         using var temp = new TempDirectory();
         var source = Path.Combine(temp.Path, "mixed.pdf");
+        var output = Path.Combine(temp.Path, "mixed-signed.pdf");
 
         // Page 1 is packed in an object stream, page 2 is a plain object.
         new PdfBuilder("1.5")
@@ -199,7 +209,10 @@ public sealed class PdfFillSignWriterTests
         Assert.NotNull(first);
         Assert.True(first!.Height > first.Width, "the fixture's first page is the packed, tall one");
 
-        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+        Assert.Contains("/Type /XRef", Encoding.Latin1.GetString(File.ReadAllBytes(output))[(int)new FileInfo(source).Length..], StringComparison.Ordinal);
     }
 
     [Fact]
