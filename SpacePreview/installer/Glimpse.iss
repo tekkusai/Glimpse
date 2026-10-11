@@ -36,7 +36,14 @@ OutputBaseFilename=Glimpse-Setup-{#MyAppVersion}
 SetupIconFile=..\Assets\Glimpse.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
-WizardStyle=modern
+; Light or dark with Windows, and no pictures: Inno's own software box is
+; not Glimpse. A blank image keeps the wizard's layout (Inno Setup 6.7 help,
+; WizardImageFile). Under dynamic, an unset dark image means Inno's dark box.
+WizardStyle=modern dynamic
+WizardImageFile=
+WizardSmallImageFile=
+WizardImageFileDynamicDark=
+WizardSmallImageFileDynamicDark=
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=no
