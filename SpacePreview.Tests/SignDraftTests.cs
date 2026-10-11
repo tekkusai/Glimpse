@@ -443,6 +443,29 @@ public sealed class SignDraftTests
         Assert.Contains(Descendants(surface).OfType<TextBlock>(), block => block.Text == "Your earlier work is back.");
     });
 
+    [Fact]
+    public Task TheLastPageAskedForIsThePageShownAndKept() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root, pages: 3);
+        SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 1, [Date(1)]);
+        var slow = new Dictionary<int, TaskCompletionSource<PdfPreviewPage?>> { [0] = new(), [2] = new() };
+        var surface = await EnterAsync(window, pdf, render: index =>
+            slow.TryGetValue(index, out var page) ? page.Task : Task.FromResult<PdfPreviewPage?>(BlankPage()));
+        Assert.Equal(1, surface.PageIndex);
+
+        // Next, then Previous; the page asked for first arrives last.
+        Fields.Get<Button>(surface, "_nextPageChip").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        Fields.Get<Button>(surface, "_previousPageChip").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        slow[0].SetResult(BlankPage());
+        await SettleAsync(window);
+        slow[2].SetResult(BlankPage());
+        await SettleAsync(window);
+
+        Assert.Equal(0, surface.PageIndex);
+        SignDraftKeeper.FlushAll();
+        Assert.Equal(0, SignDrafts.Load(pdf).Draft!.PageIndex);
+    });
+
     [Theory]
     [InlineData("Discard")]
     [InlineData("Save a signed copy")]
@@ -662,7 +685,11 @@ public sealed class SignDraftTests
     /// page render is stood in for, since pdfium never runs here, and notes
     /// each page it is asked for.
     /// </summary>
-    private static async Task<FillSignSurface> EnterAsync(PreviewWindow window, string pdf, List<int>? rendered = null)
+    private static async Task<FillSignSurface> EnterAsync(
+        PreviewWindow window,
+        string pdf,
+        List<int>? rendered = null,
+        Func<int, Task<PdfPreviewPage?>>? render = null)
     {
         Fields.Set(window, "CurrentPath", pdf);
         Fields.Set(window, "_fillSignPath", pdf);
@@ -670,12 +697,16 @@ public sealed class SignDraftTests
         window.RenderSignPage = (_, index) =>
         {
             rendered?.Add(index);
-            return Task.FromResult<PdfPreviewPage?>(BlankPage());
+            return render?.Invoke(index) ?? Task.FromResult<PdfPreviewPage?>(BlankPage());
         };
 
         await (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
         return Fields.Get<FillSignSurface>(window, "_fillSignSurface");
     }
+
+    /// <summary>Lets every continuation already queued on the window's thread run.</summary>
+    private static Task SettleAsync(PreviewWindow window) =>
+        window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle).Task;
 
     private static string SignablePdf(string root, int pages = 1)
     {

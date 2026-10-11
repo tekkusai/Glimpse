@@ -39,6 +39,7 @@ public partial class PreviewWindow
     // The session's draft, and whether the loaded PDF has one waiting.
     private SignDraftKeeper? _signDraft;
     private bool _hasSignDraft;
+    private long _signPageRequest;
 
     /// <summary>Sign mode's page render: a pdfium helper, never this process. Tests stand in for it.</summary>
     internal Func<string, int, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
@@ -183,11 +184,20 @@ public partial class PreviewWindow
             return;
         }
 
+        // Pages render at their own pace; only the last one asked for shows.
+        var request = ++_signPageRequest;
         var page = await pages.Get(pageIndex);
-        if (page is null || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
+        if (page is null)
         {
             pages.Forget(pageIndex);
             DiagnosticLog.Write($"fill-sign page render failed page={pageIndex + 1}");
+        }
+
+        if (page is null
+            || request != _signPageRequest
+            || !IsCurrentContentPath(path)
+            || !ReferenceEquals(_fillSignSurface, surface))
+        {
             return;
         }
 
