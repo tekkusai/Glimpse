@@ -69,7 +69,7 @@ public sealed class AppEndTests
     private static T Internal<T>(object argument) =>
         (T)Activator.CreateInstance(typeof(T), BindingFlags.Instance | BindingFlags.NonPublic, null, [argument], null)!;
 
-    private static async Task<bool> LogEventuallyContainsAsync(string text)
+    internal static async Task<bool> LogEventuallyContainsAsync(string text)
     {
         for (var attempt = 0; attempt < 100; attempt++)
         {

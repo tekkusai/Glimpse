@@ -373,8 +373,11 @@ internal sealed class SignDraftKeeper
         }
     }
 
-    /// <summary>The session ends with its work unsaved: the work is written now, and nothing after.</summary>
-    public void Close() => End(keep: true);
+    /// <summary>
+    /// The session ends with its work unsaved: the work is written now, and
+    /// nothing after. True when there was work to keep.
+    /// </summary>
+    public bool Close() => End(keep: true);
 
     /// <summary>The work was saved or thrown away: the draft goes, and nothing more is written.</summary>
     public void Discard() => End(keep: false);
@@ -424,14 +427,11 @@ internal sealed class SignDraftKeeper
         }
     }
 
-    private void End(bool keep)
+    private bool End(bool keep)
     {
         lock (_writing)
         {
-            if (keep)
-            {
-                Write(onlyChanged: false);
-            }
+            var kept = keep && Write(onlyChanged: false);
 
             // A session closed first and saved after still takes its draft
             // with it, once.
@@ -451,6 +451,8 @@ internal sealed class SignDraftKeeper
             {
                 SignDrafts.Delete(_pdfPath);
             }
+
+            return kept;
         }
     }
 }

@@ -125,8 +125,16 @@ public partial class PreviewWindow : Window
         StateChanged += (_, _) => SyncNativeWindowState();
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
         Closed += (_, _) => _warmBrowser.Dispose();
-        // A close past the leave gate is the app ending: placed work goes to its draft now.
-        Closed += (_, _) => _signDraft?.Close();
+        // A close past the leave gate is the app ending: placed work goes to
+        // its draft now, and a sign mode still opening gives up.
+        Closed += (_, _) =>
+        {
+            Interlocked.Increment(ref _loadVersion);
+            if (_signDraft?.Close() == true)
+            {
+                DiagnosticLog.Write("window close kept unsaved signing work as a draft");
+            }
+        };
 
         // One line per click: where it landed and who owned the capture.
         // This is the first question for any "clicks stopped working" report.

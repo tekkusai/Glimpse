@@ -44,6 +44,9 @@ public partial class PreviewWindow
     internal Func<string, int, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
         (path, index) => PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
 
+    /// <summary>The writer's check before any work goes on; tests hold it to open the gap it leaves.</summary>
+    internal Func<string, PdfSignCheck> CheckSignable { get; set; } = PdfFillSignWriter.Preflight;
+
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
     internal void RequestFillSignEscape() => _fillSignSurface?.HandleEscape();
@@ -84,7 +87,7 @@ public partial class PreviewWindow
         // window's work on it, may have moved on since. The writer's check
         // starts now too, so kept work comes back with the page, not after.
         var draftLoad = Task.Run(() => SignDrafts.Load(path));
-        var preflight = Task.Run(() => PdfFillSignWriter.Preflight(path));
+        var preflight = Task.Run(() => CheckSignable(path));
         // Asked of the viewer now: a document scrolled by wheel alone has a
         // stale rail page.
         var (currentPage, totalPages) = await ReadPdfPositionAsync();
@@ -134,7 +137,7 @@ public partial class PreviewWindow
         // update says why before any work goes onto it, and the page count
         // is the writer's own, not whatever the rail had loaded so far.
         var check = await preflight;
-        if (!ReferenceEquals(_fillSignSurface, surface))
+        if (version != _loadVersion || !ReferenceEquals(_fillSignSurface, surface))
         {
             return;
         }
@@ -164,6 +167,11 @@ public partial class PreviewWindow
         {
             keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
             _signDraft = keeper;
+            // Work placed while the check ran had no keeper to hear it.
+            if (surface.Placements.Count != (draft?.Placements.Count ?? 0) || surface.PageIndex != pageIndex)
+            {
+                keeper.Update(surface.PageIndex, surface.Placements);
+            }
         }
 
         surface.ApplyCheck(check);

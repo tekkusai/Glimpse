@@ -517,6 +517,56 @@ public sealed class SignDraftTests
         window.Close();
 
         Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+        // A normal shutdown closes windows before OnExit; this is its log line.
+        Assert.True(await AppEndTests.LogEventuallyContainsAsync("window close kept unsaved signing work as a draft"));
+    });
+
+    [Fact]
+    public Task AWindowClosedWhileSignModeOpensLeavesNoSession() => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        var pdf = SignablePdf(root);
+        WriteDateDraft(pdf);
+        var page = new TaskCompletionSource<PdfPreviewPage?>();
+        Fields.Set(window, "CurrentPath", pdf);
+        Fields.Set(window, "_fillSignPath", pdf);
+        window.PreviewContent.Content ??= new Border();
+        window.RenderSignPage = (_, _) => page.Task;
+
+        var entering = (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
+        window.Close();
+        page.SetResult(BlankPage());
+        await entering;
+
+        Assert.Null(Fields.Get<object?>(window, "_fillSignSurface"));
+        Assert.Null(Fields.Get<object?>(window, "_signDraft"));
+
+        // The draft is finished elsewhere; the app's end must not bring it back.
+        SignDrafts.Delete(pdf);
+        Assert.False(SignDraftKeeper.FlushAll());
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+    });
+
+    [Fact]
+    public Task WorkPlacedWhileTheFileIsCheckedReachesTheDraft() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        using var checking = new ManualResetEventSlim();
+        window.CheckSignable = path =>
+        {
+            checking.Wait(TimeSpan.FromSeconds(10));
+            return PdfFillSignWriter.Preflight(path);
+        };
+
+        var entering = EnterAsync(window, pdf);
+        Assert.True(await EventuallyAsync(() => Fields.Get<object?>(window, "_fillSignSurface") is not null));
+        var surface = Fields.Get<FillSignSurface>(window, "_fillSignSurface");
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        checking.Set();
+        await entering;
+
+        // No later change, no close, no app end: the pause alone writes it.
+        Assert.True(await EventuallyAsync(() => File.Exists(SignDrafts.PathFor(pdf))), "work placed during the check never reached its draft");
     });
 
     [Fact]
