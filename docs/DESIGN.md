@@ -50,10 +50,13 @@ Video always plays on black. Everything else follows the theme, including the
 audio player, spreadsheets and the PDF viewer's toolbar (WebView2's
 `PreferredColorScheme` follows the app theme).
 
-An open or pinned preview follows a theme change without reloading. Text and
-image canvases take their colors by resource. Each browser gets the new
-`PreferredColorScheme`, and the pages Glimpse writes carry both palettes,
-the second behind `prefers-color-scheme`, so they turn with it.
+An open or pinned preview follows a theme change without reloading. Every
+part Glimpse draws itself takes its colors by resource (`Theme.Themed`), and
+what a resource can't carry, like a shadow's strength, is set again on the
+change (`Theme.Follow`). Each browser gets the new `PreferredColorScheme`,
+and the pages Glimpse writes carry both palettes, the second behind
+`prefers-color-scheme`, so they turn with it. Fill & Sign keeps the colors
+it opened with.
 
 ## Type
 
@@ -201,6 +204,10 @@ archive open in place.
   did not choose.
 
 ## Web pages
+
+A user's own web page (`.html`, `.htm`) opens at a desktop browser's size,
+up to 1440 wide and 85 % of the work area tall, so its layout is the one its
+author designed rather than the tablet one.
 
 Pages Glimpse writes (code, markdown, text, media player, image viewer,
 spreadsheets, EPUB) take their colors from one CSS block generated from the

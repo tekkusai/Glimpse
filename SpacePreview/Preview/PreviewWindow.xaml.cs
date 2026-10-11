@@ -345,16 +345,10 @@ public partial class PreviewWindow : Window
 
     private static FrameworkElement BuildWelcomeContent()
     {
-        static T Themed<T>(T element, DependencyProperty property, string token) where T : FrameworkElement
-        {
-            element.SetResourceReference(property, token);
-            return element;
-        }
-
         var mark = BrandMark.Create(64);
         mark.HorizontalAlignment = HorizontalAlignment.Center;
 
-        var title = Themed(new TextBlock
+        var title = Theme.Themed(new TextBlock
         {
             Text = Branding.Name,
             FontSize = Metrics.FontDisplay,
@@ -363,7 +357,7 @@ public partial class PreviewWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center
         }, TextBlock.ForegroundProperty, "Theme.TextPrimary");
 
-        var tagline = Themed(new TextBlock
+        var tagline = Theme.Themed(new TextBlock
         {
             Text = Branding.Tagline,
             FontSize = Metrics.FontBody,
@@ -372,7 +366,7 @@ public partial class PreviewWindow : Window
         }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
         // The one key to learn: a plain raised key.
-        var keycap = Themed(Themed(new Border
+        var keycap = Theme.Themed(Theme.Themed(new Border
         {
             Width = 136,
             Height = 44,
@@ -380,7 +374,7 @@ public partial class PreviewWindow : Window
             Margin = new Thickness(0, 40, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
             BorderThickness = new Thickness(1),
-            Child = Themed(new TextBlock
+            Child = Theme.Themed(new TextBlock
             {
                 Text = "Space",
                 FontSize = Metrics.FontLabel,
@@ -390,7 +384,7 @@ public partial class PreviewWindow : Window
             }, TextBlock.ForegroundProperty, "Theme.TextPrimary")
         }, Border.BackgroundProperty, "Theme.RaisedBg"), Border.BorderBrushProperty, "Theme.RaisedBorder");
 
-        var lesson = Themed(new TextBlock
+        var lesson = Theme.Themed(new TextBlock
         {
             Text = "Select a file in Explorer or a file picker, then press Space.\nPress it again to close.",
             FontSize = Metrics.FontBody,
@@ -400,7 +394,7 @@ public partial class PreviewWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center
         }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
-        var hints = Themed(new TextBlock
+        var hints = Theme.Themed(new TextBlock
         {
             Text = "Arrow keys browse · Enter opens · Pin keeps a preview open",
             FontSize = Metrics.FontCaption,
@@ -408,7 +402,7 @@ public partial class PreviewWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center
         }, TextBlock.ForegroundProperty, "Theme.TextTertiary");
 
-        return Themed(new Grid
+        return Theme.Themed(new Grid
         {
             Children =
             {
