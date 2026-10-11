@@ -151,6 +151,26 @@ public sealed class FileKindsTests
         Assert.Equal("Aug 27, 2025", FileKinds.DescribeWhen(new DateTime(2025, 8, 27, 11, 0, 0), Now, culture));
     }
 
+    // A one-letter clock would be read as a standard format, which throws
+    // for H and h and means the whole short time for t.
+    [Theory]
+    [InlineData("H", "Today 16")]
+    [InlineData("h", "Today 4")]
+    [InlineData("t", "Today P")]
+    public void AOneLetterClockStillFormats(string pattern, string expected)
+    {
+        using var temp = new TempDirectory();
+        var culture = (System.Globalization.CultureInfo)System.Globalization.CultureInfo.GetCultureInfo("en-US").Clone();
+        culture.DateTimeFormat.ShortTimePattern = pattern;
+        var at = new DateTime(2026, 10, 10, 16, 35, 0);
+        var notes = Path.Combine(temp.Path, "notes.md");
+        File.WriteAllBytes(notes, new byte[5427]);
+        File.SetLastWriteTime(notes, at);
+
+        Assert.Equal(expected, FileKinds.DescribeWhen(at, Now, culture));
+        Assert.Equal($"5.3 KB · {expected}", FileKinds.Describe(new FileInfo(notes), null, Now, culture));
+    }
+
     [Fact]
     public void DetailsNameAKindOnlyWhereTheNameCannot()
     {

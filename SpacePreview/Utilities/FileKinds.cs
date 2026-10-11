@@ -351,7 +351,9 @@ internal static partial class FileKinds
     /// </summary>
     public static string DescribeWhen(DateTime when, DateTime now, CultureInfo culture)
     {
-        var time = when.ToString(culture.DateTimeFormat.ShortTimePattern, English);
+        // A one-letter pattern ("H") would be read as a standard format and
+        // throw; the empty quoted prefix keeps it custom and prints nothing.
+        var time = when.ToString("''" + culture.DateTimeFormat.ShortTimePattern, English);
         return (now.Date - when.Date).Days switch
         {
             0 => $"Today {time}",
