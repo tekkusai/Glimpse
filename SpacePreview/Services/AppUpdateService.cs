@@ -412,9 +412,9 @@ internal sealed partial class AppUpdateService : IDisposable
     /// <summary>
     /// The signature asset, when the release has exactly one at the pinned
     /// URL. One listed but still uploading fails the check, as a sidecar
-    /// would, and it is asked again later. Missing from a release whose
-    /// assets are all up is not a failed check: the release is skipped by
-    /// name.
+    /// would, and it is asked again later. Missing beside an uploaded
+    /// installer and sidecar is not a failed check: the release is skipped
+    /// by name.
     /// </summary>
     internal static Uri? FindSignatureUri(GitHubRelease release, AppUpdateRelease update)
     {
