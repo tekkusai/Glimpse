@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace SpacePreview.Utilities;
 
@@ -14,7 +15,7 @@ internal enum OfficeKind
     Spreadsheet
 }
 
-internal static class FileKinds
+internal static partial class FileKinds
 {
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -282,17 +283,6 @@ internal static class FileKinds
         }
     }
 
-    public static string FriendlyKind(string path)
-    {
-        if (Directory.Exists(path))
-        {
-            return "Folder";
-        }
-
-        var extension = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
-        return string.IsNullOrEmpty(extension) ? "File" : $"{extension} file";
-    }
-
     public static string FormatSize(long bytes)
     {
         string[] units = ["B", "KB", "MB", "GB", "TB"];
@@ -307,24 +297,60 @@ internal static class FileKinds
         return unit == 0 ? $"{bytes} B" : $"{size:0.#} {units[unit]}";
     }
 
-    public static string BuildSubtitle(string path)
+    /// <summary>
+    /// The header's details: a kind only where the name shows none (a
+    /// folder, a file without an extension), the size, the one
+    /// <paramref name="fact"/> the content knows, and when it last changed.
+    /// </summary>
+    public static string Describe(FileSystemInfo item, string? fact, DateTime now, CultureInfo culture)
     {
-        try
+        var parts = new List<string>(4);
+        if (item is FileInfo file)
         {
-            if (Directory.Exists(path))
+            if (string.IsNullOrEmpty(file.Extension))
             {
-                var info = new DirectoryInfo(path);
-                return $"Folder · Modified {info.LastWriteTime:g}";
+                parts.Add("File");
             }
 
-            var file = new FileInfo(path);
-            return $"{FriendlyKind(path)} · {FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
+            parts.Add(FormatSize(file.Length));
         }
-        catch
+        else
         {
-            return FriendlyKind(path);
+            parts.Add("Folder");
         }
+
+        if (!string.IsNullOrEmpty(fact))
+        {
+            parts.Add(fact);
+        }
+
+        parts.Add(DescribeWhen(item.LastWriteTime, now, culture));
+        return string.Join(" · ", parts);
     }
+
+    /// <summary>
+    /// A time as short as it can be: "Today 4:35 PM", "Yesterday 9:12 AM",
+    /// the weekday within a week, then "Aug 27", with the year only when it
+    /// is not this one. Time and month names come from <paramref name="culture"/>.
+    /// </summary>
+    public static string DescribeWhen(DateTime when, DateTime now, CultureInfo culture)
+    {
+        var format = culture.DateTimeFormat;
+        var time = when.ToString("t", culture);
+        return (now.Date - when.Date).Days switch
+        {
+            0 => $"Today {time}",
+            1 => $"Yesterday {time}",
+            > 1 and < 7 => $"{format.GetDayName(when.DayOfWeek)} {time}",
+            _ when when.Year == now.Year => when.ToString(ShortMonth(format.MonthDayPattern), culture),
+            _ => when.ToString(ShortMonth(WeekdayPattern().Replace(format.LongDatePattern, string.Empty)), culture)
+        };
+    }
+
+    private static string ShortMonth(string pattern) => pattern.Replace("MMMM", "MMM", StringComparison.Ordinal);
+
+    [GeneratedRegex(@"[\s,]*dddd[\s,]*")]
+    private static partial Regex WeekdayPattern();
 }
 
 internal sealed record TextPreview(string Text, bool Truncated, long TotalBytes);

@@ -114,4 +114,54 @@ public sealed class FileKindsTests
         Assert.NotNull(preview);
         Assert.Contains("Write-Output", preview!.Text);
     }
+
+    // Saturday, October 10, 2026, late afternoon.
+    private static readonly DateTime Now = new(2026, 10, 10, 17, 0, 0);
+
+    [Theory]
+    [InlineData("2026-10-10 16:35", "Today 4:35 PM")]
+    [InlineData("2026-10-09 09:12", "Yesterday 9:12 AM")]
+    [InlineData("2026-10-07 18:05", "Wednesday 6:05 PM")]
+    [InlineData("2026-10-04 08:00", "Sunday 8:00 AM")]
+    [InlineData("2026-10-03 08:00", "Oct 3")]
+    [InlineData("2026-08-27 11:00", "Aug 27")]
+    [InlineData("2025-08-27 11:00", "Aug 27, 2025")]
+    public void TimesReadShortAndExactToTheMinute(string when, string expected)
+    {
+        var time = DateTime.ParseExact(when, "yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+
+        Assert.Equal(expected, FileKinds.DescribeWhen(time, Now, new System.Globalization.CultureInfo("en-US")));
+    }
+
+    [Fact]
+    public void TimesSpeakTheUsersCulture()
+    {
+        var german = new System.Globalization.CultureInfo("de-DE");
+
+        Assert.Equal("Today 16:35", FileKinds.DescribeWhen(new DateTime(2026, 10, 10, 16, 35, 0), Now, german));
+        Assert.Equal("Mittwoch 18:05", FileKinds.DescribeWhen(new DateTime(2026, 10, 7, 18, 5, 0), Now, german));
+        Assert.Equal("27. Aug.", FileKinds.DescribeWhen(new DateTime(2026, 8, 27, 11, 0, 0), Now, german));
+        Assert.Equal("27. Aug. 2025", FileKinds.DescribeWhen(new DateTime(2025, 8, 27, 11, 0, 0), Now, german));
+    }
+
+    [Fact]
+    public void DetailsNameAKindOnlyWhereTheNameCannot()
+    {
+        using var temp = new TempDirectory();
+        var culture = new System.Globalization.CultureInfo("en-US");
+        var notes = Path.Combine(temp.Path, "notes.md");
+        File.WriteAllBytes(notes, new byte[5427]);
+        var makefile = Path.Combine(temp.Path, "Makefile");
+        File.WriteAllBytes(makefile, new byte[300]);
+        var folder = Directory.CreateDirectory(Path.Combine(temp.Path, "photos.zip"));
+        var at = new DateTime(2026, 10, 10, 16, 35, 0);
+        File.SetLastWriteTime(notes, at);
+        File.SetLastWriteTime(makefile, at);
+        Directory.SetLastWriteTime(folder.FullName, at);
+
+        Assert.Equal("5.3 KB · Today 4:35 PM", FileKinds.Describe(new FileInfo(notes), null, Now, culture));
+        Assert.Equal("5.3 KB · 81 pages · Today 4:35 PM", FileKinds.Describe(new FileInfo(notes), "81 pages", Now, culture));
+        Assert.Equal("File · 300 B · Today 4:35 PM", FileKinds.Describe(new FileInfo(makefile), null, Now, culture));
+        Assert.Equal("Folder · Today 4:35 PM", FileKinds.Describe(new DirectoryInfo(folder.FullName), null, Now, culture));
+    }
 }

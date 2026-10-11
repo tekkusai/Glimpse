@@ -258,6 +258,47 @@ public sealed class ChromeHeaderTests
     });
 
     [Fact]
+    public Task TheDetailsGiveSizeAFactAndWhenWithTheFullTimeOnHover() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var image = WritePng(temp.Path, "cover.png", 400, 300);
+        var pdf = Path.Combine(temp.Path, "Lease.pdf");
+        File.WriteAllText(pdf, "%PDF-1.4 a lease");
+        var window = OpenStage(900, 650);
+        try
+        {
+            window.ShowPreview(image, IntPtr.Zero);
+            await WaitForRevealAsync(window);
+
+            // The name already says PNG; the details say what it cannot.
+            var culture = System.Globalization.CultureInfo.CurrentCulture;
+            var modified = File.GetLastWriteTime(image);
+            var size = FileKinds.FormatSize(new FileInfo(image).Length);
+            Assert.Equal($"{size} · 400×300 · Today {modified.ToString("t", culture)}", window.SubtitleText.Text);
+            Assert.Equal($"Modified {modified.ToString("f", culture)}", window.SubtitleText.ToolTip);
+
+            // A PDF's pages join once its content has counted them, and only
+            // while that PDF is still the item on screen.
+            var version = Fields.Get<long>(window, "_loadVersion");
+            Fields.Call(window, "ResetForNewItem");
+            Fields.Set(window, "CurrentPath", pdf);
+            Fields.Call(window, "ShowHeader", pdf, pdf, 1, false, version, CancellationToken.None);
+            var pdfSize = FileKinds.FormatSize(new FileInfo(pdf).Length);
+            Assert.StartsWith($"{pdfSize} · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
+
+            Fields.Call(window, "ShowHeaderFact", "81 pages", version - 1);
+            Assert.DoesNotContain("pages", window.SubtitleText.Text, StringComparison.Ordinal);
+
+            Fields.Call(window, "ShowHeaderFact", "81 pages", version);
+            Assert.StartsWith($"{pdfSize} · 81 pages · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task TheWelcomeStartsWithNoToolsFromThePreviousItem() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();

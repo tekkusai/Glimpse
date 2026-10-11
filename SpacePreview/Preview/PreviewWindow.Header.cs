@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -58,6 +59,9 @@ public partial class PreviewWindow
     private int _selectedCount = 1;
     private bool _headerShowsBrand;
 
+    // What the content learned after the header went up: a PDF's pages.
+    private string? _headerFact;
+
     /// <summary>
     /// What one item leaves behind goes before the next arrives, for a
     /// preview and for the welcome alike.
@@ -98,6 +102,7 @@ public partial class PreviewWindow
         }
 
         _selectedCount = selectedCount;
+        _headerFact = null;
         ApplyHeaderSubtitle(path, _shortcutTarget);
 
         _openActions = BuildOpenActions(path, contentPath, isDirectory);
@@ -455,9 +460,16 @@ public partial class PreviewWindow
     {
         var pickerCount = _isFileDialogMode ? _selectedCount : 1;
         SubtitleText.Inlines.Clear();
+        SubtitleText.ToolTip = null;
         if (shortcutTarget is null)
         {
-            SubtitleText.Text = BuildHeaderSubtitle(path, null, pickerCount);
+            var (details, modified) = DescribeHeaderItem(path, _headerFact);
+            SubtitleText.Text = pickerCount > 1 ? $"{details} · {pickerCount} selected" : details;
+            if (modified is { } when)
+            {
+                SubtitleText.ToolTip = $"Modified {when.ToString("f", CultureInfo.CurrentCulture)}";
+            }
+
             return;
         }
 
@@ -489,38 +501,42 @@ public partial class PreviewWindow
         }
     }
 
-    private static string BuildHeaderSubtitle(string path, string? shortcutTarget, int selectedCount)
+    /// <summary>
+    /// The details line and the time it names, from the directory entry. An
+    /// image adds its pixel size from its header bytes; anything else adds
+    /// only a fact its content already found. Nothing when the item is gone.
+    /// </summary>
+    private static (string Details, DateTime? Modified) DescribeHeaderItem(string path, string? fact)
     {
-        string subtitle;
-        if (shortcutTarget is not null)
+        try
         {
-            subtitle = $"Shortcut → {shortcutTarget}";
-        }
-        else if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
-            && LooksLikeLocalDrivePath(path)
-            && ImageHeader.TryRead(path) is { } image)
-        {
-            try
+            FileSystemInfo item = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
+            if (fact is null
+                && (FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
+                && LooksLikeLocalDrivePath(path)
+                && ImageHeader.TryRead(path) is { } image)
             {
-                var file = new FileInfo(path);
-                subtitle = $"{FileKinds.FriendlyKind(path)} · {image.Width}×{image.Height} · {FileKinds.FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
+                fact = $"{image.Width}×{image.Height}";
             }
-            catch
-            {
-                subtitle = FileKinds.BuildSubtitle(path);
-            }
+
+            return (FileKinds.Describe(item, fact, DateTime.Now, CultureInfo.CurrentCulture), item.LastWriteTime);
         }
-        else
+        catch
         {
-            subtitle = FileKinds.BuildSubtitle(path);
+            return (string.Empty, null);
+        }
+    }
+
+    /// <summary>A fact the content found after the header went up, for the item still showing.</summary>
+    private void ShowHeaderFact(string fact, long version)
+    {
+        if (version != _loadVersion || CurrentPath is not { } path)
+        {
+            return;
         }
 
-        if (selectedCount > 1)
-        {
-            subtitle += $" · {selectedCount} selected";
-        }
-
-        return subtitle;
+        _headerFact = fact;
+        ApplyHeaderSubtitle(path, _shortcutTarget);
     }
 
     private static string? TryResolveShortcutTarget(string path)
