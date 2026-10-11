@@ -96,6 +96,20 @@
             </Grid>
         </Border>
 
+        <Border x:Name="AutoUpdateRow" Style="{StaticResource SettingsRow}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Text="Install updates automatically" Style="{StaticResource RowLabel}" />
+                <ToggleButton x:Name="AutoUpdateToggle"
+                              Grid.Column="1"
+                              Style="{StaticResource HouseToggle}"
+                              AutomationProperties.Name="Install updates automatically" />
+            </Grid>
+        </Border>
+
         <Border Style="{StaticResource SettingsRow}">
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -162,25 +176,28 @@
 
         <Border Style="{StaticResource Divider}" />
 
-        <Grid Margin="0,4,0,0">
+        <Grid x:Name="Footer" Margin="0,4,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+            <StackPanel x:Name="VersionLine" Orientation="Horizontal" VerticalAlignment="Center">
                 <TextBlock x:Name="VersionText"
                            VerticalAlignment="Center"
                            FontSize="{x:Static u:Metrics.FontLabel}"
                            FontWeight="SemiBold"
                            Foreground="{DynamicResource Theme.TextSecondary}" />
-                <!-- One slot after the version: the quiet fact or the action. -->
-                <TextBlock x:Name="UpToDateText"
+                <!-- One slot after the version: a short fact, its link, or both. -->
+                <TextBlock x:Name="UpdateStatusText"
                            Margin="12,0,0,0"
                            VerticalAlignment="Center"
                            FontSize="{x:Static u:Metrics.FontLabel}"
                            FontWeight="SemiBold"
                            Foreground="{DynamicResource Theme.TextTertiary}"
-                           Text="Up to date"
                            Visibility="Collapsed" />
                 <Button x:Name="UpdateLink"
                         Margin="6,0,0,0"
@@ -189,8 +206,16 @@
                         FontSize="{x:Static u:Metrics.FontLabel}"
                         FontWeight="SemiBold"
                         Foreground="{DynamicResource Theme.Accent}"
+                        Content="Install now"
                         Visibility="Collapsed"
-                        AutomationProperties.Name="Install available update" />
+                        AutomationProperties.Name="Install update now" />
+                <Button x:Name="CheckLink"
+                        Margin="6,0,0,0"
+                        Padding="6,2"
+                        Style="{StaticResource LinkButton}"
+                        Content="Check for updates"
+                        Visibility="Collapsed"
+                        AutomationProperties.Name="Check for updates" />
             </StackPanel>
             <Button x:Name="CopyDiagnosticsButton"
                     Grid.Column="1"
@@ -198,6 +223,15 @@
                     Style="{StaticResource LinkButton}"
                     Content="Copy diagnostics"
                     AutomationProperties.Name="Copy diagnostics" />
+            <!-- Only when there is something to explain. -->
+            <TextBlock x:Name="UpdateCaption"
+                       Grid.Row="1"
+                       Grid.ColumnSpan="2"
+                       Margin="0,2,0,0"
+                       TextWrapping="Wrap"
+                       FontSize="{x:Static u:Metrics.FontCaption}"
+                       Foreground="{DynamicResource Theme.TextTertiary}"
+                       Visibility="Collapsed" />
         </Grid>
     </StackPanel>
 </Window>

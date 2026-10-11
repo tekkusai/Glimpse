@@ -21,21 +21,14 @@ namespace SpacePreview.Services;
 internal sealed class TrayIcon : IDisposable
 {
     private const int IconId = 1;
-    private static readonly TimeSpan UpdateCheckInterval = TimeSpan.FromHours(6);
-    private static readonly TimeSpan UpdateMenuRetryInterval = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan UpdateNotificationRetryInterval = TimeSpan.FromSeconds(15);
 
     private readonly NativeMethods.WndProc _wndProc;
     private readonly uint _taskbarCreatedMessage;
     private readonly ContextMenu _menu;
-    private readonly AppUpdateService _updateService;
-    private readonly CancellationTokenSource _updateLifetime = new();
-    private readonly DispatcherTimer _updateTimer;
-    private readonly DispatcherTimer _updateNotificationTimer;
-    private readonly Func<bool> _canShowUpdateNotification;
+    private readonly AppUpdater _updates;
 
-    // Quitting and updating both end the app. Unsaved signing work comes
-    // forward first and holds both.
+    // Quitting ends the app. Unsaved signing work comes forward first and
+    // holds it.
     private readonly Func<bool> _canQuit;
     private IntPtr _hwnd;
     private IntPtr _icon;
@@ -43,18 +36,8 @@ internal sealed class TrayIcon : IDisposable
     private DateTime _menuClosedAt;
     private bool _iconVisible;
     private bool _disposed;
-    private bool _updateCheckRunning;
-    private DateTime _lastUpdateCheckAt;
-    private AppUpdateRelease? _availableUpdate;
 
-    // A check has reached GitHub: only then may Settings say "Up to date".
-    private bool _updateChecked;
-
-    private AppUpdateWindow? _updateWindow;
     private PreviewAccessWarningWindow? _previewAccessWarningWindow;
-
-    // The one stateful menu item: present only while an update is pending.
-    private readonly MenuItem _updateItem;
     private SettingsWindow? _settingsWindow;
 
     /// <summary>Raised when the user picks a theme. Handler should persist and re-resolve.</summary>
@@ -63,40 +46,18 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>Raised when the user picks Quit.</summary>
     public event Action? QuitRequested;
 
-    public TrayIcon(Func<bool>? canShowUpdateNotification = null, Func<bool>? canQuit = null)
+    public TrayIcon(AppUpdater updates, Func<bool>? canQuit = null)
     {
         _wndProc = WindowProc;
         _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
-        _canShowUpdateNotification = canShowUpdateNotification ?? (() => true);
+        _updates = updates;
         _canQuit = canQuit ?? (() => true);
-
-        _updateItem = MakeItem("Update", ShowAvailableUpdate);
-        _updateItem.Visibility = Visibility.Collapsed;
-        _updateService = new AppUpdateService();
-        _updateService.CleanupStaleDownloads();
-
-        _updateTimer = new DispatcherTimer(DispatcherPriority.Background)
-        {
-            Interval = UpdateCheckInterval
-        };
-        _updateTimer.Tick += (_, _) => _ = CheckForUpdatesAsync();
-        _updateTimer.Start();
-        _updateNotificationTimer = new DispatcherTimer(DispatcherPriority.Background)
-        {
-            Interval = UpdateNotificationRetryInterval
-        };
-        _updateNotificationTimer.Tick += (_, _) =>
-        {
-            _updateNotificationTimer.Stop();
-            ScheduleUpdateNotification();
-        };
 
         _menu = BuildMenu();
 
         CreateMessageWindow();
         RebuildIcon();
         AddIcon();
-        _ = CheckForUpdatesAfterStartupAsync();
 
         // The taskbar's own theme (a separate setting from app theme) picks
         // the glyph color; broadcasts never reach a message-only window, so
@@ -148,11 +109,10 @@ internal sealed class TrayIcon : IDisposable
         var itemStyle = (Style)app.FindResource("PreviewMenuItem");
         var separatorStyle = (Style)app.FindResource("PreviewMenuSeparator");
 
-        // The menu is a door, not a settings tree: everything stateful lives
-        // in the Settings window. Only a pending update earns a direct item.
+        // The menu is a door, not a settings tree: everything stateful,
+        // updates included, lives in the Settings window.
         var settings = MakeItem("Settings…", OpenSettings);
         settings.Style = itemStyle;
-        _updateItem.Style = itemStyle;
 
         var quit = MakeItem("Quit", () =>
         {
@@ -168,7 +128,6 @@ internal sealed class TrayIcon : IDisposable
         menu.Closed += (_, _) => _menuClosedAt = DateTime.UtcNow;
 
         menu.Items.Add(settings);
-        menu.Items.Add(_updateItem);
         menu.Items.Add(new Separator { Style = separatorStyle });
         menu.Items.Add(quit);
         return menu;
@@ -185,11 +144,7 @@ internal sealed class TrayIcon : IDisposable
         _menu.IsOpen = false;
         if (_settingsWindow is null)
         {
-            var window = new SettingsWindow(
-                () => _availableUpdate,
-                () => _updateChecked,
-                ShowAvailableUpdate,
-                PickTheme);
+            var window = new SettingsWindow(_updates, PickTheme);
             _settingsWindow = window;
             window.Closed += (_, _) => _settingsWindow = null;
             _ = ShowSettingsWhenWholeAsync(window);
@@ -231,181 +186,10 @@ internal sealed class TrayIcon : IDisposable
             return;
         }
 
-        RefreshUpdateItem();
-        if (DateTime.UtcNow - _lastUpdateCheckAt >= UpdateMenuRetryInterval)
-        {
-            _ = CheckForUpdatesAsync();
-        }
-
         // The foreground dance: without it the menu will not close on an
         // outside click.
         NativeMethods.SetForegroundWindow(_hwnd);
         _menu.IsOpen = true;
-    }
-
-    private void RefreshUpdateItem()
-    {
-        if (_availableUpdate is { } update)
-        {
-            _updateItem.Header = $"Update to {update.VersionText}";
-            _updateItem.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            _updateItem.Visibility = Visibility.Collapsed;
-        }
-    }
-
-    private async Task CheckForUpdatesAfterStartupAsync()
-    {
-        try
-        {
-            await Task.Delay(TimeSpan.FromSeconds(4), _updateLifetime.Token);
-            await CheckForUpdatesAsync();
-        }
-        catch (OperationCanceledException)
-        {
-            // App shutdown owns the cancellation.
-        }
-    }
-
-    private async Task CheckForUpdatesAsync()
-    {
-        if (_disposed || _updateCheckRunning)
-        {
-            return;
-        }
-
-        _updateCheckRunning = true;
-        _lastUpdateCheckAt = DateTime.UtcNow;
-        try
-        {
-            var update = await _updateService.CheckForUpdateAsync(_updateLifetime.Token);
-            if (_disposed)
-            {
-                return;
-            }
-
-            _availableUpdate = update;
-            _updateChecked = true;
-            RefreshUpdateItem();
-            _settingsWindow?.RefreshUpdateStatus();
-            if (update is not null)
-            {
-                DiagnosticLog.Write(
-                    $"update available current={_updateService.CurrentVersionText} latest={update.VersionText}");
-            }
-            else
-            {
-                DiagnosticLog.Write($"update check current={_updateService.CurrentVersionText}");
-            }
-
-            ScheduleUpdateNotification();
-        }
-        catch (OperationCanceledException) when (_updateLifetime.IsCancellationRequested)
-        {
-            // App shutdown owns the cancellation.
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
-        }
-        finally
-        {
-            _updateCheckRunning = false;
-        }
-    }
-
-    private void ShowAvailableUpdate()
-    {
-        if (_availableUpdate is not { } update)
-        {
-            return;
-        }
-
-        _menu.IsOpen = false;
-        if (_updateWindow is not null)
-        {
-            _updateWindow.Activate();
-            return;
-        }
-
-        ShowUpdateWindow(update, activate: true, automatic: false);
-    }
-
-    private void ScheduleUpdateNotification()
-    {
-        _updateNotificationTimer.Stop();
-        if (_disposed
-            || _availableUpdate is not { } update
-            || _updateWindow is not null)
-        {
-            return;
-        }
-
-        var delay = UpdateNotificationPolicy.DelayUntilPrompt(
-            Settings.Current,
-            update.Version,
-            DateTimeOffset.UtcNow);
-        if (delay > TimeSpan.Zero)
-        {
-            _updateNotificationTimer.Interval = delay < UpdateCheckInterval
-                ? delay
-                : UpdateCheckInterval;
-            _updateNotificationTimer.Start();
-            return;
-        }
-
-        if (!_canShowUpdateNotification())
-        {
-            _updateNotificationTimer.Interval = UpdateNotificationRetryInterval;
-            _updateNotificationTimer.Start();
-            return;
-        }
-
-        ShowUpdateWindow(update, activate: false, automatic: true);
-    }
-
-    private void ShowUpdateWindow(
-        AppUpdateRelease update,
-        bool activate,
-        bool automatic)
-    {
-        var window = new AppUpdateWindow(_updateService, update, _canQuit)
-        {
-            ShowActivated = activate
-        };
-        _updateWindow = window;
-        window.Closed += (_, _) =>
-        {
-            _updateWindow = null;
-            if (_disposed
-                || window.InstallerLaunched
-                || !window.SnoozeRequested)
-            {
-                _updateNotificationTimer.Stop();
-                return;
-            }
-
-            var dismissedAt = DateTimeOffset.UtcNow;
-            Settings.Update(settings => UpdateNotificationPolicy.Snooze(
-                settings,
-                update.Version,
-                dismissedAt));
-            DiagnosticLog.Write(
-                $"update notification snoozed version={update.VersionText} days=7");
-            ScheduleUpdateNotification();
-        };
-        window.Show();
-        if (activate)
-        {
-            window.Activate();
-        }
-
-        if (automatic)
-        {
-            DiagnosticLog.Write($"update notification shown version={update.VersionText}");
-        }
     }
 
     public void ShowPreviewAccessWarning(PreviewAccessWarningInfo warning)
@@ -644,15 +428,8 @@ internal sealed class TrayIcon : IDisposable
         }
 
         _disposed = true;
-        _updateTimer.Stop();
-        _updateNotificationTimer.Stop();
-        _updateLifetime.Cancel();
         _settingsWindow?.Close();
         _settingsWindow = null;
-        _updateWindow?.Close();
-        _updateWindow = null;
-        _updateService.Dispose();
-        _updateLifetime.Dispose();
         Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;
         _previewAccessWarningWindow?.Dismiss(PreviewAccessWarningDismissalReason.Disposed);
         _previewAccessWarningWindow = null;

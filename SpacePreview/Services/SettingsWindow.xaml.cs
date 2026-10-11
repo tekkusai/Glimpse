@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -20,9 +21,7 @@ public partial class SettingsWindow : Window
 {
     internal const int DiagnosticLogLines = 200;
 
-    private readonly Func<AppUpdateRelease?> _availableUpdate;
-    private readonly Func<bool> _updateChecked;
-    private readonly Action _showUpdate;
+    private readonly AppUpdater _updates;
     private readonly Action<ThemePreference> _themePicked;
     private readonly Func<IReadOnlyList<MissingPiece>> _findMissingPieces;
     private readonly DispatcherTimer _copiedTimer;
@@ -33,18 +32,13 @@ public partial class SettingsWindow : Window
     private bool _closed;
     private bool _syncing;
 
-    /// <param name="updateChecked">True once an update check has reached GitHub.</param>
     /// <param name="findMissingPieces">Runs off the UI thread; tests pass their own.</param>
     internal SettingsWindow(
-        Func<AppUpdateRelease?> availableUpdate,
-        Func<bool> updateChecked,
-        Action showUpdate,
+        AppUpdater updates,
         Action<ThemePreference> themePicked,
         Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null)
     {
-        _availableUpdate = availableUpdate;
-        _updateChecked = updateChecked;
-        _showUpdate = showUpdate;
+        _updates = updates;
         _themePicked = themePicked;
         _findMissingPieces = findMissingPieces ?? MissingPieces.Find;
         InitializeComponent();
@@ -63,19 +57,25 @@ public partial class SettingsWindow : Window
         StartupRow.MouseLeftButtonUp += (_, _) => StartupToggle.IsChecked = StartupToggle.IsChecked != true;
         StartupToggle.Checked += (_, _) => ApplyStartup(true);
         StartupToggle.Unchecked += (_, _) => ApplyStartup(false);
+        AutoUpdateRow.MouseLeftButtonUp += (_, _) => AutoUpdateToggle.IsChecked = AutoUpdateToggle.IsChecked != true;
+        AutoUpdateToggle.Checked += (_, _) => ApplyAutoUpdate(true);
+        AutoUpdateToggle.Unchecked += (_, _) => ApplyAutoUpdate(false);
 
         ThemeSystem.Checked += (_, _) => PickTheme(ThemePreference.FollowSystem);
         ThemeLight.Checked += (_, _) => PickTheme(ThemePreference.Light);
         ThemeDark.Checked += (_, _) => PickTheme(ThemePreference.Dark);
 
-        UpdateLink.Click += (_, _) => _showUpdate();
+        UpdateLink.Click += (_, _) => _ = _updates.InstallNowAsync();
+        CheckLink.Click += (_, _) => _ = _updates.CheckNowAsync();
         _copiedTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Normal, (_, _) => EndCopiedFeedback(), Dispatcher);
         _copiedTimer.Stop();
         CopyDiagnosticsButton.Click += async (_, _) => await CopyDiagnosticsAsync();
+        _updates.Changed += RefreshUpdateStatus;
         Closed += (_, _) =>
         {
             _closed = true;
             _copiedTimer.Stop();
+            _updates.Changed -= RefreshUpdateStatus;
         };
 
         // The registry can change while the window sits open; returning to it
@@ -88,8 +88,20 @@ public partial class SettingsWindow : Window
     /// <summary>The latest look for missing pieces; opening waits briefly on it.</summary>
     internal Task MissingPiecesChecked => _missingPiecesChecked;
 
-    /// <summary>An update check finished while the window was open.</summary>
-    internal void RefreshUpdateStatus() => SyncAbout();
+    /// <summary>The update moved on, or its setting changed, while the window was open.</summary>
+    private void RefreshUpdateStatus()
+    {
+        _syncing = true;
+        try
+        {
+            AutoUpdateToggle.IsChecked = Settings.Current.InstallUpdatesAutomatically;
+            SyncAbout();
+        }
+        finally
+        {
+            _syncing = false;
+        }
+    }
 
     private void SyncAll()
     {
@@ -97,6 +109,7 @@ public partial class SettingsWindow : Window
         try
         {
             StartupToggle.IsChecked = StartupRegistration.IsInstalled();
+            AutoUpdateToggle.IsChecked = Settings.Current.InstallUpdatesAutomatically;
 
             var theme = Settings.Current.Theme;
             ThemeSystem.IsChecked = theme == ThemePreference.FollowSystem;
@@ -135,13 +148,19 @@ public partial class SettingsWindow : Window
 
     private void SyncAbout()
     {
-        VersionText.Text = $"{Branding.Name} {CurrentVersion()}";
-        var update = _availableUpdate();
-        UpdateLink.Content = update is null ? null : $"Update to {update.VersionText}";
-        UpdateLink.Visibility = update is null ? Visibility.Collapsed : Visibility.Visible;
+        var current = _updates.CurrentVersion;
+        var footer = UpdateFooter.Describe(_updates.State, Settings.Current, current, DateTimeOffset.Now, CultureInfo.CurrentCulture);
+        VersionText.Text = $"{Branding.Name} {current.ToString(3)}";
+        ShowText(UpdateStatusText, footer.Status);
+        ShowText(UpdateCaption, footer.Caption);
+        CheckLink.Visibility = footer.Link == FooterLink.CheckForUpdates ? Visibility.Visible : Visibility.Collapsed;
+        UpdateLink.Visibility = footer.Link == FooterLink.InstallNow ? Visibility.Visible : Visibility.Collapsed;
+    }
 
-        // Never claimed without a check that reached GitHub and found nothing newer.
-        UpToDateText.Visibility = update is null && _updateChecked() ? Visibility.Visible : Visibility.Collapsed;
+    private static void ShowText(TextBlock block, string? text)
+    {
+        block.Text = text ?? string.Empty;
+        block.Visibility = text is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private static string CurrentVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
@@ -394,6 +413,14 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private void ApplyAutoUpdate(bool automatic)
+    {
+        if (!_syncing)
+        {
+            _updates.SetInstallAutomatically(automatic);
+        }
+    }
+
     // The palette reaches every open window through the app's resources.
     private void PickTheme(ThemePreference preference)
     {
@@ -473,4 +500,61 @@ public partial class SettingsWindow : Window
 
         return [.. tail];
     }
+}
+
+internal enum FooterLink
+{
+    None,
+    CheckForUpdates,
+    InstallNow
+}
+
+/// <summary>
+/// What the Settings footer says about updates: one short status after the
+/// version, one link, and a caption only when something needs explaining.
+/// </summary>
+internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Caption)
+{
+    internal static readonly TimeSpan StaleAfter = TimeSpan.FromDays(3);
+
+    /// <param name="now">Local time: "today" is the user's day.</param>
+    public static UpdateFooter Describe(
+        UpdateState state,
+        Settings settings,
+        Version current,
+        DateTimeOffset now,
+        CultureInfo culture)
+    {
+        if (state.Pending is { } pending)
+        {
+            var version = pending.VersionText;
+            return state.Installing
+                ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
+                : new(null, FooterLink.InstallNow, !settings.InstallUpdatesAutomatically
+                    ? $"{version} is ready to install."
+                    : state.Downloading
+                        ? $"Downloading {version} in the background."
+                        : $"{version} installs the next time you step away.");
+        }
+
+        var stale = settings.LastUpdateCheckUtc is { } last && now - last >= StaleAfter
+            ? $"Couldn't check for updates since {ShortDate(last, now, culture)}."
+            : null;
+        // A skipped release that is no longer the latest needs no word.
+        var caption = stale
+            ?? (!state.UpToDate && AppUpdateService.TryParseVersion(settings.SkippedUpdateVersion, out var skipped) && skipped > current
+                ? $"{skipped.ToString(3)} failed verification and was skipped."
+                : null);
+        if (state.Checking)
+        {
+            return new("Checking for updates", FooterLink.None, caption);
+        }
+
+        // Up to date only on the word of a check that reached GitHub.
+        return new(state.UpToDate && stale is null ? "Up to date" : null, FooterLink.CheckForUpdates, caption);
+    }
+
+    // The culture's month and day with the month abbreviated: Oct 7, 7 Oct.
+    private static string ShortDate(DateTimeOffset when, DateTimeOffset now, CultureInfo culture) =>
+        when.ToOffset(now.Offset).ToString(culture.DateTimeFormat.MonthDayPattern.Replace("MMMM", "MMM", StringComparison.Ordinal), culture);
 }

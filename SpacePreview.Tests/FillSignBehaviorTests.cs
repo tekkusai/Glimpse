@@ -428,7 +428,7 @@ public sealed class FillSignBehaviorTests
                 var surface = new FillSignSurface(0, 1, BlankPage());
                 var host = new Window { Left = -30000, Top = 0, Width = 800, Height = 600, ShowActivated = false, ShowInTaskbar = false, Content = surface };
                 host.Show();
-                var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { }, () => []);
+                var settings = new SettingsWindow(ReleaseFixture.QuietUpdater(), _ => { }, () => []);
                 try
                 {
                     Assert.True(await UntilAsync(() => surface.IsLoaded));

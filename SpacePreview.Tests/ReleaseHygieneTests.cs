@@ -195,7 +195,8 @@ public sealed class ReleaseHygieneTests
         var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("Update to {update.VersionText}", tray, StringComparison.Ordinal);
+        // Updates never add to the tray menu: it stays a door to Settings.
+        Assert.DoesNotContain("Update to", tray, StringComparison.Ordinal);
         Assert.Contains("/GLIMPSEUPDATE", updater, StringComparison.Ordinal);
         Assert.Contains("function AutoUpdateRequested", installer, StringComparison.Ordinal);
         Assert.Contains("Parameters: \"--updated\"; Check: AutoUpdateRequested", installer, StringComparison.Ordinal);

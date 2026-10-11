@@ -346,53 +346,17 @@ public sealed class ChromeHeaderTests
     });
 
     [Fact]
-    public Task SettingsKeepsTheVersionBesideAnAvailableUpdate() => WpfApp.RunAsync(() =>
-    {
-        var release = new AppUpdateRelease(
-            new Version(9, 1, 0),
-            "v9.1.0",
-            new Uri("https://example.invalid/setup.exe"),
-            1,
-            string.Empty,
-            new Uri("https://example.invalid/setup.exe.sha256"));
-        var settings = new SettingsWindow(() => release, () => true, () => { }, _ => { }, () => []);
-        try
-        {
-            Assert.StartsWith(Branding.Name, settings.VersionText.Text, StringComparison.Ordinal);
-            Assert.NotEqual(Visibility.Collapsed, settings.VersionText.Visibility);
-            Assert.Equal(Visibility.Visible, settings.UpdateLink.Visibility);
-            Assert.Equal("Update to 9.1.0", settings.UpdateLink.Content);
-        }
-        finally
-        {
-            settings.Close();
-        }
-
-        return Task.CompletedTask;
-    });
-
-    [Fact]
     public Task DialogsWearThePreviewFrameAndTheNoticeNeverActivates() => WpfApp.RunAsync(() =>
     {
         const long WS_THICKFRAME = 0x00040000;
         const long WS_MAXIMIZEBOX = 0x00010000;
-        var root = Path.Combine(Path.GetTempPath(), $"GlimpseChromeTest-{Guid.NewGuid():N}");
-        using var client = new HttpClient();
-        using var updates = new AppUpdateService(client, new Version(1, 0, 0), root);
-        var release = new AppUpdateRelease(
-            new Version(9, 1, 0),
-            "v9.1.0",
-            new Uri("https://example.invalid/setup.exe"),
-            1,
-            string.Empty,
-            new Uri("https://example.invalid/setup.exe.sha256"));
+        using var updates = ReleaseFixture.QuietUpdater();
         var notice = new PreviewAccessWarningWindow(
             new PreviewAccessWarningInfo("key", "Notepad", 1, PreviewAccessWarningKind.ConfirmedElevationMismatch),
             finalReminder: false);
         Window[] dialogs =
         [
-            new SettingsWindow(() => null, () => false, () => { }, _ => { }, () => []),
-            new AppUpdateWindow(updates, release),
+            new SettingsWindow(updates, _ => { }, () => []),
             notice
         ];
         try
@@ -423,11 +387,6 @@ public sealed class ChromeHeaderTests
             foreach (var dialog in dialogs)
             {
                 dialog.Close();
-            }
-
-            if (Directory.Exists(root))
-            {
-                Directory.Delete(root, recursive: true);
             }
         }
 

@@ -230,12 +230,13 @@ internal static class ProbeRunner
 
     /// <summary>
     /// Renders the settings window off screen, after the missing-pieces
-    /// check has landed. Stub callbacks: the probe never touches live
-    /// settings, and with no update check it shows just the version.
+    /// check has landed. The updater is never started, so the probe never
+    /// reaches GitHub and the footer offers Check for updates.
     /// </summary>
     private static async Task CaptureSettingsAsync(string outputPng)
     {
-        var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { })
+        using var updates = new AppUpdater(new AppUpdateService());
+        var settings = new SettingsWindow(updates, _ => { })
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             Left = -30000,
@@ -260,7 +261,8 @@ internal static class ProbeRunner
     {
         const double Gap = 48;
         var area = SystemParameters.WorkArea;
-        var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { })
+        using var updates = new AppUpdater(new AppUpdateService());
+        var settings = new SettingsWindow(updates, _ => { })
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             ShowActivated = false

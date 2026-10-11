@@ -60,10 +60,17 @@ internal sealed class ReleaseFixture : IDisposable
     /// <summary>Every request fails as if offline.</summary>
     public bool Offline { get; set; }
 
-    /// <summary>Holds the installer download until released, to see the window while it runs.</summary>
+    /// <summary>Holds the release check until released, to see Settings while it runs.</summary>
+    public TaskCompletionSource? HoldCheck { get; set; }
+
+    /// <summary>Holds the installer download until released.</summary>
     public TaskCompletionSource? HoldInstaller { get; set; }
 
     public static string Recorded => TestSource.Read(@"SpacePreview.Tests\Fixtures\github-release-v2.0.0.json");
+
+    /// <summary>A never-started updater with no network: Settings before any check.</summary>
+    public static AppUpdater QuietUpdater() =>
+        new(new ReleaseFixture { Offline = true }.Service(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "GlimpseUpdateTest-quiet")));
 
     public HttpClient Client() => new(new Handler(this));
 
@@ -125,7 +132,10 @@ internal sealed class ReleaseFixture : IDisposable
         }
 
         var path = uri.AbsolutePath;
-        if (path.EndsWith(".exe", StringComparison.Ordinal) && HoldInstaller is { } hold)
+        var hold = uri == AppUpdateService.LatestReleaseUri ? HoldCheck
+            : path.EndsWith(".exe", StringComparison.Ordinal) ? HoldInstaller
+            : null;
+        if (hold is not null)
         {
             await hold.Task.WaitAsync(cancellationToken);
         }
@@ -149,4 +159,28 @@ internal sealed class ReleaseFixture : IDisposable
             CancellationToken cancellationToken) =>
             release.ServeAsync(request, cancellationToken);
     }
+}
+
+/// <summary>
+/// Sets the update fields of the process-wide settings for one test and
+/// puts the previous settings back. Use it on the WPF test thread, where
+/// every other settings write in the run also happens.
+/// </summary>
+internal sealed class UpdateSettingsScope : IDisposable
+{
+    private readonly Settings _saved = Settings.Current;
+
+    public UpdateSettingsScope(Func<Settings, Settings>? change = null)
+    {
+        Settings.Update(settings => (change ?? (s => s))(settings with
+        {
+            InstallUpdatesAutomatically = true,
+            LastUpdateCheckUtc = null,
+            SkippedUpdateVersion = null,
+            UpdateAttemptVersion = null,
+            UpdateAttemptUtc = null
+        }));
+    }
+
+    public void Dispose() => Settings.Update(_ => _saved);
 }

@@ -1,4 +1,5 @@
 ﻿using System.Windows;
+using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
@@ -10,6 +11,7 @@ public partial class App : Application
     private SingleInstance? _instance;
     private SpacePreviewController? _controller;
     private TrayIcon? _trayIcon;
+    private AppUpdater? _updater;
     private EventWaitHandle? _quitEvent;
     private RegisteredWaitHandle? _quitRegistration;
     private EventWaitHandle? _showEvent;
@@ -153,9 +155,9 @@ public partial class App : Application
 
     private TrayIcon CreateTrayIcon()
     {
-        var tray = new TrayIcon(
-            () => _controller?.CanShowUpdateNotification == true,
-            () => _controller?.CanQuit() != false);
+        Func<bool> canQuit = () => _controller?.CanQuit() != false;
+        _updater = new AppUpdater(new AppUpdateService(), ObserveForUpdate, canQuit);
+        var tray = new TrayIcon(_updater, canQuit);
 
         tray.ThemeChanged += preference =>
         {
@@ -164,8 +166,17 @@ public partial class App : Application
         };
 
         tray.QuitRequested += () => Shutdown();
+        _updater.Start();
         return tray;
     }
+
+    private InstallState ObserveForUpdate() => new()
+    {
+        PreviewOpen = _controller?.NoPreviewOpen != true,
+        FullscreenSuspended = _controller?.InputSuspendedForFullscreen != false,
+        AcceptsNotifications = NativeMethods.AcceptsNotifications(),
+        Idle = NativeMethods.TimeSinceLastInput()
+    };
 
     protected override void OnExit(ExitEventArgs e)
     {
@@ -181,6 +192,7 @@ public partial class App : Application
         {
             DiagnosticLog.Write("app exiting");
             _trayIcon?.Dispose();
+            _updater?.Dispose();
             _controller.Dispose();
             try
             {

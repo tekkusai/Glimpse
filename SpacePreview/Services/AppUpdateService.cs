@@ -158,7 +158,6 @@ internal sealed partial class AppUpdateService : IDisposable
 
     public async Task<string> DownloadAndVerifyAsync(
         AppUpdateRelease release,
-        IProgress<double>? progress,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -177,7 +176,6 @@ internal sealed partial class AppUpdateService : IDisposable
             && new FileInfo(destination).Length == release.InstallerSize
             && await FileMatchesSha256Async(destination, release.InstallerSha256, timeout.Token))
         {
-            progress?.Report(1);
             return destination;
         }
 
@@ -224,7 +222,6 @@ internal sealed partial class AppUpdateService : IDisposable
                     }
 
                     await output.WriteAsync(buffer.AsMemory(0, read), timeout.Token);
-                    progress?.Report((double)received / release.InstallerSize);
                 }
 
                 if (received != release.InstallerSize)
@@ -239,7 +236,6 @@ internal sealed partial class AppUpdateService : IDisposable
             }
 
             File.Move(partial, destination, overwrite: true);
-            progress?.Report(1);
             return destination;
         }
         catch
