@@ -78,8 +78,8 @@ internal static class SetupImage
                 Node("Translation", [0x09, 0x04, 0xB0, 0x04], text: false, 4)));
     }
 
-    // One node of the tree: length, value length, type, key, value, children,
-    // each start on a four-byte boundary.
+    // One node of the tree: length, value length, type, key, value and
+    // children, each starting on a four-byte boundary.
     private static byte[] Node(string key, byte[] value, bool text, int valueLength, params byte[][] children)
     {
         using var node = new MemoryStream();
