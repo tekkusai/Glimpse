@@ -103,6 +103,51 @@ public sealed class InputSessionTests
     }
 
     [Fact]
+    public Task SigningStartedWhileTheShellAnswersABrowseAsksBeforeTheNextFile() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var next = WritePng(temp.Path);
+        var controller = new SpacePreviewController(Dispatcher.CurrentDispatcher);
+
+        // As if a fullscreen app were in front, so showing a file never
+        // installs a real mouse hook. Parked off screen, like the probe.
+        Fields.Set(Fields.Get<FullscreenInputSuspension>(controller, "_fullscreenInputSuspension"), "_suspended", true);
+        var window = new PreviewWindow { Left = -30000, Top = 0, Width = 640, Height = 480 };
+        window.MarkGeometryUserPinnedForProbe();
+        var shell = new TaskCompletionSource<ExplorerSelection?>();
+        try
+        {
+            Fields.Set(window, "CurrentPath", Path.Combine(TestDataRoot.Path, "unsigned.pdf"));
+            Fields.Set(controller, "_previewWindow", window);
+            Fields.Set(controller, "_previewVisible", true);
+            Fields.Set(controller, "_browseRelative", (Func<IntPtr, bool, int, Task<ExplorerSelection?>>)((_, _, _) => shell.Task));
+
+            // Nothing to keep when the step starts.
+            Fields.Call(controller, "BrowseRelativeAsync", 1, 0L);
+            Assert.True(Fields.Get<bool>(controller, "_browseInFlight"));
+
+            // A date goes down before the shell names the next file.
+            var surface = SignMode.Enter(window, withWork: true);
+            var signing = window.CurrentPath;
+            shell.SetResult(new ExplorerSelection(next, IntPtr.Zero, ViewIndex: 1, ViewCount: 2));
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while (Fields.Get<bool>(controller, "_browseInFlight") && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.Equal(signing, window.CurrentPath);
+            Assert.Same(surface, Fields.Get<FillSignSurface>(window, "_fillSignSurface"));
+            Assert.True(SignMode.SaveChoiceShown(surface));
+        }
+        finally
+        {
+            // Dispose closes the glance.
+            controller.Dispose();
+        }
+    });
+
+    [Fact]
     public void AnOutsideClickOverSigningWorkAsksInsteadOfHiding()
     {
         WithSigningPreview((controller, window, surface) =>

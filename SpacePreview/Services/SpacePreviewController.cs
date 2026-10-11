@@ -43,8 +43,10 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _ownerLossTimer;
     private readonly DispatcherTimer _fullscreenRecheckTimer;
 
-    // Tests stand in for the window in front.
+    // Tests stand in for the window in front and for the shell's browse.
     private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
+    private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
+        (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
     private readonly uint _processId = (uint)Environment.ProcessId;
     private readonly List<PreviewWindow> _pinnedWindows = [];
     private IntPtr _foregroundHook;
@@ -2011,8 +2013,7 @@ internal sealed class SpacePreviewController : IDisposable
                 var ownerRoot = _previewOwnerRootHwnd;
                 var wasDesktop = source == SelectionSource.Desktop;
                 var hwnd = _lastExplorerHwnd;
-                var selection = await StaTask.Run(() =>
-                    ExplorerSelectionService.TryBrowseRelative(hwnd, wasDesktop, step));
+                var selection = await _browseRelative(hwnd, wasDesktop, step);
 
                 if (_disposed
                     || !_previewVisible
@@ -2033,6 +2034,12 @@ internal sealed class SpacePreviewController : IDisposable
                 DiagnosticLog.Write($"browse {step:+0;-0} -> {selection.Path} ({selection.ViewIndex + 1} of {selection.ViewCount})");
                 if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
                 {
+                    // Signing may have started while the shell answered.
+                    if (!CanLeavePreview(_previewWindow))
+                    {
+                        return;
+                    }
+
                     ShowPreview(selection, stepStamp);
                 }
                 else
