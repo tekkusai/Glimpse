@@ -67,9 +67,7 @@ public partial class PreviewWindow
             var uri = new Uri(path, UriKind.Absolute);
             var glyphs = new GlyphTypeface(uri);
             var familyName = Localized(glyphs.FamilyNames) ?? Path.GetFileNameWithoutExtension(path);
-            var family = new FontFamily(uri, "./" + Uri.EscapeDataString(Path.GetFileName(path)) + "#" + familyName);
-            var typeface = new Typeface(family, glyphs.Style, glyphs.Weight, glyphs.Stretch);
-            if (!typeface.TryGetGlyphTypeface(out _))
+            if (ResolveOwnFamily(uri, path, glyphs, familyName) is not { } family)
             {
                 return null;
             }
@@ -108,6 +106,43 @@ public partial class PreviewWindow
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// A family that resolves to this very file. WPF reads the file name in
+    /// the location as written, so an escaped space or "(1)" misses it, and
+    /// some name tables answer only to their Win32 name. Each spelling is
+    /// tried; one that lands on a sibling or a fallback face never counts.
+    /// </summary>
+    private static FontFamily? ResolveOwnFamily(Uri uri, string path, GlyphTypeface glyphs, string familyName)
+    {
+        var file = Path.GetFileName(path);
+        var names = glyphs.FamilyNames.Values.Concat(glyphs.Win32FamilyNames.Values).Prepend(familyName).Distinct(StringComparer.Ordinal).ToList();
+        foreach (var location in new[] { "./" + file, "./" + Uri.EscapeDataString(file) }.Distinct(StringComparer.Ordinal))
+        {
+            foreach (var name in names)
+            {
+                var family = new FontFamily(uri, location + "#" + name);
+                if (new Typeface(family, glyphs.Style, glyphs.Weight, glyphs.Stretch).TryGetGlyphTypeface(out var resolved)
+                    && string.Equals(resolved.FontUri.LocalPath, path, StringComparison.OrdinalIgnoreCase))
+                {
+                    return family;
+                }
+            }
+        }
+
+        // An odd name table answers only to a name WPF composes itself
+        // ("Anago ☞"); ask WPF for the faces it sees and keep this file's.
+        foreach (var typeface in Fonts.GetTypefaces(uri))
+        {
+            if (typeface.TryGetGlyphTypeface(out var resolved)
+                && string.Equals(resolved.FontUri.LocalPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                return typeface.FontFamily;
+            }
+        }
+
+        return null;
     }
 
     private static string? Localized(IDictionary<System.Globalization.CultureInfo, string> names) =>
@@ -198,8 +233,9 @@ public partial class PreviewWindow
 
         var page = new StackPanel
         {
+            // No clip: a script face's swash hangs left of its first letter
+            // into the inset, and the fade already ends every long line.
             Margin = new Thickness(SpecimenInset, 32, 0, 40),
-            ClipToBounds = true,
             Children =
             {
                 title,
