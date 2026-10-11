@@ -75,7 +75,7 @@ public partial class App : Application
         _quitEvent = SingleInstance.CreateQuitEvent();
         _quitRegistration = ThreadPool.RegisterWaitForSingleObject(
             _quitEvent,
-            (_, _) => Dispatcher.BeginInvoke(() => Shutdown()),
+            (_, _) => Dispatcher.BeginInvoke(QuitForSetup),
             null,
             Timeout.Infinite,
             executeOnlyOnce: true);
@@ -117,10 +117,26 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// Setup's --quit cannot wait for an answer: setup force-kills a resident
+    /// still running five seconds later, so refusing would lose the work all
+    /// the same. The log says what went.
+    /// </summary>
+    private void QuitForSetup()
+    {
+        if (_controller?.HoldsSigningWork == true)
+        {
+            DiagnosticLog.Write("installer quit discarded unsaved signing work");
+        }
+
+        Shutdown();
+    }
+
     private TrayIcon CreateTrayIcon()
     {
         var tray = new TrayIcon(
-            () => _controller?.CanShowUpdateNotification == true);
+            () => _controller?.CanShowUpdateNotification == true,
+            () => _controller?.CanQuit() != false);
 
         tray.ThemeChanged += preference =>
         {

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,6 +42,7 @@ internal sealed class SpacePreviewController : IDisposable
     private IntPtr _foregroundHook;
     private IntPtr[] _mouseActivationWindows = [];
     private PreviewWindow? _previewWindow;
+    private PreviewWindow? _closingWindow;
     private IntPtr _lastExplorerHwnd;
     private IntPtr _previewOwnerRootHwnd;
     private SelectionSource _lastSelectionSource = SelectionSource.Explorer;
@@ -772,8 +774,83 @@ internal sealed class SpacePreviewController : IDisposable
         window.SelectionItemRequested += (sender, index) => OnSelectionItemRequested((PreviewWindow)sender!, index);
         window.SlideshowAdvanceRequested += (sender, _) => OnSlideshowAdvanceRequested((PreviewWindow)sender!);
         window.PresentationFailed += OnPreviewPresentationFailed;
+        window.Closing += (sender, args) => OnPreviewWindowClosing((PreviewWindow)sender!, args);
+        window.Closed += (sender, _) => OnPreviewWindowClosed((PreviewWindow)sender!);
         window.SetPinLimitReached(_pinnedWindows.Count >= MaxPinnedPreviews);
         return window;
+    }
+
+    /// <summary>
+    /// Alt+F4, the taskbar's Close or another app's WM_CLOSE is the user
+    /// leaving, and leaving goes through the same gates as Esc and the X:
+    /// a glance hides, a pinned window closes, and signing work asks
+    /// first. Only the controller's own closes get through.
+    /// </summary>
+    private void OnPreviewWindowClosing(PreviewWindow window, CancelEventArgs args)
+    {
+        if (_disposed || window == _closingWindow)
+        {
+            return;
+        }
+
+        args.Cancel = true;
+
+        // Out of the close's own call stack: retiring a window closes it.
+        // By then a window app shutdown closed, or one already retiring, is
+        // no longer held and has nothing to ask.
+        _dispatcher.BeginInvoke(() =>
+        {
+            if (_pinnedWindows.Contains(window))
+            {
+                DiagnosticLog.Write("window close -> close pinned");
+                OnPinnedCloseRequested(window);
+            }
+            else if (window == _previewWindow)
+            {
+                DiagnosticLog.Write("window close -> dismiss");
+                RequestHide();
+            }
+        });
+    }
+
+    /// <summary>
+    /// App shutdown closes windows past any cancel. Whatever closed one, the
+    /// controller lets go of it: the next Space must never show a dead window.
+    /// </summary>
+    private void OnPreviewWindowClosed(PreviewWindow window)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (window == _previewWindow)
+        {
+            _previewWindow = null;
+            _previewVisible = false;
+            ResetSession();
+        }
+
+        if (_pinnedWindows.Remove(window))
+        {
+            UpdatePinCapacity();
+        }
+
+        SyncMouseHook();
+    }
+
+    /// <summary>The controller's own close: the one close the leave gate lets through.</summary>
+    private void CloseWindow(PreviewWindow window)
+    {
+        _closingWindow = window;
+        try
+        {
+            window.Close();
+        }
+        finally
+        {
+            _closingWindow = null;
+        }
     }
 
     private void OnPreviewPresentationFailed(PreviewWindow window, string reason)
@@ -919,11 +996,11 @@ internal sealed class SpacePreviewController : IDisposable
     }
 
     /// <summary>Fades a surplus window out, then closes it for real.</summary>
-    private static void RetireWindow(PreviewWindow window)
+    private void RetireWindow(PreviewWindow window)
     {
         if (!window.IsVisible)
         {
-            window.Close();
+            CloseWindow(window);
             return;
         }
 
@@ -937,7 +1014,7 @@ internal sealed class SpacePreviewController : IDisposable
             window.IsVisibleChanged -= CloseOnceHidden;
             // The event fires from inside Hide(); closing is deferred out of
             // that call stack.
-            window.Dispatcher.BeginInvoke(window.Close);
+            window.Dispatcher.BeginInvoke(() => CloseWindow(window));
         }
 
         window.IsVisibleChanged += CloseOnceHidden;
@@ -1527,6 +1604,40 @@ internal sealed class SpacePreviewController : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Quit is a way out too. The first window holding signing work comes
+    /// forward with its save choice, and the app stays.
+    /// </summary>
+    internal bool CanQuit()
+    {
+        foreach (var window in OpenWindows())
+        {
+            if (!CanLeavePreview(window))
+            {
+                window.BringForward();
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Unsaved signing work in the glance or any pinned window.</summary>
+    internal bool HoldsSigningWork => OpenWindows().Any(window => window.HoldsSigningWork);
+
+    private IEnumerable<PreviewWindow> OpenWindows()
+    {
+        if (_previewVisible && _previewWindow is { } glance)
+        {
+            yield return glance;
+        }
+
+        foreach (var pinned in _pinnedWindows)
+        {
+            yield return pinned;
+        }
+    }
+
     /// <summary>Every user-driven end of a glance comes through here.</summary>
     private void RequestHide()
     {
@@ -1978,7 +2089,7 @@ internal sealed class SpacePreviewController : IDisposable
 
             try
             {
-                window.Close();
+                CloseWindow(window);
             }
             catch
             {

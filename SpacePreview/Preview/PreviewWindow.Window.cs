@@ -233,6 +233,18 @@ public partial class PreviewWindow
         WindowState = IsStageMaximized ? WindowState.Normal : WindowState.Maximized;
     }
 
+    /// <summary>Puts the window in front of the user, back from the taskbar if minimized.</summary>
+    internal void BringForward()
+    {
+        if (!IsVisible || Hwnd == IntPtr.Zero)
+        {
+            return;
+        }
+
+        RestoreFromNativeMinimize();
+        NativeMethods.ForceForeground(Hwnd);
+    }
+
     private void RestoreFromNativeMinimize()
     {
         if (WindowState != WindowState.Minimized)
