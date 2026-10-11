@@ -577,8 +577,8 @@ public partial class PreviewWindow : Window
                     // Everything PDF-backed goes to the Chromium viewer, so
                     // artwork gets the same zoom, scrolling, and page rail a
                     // document gets. Illustrator files reach it through a
-                    // linked .pdf name; the static pdfium render is what is
-                    // left when even that fails.
+                    // linked .pdf name; the error card is what is left when
+                    // even that fails.
                     var nativePdf = Path.GetExtension(contentPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase);
                     if (nativePdf)
                     {
@@ -592,7 +592,7 @@ public partial class PreviewWindow : Window
                         : await Task.Run(() => PdfViewerLink.TryResolve(contentPath, token), token);
 
                     content = viewerPath is null
-                        ? await BuildPdfViaPdfiumAsync(contentPath, token)
+                        ? BuildPdfErrorPreview(contentPath)
                         : BuildPdfWebPreview(viewerPath, version, token);
                 }
                 else if (OfficeOpenXmlPreviewLoader.IsSupported(contentPath))
@@ -1178,10 +1178,8 @@ public partial class PreviewWindow : Window
                 return;
             }
 
-            if (FileKinds.IsPdf(contentPath)
-                && PdfPageSizeProbe.TryReadFirstPageSize(contentPath, out var pageWidth, out var pageHeight))
+            if (FileKinds.IsPdf(contentPath) && TryHintPdfStage(contentPath, version))
             {
-                SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
                 return;
             }
 
@@ -1197,9 +1195,8 @@ public partial class PreviewWindow : Window
                 }
 
                 if (OfficeDocumentPdfConverter.TryGetCachedPdfConversion(contentPath) is { } cached
-                    && PdfPageSizeProbe.TryReadFirstPageSize(cached.DocumentPath, out pageWidth, out pageHeight))
+                    && TryHintPdfStage(cached.DocumentPath, version))
                 {
-                    SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
                     return;
                 }
 

@@ -107,11 +107,10 @@ public sealed class PdfPreviewRendererTests
         var pdfPath = Path.Combine(temp.Path, "dieline.pdf");
         WriteBlankPdf(pdfPath, 1, pageWidth: 12848, pageHeight: 5503);
 
-        var preview = PdfPreviewRenderer.TryRender(pdfPath, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(pdfPath, 0, CancellationToken.None);
 
-        Assert.NotNull(preview);
-        var page = Assert.Single(preview!.Pages);
-        Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page.Width, page.Height, thumbnail: false));
+        Assert.NotNull(page);
+        Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page!.Width, page.Height, thumbnail: false));
         Assert.True(page.Width >= 2000);
     }
 

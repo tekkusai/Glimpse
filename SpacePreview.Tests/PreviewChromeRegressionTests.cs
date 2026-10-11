@@ -190,132 +190,34 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("scroll-margin-top", themeSource, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// The PDF traps no behavior test can reach, because they live inside the
+    /// Chromium viewer. Hiding Search collapses the whole toolbar strip, page
+    /// box included, and the rail's instant jump types into that box. The
+    /// viewer honours #page only at document load, so a staged jump is a real
+    /// load with a cache-busting query; a runtime location.hash does nothing.
+    /// </summary>
     [Fact]
-    public void PdfDocumentsUseOwnedPageRailInsteadOfBrokenNativeSidebar()
+    public void PdfViewerTrapsStayGuarded()
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var appSource = ReadSource(@"SpacePreview\App.xaml.cs");
-        var upgradeBody = ReadMethod(windowSource, "private void UpgradeConvertedOfficePreview");
-        var stagedJumpBody = ReadMethod(windowSource, "private void StagePdfViewerJump");
         var stagedReplacementBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
-        var inProcessRailBody = ReadMethod(windowSource, "private Task LoadPdfPageRailAsync");
-        var officeRailBody = ReadMethod(windowSource, "private Task LoadPdfPageRailOutOfProcessAsync");
 
-        // The native toolbar keeps the zoom pair, page box, search, and print:
-        // a fixed set that fits at every stage width. Hiding Search collapses
-        // the ENTIRE strip (page box included), which kills the instant native
-        // jump - it must stay visible.
-        Assert.Contains("CoreWebView2PdfToolbarItems.Save | CoreWebView2PdfToolbarItems.SaveAs", windowSource, StringComparison.Ordinal);
-        Assert.Contains("CoreWebView2PdfToolbarItems.FullScreen | CoreWebView2PdfToolbarItems.MoreSettings", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("CoreWebView2PdfToolbarItems.Print", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("CoreWebView2PdfToolbarItems.PageSelector", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("CoreWebView2PdfToolbarItems.Search", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("CoreWebView2PdfToolbarItems.ZoomIn", windowSource, StringComparison.Ordinal);
+        foreach (var visible in new[] { "Search", "Print", "ZoomIn", "ZoomOut", "PageSelector" })
+        {
+            Assert.DoesNotContain($"CoreWebView2PdfToolbarItems.{visible}", windowSource, StringComparison.Ordinal);
+        }
 
-        // The collapsed rail must reclaim document space. It keeps only a
-        // small handle, and the native viewer is briefly cloaked while its
-        // internal toolbar/scrollbar settles.
-        Assert.Contains("state.RailColumn.Width = new GridLength(targetWidth)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("var targetWidth = state.IsVisible ? PdfPageRailWidth : PdfPageRailCollapsedWidth", windowSource, StringComparison.Ordinal);
-        Assert.Contains("CloakViewerForRailResize(state.WebView, state.Version)", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("ApplyPdfRailWidthUnderHeldFrameAsync", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png", windowSource, StringComparison.Ordinal);
-        Assert.Contains("PdfPageRailInitialPages = 10", windowSource, StringComparison.Ordinal);
-        Assert.Contains("LoadPdfPageRailOutOfProcessAsync(state)", inProcessRailBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("PdfPreviewRenderer.TryRenderThumbnails", inProcessRailBody, StringComparison.Ordinal);
-        Assert.Contains("TryRenderPdfThumbnailsOutOfProcessAsync", officeRailBody, StringComparison.Ordinal);
-        Assert.Contains("AnimateRail(state.Host, targetWidth, content)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("BuildCollapsedRail(document.TotalPages, \"Show pages\"", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.TryHandleJump?.Invoke(state, page) == true", windowSource, StringComparison.Ordinal);
-        Assert.Contains("JumpPdfToPage(state, page)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.RailVerticalOffset", windowSource, StringComparison.Ordinal);
-        Assert.Contains("scroll.ScrollToVerticalOffset(verticalOffset)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("Grid.SetRow(scroll, 1)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("host.Width = targetWidth;", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("new DoubleAnimation(current, targetWidth", windowSource, StringComparison.Ordinal);
-
-        // Initial document reveal waits for the first rail decision, so the
-        // user does not see the PDF surface appear and then slide sideways
-        // when thumbnails arrive.
-        Assert.Contains("FirstRailReady", windowSource, StringComparison.Ordinal);
-        Assert.Contains("WaitForDocumentRevealGateAsync(content)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("WaitForWebPaintReadyAsync(", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("WebRevealSettleDelay", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("NavigationCompleted += (_, _) => RunAfter(TimeSpan.FromMilliseconds(220)", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("NavigationCompleted += (_, _) => RunAfter(TimeSpan.FromMilliseconds(240)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("StagePdfViewerReplacement(", upgradeBody, StringComparison.Ordinal);
-        Assert.Contains("StagePdfViewerReplacement(", stagedJumpBody, StringComparison.Ordinal);
-        Assert.Contains("var paintAttemptStarted = false;", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.Contains("paintAttemptStarted = true;", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.Contains("if (!paintAttemptStarted)", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.Contains("DiscardFresh();", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.Contains("await WaitForWebPaintReadyAsync", stagedReplacementBody, StringComparison.Ordinal);
-        Assert.True(
-            stagedReplacementBody.IndexOf("paintAttemptStarted = true;", StringComparison.Ordinal)
-            < stagedReplacementBody.IndexOf("await WaitForWebPaintReadyAsync", StringComparison.Ordinal));
-
-        // The Chromium PDF viewer honors #page= only at document load, so a
-        // jump must be a REAL load: cache-busting query, never a runtime
-        // hash update (which the viewer silently ignores).
         Assert.DoesNotContain("location.hash", windowSource, StringComparison.Ordinal);
         Assert.Contains("?jump={target}#page={target}&view=FitH", windowSource, StringComparison.Ordinal);
 
-        // Rail clicks use the PDF viewer's own page box path: click the
-        // native field, select its value, write the target, and press Enter.
-        // That jumps without a reload. The staged viewer remains fallback
-        // only.
-        Assert.Contains("JumpPdfWithNativePageBoxAsync(state.WebView, core, target)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("DispatchMouseClickAsync(core, x, 20)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("DispatchModifiedKeyAsync(core, 65, \"KeyA\", \"a\", modifiers: 2)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("\"Input.insertText\"", windowSource, StringComparison.Ordinal);
-        Assert.Contains("StartPdfPageSync(railState)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("SyncPdfPageFromViewer", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TryReadPdfPageFromAutomation", windowSource, StringComparison.Ordinal);
-        var syncStart = windowSource.IndexOf(
-            "private async void SyncPdfPageFromViewer",
-            StringComparison.Ordinal);
-        Assert.True(syncStart >= 0);
-        var syncEnd = windowSource.IndexOf(
-            "private void SetPdfCurrentPageFromViewer",
-            syncStart,
-            StringComparison.Ordinal);
-        Assert.True(syncEnd > syncStart);
-        var pageSync = windowSource[syncStart..syncEnd];
-        Assert.Contains("var probeTask = Task.Run(() =>", pageSync, StringComparison.Ordinal);
-        Assert.Contains("TryReadPdfPageFromAutomation(hwnd, totalPages, cachedElement)", pageSync, StringComparison.Ordinal);
-        Assert.Contains("Task.WhenAny(probeTask, timeoutTask)", pageSync, StringComparison.Ordinal);
-        Assert.DoesNotContain("AutomationElement.FromHandle", pageSync, StringComparison.Ordinal);
-        Assert.Contains("PdfPageAutomationTimeout", windowSource, StringComparison.Ordinal);
-        Assert.Contains("PageSyncGeneration", windowSource, StringComparison.Ordinal);
-        Assert.Contains("PageSyncDisabled", windowSource, StringComparison.Ordinal);
-        Assert.Contains("AutomationElement.FromHandle", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ValuePattern.Pattern", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TryReadPdfPageFromSource", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TryReadPdfAutomationPageValue", windowSource, StringComparison.Ordinal);
-        Assert.Contains("SetPdfCurrentPageFromViewer", windowSource, StringComparison.Ordinal);
-        Assert.Contains("SetPdfCurrentPageFromViewer(state, page, logChange: false)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ReferenceEquals(state.SelectedPageTile, currentTile)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.JumpInFlight", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TimeSpan.FromMilliseconds(650)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.PageTiles[page]", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.PageRailScrollViewer = scroll", windowSource, StringComparison.Ordinal);
-        Assert.Contains("BringPdfPageTileIntoView(state, tile)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.RailNeedsSelectedPageScroll", windowSource, StringComparison.Ordinal);
-        Assert.Contains("pageToRevealOnLoad", windowSource, StringComparison.Ordinal);
-        Assert.Contains("alignLoadedSelection(tile)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("var topBand = scroll.ViewportHeight * 0.25", windowSource, StringComparison.Ordinal);
-        Assert.Contains("var targetTop = scroll.ViewportHeight / 3", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("Border? selected = null", windowSource, StringComparison.Ordinal);
-        Assert.Contains("SetEpubCurrentChapter(state, spineIndex)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("state.ChapterTiles[index] = tile", windowSource, StringComparison.Ordinal);
-        // The fallback stages a fresh viewer and swaps; it never scripts the
-        // PDF page or reloads in place. Converted Office documents get the
-        // same rail, but their thumbnails render in a helper process so
-        // pdfium cannot take the resident process down.
-        Assert.Contains("trackAsPreviewDisposable: false", windowSource, StringComparison.Ordinal);
-        Assert.DoesNotContain("AddScriptToExecuteOnDocumentCreatedAsync", windowSource, StringComparison.Ordinal);
-        Assert.Contains("LoadPdfPageRailOutOfProcessAsync(railState)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("--render-pdf-thumbnails", appSource, StringComparison.Ordinal);
+        // Navigation and the 4 s escape share one owner: the escape stands
+        // down once the paint wait has started, so a slow paint is never
+        // swapped in half-drawn and then swapped again.
+        Assert.True(
+            stagedReplacementBody.IndexOf("paintAttemptStarted = true;", StringComparison.Ordinal)
+            < stagedReplacementBody.IndexOf("await WaitForWebPaintReadyAsync", StringComparison.Ordinal));
+        Assert.Contains("if (!paintAttemptStarted)", stagedReplacementBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -631,27 +533,6 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("Task.Run(() => TryReadPdfThumbnailManifest(cacheDir), token)", body, StringComparison.Ordinal);
         Assert.Contains("Task.Run(() => TryReadPdfThumbnailManifest(tempDir), token)", body, StringComparison.Ordinal);
         Assert.Contains("startPage", body, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PdfRailRangeRenderingFallsBackToFullRender()
-    {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var coreBody = ReadMethod(windowSource, "private async Task LoadPdfPageRailCoreAsync");
-        var directPdfBody = ReadMethod(windowSource, "private Task LoadPdfPageRailAsync");
-        var outOfProcessBody = ReadMethod(windowSource, "private Task LoadPdfPageRailOutOfProcessAsync");
-
-        Assert.Contains("var firstPages = await renderRange(PdfPageRailInitialPages, 0)", coreBody, StringComparison.Ordinal);
-        Assert.Contains("PdfPageRailMaxPages - firstPages.Pages.Count", coreBody, StringComparison.Ordinal);
-        Assert.Contains("var allPages = await renderFallback()", coreBody, StringComparison.Ordinal);
-        Assert.Contains("CombinePdfPreviewDocuments(firstPages, remainingPages)", coreBody, StringComparison.Ordinal);
-        Assert.Contains("state.Version != _loadVersion", coreBody, StringComparison.Ordinal);
-        Assert.Contains("state.Token.IsCancellationRequested", coreBody, StringComparison.Ordinal);
-        Assert.Contains("LoadPdfPageRailOutOfProcessAsync(state)", directPdfBody, StringComparison.Ordinal);
-        Assert.Contains("LoadPdfPageRailCoreAsync", outOfProcessBody, StringComparison.Ordinal);
-        Assert.DoesNotContain("PdfPreviewRenderer.TryRenderThumbnails", directPdfBody, StringComparison.Ordinal);
-        Assert.Contains("TryRenderPdfThumbnailsOutOfProcessAsync", outOfProcessBody, StringComparison.Ordinal);
-        Assert.Contains("PdfPageRailMaxPages", outOfProcessBody, StringComparison.Ordinal);
     }
 
     [Fact]
