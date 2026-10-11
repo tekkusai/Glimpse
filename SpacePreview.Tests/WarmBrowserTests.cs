@@ -2,13 +2,14 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
 /// <summary>
 /// The parked browser costs six processes and about 80 MB. A window pays
-/// for it only once it has shown a web surface, and never while pinned: a
-/// pinned window serves no further glance.
+/// for it only once it loads a page, and never while pinned: a pinned
+/// window serves no further glance.
 /// </summary>
 [Collection(WpfCollection.Name)]
 public sealed class WarmBrowserTests
@@ -58,6 +59,74 @@ public sealed class WarmBrowserTests
         Assert.False(WarmBrowserStarted(window));
     });
 
+    // The load leaves before it reads the file, so no page is ever built:
+    // a page known by its name launches its browser beside the reading and
+    // the build, and anything else starts nothing yet.
+    [Theory]
+    [InlineData("notes.md", true)]
+    [InlineData("guide.pdf", true)]
+    [InlineData("clip.mp4", true)]
+    [InlineData("report.docx", true)]
+    [InlineData("book.epub", true)]
+    [InlineData("page.html", true)]
+    [InlineData("logo.svg", true)]
+    [InlineData("photo.jpg", false)]
+    [InlineData("readme.txt", false)]
+    [InlineData("README", false)]
+    [InlineData("code.cs", false)]
+    public async Task APageKnownByItsNameStartsTheBrowserBeforeTheFileIsRead(string name, bool page) =>
+        Assert.Equal(page, await StartedBeforeReadingAsync(name));
+
+    // Code is a page only once a grammar takes it. The browser starts then,
+    // while the code is still being highlighted.
+    [Fact]
+    public Task CodeStartsTheBrowserWhileItIsHighlighted() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var code = string.Concat(Enumerable.Repeat("public static int Twice(int value) => value * 2; // " + Guid.NewGuid() + "\n", 2500));
+        var path = temp.CreateFile("big.cs", code);
+        var window = new PreviewWindow { Left = -30000, Top = 0 };
+        new WindowInteropHelper(window).EnsureHandle();
+        try
+        {
+            var load = (Task)Fields.Call(window, "BuildPreviewContentAsync", path, FileSignatureKind.Unknown, false, 1L, CancellationToken.None)!;
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (!WarmBrowserStarted(window))
+            {
+                Assert.True(DateTime.UtcNow < deadline, "The browser never started.");
+                await Task.Delay(1);
+            }
+
+            Assert.False(load.IsCompleted, "The page was built before the browser started.");
+            await load;
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Theory]
+    [InlineData("README")]
+    [InlineData("notes.txt")]
+    public Task TextWithoutAGrammarStartsNoBrowser(string name) => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var path = temp.CreateFile(name, "Plain words, no grammar.");
+        var window = new PreviewWindow { Left = -30000, Top = 0 };
+        new WindowInteropHelper(window).EnsureHandle();
+        try
+        {
+            await (Task)Fields.Call(window, "BuildPreviewContentAsync", path, FileSignatureKind.Unknown, false, 1L, CancellationToken.None)!;
+
+            Assert.False(WarmBrowserStarted(window));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
     [Fact]
     public void APinnedWindowLetsItsBrowserGoUntilItIsTheGlanceAgain() => Sta.Run(() =>
     {
@@ -84,6 +153,30 @@ public sealed class WarmBrowserTests
             window.Close();
         }
     });
+
+    /// <summary>Runs a load that leaves before it reads the file and says whether it started the browser.</summary>
+    private static async Task<bool> StartedBeforeReadingAsync(string name)
+    {
+        var started = false;
+        await WpfApp.RunAsync(async () =>
+        {
+            var window = new PreviewWindow { Left = -30000, Top = 0 };
+            new WindowInteropHelper(window).EnsureHandle();
+            try
+            {
+                var path = Path.Combine(Path.GetTempPath(), name);
+                var load = (Task)Fields.Call(window, "LoadPreviewAsync", path, path, 1L, new CancellationToken(canceled: true), false)!;
+                started = WarmBrowserStarted(window);
+                await load;
+            }
+            finally
+            {
+                window.Close();
+            }
+        });
+
+        return started;
+    }
 
     private static bool WarmBrowserStarted(PreviewWindow window) =>
         Fields.Get<bool>(Fields.Get<object>(window, "_warmBrowser"), "_started");

@@ -293,7 +293,9 @@ public partial class PreviewWindow
 
     /// <summary>
     /// A window that has shown a page keeps its browser for the next glance.
-    /// A pinned one never serves another.
+    /// A load starts it before its page exists: by name before the file is
+    /// read, code once a grammar takes it, anything else in CreateWebView.
+    /// A pinned window never serves another glance.
     /// </summary>
     private void WarmBrowserForNextGlance()
     {
