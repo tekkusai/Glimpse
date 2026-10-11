@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Windows.Media.Media3D;
 using System.Xml.Linq;
 using SpacePreview.Services;
+using SpacePreview.Utilities;
 using Quaternion = System.Numerics.Quaternion;
 
 namespace SpacePreview.Preview;
@@ -32,6 +33,12 @@ internal static class MeshPreviewLoader
     /// <summary>The most triangles the viewport gets; Viewport3D still rotates smoothly here.</summary>
     internal const int MaxRenderedTriangles = 250_000;
 
+    // GLB nodes and 3MF build items place their mesh again for every
+    // instance, so a small file can ask for geometry without end. The totals
+    // hold a large scan; past them the file gets its card.
+    internal const int MaxPlacedVertices = 4_000_000;
+    internal const int MaxPlacedTriangles = 4_000_000;
+
     private const long MaxTextMeshBytes = 256L * 1024 * 1024;
     private const long Max3MfModelBytes = 32L * 1024 * 1024;
     private const long MaxGlbJsonBytes = 64L * 1024 * 1024;
@@ -40,6 +47,10 @@ internal static class MeshPreviewLoader
     // Faces that turn less than about 45 degrees from each other share a
     // smoothed normal; a sharper turn stays a crease.
     private const float CreaseCosine = 0.7f;
+
+    // A sphere's pole sits in one face per slice. A vertex in more faces
+    // than this is a fan or a repeat, and flat shading serves it.
+    internal const int MaxSmoothedFaces = 128;
 
     public static MeshPreview? TryLoad(string path, CancellationToken token) =>
         TryLoad(path, MaxRenderedTriangles, token);
@@ -724,6 +735,8 @@ internal static class MeshPreviewLoader
             }
 
             var mesh = gltf.Mesh;
+            var corners = indices?.Length ?? positions.Length;
+            Place(mesh, positions.Length, mode == 4 ? corners / 3 : Math.Max(0, corners - 2));
             var first = mesh.VertexCount;
             foreach (var position in positions)
             {
@@ -731,7 +744,6 @@ internal static class MeshPreviewLoader
                 mesh.AddVertex(new Vector3(placed.X, -placed.Z, placed.Y));
             }
 
-            var corners = indices?.Length ?? positions.Length;
             int Corner(int i) => first + (indices is null ? i : indices[i]);
             void Add(int a, int b, int c)
             {
@@ -783,7 +795,8 @@ internal static class MeshPreviewLoader
     {
         // Float VEC3 only: quantized or Draco-compressed positions have no
         // readable float data here, and that primitive is skipped.
-        if (ReadGltfAccessor(gltf, accessorIndex, "VEC3", out var componentType, out var count, out var stride, out var bytes)
+        var room = MaxPlacedVertices - gltf.Mesh.VertexCount;
+        if (ReadGltfAccessor(gltf, accessorIndex, "VEC3", room, out var componentType, out var count, out var stride, out var bytes)
             && componentType == 5126)
         {
             var positions = new Vector3[count];
@@ -800,7 +813,9 @@ internal static class MeshPreviewLoader
 
     private static int[]? ReadGltfIndices(Gltf gltf, int accessorIndex)
     {
-        if (!ReadGltfAccessor(gltf, accessorIndex, "SCALAR", out var componentType, out var count, out var stride, out var bytes))
+        // A strip or fan makes a triangle per index past its first two.
+        var room = 3L * (MaxPlacedTriangles - gltf.Mesh.TriangleCount) + 2;
+        if (!ReadGltfAccessor(gltf, accessorIndex, "SCALAR", room, out var componentType, out var count, out var stride, out var bytes))
         {
             return null;
         }
@@ -824,12 +839,14 @@ internal static class MeshPreviewLoader
     /// <summary>
     /// The bytes behind one accessor, sliced from the BIN chunk: element i
     /// starts at i * stride. Sparse accessors and external buffers are not
-    /// read.
+    /// read. More than <paramref name="room"/> elements refuses the file
+    /// before anything is allocated.
     /// </summary>
     private static bool ReadGltfAccessor(
         Gltf gltf,
         int accessorIndex,
         string type,
+        long room,
         out int componentType,
         out int count,
         out int stride,
@@ -886,6 +903,11 @@ internal static class MeshPreviewLoader
         }
 
         gltf.Token.ThrowIfCancellationRequested();
+        if (count > room)
+        {
+            throw new InvalidDataException(TooMuchGeometry);
+        }
+
         bytes = new byte[span];
         gltf.Stream.Position = gltf.BinStart + viewOffset + accessorOffset;
         gltf.Stream.ReadExactly(bytes);
@@ -1713,18 +1735,12 @@ internal static class MeshPreviewLoader
             return null;
         }
 
-        XDocument document;
-        using (var entryStream = modelEntry.Open())
+        var settings = new System.Xml.XmlReaderSettings
         {
-            var settings = new System.Xml.XmlReaderSettings
-            {
-                DtdProcessing = System.Xml.DtdProcessing.Prohibit,
-                MaxCharactersInDocument = Max3MfModelBytes
-            };
-            using var reader = System.Xml.XmlReader.Create(entryStream, settings);
-            document = XDocument.Load(reader);
-        }
-
+            DtdProcessing = System.Xml.DtdProcessing.Prohibit,
+            MaxCharactersInDocument = Max3MfModelBytes
+        };
+        var document = XmlNesting.Load(modelEntry.Open, settings, LoadOptions.None);
         token.ThrowIfCancellationRequested();
         var ns = document.Root?.Name.Namespace ?? XNamespace.None;
         var objects = new Dictionary<string, (List<Vector3> Vertices, List<(int A, int B, int C)> Faces)>();
@@ -1789,6 +1805,7 @@ internal static class MeshPreviewLoader
         List<(int A, int B, int C)> faces,
         Matrix4x4? transform)
     {
+        Place(mesh, vertices.Count, faces.Count);
         var first = mesh.VertexCount;
         foreach (var vertex in vertices)
         {
@@ -1853,6 +1870,17 @@ internal static class MeshPreviewLoader
 
     // ----------------------------------------------------------- shared --
 
+    private const string TooMuchGeometry = "The model places more geometry than a preview holds.";
+
+    /// <summary>Refuses an instance that would carry the mesh past the placed totals.</summary>
+    private static void Place(IndexedMesh mesh, long vertices, long triangles)
+    {
+        if (mesh.VertexCount + vertices > MaxPlacedVertices || mesh.TriangleCount + triangles > MaxPlacedTriangles)
+        {
+            throw new InvalidDataException(TooMuchGeometry);
+        }
+    }
+
     // The first preview after launch runs the per-vertex and per-triangle
     // paths millions of times before tiering would promote them, so they
     // start optimized.
@@ -1906,7 +1934,7 @@ internal static class MeshPreviewLoader
         countLabel ??= shape.TriangleCount < count
             ? $"{count:N0} triangles, simplified to {shape.TriangleCount:N0}"
             : $"{count:N0} triangles";
-        return new MeshPreview(ToGeometry(shape, min, max), formatName, countLabel, count);
+        return new MeshPreview(ToGeometry(shape, min, max, token), formatName, countLabel, count);
     }
 
     /// <summary>
@@ -2068,13 +2096,14 @@ internal static class MeshPreviewLoader
     /// Per-corner normals. A corner averages the faces around its vertex
     /// that turn less than the crease angle from its own face, weighted by
     /// area, so curved surfaces shade smooth and hard edges stay sharp.
+    /// Every corner scans its vertex's faces, so a vertex in more than
+    /// <see cref="MaxSmoothedFaces"/> shades flat instead of costing the
+    /// square of its count.
     /// </summary>
-    private static Vector3[] CreaseNormals(MeshShape shape)
+    internal static Vector3[] CreaseNormals(Vector3[] positions, int[] corners, CancellationToken token)
     {
-        var corners = shape.Corners;
-        var positions = shape.Positions;
-        var weighted = new Vector3[shape.TriangleCount];
-        var unit = new Vector3[shape.TriangleCount];
+        var weighted = new Vector3[corners.Length / 3];
+        var unit = new Vector3[corners.Length / 3];
         for (var t = 0; t < weighted.Length; t++)
         {
             var a = positions[corners[t * 3]];
@@ -2105,8 +2134,19 @@ internal static class MeshPreviewLoader
         var normals = new Vector3[corners.Length];
         for (var i = 0; i < corners.Length; i++)
         {
+            if ((i & 4095) == 0)
+            {
+                token.ThrowIfCancellationRequested();
+            }
+
             var own = unit[i / 3];
             var vertex = corners[i];
+            if (start[vertex + 1] - start[vertex] > MaxSmoothedFaces)
+            {
+                normals[i] = own == Vector3.Zero ? Vector3.UnitZ : own;
+                continue;
+            }
+
             var sum = Vector3.Zero;
             for (var k = start[vertex]; k < start[vertex + 1]; k++)
             {
@@ -2125,13 +2165,13 @@ internal static class MeshPreviewLoader
     }
 
     /// <summary>Centers the shape and scales its longest side to the viewport's frame.</summary>
-    private static MeshGeometry3D ToGeometry(MeshShape shape, Vector3 min, Vector3 max)
+    private static MeshGeometry3D ToGeometry(MeshShape shape, Vector3 min, Vector3 max, CancellationToken token)
     {
         var center = (min + max) / 2;
         var extent = max - min;
         double longest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
         var scale = longest > 0 && double.IsFinite(longest) ? 3.1 / longest : 1;
-        var normals = CreaseNormals(shape);
+        var normals = CreaseNormals(shape.Positions, shape.Corners, token);
         var positions = new Point3D[shape.Corners.Length];
         var vectors = new Vector3D[shape.Corners.Length];
         for (var i = 0; i < positions.Length; i++)
