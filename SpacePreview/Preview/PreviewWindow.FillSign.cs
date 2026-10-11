@@ -36,6 +36,9 @@ public partial class PreviewWindow
     // user's explicit second choice.
     // ---------------------------------------------------------------------
 
+    // ERROR_FILE_EXISTS: another save took the copy's name first.
+    private const int FileExists = unchecked((int)0x80070050);
+
     // Every window's sign session, by the file it signs.
     private static readonly Dictionary<string, SignSession> SignSessions = [];
 
@@ -51,6 +54,9 @@ public partial class PreviewWindow
 
     /// <summary>The writer's check before any work goes on; tests hold it to open the gap it leaves.</summary>
     internal Func<string, PdfSignCheck> CheckSignable { get; set; } = PdfFillSignWriter.Preflight;
+
+    /// <summary>The writer itself; tests hold it to open the gaps around a save.</summary>
+    internal Action<string, string, IReadOnlyList<SignPlacement>> WriteSignedPdf { get; set; } = PdfFillSignWriter.WriteSignedCopy;
 
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
@@ -397,15 +403,22 @@ public partial class PreviewWindow
             && IsCurrentContentPath(path);
 
         surface.SetSaving(true);
-        var finalPath = overwrite ? path : NextSignedCopyPath(path);
+        var stamp = keeper.File;
+        string finalPath;
         try
         {
             if (overwrite)
             {
+                finalPath = path;
                 var temp = SigningTempPath(path);
                 try
                 {
-                    await Task.Run(() => WriteHiddenSignedCopy(path, temp, placements));
+                    await Task.Run(() =>
+                    {
+                        RequireUnchanged(path, stamp);
+                        WriteSignedPdf(path, temp, placements);
+                        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
+                    });
 
                     // The embedded viewer holds the original open; release
                     // it and give Chromium a beat to let go before the swap.
@@ -417,7 +430,7 @@ public partial class PreviewWindow
                         _currentDisposable = null;
                     }
 
-                    await ReplaceWithRetriesAsync(temp, path);
+                    await ReplaceWithRetriesAsync(temp, path, stamp);
                 }
                 catch
                 {
@@ -427,7 +440,11 @@ public partial class PreviewWindow
             }
             else
             {
-                await Task.Run(() => PdfFillSignWriter.WriteSignedCopy(path, finalPath, placements));
+                finalPath = await Task.Run(() =>
+                {
+                    RequireUnchanged(path, stamp);
+                    return WriteSignedCopyBeside(path, placements);
+                });
             }
         }
         catch (Exception ex)
@@ -464,6 +481,9 @@ public partial class PreviewWindow
         }
     }
 
+    /// <summary>What a save says when the PDF is no longer the version the work was placed on.</summary>
+    internal const string ChangedSinceSigningBegan = "This PDF was changed in another app while you were signing. Nothing was saved.";
+
     /// <summary>What a failed save says in place of the choices it brings back.</summary>
     internal static string SaveFailureReason(Exception ex) => ex switch
     {
@@ -477,22 +497,45 @@ public partial class PreviewWindow
     };
 
     /// <summary>
-    /// One predictable, hidden file beside the original: a crash leaves at
-    /// most one behind, and the next save reuses it.
+    /// The work was placed on one version of the file. Saving onto any
+    /// other would put ink on whatever is there now, or write over another
+    /// app's newer save, so the save is refused and the work stays.
+    /// </summary>
+    private static void RequireUnchanged(string path, FileStamp stamp)
+    {
+        if (FileStamp.Of(path) != stamp)
+        {
+            throw new InvalidOperationException(ChangedSinceSigningBegan);
+        }
+    }
+
+    /// <summary>
+    /// A hidden file beside the original, its own for each save: two saves
+    /// at once never write into, or swap in, each other's.
     /// </summary>
     internal static string SigningTempPath(string path) =>
-        Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, "." + Path.GetFileName(path) + ".signing");
+        Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, $".{Path.GetFileName(path)}.{Guid.NewGuid().ToString("N")[..8]}.signing");
 
-    private static void WriteHiddenSignedCopy(string path, string temp, IReadOnlyList<SignPlacement> placements)
+    /// <summary>
+    /// Writes the copy under the first free "(signed)" name. Another save
+    /// can take that name between the look and the write; the writer then
+    /// refuses it and the next free name is tried.
+    /// </summary>
+    private string WriteSignedCopyBeside(string path, IReadOnlyList<SignPlacement> placements)
     {
-        if (File.Exists(temp))
+        for (var attempt = 0; ; attempt++)
         {
-            File.SetAttributes(temp, FileAttributes.Normal);
-            File.Delete(temp);
+            var candidate = NextSignedCopyPath(path);
+            try
+            {
+                WriteSignedPdf(path, candidate, placements);
+                return candidate;
+            }
+            catch (IOException ex) when (ex.HResult == FileExists && attempt < 8)
+            {
+                // Taken a moment ago; the next look skips it.
+            }
         }
-
-        PdfFillSignWriter.WriteSignedCopy(path, temp, placements);
-        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
     }
 
     /// <summary>
@@ -525,12 +568,18 @@ public partial class PreviewWindow
         }
     }
 
-    private static async Task ReplaceWithRetriesAsync(string signedPath, string destinationPath)
+    /// <summary>
+    /// Swaps the signed file in, retrying while the viewer lets go of the
+    /// original. Every try checks first that the original is still the
+    /// version the work was placed on.
+    /// </summary>
+    private static async Task ReplaceWithRetriesAsync(string signedPath, string destinationPath, FileStamp stamp)
     {
         for (var attempt = 0; ; attempt++)
         {
             try
             {
+                RequireUnchanged(destinationPath, stamp);
                 File.Replace(signedPath, destinationPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
                 return;
             }

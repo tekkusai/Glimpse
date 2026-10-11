@@ -43,7 +43,9 @@ public sealed class PdfFillSignWriterAdversarialTests
         WriteMinimalPdf(source);
         var hashBefore = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(source)));
 
-        var output = source + ".signing";
+        // Its own name each run: the writer never writes over a file, and a
+        // rendered output stays open until the host exits.
+        var output = $"{source}.{Guid.NewGuid():N}.signing";
         PdfFillSignWriter.WriteSignedCopy(
             source,
             output,

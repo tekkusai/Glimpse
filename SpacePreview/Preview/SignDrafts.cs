@@ -359,6 +359,9 @@ internal sealed class SignDraftKeeper
         }
     }
 
+    /// <summary>The version of the PDF this session's work was placed on.</summary>
+    public FileStamp File => _file;
+
     /// <summary>Takes the work as it is now and restarts the pause. Never touches the disk.</summary>
     public void Update(int pageIndex, IReadOnlyList<SignPlacement> placements)
     {

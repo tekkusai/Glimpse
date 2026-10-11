@@ -195,6 +195,33 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void ASignedCopyNeverWritesOverAFileAlreadyThere()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "deal.pdf");
+        WritePdf(source, 200, 100);
+        var taken = temp.CreateFile("deal (signed).pdf", "another save's copy");
+        var date = new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.3, 0.1, "1/2/2026");
+
+        Assert.ThrowsAny<IOException>(() => PdfFillSignWriter.WriteSignedCopy(source, taken, [date]));
+        Assert.Equal("another save's copy", File.ReadAllText(taken));
+
+        // A write that fails before it made its file takes nothing with it.
+        var broken = temp.CreateFile("broken.pdf", "not a pdf");
+        Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.WriteSignedCopy(broken, taken, [date]));
+        Assert.Equal("another save's copy", File.ReadAllText(taken));
+    }
+
+    [Fact]
+    public void EverySaveStagesItsOwnFile()
+    {
+        var original = Path.Combine(Path.GetTempPath(), "deal.pdf");
+
+        Assert.NotEqual(PreviewWindow.SigningTempPath(original), PreviewWindow.SigningTempPath(original));
+        Assert.StartsWith(".deal.pdf.", Path.GetFileName(PreviewWindow.SigningTempPath(original)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AReplaceThatLostTheOriginalKeepsTheSignedDocument()
     {
         using var temp = new TempDirectory();

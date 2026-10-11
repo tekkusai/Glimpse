@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -621,6 +622,130 @@ public sealed class SignDraftTests
     });
 
     [Fact]
+    public Task TwoCopiesSavedAtOnceGetTwoNames() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        var folder = Path.GetDirectoryName(pdf)!;
+        var first = Path.Combine(folder, "contract (signed).pdf");
+
+        // Another save takes the first free name between this one's look and its write.
+        var written = new List<string>();
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            if (!File.Exists(first))
+            {
+                File.WriteAllText(first, "the other save's copy");
+            }
+
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            lock (written)
+            {
+                written.Add(output);
+            }
+        };
+        surface.ShowSaveChoice();
+        Press(surface, "Save a signed copy");
+        // A finished save shows its file next, in a viewer a test never starts.
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+
+        Assert.True(await EventuallyAsync(() =>
+        {
+            lock (written)
+            {
+                return written.Count > 0;
+            }
+        }));
+        var second = Path.Combine(folder, "contract (signed 2).pdf");
+        Assert.Equal([second], written);
+        Assert.Equal("the other save's copy", File.ReadAllText(first));
+        Assert.Contains("/Subtype /FreeText", Latin1(second), StringComparison.Ordinal);
+    });
+
+    [Fact]
+    public Task TwoReplacesAtOnceEachUseTheirOwnSignedFile() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        var keeper = Fields.Get<SignDraftKeeper>(window, "_signDraft");
+        using var firstStaged = new ManualResetEventSlim();
+        using var firstGo = new ManualResetEventSlim();
+        using var secondStaged = new ManualResetEventSlim();
+        using var secondGo = new ManualResetEventSlim();
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            var (staged, go) = placements.Count == 1 ? (firstStaged, firstGo) : (secondStaged, secondGo);
+            staged.Set();
+            go.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        // Two saves of different work, each written and waiting to swap.
+        SignPlacement[] one = [Date(0) with { Text = "AAA" }];
+        SignPlacement[] two = [Date(0) with { Text = "BBB" }, Date(0) with { Text = "BBB" }];
+        var firstSave = (Task)Fields.Call(window, "SaveFillSignAsync", surface, keeper, one, true)!;
+        Assert.True(await EventuallyAsync(() => firstStaged.IsSet));
+        var secondSave = (Task)Fields.Call(window, "SaveFillSignAsync", surface, keeper, two, true)!;
+        Assert.True(await EventuallyAsync(() => secondStaged.IsSet));
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+
+        firstGo.Set();
+        await firstSave;
+        Assert.Contains("(AAA)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.DoesNotContain("(BBB)", Latin1(pdf), StringComparison.Ordinal);
+
+        // The second was made from the file before the first landed, so it
+        // is refused, and the first save's file stays.
+        secondGo.Set();
+        await secondSave;
+        Assert.Contains("(AAA)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.DoesNotContain("(BBB)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.Equal([pdf], Directory.GetFiles(Path.GetDirectoryName(pdf)!));
+    });
+
+    [Theory]
+    [InlineData("Save a signed copy")]
+    [InlineData("Replace the original")]
+    public Task ASaveRefusesAPdfThatChangedSinceSigningBegan(string choice) => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        // Another app saves a different one-page document under the same name.
+        FillSignBehaviorTests.WritePdf(pdf, 595.5, 842);
+        var newer = File.ReadAllBytes(pdf);
+
+        surface.ShowSaveChoice();
+        Press(surface, choice);
+
+        await RefusedAsync(window, surface, pdf, () => newer);
+    });
+
+    [Fact]
+    public Task AnEditSavedWhileTheSignedFileIsWrittenIsKept() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        byte[] newer = [];
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            // Another app saves its edit after the signed file is written, before the swap.
+            FillSignBehaviorTests.WritePdf(source, 595.5, 842);
+            newer = File.ReadAllBytes(source);
+        };
+
+        surface.ShowSaveChoice();
+        Press(surface, "Replace the original");
+
+        await RefusedAsync(window, surface, pdf, () => newer);
+    });
+
+    [Fact]
     public Task AFileThatCannotBeReadRightNowKeepsItsDraft() => InWindow(async (root, window) =>
     {
         var pdf = SignablePdf(root);
@@ -819,6 +944,21 @@ public sealed class SignDraftTests
 
         await (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
         return Fields.Get<FillSignSurface>(window, "_fillSignSurface");
+    }
+
+    private static string Latin1(string path) => Encoding.Latin1.GetString(File.ReadAllBytes(path));
+
+    /// <summary>The save said no, wrote nothing, left the newer file alone, and kept the work and its draft.</summary>
+    private static async Task RefusedAsync(PreviewWindow window, FillSignSurface surface, string pdf, Func<byte[]> newer)
+    {
+        var status = Fields.Get<TextBlock>(surface, "_saveStatus");
+        Assert.True(await EventuallyAsync(() => status.Text.Length > 0 && status.Text != "Saving…"), "the save never answered");
+        Assert.Equal(PreviewWindow.ChangedSinceSigningBegan, status.Text);
+        Assert.Equal(newer(), File.ReadAllBytes(pdf));
+        Assert.Equal([pdf], Directory.GetFiles(Path.GetDirectoryName(pdf)!));
+        Assert.Single(surface.Placements);
+        Assert.Same(surface, Fields.Get<FillSignSurface?>(window, "_fillSignSurface"));
+        Assert.True(SignDraftKeeper.FlushAll());
     }
 
     /// <summary>Lets every continuation already queued on the window's thread run.</summary>
