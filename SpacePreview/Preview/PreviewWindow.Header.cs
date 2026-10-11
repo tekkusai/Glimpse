@@ -72,6 +72,11 @@ public partial class PreviewWindow
         _escapeYieldsToContent = false;
         _lastContentClickInViewerChrome = false;
         _userEngagedContent = false;
+        // A session dropped without the user choosing keeps its work as a
+        // draft, like any other end nobody chose.
+        _signDraft?.Close();
+        _signDraft = null;
+        _hasSignDraft = false;
         _fillSignSurface = null;
         _fillSignParkedContent = null;
         _deferredWebFailure = null;

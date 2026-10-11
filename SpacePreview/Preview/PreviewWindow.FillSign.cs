@@ -40,6 +40,10 @@ public partial class PreviewWindow
     private SignDraftKeeper? _signDraft;
     private bool _hasSignDraft;
 
+    /// <summary>Sign mode's page render: a pdfium helper, never this process. Tests stand in for it.</summary>
+    internal Func<string, int, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
+        (path, index) => PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
+
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
     internal void RequestFillSignEscape() => _fillSignSurface?.HandleEscape();
@@ -53,9 +57,6 @@ public partial class PreviewWindow
     {
         return _fillSignSurface?.TryLeave() != false;
     }
-
-    /// <summary>Placed ink not yet saved. Unlike TryLeaveFillSign, it never brings up the save choice.</summary>
-    internal bool HoldsSigningWork => _fillSignSurface?.HasWork == true;
 
     /// <summary>
     /// Looks for work kept from last time on the PDF that just loaded, off
@@ -80,8 +81,10 @@ public partial class PreviewWindow
 
         var version = _loadVersion;
         // Read again rather than trusted from the load: the file, or another
-        // window's work on it, may have moved on since.
+        // window's work on it, may have moved on since. The writer's check
+        // starts now too, so kept work comes back with the page, not after.
         var draftLoad = Task.Run(() => SignDrafts.Load(path));
+        var preflight = Task.Run(() => PdfFillSignWriter.Preflight(path));
         // Asked of the viewer now: a document scrolled by wheel alone has a
         // stale rail page.
         var (currentPage, totalPages) = await ReadPdfPositionAsync();
@@ -93,7 +96,7 @@ public partial class PreviewWindow
 
         int? viewerPages = totalPages > 0 ? totalPages : null;
         var pageIndex = draft?.PageIndex ?? Math.Max(0, currentPage - 1);
-        var pages = new SignPageCache(path, viewerPages ?? pageIndex + 1);
+        var pages = new SignPageCache(index => RenderSignPage(path, index), viewerPages ?? pageIndex + 1);
         var page = await pages.Get(pageIndex);
         if (page is null)
         {
@@ -112,12 +115,9 @@ public partial class PreviewWindow
         }
 
         var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
-        if (draft is not null)
-        {
-            surface.Restore(draft.Placements);
-        }
-
-        var keeper = file is { } stamp ? new SignDraftKeeper(path, stamp, restored: draft is not null) : null;
+        // Kept only once the check passes: a draft of work this file cannot
+        // save would offer to resume it forever.
+        SignDraftKeeper? keeper = null;
         surface.WorkChanged += () => keeper?.Update(surface.PageIndex, surface.Placements);
         surface.ExitRequested += ExitFillSignMode;
         surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
@@ -125,16 +125,15 @@ public partial class PreviewWindow
 
         _fillSignParkedContent = current;
         _fillSignSurface = surface;
-        _signDraft = keeper;
         _hasSignDraft = false;
         PreviewContent.Content = surface;
         SyncHeaderTools();
-        DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}" + (draft is null ? "" : $" restored={draft.Placements.Count}"));
+        DiagnosticLog.Write($"fill-sign entered page={pageIndex + 1}");
 
         // The writer reads the file exactly as a save would. A PDF it cannot
         // update says why before any work goes onto it, and the page count
         // is the writer's own, not whatever the rail had loaded so far.
-        var check = await Task.Run(() => PdfFillSignWriter.Preflight(path));
+        var check = await preflight;
         if (!ReferenceEquals(_fillSignSurface, surface))
         {
             return;
@@ -148,17 +147,28 @@ public partial class PreviewWindow
 
         if (check.Problem is not null)
         {
-            // Work this file can never save is not worth keeping.
+            // A problem never ends a draft: drafts exist only for files that
+            // passed this check, and one waits for its file to read again.
             DiagnosticLog.Write($"fill-sign unavailable: {check.Problem}");
-            keeper?.Discard();
+            surface.ApplyCheck(check);
+            return;
+        }
+
+        if (draft is not null)
+        {
+            surface.Restore(draft.Placements);
+            DiagnosticLog.Write($"fill-sign restored placements={draft.Placements.Count}");
+        }
+
+        if (file is { } stamp)
+        {
+            keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
+            _signDraft = keeper;
         }
 
         surface.ApplyCheck(check);
-        if (check.Problem is null)
-        {
-            pages.PageCount = check.PageCount;
-            pages.KeepNeighbors(pageIndex);
-        }
+        pages.PageCount = check.PageCount;
+        pages.KeepNeighbors(pageIndex);
     }
 
     private async Task ShowFillSignPageAsync(FillSignSurface surface, SignPageCache pages, int pageIndex)
@@ -186,7 +196,7 @@ public partial class PreviewWindow
     /// instead of a helper's start; pages further away are let go. UI thread
     /// only.
     /// </summary>
-    private sealed class SignPageCache(string path, int pageCount)
+    private sealed class SignPageCache(Func<int, Task<PdfPreviewPage?>> render, int pageCount)
     {
         private readonly Dictionary<int, Task<PdfPreviewPage?>> _pages = [];
 
@@ -196,7 +206,7 @@ public partial class PreviewWindow
         {
             if (!_pages.TryGetValue(index, out var page))
             {
-                page = PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
+                page = render(index);
                 _pages[index] = page;
             }
 
@@ -232,7 +242,7 @@ public partial class PreviewWindow
         }
 
         // The mode ends only with no work, work this file can never save,
-        // or Discard: nothing is left to keep.
+        // or Discard: nothing of this session is left to keep.
         _signDraft?.Discard();
         _signDraft = null;
         _fillSignSurface = null;
@@ -255,6 +265,14 @@ public partial class PreviewWindow
         _fillSignParkedContent = null;
         SyncHeaderTools();
         DiagnosticLog.Write("fill-sign exited");
+
+        // A draft this session could not take up, on a file that could not
+        // be read, is still there: the pill offers it again.
+        if (_fillSignPath is { } pdf)
+        {
+            _ = FindSignDraftAsync(pdf, _loadVersion);
+        }
+
         var deferredFailure = _deferredWebFailure;
         _deferredWebFailure = null;
         deferredFailure?.Invoke();

@@ -124,7 +124,7 @@ public partial class App : Application
     /// <summary>
     /// Setup's --quit cannot wait for an answer: setup force-kills a resident
     /// still running five seconds later. Unsaved signing work goes to its
-    /// draft and comes back as Resume signing.
+    /// draft and comes back as Resume.
     /// </summary>
     private void QuitForSetup()
     {
@@ -143,14 +143,12 @@ public partial class App : Application
         base.OnSessionEnding(e);
     }
 
-    private void KeepSigningWork(string reason)
+    private static void KeepSigningWork(string reason)
     {
-        if (_controller?.HoldsSigningWork == true)
+        if (SignDraftKeeper.FlushAll())
         {
             DiagnosticLog.Write($"{reason} kept unsaved signing work as a draft");
         }
-
-        SignDraftKeeper.FlushAll();
     }
 
     private TrayIcon CreateTrayIcon()
@@ -173,7 +171,7 @@ public partial class App : Application
     {
         // First, before anything that can wait: whatever ends the app,
         // placed work is on disk.
-        SignDraftKeeper.FlushAll();
+        KeepSigningWork("app exit");
 
         // Helpers, the probe and installer commands exit through here too,
         // but only the resident has hooks, a tray and a shell session to

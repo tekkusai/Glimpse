@@ -318,34 +318,42 @@ internal static class SignDrafts
 }
 
 /// <summary>
-/// One sign session's draft. A change replaces the waiting snapshot and
+/// One sign session's draft. A change replaces the session's work and
 /// restarts a short pause; the write happens on the thread pool once the
-/// user stops, or at once when the app is ending. A session only deletes a
-/// draft it restored or wrote, so a second window that placed nothing
-/// cannot erase the first one's work.
+/// user stops, and at once when the session or the app ends. The keeper
+/// holds on to its work after writing it, so the app's end writes every
+/// live session's work again, whatever another session did to the draft
+/// meanwhile. A session only deletes a draft it restored or wrote, so a
+/// second window that placed nothing cannot erase the first one's work.
 /// </summary>
 internal sealed class SignDraftKeeper
 {
     public static readonly TimeSpan Pause = TimeSpan.FromMilliseconds(250);
 
-    // Guards every keeper's fields and the waiting set; never held over disk work.
+    // Guards every keeper's fields and the set of live sessions; never held over disk work.
     private static readonly object State = new();
-    private static readonly HashSet<SignDraftKeeper> Waiting = [];
+    private static readonly HashSet<SignDraftKeeper> Live = [];
 
     private readonly string _pdfPath;
     private readonly FileStamp _file;
     private readonly Timer _timer;
     private readonly object _writing = new();
-    private (int Page, SignPlacement[] Placements)? _snapshot;
+    private (int Page, SignPlacement[] Placements) _work;
+    private bool _changed;
     private bool _owns;
-    private bool _closed;
 
-    public SignDraftKeeper(string pdfPath, FileStamp file, bool restored)
+    /// <summary>Starts from the work already on the surface: what a draft brought back, or none.</summary>
+    public SignDraftKeeper(string pdfPath, FileStamp file, int pageIndex, IReadOnlyList<SignPlacement> work)
     {
         _pdfPath = pdfPath;
         _file = file;
-        _owns = restored;
-        _timer = new Timer(_ => Flush());
+        _work = (pageIndex, work.ToArray());
+        _owns = work.Count > 0;
+        _timer = new Timer(_ => Write(onlyChanged: true));
+        lock (State)
+        {
+            Live.Add(this);
+        }
     }
 
     /// <summary>Takes the work as it is now and restarts the pause. Never touches the disk.</summary>
@@ -353,74 +361,96 @@ internal sealed class SignDraftKeeper
     {
         lock (State)
         {
-            if (_closed || placements.Count == 0 && !_owns)
+            if (!Live.Contains(this) || placements.Count == 0 && !_owns)
             {
                 return;
             }
 
             _owns = true;
-            _snapshot = (pageIndex, placements.ToArray());
-            Waiting.Add(this);
+            _work = (pageIndex, placements.ToArray());
+            _changed = true;
             _timer.Change(Pause, Timeout.InfiniteTimeSpan);
         }
     }
 
-    /// <summary>Writes the waiting snapshot now, if there is one.</summary>
-    public void Flush()
+    /// <summary>The session ends with its work unsaved: the work is written now, and nothing after.</summary>
+    public void Close() => End(keep: true);
+
+    /// <summary>The work was saved or thrown away: the draft goes, and nothing more is written.</summary>
+    public void Discard() => End(keep: false);
+
+    /// <summary>
+    /// Every live session's work to disk, synchronously, each after any
+    /// write of its own already under way: the app is ending. True when
+    /// there was work to keep.
+    /// </summary>
+    public static bool FlushAll()
+    {
+        SignDraftKeeper[] live;
+        lock (State)
+        {
+            live = [.. Live];
+        }
+
+        var kept = false;
+        foreach (var keeper in live)
+        {
+            kept |= keeper.Write(onlyChanged: false);
+        }
+
+        return kept;
+    }
+
+    /// <summary>The work to disk, or only a change still waiting out its pause. True when it wrote work.</summary>
+    private bool Write(bool onlyChanged)
     {
         lock (_writing)
         {
-            (int Page, SignPlacement[] Placements) snapshot;
+            (int Page, SignPlacement[] Placements) work;
             lock (State)
             {
-                Waiting.Remove(this);
-                if (_snapshot is not { } waiting)
+                if (!Live.Contains(this) || onlyChanged && !_changed || _work.Placements.Length == 0 && !_owns)
                 {
-                    return;
+                    return false;
                 }
 
-                snapshot = waiting;
-                _snapshot = null;
-                _owns = snapshot.Placements.Length > 0;
+                work = _work;
+                _changed = false;
+                _owns = work.Placements.Length > 0;
             }
 
-            SignDrafts.Write(_pdfPath, _file, snapshot.Page, snapshot.Placements);
+            SignDrafts.Write(_pdfPath, _file, work.Page, work.Placements);
+            return work.Placements.Length > 0;
         }
     }
 
-    /// <summary>The work was saved or thrown away: the draft goes, and nothing more is written.</summary>
-    public void Discard()
+    private void End(bool keep)
     {
         lock (_writing)
         {
-            bool owned;
-            lock (State)
+            if (keep)
             {
-                Waiting.Remove(this);
-                _closed = true;
-                _snapshot = null;
-                owned = _owns;
+                Write(onlyChanged: false);
             }
 
-            if (owned)
+            // A session closed first and saved after still takes its draft
+            // with it, once.
+            bool delete;
+            lock (State)
+            {
+                Live.Remove(this);
+                delete = !keep && _owns;
+                if (delete)
+                {
+                    _owns = false;
+                }
+            }
+
+            _timer.Dispose();
+            if (delete)
             {
                 SignDrafts.Delete(_pdfPath);
             }
-        }
-    }
-
-    /// <summary>Every waiting snapshot to disk, synchronously: the app is ending.</summary>
-    public static void FlushAll()
-    {
-        SignDraftKeeper[] waiting;
-        lock (State)
-        {
-            waiting = [.. Waiting];
-        }
-
-        foreach (var keeper in waiting)
-        {
-            keeper.Flush();
         }
     }
 }

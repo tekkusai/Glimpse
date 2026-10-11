@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -180,7 +181,7 @@ public sealed class SignDraftTests
     public void ChangesReachTheDraftAfterAPauseAndAtOnceWhenTheAppEnds() => InDataRoot(root =>
     {
         var pdf = WritePdf(root);
-        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, restored: false);
+        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, 0, []);
 
         keeper.Update(0, [Date(0)]);
         Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
@@ -192,13 +193,14 @@ public sealed class SignDraftTests
         var draft = SignDrafts.Load(pdf).Draft!;
         Assert.Equal(4, draft.PageIndex);
         Assert.Equal(2, draft.Placements.Count);
+        keeper.Discard();
     });
 
     [Fact]
     public void DiscardLeavesNoDraftEvenWithAWriteWaiting() => InDataRoot(root =>
     {
         var pdf = WritePdf(root);
-        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, restored: false);
+        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, 0, []);
         keeper.Update(0, [Date(0)]);
         SignDraftKeeper.FlushAll();
         Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
@@ -215,7 +217,7 @@ public sealed class SignDraftTests
     public void RemovingTheLastPlacementRemovesTheDraft() => InDataRoot(root =>
     {
         var pdf = WritePdf(root);
-        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, restored: false);
+        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, 0, []);
         keeper.Update(0, [Date(0)]);
         SignDraftKeeper.FlushAll();
 
@@ -223,6 +225,7 @@ public sealed class SignDraftTests
         SignDraftKeeper.FlushAll();
 
         Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+        keeper.Discard();
     });
 
     [Fact]
@@ -230,17 +233,117 @@ public sealed class SignDraftTests
     {
         var pdf = WritePdf(root);
         var stamp = FileStamp.Of(pdf)!.Value;
-        var working = new SignDraftKeeper(pdf, stamp, restored: false);
+        var working = new SignDraftKeeper(pdf, stamp, 0, []);
         working.Update(0, [Date(0)]);
         SignDraftKeeper.FlushAll();
 
         // A second window on the same PDF turns a page and leaves.
-        var looking = new SignDraftKeeper(pdf, stamp, restored: false);
+        var looking = new SignDraftKeeper(pdf, stamp, 0, []);
         looking.Update(3, []);
         SignDraftKeeper.FlushAll();
         looking.Discard();
 
         Assert.NotNull(SignDrafts.Load(pdf).Draft);
+        working.Discard();
+    });
+
+    [Fact]
+    public void TheAppsEndPutsBackWorkAnotherWindowThrewAway() => InDataRoot(root =>
+    {
+        var pdf = WritePdf(root);
+        var stamp = FileStamp.Of(pdf)!.Value;
+        var working = new SignDraftKeeper(pdf, stamp, 0, []);
+        working.Update(0, [Date(0)]);
+        SignDraftKeeper.FlushAll();
+
+        // A second window resumes that draft and discards it, while the
+        // first still has the work on screen.
+        var resumed = new SignDraftKeeper(pdf, stamp, 0, SignDrafts.Load(pdf).Draft!.Placements);
+        resumed.Discard();
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+
+        SignDraftKeeper.FlushAll();
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+
+        // A session that ended is never written again.
+        working.Close();
+        File.Delete(SignDrafts.PathFor(pdf));
+        SignDraftKeeper.FlushAll();
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+    });
+
+    [Fact]
+    public void ASessionClosedBeforeItsSaveFinishedStillTakesItsDraftOnce() => InDataRoot(root =>
+    {
+        var pdf = WritePdf(root);
+        var stamp = FileStamp.Of(pdf)!.Value;
+        var keeper = new SignDraftKeeper(pdf, stamp, 0, []);
+        keeper.Update(0, [Date(0)]);
+
+        // The next item took the session's work to its draft; then its save landed.
+        keeper.Close();
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+        keeper.Discard();
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+
+        // Once: a draft another window keeps later is not this session's.
+        WriteDateDraft(pdf);
+        keeper.Discard();
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+    });
+
+    [Fact]
+    public void AWriteDueAsTheSessionEndsNeverBringsTheDraftBack() => InDataRoot(root =>
+    {
+        var pdf = WritePdf(root);
+        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, 0, []);
+        keeper.Update(0, [Date(0)]);
+        SignDraftKeeper.FlushAll();
+
+        // The next change's pause runs out while Discard is deleting the draft.
+        var writing = Fields.Get<object>(keeper, "_writing");
+        Monitor.Enter(writing);
+        try
+        {
+            keeper.Update(0, [Date(0), Date(0)]);
+            Thread.Sleep(SignDraftKeeper.Pause * 3);
+            keeper.Discard();
+        }
+        finally
+        {
+            Monitor.Exit(writing);
+        }
+
+        Thread.Sleep(SignDraftKeeper.Pause);
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+    });
+
+    [Fact]
+    public void TheAppsEndWaitsForADraftWriteAlreadyUnderWay() => InDataRoot(root =>
+    {
+        var pdf = WritePdf(root);
+        var keeper = new SignDraftKeeper(pdf, FileStamp.Of(pdf)!.Value, 0, []);
+        var disk = typeof(SignDrafts).GetField("Io", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        var writing = Fields.Get<object>(keeper, "_writing");
+        Task flush;
+        Monitor.Enter(disk);
+        try
+        {
+            // The first change's write starts after its pause and stalls on the disk.
+            keeper.Update(0, [Date(0)]);
+            Assert.True(SpinWait.SpinUntil(() => HeldElsewhere(writing), TimeSpan.FromSeconds(5)));
+
+            flush = Task.Run(SignDraftKeeper.FlushAll);
+            Assert.False(flush.Wait(TimeSpan.FromMilliseconds(300)), "the app's end went ahead of a write still under way");
+        }
+        finally
+        {
+            Monitor.Exit(disk);
+        }
+
+        Assert.True(flush.Wait(TimeSpan.FromSeconds(5)));
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+        keeper.Discard();
     });
 
     // ------------------------------------------------------------------
@@ -297,49 +400,140 @@ public sealed class SignDraftTests
     }));
 
     [Fact]
-    public async Task TheSignPillOffersToResumeAtTheSameWidth()
+    public Task TheSignPillOffersToResumeAtTheSameWidth() => InWindow(async (root, window) =>
     {
-        using var temp = new TempDirectory();
-        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
-        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
-        try
-        {
-            await WpfApp.RunAsync(async () =>
-            {
-                var window = new PreviewWindow();
-                try
-                {
-                    var pdf = WritePdf(temp.Path);
-                    var version = Fields.Get<long>(window, "_loadVersion");
-                    Fields.Call(window, "ShowTool", HeaderTool.Sign);
-                    Fields.Set(window, "_fillSignPath", pdf);
-                    await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
-                    Assert.Equal("Fill and sign", AutomationProperties.GetName(window.SignButton));
-                    Assert.Equal(Visibility.Visible, window.SignLabel.Visibility);
-                    var signWidth = Width(window.SignButton);
+        var pdf = WritePdf(root);
+        var version = Fields.Get<long>(window, "_loadVersion");
+        Fields.Call(window, "ShowTool", HeaderTool.Sign);
+        Fields.Set(window, "_fillSignPath", pdf);
+        await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
+        Assert.Equal("Fill and sign", AutomationProperties.GetName(window.SignButton));
+        Assert.Equal(Visibility.Visible, window.SignLabel.Visibility);
+        var signWidth = Width(window.SignButton);
 
-                    WriteDateDraft(pdf);
-                    await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
+        WriteDateDraft(pdf);
+        await (Task)Fields.Call(window, "FindSignDraftAsync", pdf, version)!;
 
-                    // The pen says what is resumed; the name says it in full.
-                    Assert.Equal("Resume signing", AutomationProperties.GetName(window.SignButton));
-                    Assert.Equal("Resume signing", window.SignButton.ToolTip);
-                    Assert.Equal(Visibility.Visible, window.ResumeLabel.Visibility);
-                    Assert.Equal("Resume", window.ResumeLabel.Children.OfType<TextBlock>().Last().Text);
-                    Assert.Equal(Visibility.Hidden, window.SignLabel.Visibility);
-                    Assert.Equal(signWidth, Width(window.SignButton));
-                }
-                finally
-                {
-                    window.Close();
-                }
-            });
-        }
-        finally
+        // The pen says what is resumed; the name says it in full.
+        Assert.Equal("Resume signing", AutomationProperties.GetName(window.SignButton));
+        Assert.Equal("Resume signing", window.SignButton.ToolTip);
+        Assert.Equal(Visibility.Visible, window.ResumeLabel.Visibility);
+        Assert.Equal("Resume", window.ResumeLabel.Children.OfType<TextBlock>().Last().Text);
+        Assert.Equal(Visibility.Hidden, window.SignLabel.Visibility);
+        Assert.Equal(signWidth, Width(window.SignButton));
+    });
+
+    // ------------------------------------------------------------------
+    // The window: sign mode entered the way the Sign pill enters it.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public Task ResumingBringsTheWorkBackOnThePageItWasLeftOn() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root, pages: 3);
+        SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 2, [Date(0), Date(2)]);
+        var rendered = new List<int>();
+
+        var surface = await EnterAsync(window, pdf, rendered);
+
+        Assert.Equal(2, rendered.First());
+        Assert.Equal(2, surface.PageIndex);
+        Assert.Equal([0, 2], surface.Placements.Select(placement => placement.PageIndex).Order());
+        Assert.Single(Frames(surface));
+        Assert.Contains(Descendants(surface).OfType<TextBlock>(), block => block.Text == "Your earlier work is back.");
+    });
+
+    [Theory]
+    [InlineData("Discard")]
+    [InlineData("Save a signed copy")]
+    [InlineData("Replace the original")]
+    public Task EveryWayOfFinishingTakesTheDraftWithIt(string choice) => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 0, [Date(0)]);
+        var surface = await EnterAsync(window, pdf);
+        Assert.Single(surface.Placements);
+
+        surface.ShowSaveChoice();
+        Press(surface, choice);
+        // A finished save shows its file next, in a viewer a test never starts.
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+
+        Assert.True(await EventuallyAsync(() => !File.Exists(SignDrafts.PathFor(pdf))), "the draft outlived " + choice);
+    });
+
+    [Fact]
+    public Task AFailedSaveKeepsTheWorkForItsDraft() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        // A folder holds the copy's name, so the copy cannot be written.
+        Directory.CreateDirectory(Path.Combine(Path.GetDirectoryName(pdf)!, "contract (signed).pdf"));
+        surface.ShowSaveChoice();
+        Press(surface, "Save a signed copy");
+        var status = Fields.Get<TextBlock>(surface, "_saveStatus");
+        Assert.True(await EventuallyAsync(() => status.Text.Length > 0 && status.Text != "Saving\u2026"));
+
+        SignDraftKeeper.FlushAll();
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+    });
+
+    [Fact]
+    public Task AFileThatCannotBeReadRightNowKeepsItsDraft() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 0, [Date(0)]);
+        FillSignSurface surface;
+        using (new FileStream(pdf, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite))
         {
-            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+            surface = await EnterAsync(window, pdf);
         }
-    }
+
+        // Nothing comes back into a surface that cannot save it, nothing is
+        // kept from it, and the draft waits.
+        Assert.Contains("can't be read right now", Fields.Get<TextBlock>(surface, "_centerText").Text, StringComparison.Ordinal);
+        Assert.Empty(surface.Placements);
+        Assert.Null(Fields.Get<SignDraftKeeper?>(window, "_signDraft"));
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+
+        // Leaving offers it again, and once the file reads, the work is back.
+        surface.HandleEscape();
+        Assert.True(await EventuallyAsync(() => window.ResumeLabel.Visibility == Visibility.Visible));
+        surface = await EnterAsync(window, pdf);
+        Assert.Single(surface.Placements);
+    });
+
+    [Fact]
+    public Task ClosingTheWindowWritesTheWorkAtOnce() => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+
+        window.Close();
+
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+    });
+
+    [Fact]
+    public Task TheNextItemTakesUnsavedWorkToItsDraft() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        Fields.Call(window, "ResetForNewItem");
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+
+        // That session is over: the app's end never writes it again.
+        File.Delete(SignDrafts.PathFor(pdf));
+        SignDraftKeeper.FlushAll();
+        Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
+    });
 
     // ------------------------------------------------------------------
     // Helpers.
@@ -358,6 +552,88 @@ public sealed class SignDraftTests
         {
             Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
         }
+    }
+
+    private static async Task InDataRootAsync(Func<string, Task> body)
+    {
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        try
+        {
+            await WpfApp.RunAsync(() => body(temp.Path));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    }
+
+    /// <summary>A window that is never shown. It closes, and its session with it, before the data root goes.</summary>
+    private static Task InWindow(Func<string, PreviewWindow, Task> body) => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        try
+        {
+            await body(root, window);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// Sign mode as the Sign pill enters it, on a PDF the writer reads. The
+    /// page render is stood in for, since pdfium never runs here, and notes
+    /// each page it is asked for.
+    /// </summary>
+    private static async Task<FillSignSurface> EnterAsync(PreviewWindow window, string pdf, List<int>? rendered = null)
+    {
+        Fields.Set(window, "CurrentPath", pdf);
+        Fields.Set(window, "_fillSignPath", pdf);
+        window.PreviewContent.Content ??= new Border();
+        window.RenderSignPage = (_, index) =>
+        {
+            rendered?.Add(index);
+            return Task.FromResult<PdfPreviewPage?>(BlankPage());
+        };
+
+        await (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
+        return Fields.Get<FillSignSurface>(window, "_fillSignSurface");
+    }
+
+    private static string SignablePdf(string root, int pages = 1)
+    {
+        var path = Path.Combine(root, "docs", "contract.pdf");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        FillSignBehaviorTests.WritePdf(path, 612, 792, pages);
+        return path;
+    }
+
+    private static void Press(DependencyObject root, string label) =>
+        Descendants(root).OfType<ButtonBase>().First(button => button.Content as string == label)
+            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static async Task<bool> EventuallyAsync(Func<bool> condition)
+    {
+        for (var waited = 0; waited < 5000 && !condition(); waited += 20)
+        {
+            await Task.Delay(20);
+        }
+
+        return condition();
+    }
+
+    private static bool HeldElsewhere(object gate)
+    {
+        if (!Monitor.TryEnter(gate))
+        {
+            return true;
+        }
+
+        Monitor.Exit(gate);
+        return false;
     }
 
     private static string WritePdf(string root)

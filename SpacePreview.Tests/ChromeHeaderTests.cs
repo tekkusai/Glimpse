@@ -144,6 +144,43 @@ public sealed class ChromeHeaderTests
     });
 
     [Fact]
+    public Task ResumeBelongsToTheFileItWasFoundFor() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var image = WritePng(temp.Path, "cover.png", 400, 300);
+        var first = Path.Combine(temp.Path, "first.pdf");
+        var second = Path.Combine(temp.Path, "second.pdf");
+        File.WriteAllText(first, "%PDF-1.4 first");
+        File.WriteAllText(second, "%PDF-1.4 second");
+        SignDrafts.Write(first, FileStamp.Of(first)!.Value, 0, [new SignPlacement(SignPlacementKind.Date, 0, 0.4, 0.2, 0.14, 0.028, "10/10/2026")]);
+        var window = OpenStage(900, 650);
+        try
+        {
+            // The first PDF is on screen and its draft was found.
+            window.ShowPreview(image, IntPtr.Zero);
+            await WaitForRevealAsync(window);
+            Fields.Call(window, "ResetForNewItem");
+            Fields.Call(window, "ShowTool", HeaderTool.Sign);
+            Fields.Set(window, "_fillSignPath", first);
+            await (Task)Fields.Call(window, "FindSignDraftAsync", first, Fields.Get<long>(window, "_loadVersion"))!;
+            Assert.Equal("Resume signing", AutomationProperties.GetName(window.SignButton));
+
+            // The next PDF offers to sign from its first frame; only its own draft could say otherwise.
+            window.ShowPreview(second, IntPtr.Zero);
+            Assert.Equal("Fill and sign", AutomationProperties.GetName(window.SignButton));
+            Assert.Equal(Visibility.Visible, window.SignLabel.Visibility);
+            Assert.Equal(Visibility.Hidden, window.ResumeLabel.Visibility);
+        }
+        finally
+        {
+            // Called off before the PDF viewer would start.
+            window.HidePreview();
+            SignDrafts.Delete(first);
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task BrowsingImagesKeepsTheToolsAndIconInPlace() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
