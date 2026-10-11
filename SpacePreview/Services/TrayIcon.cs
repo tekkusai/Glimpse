@@ -683,18 +683,10 @@ internal static class TrayIconRenderer
 {
     public static IntPtr Create() => ToHIcon(Render(TaskbarDpi(), TaskbarIsLight()));
 
-    /// <summary>
-    /// The glyph at the tray's pixel size for <paramref name="dpi"/>. It is
-    /// drawn in pixels, so the bitmap stays at 96: a bitmap at the real DPI
-    /// would scale the drawing a second time and crop it.
-    /// </summary>
-    internal static BitmapSource Render(uint dpi, bool lightTaskbar)
-    {
-        var size = NativeMethods.GetSystemMetricsForDpi(NativeMethods.SM_CXSMICON, dpi);
-        var bitmap = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(BuildVisual(size, lightTaskbar));
-        return bitmap;
-    }
+    /// <summary>The glyph at the tray's pixel size for <paramref name="dpi"/>.</summary>
+    internal static BitmapSource Render(uint dpi, bool lightTaskbar) => BrandMark.RenderGlyph(
+        NativeMethods.GetSystemMetricsForDpi(NativeMethods.SM_CXSMICON, dpi),
+        lightTaskbar ? Color.FromRgb(0x2A, 0x2C, 0x33) : Color.FromRgb(0xF2, 0xF3, 0xF6));
 
     // The tray lives on the taskbar's monitor. The message-only window lives
     // on none, so its own DPI is no answer.
@@ -704,29 +696,6 @@ internal static class TrayIconRenderer
             NativeMethods.FindWindow("Shell_TrayWnd", null),
             NativeMethods.MONITOR_DEFAULTTOPRIMARY);
         return NativeMethods.GetDpiForMonitor(monitor, NativeMethods.MDT_EFFECTIVE_DPI, out var dpi, out _) == 0 ? dpi : 96;
-    }
-
-    private static DrawingVisual BuildVisual(int size, bool lightTaskbar)
-    {
-        var visual = new DrawingVisual();
-        using var dc = visual.RenderOpen();
-
-        double s = size;
-        var fill = new SolidColorBrush(lightTaskbar
-            ? Color.FromRgb(0x2A, 0x2C, 0x33)
-            : Color.FromRgb(0xF2, 0xF3, 0xF6));
-        fill.Freeze();
-
-        // The brand glint, scaled from its -50..50 box into the icon square.
-        // Just the main spark: at tray sizes the companion would be a smudge.
-        var spark = Geometry.Parse(Preview.BrandMark.SparkPath).Clone();
-        var transform = new TransformGroup();
-        transform.Children.Add(new ScaleTransform(s * 0.92 / 100.0, s * 0.92 / 100.0));
-        transform.Children.Add(new TranslateTransform(s / 2.0, s / 2.0));
-        spark.Transform = transform;
-        dc.DrawGeometry(fill, null, spark);
-
-        return visual;
     }
 
     private static bool TaskbarIsLight()

@@ -114,15 +114,6 @@ public sealed class HookPathArchitectureTests
     }
 
     [Fact]
-    public void TrayIconDrawsTheBrandGlint()
-    {
-        var body = TestSource.CodeMethod(@"SpacePreview\Services\TrayIcon.cs", "BuildVisual");
-
-        Assert.Contains("BrandMark.SparkPath", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("DrawRoundedRectangle", body, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void HoveredFileIconsMatchTheDirectCardPresentation()
     {
         var body = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "BuildHoverArtwork");
