@@ -15,7 +15,8 @@ internal enum SignPlacementKind
 /// deliberately ignorant of PDF user space. The writer owns the translation
 /// to page boxes, bottom-left origin, and rotation. Image placements carry
 /// their pixels from the moment of placement, so replacing the stored
-/// signature can never rewrite ink the user already put down.
+/// signature can never rewrite ink the user already put down. Source names
+/// the stored file those pixels came from; only drafts read it.
 /// </summary>
 internal sealed record SignPlacement(
     SignPlacementKind Kind,
@@ -25,7 +26,8 @@ internal sealed record SignPlacement(
     double Width,
     double Height,
     string? Text,
-    byte[]? ImagePng = null)
+    byte[]? ImagePng = null,
+    SignInkSource? Source = null)
 {
     /// <summary>Kept inside the page with a working minimum size.</summary>
     public SignPlacement Clamped()
@@ -70,6 +72,14 @@ internal sealed record SignPlacement(
         }).Clamped();
     }
 }
+
+/// <summary>
+/// The saved signature or stamp a placement's pixels came from, and a
+/// fingerprint of that file's bytes when they were read: a stamp replaced
+/// since is a different image under the same name. Redrawn ink was edited
+/// on the pad after placing, so no stored file holds it any more.
+/// </summary>
+internal sealed record SignInkSource(string File, string Fingerprint, bool Redrawn = false);
 
 /// <summary>
 /// Placed text is Helvetica in the file and Arial on screen. The two share

@@ -377,7 +377,7 @@ public partial class PreviewWindow
         }
 
         await Task.Delay(200);
-        return $"placements={surface.Placements.Count}";
+        return $"placements={surface.Placements.Count} page={surface.PageIndex + 1}";
     }
 
     /// <summary>Presses the button whose label or accessible name is <paramref name="label"/>.</summary>

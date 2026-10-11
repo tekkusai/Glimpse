@@ -28,6 +28,7 @@ namespace SpacePreview.Preview;
 internal sealed class FillSignSurface : Grid
 {
     private const string Hint = "Pick Signature, Date or Stamp, then click the page.";
+    private const string RestoredNotice = "Your earlier work is back.";
     private const double BarHeight = 48;
     private const double ChipSize = 22;
     private const double HandleSize = 12;
@@ -67,6 +68,7 @@ internal sealed class FillSignSurface : Grid
     private double _pageWidth;
     private double _pageHeight;
     private string? _problem;
+    private string? _notice;
     private bool _hintRetired;
     private SignPlacementKind? _armedTool;
     private Grid? _selectedFrame;
@@ -87,6 +89,9 @@ internal sealed class FillSignSurface : Grid
 
     /// <summary>Asks the host to render another page into this surface.</summary>
     public event Action<int>? PageChangeRequested;
+
+    /// <summary>The work or the page on screen changed: what a draft keeps.</summary>
+    public event Action? WorkChanged;
 
     public FillSignSurface(int pageIndex, int totalPages, PdfPreviewPage page)
     {
@@ -180,6 +185,15 @@ internal sealed class FillSignSurface : Grid
             }
         };
 
+        // Settings, or this surface's own picker, may change the saved ink
+        // while the mode is open.
+        Loaded += (_, _) =>
+        {
+            SignatureStore.Changed -= OnStoreChanged;
+            SignatureStore.Changed += OnStoreChanged;
+        };
+        Unloaded += (_, _) => SignatureStore.Changed -= OnStoreChanged;
+
         UpdatePageChrome();
         UpdateWorkState();
     }
@@ -187,6 +201,38 @@ internal sealed class FillSignSurface : Grid
     public IReadOnlyList<SignPlacement> Placements => _placements;
 
     public bool HasWork => _placements.Count > 0;
+
+    public int PageIndex => _pageIndex;
+
+    /// <summary>
+    /// Brings back work from a draft, on its pages, and says so once. It is
+    /// not a change: nothing is written until the user changes something.
+    /// </summary>
+    public void Restore(IReadOnlyList<SignPlacement> placements)
+    {
+        foreach (var placement in placements)
+        {
+            _placements.Add(placement);
+            if (placement.PageIndex == _pageIndex)
+            {
+                AddPlacementVisual(placement, select: false);
+            }
+        }
+
+        _notice = HasWork ? RestoredNotice : null;
+        UpdateWorkState();
+    }
+
+    private void OnWorkChanged()
+    {
+        if (_notice is not null)
+        {
+            _notice = null;
+            UpdateWorkState();
+        }
+
+        WorkChanged?.Invoke();
+    }
 
     /// <summary>
     /// Escape walks back one layer at a time: an open editor, picker, pad
@@ -519,6 +565,7 @@ internal sealed class FillSignSurface : Grid
         _scroller.ScrollToTop();
         UpdatePageChrome();
         UpdateChrome();
+        OnWorkChanged();
     }
 
     private void UpdatePageChrome()
@@ -536,7 +583,7 @@ internal sealed class FillSignSurface : Grid
     {
         _savePill.IsEnabled = HasWork;
         _hintRetired |= HasWork;
-        _centerText.Text = _problem ?? (_hintRetired ? string.Empty : Hint);
+        _centerText.Text = _problem ?? _notice ?? (_hintRetired ? string.Empty : Hint);
         _centerText.Foreground = Theme.Brush(_problem is null ? Theme.Current.TextTertiary : Theme.Current.Warning);
         FitCenterText();
     }
@@ -664,6 +711,7 @@ internal sealed class FillSignSurface : Grid
         _placements.Add(placement);
         AddPlacementVisual(placement);
         UpdateWorkState();
+        OnWorkChanged();
         return true;
     }
 
@@ -680,15 +728,16 @@ internal sealed class FillSignSurface : Grid
         var assetPath = kind == SignPlacementKind.Signature
             ? _selectedSignaturePath ?? SignatureStore.ListSignatures().FirstOrDefault()
             : SignatureStore.StampPath;
-        var png = assetPath is null ? null : SignatureStore.TryReadForPlacement(assetPath);
-        if (png is null || SignatureStore.TryLoad(png) is not { } source)
+        SignInkSource? source = null;
+        var png = assetPath is null ? null : SignatureStore.TryReadForPlacement(assetPath, out source);
+        if (png is null || SignatureStore.TryLoad(png) is not { } image)
         {
             return null;
         }
 
         var width = kind == SignPlacementKind.Signature ? 0.24 : 0.18;
-        var height = width * (_pageWidth / _pageHeight) * (source.PixelHeight / (double)source.PixelWidth);
-        return new SignPlacement(kind, _pageIndex, x - width / 2, y - height / 2, width, height, null, png).Clamped();
+        var height = width * (_pageWidth / _pageHeight) * (image.PixelHeight / (double)image.PixelWidth);
+        return new SignPlacement(kind, _pageIndex, x - width / 2, y - height / 2, width, height, null, png, source).Clamped();
     }
 
     /// <summary>Today in the user's short date form, kept to what the file can carry.</summary>
@@ -915,6 +964,7 @@ internal sealed class FillSignSurface : Grid
         frame.Tag = updated;
         ApplyPlacementBounds(frame);
         UpdateChrome();
+        OnWorkChanged();
     }
 
     private void ApplyPlacementBounds(Grid frame)
@@ -950,6 +1000,7 @@ internal sealed class FillSignSurface : Grid
 
         UpdateChrome();
         UpdateWorkState();
+        OnWorkChanged();
     }
 
     private void Select(Grid? frame)
@@ -1256,7 +1307,7 @@ internal sealed class FillSignSurface : Grid
             CornerRadius = Metrics.RowCorner,
             Visibility = Visibility.Collapsed
         };
-        var delete = HousePill.Build("Delete", () => DeleteSignature(path));
+        var delete = HousePill.Build("Delete", () => SignatureStore.Remove(path));
         delete.Margin = new Thickness(0);
         confirm.Child = new StackPanel
         {
@@ -1291,18 +1342,26 @@ internal sealed class FillSignSurface : Grid
         return frame;
     }
 
-    private void DeleteSignature(string path)
+    /// <summary>
+    /// The saved ink changed, in this picker or in Settings. The picker lists
+    /// what is there now, and a tool holding ink that is gone is put down
+    /// instead of placing nothing. Placed ink carries its own pixels, so
+    /// deleting only changes what can be placed next.
+    /// </summary>
+    private void OnStoreChanged()
     {
-        // Already-placed ink carries its own pixels; deleting a saved
-        // signature only changes what can be placed next.
-        SignatureStore.Remove(path);
-        if (string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase))
+        if (_selectedSignaturePath is { } selected && !System.IO.File.Exists(selected))
         {
             _selectedSignaturePath = null;
             if (_armedTool == SignPlacementKind.Signature)
             {
                 DisarmTool();
             }
+        }
+
+        if (_armedTool == SignPlacementKind.Stamp && !SignatureStore.HasStamp)
+        {
+            DisarmTool();
         }
 
         RefreshSignaturePicker();
@@ -1551,6 +1610,7 @@ internal sealed class FillSignSurface : Grid
         var updated = (placement with
         {
             ImagePng = png,
+            Source = placement.Source is { } source ? source with { Redrawn = true } : null,
             Height = height,
             Y = placement.Y + placement.Height / 2 - height / 2
         }).Clamped();

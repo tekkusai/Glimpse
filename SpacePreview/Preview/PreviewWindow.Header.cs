@@ -72,6 +72,11 @@ public partial class PreviewWindow
         _escapeYieldsToContent = false;
         _lastContentClickInViewerChrome = false;
         _userEngagedContent = false;
+        // A session dropped without the user choosing keeps its work as a
+        // draft, like any other end nobody chose.
+        _signDraft?.Close();
+        _signDraft = null;
+        _hasSignDraft = false;
         _fillSignSurface = null;
         _fillSignParkedContent = null;
         _deferredWebFailure = null;
@@ -210,6 +215,12 @@ public partial class PreviewWindow
         ZoomControls.IsEnabled = !settled || _zoomWebView is not null;
         ContentActions.IsEnabled = !settled || _rotationSession is not null;
         SignButton.IsEnabled = _fillSignSurface is null && (!settled || _fillSignPath is not null);
+
+        // Work kept from last time: the pill offers it back, at the same width.
+        SignLabel.Visibility = _hasSignDraft ? Visibility.Hidden : Visibility.Visible;
+        ResumeLabel.Visibility = _hasSignDraft ? Visibility.Visible : Visibility.Hidden;
+        SignButton.ToolTip = _hasSignDraft ? "Resume signing" : "Fill and sign";
+        AutomationProperties.SetName(SignButton, (string)SignButton.ToolTip);
     }
 
     private void SignButton_Click(object sender, RoutedEventArgs e) => _ = EnterFillSignModeAsync();

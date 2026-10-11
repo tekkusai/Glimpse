@@ -269,6 +269,8 @@ public sealed class SettingsWindowTests
             Assert.False(File.Exists(signature));
             Assert.Single(settings.SignaturesList.Children);
 
+            // The rows were rebuilt, and the stamp is being read again.
+            await InkLoadedAsync(settings);
             (trash, _, delete) = Controls(settings, 0);
             Assert.Equal("Delete this stamp", trash.ToolTip);
             Click(trash);

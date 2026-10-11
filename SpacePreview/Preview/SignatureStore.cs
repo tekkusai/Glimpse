@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -20,6 +21,9 @@ internal static class SignatureStore
 {
     private const double InkScale = 3.0;
     private const double InkPenWidth = 2.2;
+
+    /// <summary>A signature or the stamp was saved or removed, from Settings or any sign session. UI thread.</summary>
+    public static event Action? Changed;
 
     public static string StampPath => AppPaths.InDataRoot("stamp.png");
 
@@ -114,6 +118,8 @@ internal static class SignatureStore
         {
             // Already gone is the goal state.
         }
+
+        Changed?.Invoke();
     }
 
     /// <summary>
@@ -124,7 +130,13 @@ internal static class SignatureStore
     public static string? SaveSignatureFromStrokes(IReadOnlyList<IReadOnlyList<Point>> strokes, Color inkColor)
     {
         var ink = RenderComposite(baseImage: null, Rect.Empty, strokes, inkColor);
-        return ink is null ? null : SaveNewSignature(ink);
+        if (ink is null || SaveNewSignature(ink) is not { } saved)
+        {
+            return null;
+        }
+
+        Changed?.Invoke();
+        return saved;
     }
 
     /// <summary>Saves rendered ink as a new library entry, newest by mtime.</summary>
@@ -160,21 +172,24 @@ internal static class SignatureStore
 
             Directory.CreateDirectory(Path.GetDirectoryName(StampPath)!);
             File.WriteAllBytes(StampPath, png);
-            return true;
         }
         catch
         {
             return false;
         }
+
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>
-    /// A stored image's PNG as a placement snapshot. A stamp imported before
-    /// imports were bounded is scaled down here, so no placement carries
-    /// more pixels than a printed page can use.
+    /// A stored image's PNG as a placement snapshot, and where it came from.
+    /// A stamp imported before imports were bounded is scaled down here, so
+    /// no placement carries more pixels than a printed page can use.
     /// </summary>
-    public static byte[]? TryReadForPlacement(string path)
+    public static byte[]? TryReadForPlacement(string path, out SignInkSource? source)
     {
+        source = null;
         try
         {
             var png = File.ReadAllBytes(path);
@@ -183,6 +198,7 @@ internal static class SignatureStore
                 return null;
             }
 
+            source = new SignInkSource(path, Convert.ToHexString(SHA256.HashData(png)));
             return Math.Max(image.PixelWidth, image.PixelHeight) <= MaxPlacedEdge ? png : EncodePng(Bounded(image));
         }
         catch

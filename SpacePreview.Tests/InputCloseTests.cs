@@ -112,7 +112,6 @@ public sealed class InputCloseTests
     {
         WithManagedWindow(pinned: true, withWork: true, (controller, window, hwnd, surface) =>
         {
-            Assert.True(controller.HoldsSigningWork);
             Assert.False(controller.CanQuit());
             Assert.True(SignMode.SaveChoiceShown(surface!));
             Assert.Contains(window, Fields.Get<List<PreviewWindow>>(controller, "_pinnedWindows"));
@@ -124,7 +123,6 @@ public sealed class InputCloseTests
     {
         WithManagedWindow(pinned: false, withWork: true, (controller, window, hwnd, surface) =>
         {
-            Assert.True(controller.HoldsSigningWork);
             Assert.False(controller.CanQuit());
             Assert.True(SignMode.SaveChoiceShown(surface!));
         });
@@ -135,7 +133,6 @@ public sealed class InputCloseTests
     {
         WithManagedWindow(pinned: true, withWork: false, (controller, _, _, _) =>
         {
-            Assert.False(controller.HoldsSigningWork);
             Assert.True(controller.CanQuit());
         });
     }

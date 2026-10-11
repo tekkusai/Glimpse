@@ -1633,9 +1633,6 @@ internal sealed class SpacePreviewController : IDisposable
         return true;
     }
 
-    /// <summary>Unsaved signing work in the glance or any pinned window.</summary>
-    internal bool HoldsSigningWork => OpenWindows().Any(window => window.HoldsSigningWork);
-
     private IEnumerable<PreviewWindow> OpenWindows()
     {
         if (_previewVisible && _previewWindow is { } glance)
