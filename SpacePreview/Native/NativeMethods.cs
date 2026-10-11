@@ -21,6 +21,7 @@ internal static class NativeMethods
     public const uint PM_NOREMOVE = 0x0000;
     public const int WM_CONTEXTMENU = 0x007B;
     public const uint WM_GETTEXT = 0x000D;
+    public const uint WM_SETTINGCHANGE = 0x001A;
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_OBJECT_FOCUS = 0x8005;
     public const uint EVENT_OBJECT_SELECTIONWITHIN = 0x8009;
@@ -40,8 +41,6 @@ internal static class NativeMethods
     public const uint NIIF_RESPECT_QUIET_TIME = 0x00000080;
     public const uint WM_APP = 0x8000;
     public const uint WM_TRAYICON = WM_APP + 1;
-
-    public static readonly IntPtr HWND_MESSAGE = new(-3);
 
     public const int VK_RETURN = 0x0D;
     public const int VK_ESCAPE = 0x1B;
@@ -502,6 +501,10 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     public static extern ushort RegisterClassEx(ref WNDCLASSEX lpwcx);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool UnregisterClass(string lpClassName, IntPtr hInstance);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr DefWindowProc(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);

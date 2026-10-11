@@ -13,10 +13,10 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Services;
 
 /// <summary>
-/// The whole tray presence: a shell notification icon backed by a message-only
-/// window, a compact WPF flyout, and ownership of the settings and notification
-/// windows opened from that surface. Manages its GDI handles and cleans them up
-/// on <see cref="Dispose"/>.
+/// The whole tray presence: a shell notification icon backed by a hidden
+/// <see cref="TrayWindow"/>, a compact WPF flyout, and ownership of the
+/// settings and notification windows opened from that surface. Manages its GDI
+/// handles and cleans them up on <see cref="Dispose"/>.
 /// </summary>
 internal sealed class TrayIcon : IDisposable
 {
@@ -25,8 +25,7 @@ internal sealed class TrayIcon : IDisposable
     private static readonly TimeSpan UpdateMenuRetryInterval = TimeSpan.FromMinutes(15);
     private static readonly TimeSpan UpdateNotificationRetryInterval = TimeSpan.FromSeconds(15);
 
-    private readonly NativeMethods.WndProc _wndProc;
-    private readonly uint _taskbarCreatedMessage;
+    private readonly TrayWindow _window;
     private readonly ContextMenu _menu;
     private readonly AppUpdateService _updateService;
     private readonly CancellationTokenSource _updateLifetime = new();
@@ -37,9 +36,7 @@ internal sealed class TrayIcon : IDisposable
     // Quitting and updating both end the app. Unsaved signing work comes
     // forward first and holds both.
     private readonly Func<bool> _canQuit;
-    private IntPtr _hwnd;
     private IntPtr _icon;
-    private ushort _classAtom;
     private DateTime _menuClosedAt;
     private bool _iconVisible;
     private bool _disposed;
@@ -65,8 +62,6 @@ internal sealed class TrayIcon : IDisposable
 
     public TrayIcon(Func<bool>? canShowUpdateNotification = null, Func<bool>? canQuit = null)
     {
-        _wndProc = WindowProc;
-        _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
         _canShowUpdateNotification = canShowUpdateNotification ?? (() => true);
         _canQuit = canQuit ?? (() => true);
 
@@ -93,26 +88,23 @@ internal sealed class TrayIcon : IDisposable
 
         _menu = BuildMenu();
 
-        CreateMessageWindow();
+        // A new taskbar may sit at a new scale, so draw for it, then add.
+        _window = new TrayWindow(
+            ShowMenu,
+            taskbarCreated: () =>
+            {
+                RebuildIcon();
+                AddIcon();
+            },
+            settingChanged: () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIconForTheme)));
         RebuildIcon();
         AddIcon();
         _ = CheckForUpdatesAfterStartupAsync();
-
-        // The taskbar's own theme (a separate setting from app theme) picks
-        // the glyph color; broadcasts never reach a message-only window, so
-        // SystemEvents carries the change here instead.
-        _userPreferenceChanged = (_, args) =>
-        {
-            if (args.Category == Microsoft.Win32.UserPreferenceCategory.General)
-            {
-                Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIconForTheme));
-            }
-        };
-        Microsoft.Win32.SystemEvents.UserPreferenceChanged += _userPreferenceChanged;
     }
 
-    private readonly Microsoft.Win32.UserPreferenceChangedEventHandler _userPreferenceChanged;
-
+    // The taskbar's own theme (a separate setting from app theme) picks the
+    // glyph color. Its broadcast holds up the app that sent it, so the
+    // redraw waits for this thread's next turn.
     private void RefreshIconForTheme()
     {
         if (_disposed)
@@ -239,7 +231,7 @@ internal sealed class TrayIcon : IDisposable
 
         // The foreground dance: without it the menu will not close on an
         // outside click.
-        NativeMethods.SetForegroundWindow(_hwnd);
+        NativeMethods.SetForegroundWindow(_window.Handle);
         _menu.IsOpen = true;
     }
 
@@ -515,85 +507,25 @@ internal sealed class TrayIcon : IDisposable
         return false;
     }
 
-    // ---- Message-only window -------------------------------------------------
-
-    private void CreateMessageWindow()
-    {
-        var module = NativeMethods.GetModuleHandle(null);
-        var wndClass = new NativeMethods.WNDCLASSEX
-        {
-            cbSize = (uint)Marshal.SizeOf<NativeMethods.WNDCLASSEX>(),
-            lpfnWndProc = _wndProc,
-            hInstance = module,
-            lpszClassName = "Glimpse.TrayWindow"
-        };
-
-        _classAtom = NativeMethods.RegisterClassEx(ref wndClass);
-        if (_classAtom == 0)
-        {
-            throw new InvalidOperationException($"Unable to register tray window class. Win32 error: {Marshal.GetLastWin32Error()}");
-        }
-
-        _hwnd = NativeMethods.CreateWindowEx(
-            0,
-            "Glimpse.TrayWindow",
-            Branding.Name,
-            0,
-            0, 0, 0, 0,
-            NativeMethods.HWND_MESSAGE,
-            IntPtr.Zero,
-            module,
-            IntPtr.Zero);
-
-        if (_hwnd == IntPtr.Zero)
-        {
-            throw new InvalidOperationException($"Unable to create tray message window. Win32 error: {Marshal.GetLastWin32Error()}");
-        }
-
-        DiagnosticLog.Write($"tray window created hwnd=0x{_hwnd.ToInt64():X}");
-    }
-
-    private IntPtr WindowProc(IntPtr hwnd, uint msg, IntPtr wParam, IntPtr lParam)
-    {
-        if (msg == NativeMethods.WM_TRAYICON)
-        {
-            var mouse = lParam.ToInt32() & 0xFFFF;
-            switch (mouse)
-            {
-                case NativeMethods.WM_LBUTTONUP:
-                case NativeMethods.WM_RBUTTONUP:
-                case NativeMethods.WM_CONTEXTMENU:
-                    ShowMenu();
-                    break;
-            }
-
-            return IntPtr.Zero;
-        }
-
-        if (msg == _taskbarCreatedMessage && _taskbarCreatedMessage != 0)
-        {
-            // Explorer restarted and dropped every tray icon; re-add ours.
-            DiagnosticLog.Write("taskbar recreated -> re-adding tray icon");
-            AddIcon();
-
-            return IntPtr.Zero;
-        }
-
-        return NativeMethods.DefWindowProc(hwnd, msg, wParam, lParam);
-    }
-
     // ---- Shell notification icon --------------------------------------------
 
     private void AddIcon()
     {
         var data = NewIconData();
-        NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_ADD, ref data);
+
+        // An icon still in place refuses the add; the change carries the new
+        // drawing instead.
+        if (!NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_ADD, ref data))
+        {
+            NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_MODIFY, ref data);
+        }
+
         _iconVisible = true;
     }
 
     private void RemoveIcon()
     {
-        if (!_iconVisible || _hwnd == IntPtr.Zero)
+        if (!_iconVisible)
         {
             return;
         }
@@ -601,7 +533,7 @@ internal sealed class TrayIcon : IDisposable
         var data = new NativeMethods.NOTIFYICONDATA
         {
             cbSize = Marshal.SizeOf<NativeMethods.NOTIFYICONDATA>(),
-            hWnd = _hwnd,
+            hWnd = _window.Handle,
             uID = IconId
         };
         NativeMethods.Shell_NotifyIcon(NativeMethods.NIM_DELETE, ref data);
@@ -613,7 +545,7 @@ internal sealed class TrayIcon : IDisposable
         return new NativeMethods.NOTIFYICONDATA
         {
             cbSize = Marshal.SizeOf<NativeMethods.NOTIFYICONDATA>(),
-            hWnd = _hwnd,
+            hWnd = _window.Handle,
             uID = IconId,
             uFlags = NativeMethods.NIF_MESSAGE | NativeMethods.NIF_ICON | NativeMethods.NIF_TIP,
             uCallbackMessage = NativeMethods.WM_TRAYICON,
@@ -653,16 +585,11 @@ internal sealed class TrayIcon : IDisposable
         _updateWindow = null;
         _updateService.Dispose();
         _updateLifetime.Dispose();
-        Microsoft.Win32.SystemEvents.UserPreferenceChanged -= _userPreferenceChanged;
         _previewAccessWarningWindow?.Dismiss(PreviewAccessWarningDismissalReason.Disposed);
         _previewAccessWarningWindow = null;
 
-        if (_hwnd != IntPtr.Zero)
-        {
-            RemoveIcon();
-            NativeMethods.DestroyWindow(_hwnd);
-            _hwnd = IntPtr.Zero;
-        }
+        RemoveIcon();
+        _window.Dispose();
 
         if (_icon != IntPtr.Zero)
         {
@@ -683,50 +610,19 @@ internal static class TrayIconRenderer
 {
     public static IntPtr Create() => ToHIcon(Render(TaskbarDpi(), TaskbarIsLight()));
 
-    /// <summary>
-    /// The glyph at the tray's pixel size for <paramref name="dpi"/>. It is
-    /// drawn in pixels, so the bitmap stays at 96: a bitmap at the real DPI
-    /// would scale the drawing a second time and crop it.
-    /// </summary>
-    internal static BitmapSource Render(uint dpi, bool lightTaskbar)
-    {
-        var size = NativeMethods.GetSystemMetricsForDpi(NativeMethods.SM_CXSMICON, dpi);
-        var bitmap = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
-        bitmap.Render(BuildVisual(size, lightTaskbar));
-        return bitmap;
-    }
+    /// <summary>The glyph at the tray's pixel size for <paramref name="dpi"/>.</summary>
+    internal static BitmapSource Render(uint dpi, bool lightTaskbar) => BrandMark.RenderGlyph(
+        NativeMethods.GetSystemMetricsForDpi(NativeMethods.SM_CXSMICON, dpi),
+        lightTaskbar ? Color.FromRgb(0x2A, 0x2C, 0x33) : Color.FromRgb(0xF2, 0xF3, 0xF6));
 
-    // The tray lives on the taskbar's monitor. The message-only window lives
-    // on none, so its own DPI is no answer.
+    // The tray lives on the taskbar's monitor. The hidden tray window sits
+    // wherever it was made, so its own DPI is no answer.
     private static uint TaskbarDpi()
     {
         var monitor = NativeMethods.MonitorFromWindow(
             NativeMethods.FindWindow("Shell_TrayWnd", null),
             NativeMethods.MONITOR_DEFAULTTOPRIMARY);
         return NativeMethods.GetDpiForMonitor(monitor, NativeMethods.MDT_EFFECTIVE_DPI, out var dpi, out _) == 0 ? dpi : 96;
-    }
-
-    private static DrawingVisual BuildVisual(int size, bool lightTaskbar)
-    {
-        var visual = new DrawingVisual();
-        using var dc = visual.RenderOpen();
-
-        double s = size;
-        var fill = new SolidColorBrush(lightTaskbar
-            ? Color.FromRgb(0x2A, 0x2C, 0x33)
-            : Color.FromRgb(0xF2, 0xF3, 0xF6));
-        fill.Freeze();
-
-        // The brand glint, scaled from its -50..50 box into the icon square.
-        // Just the main spark: at tray sizes the companion would be a smudge.
-        var spark = Geometry.Parse(Preview.BrandMark.SparkPath).Clone();
-        var transform = new TransformGroup();
-        transform.Children.Add(new ScaleTransform(s * 0.92 / 100.0, s * 0.92 / 100.0));
-        transform.Children.Add(new TranslateTransform(s / 2.0, s / 2.0));
-        spark.Transform = transform;
-        dc.DrawGeometry(fill, null, spark);
-
-        return visual;
     }
 
     private static bool TaskbarIsLight()
