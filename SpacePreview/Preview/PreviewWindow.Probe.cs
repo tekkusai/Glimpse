@@ -96,7 +96,7 @@ public partial class PreviewWindow
 
                     using var document = JsonDocument.Parse(await capture);
                     var bytes = Convert.FromBase64String(document.RootElement.GetProperty("data").GetString() ?? string.Empty);
-                    var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
+                    var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad);
                     var origin = webView.TransformToAncestor(this).Transform(new Point(0, 0));
                     context.PushOpacity(webView.Opacity);
                     context.DrawImage(frame, new Rect(origin, new Size(webView.ActualWidth, webView.ActualHeight)));

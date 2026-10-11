@@ -178,6 +178,19 @@ public partial class PreviewWindow
             foreach (var scrollBar in FindVisualChildren<System.Windows.Controls.Primitives.ScrollBar>(host))
             {
                 scrollBar.Style = style;
+                // A TextBox's scroll viewer gives its bars the system's 17 px
+                // as a minimum in its own template, which outranks the style.
+                if (scrollBar.Orientation == Orientation.Vertical)
+                {
+                    scrollBar.MinWidth = 0;
+                    scrollBar.Width = 11;
+                }
+                else
+                {
+                    scrollBar.MinHeight = 0;
+                    scrollBar.Height = 11;
+                }
+
                 found = true;
             }
 

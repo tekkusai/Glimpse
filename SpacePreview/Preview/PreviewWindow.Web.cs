@@ -216,9 +216,11 @@ public partial class PreviewWindow
         {
             try
             {
+                // A heading link is the same page with a fragment.
+                var page = new Uri(parsed.GetLeftPart(UriPartial.Path));
                 return string.Equals(
                     Path.GetFullPath(htmlPath),
-                    Path.GetFullPath(LocalPathFromFileUri(parsed)),
+                    Path.GetFullPath(LocalPathFromFileUri(page)),
                     StringComparison.OrdinalIgnoreCase)
                     ? GeneratedHtmlNavigationAction.Allow
                     : GeneratedHtmlNavigationAction.Cancel;
@@ -467,7 +469,7 @@ public partial class PreviewWindow
         const string script = """
             (() => {
               const style = document.createElement('style');
-              style.textContent = '*{scrollbar-width:thin!important;scrollbar-color:rgba(128,134,148,.65) transparent!important}';
+              style.textContent = '*{scrollbar-width:thin!important;scrollbar-color:rgba(128,128,128,.6) transparent!important}';
               (document.head || document.documentElement).appendChild(style);
 
               const de = document.documentElement;

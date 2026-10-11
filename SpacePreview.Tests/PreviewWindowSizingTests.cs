@@ -191,7 +191,7 @@ public sealed class PreviewWindowSizingTests
         var railCore = TestSource.MethodFrom(windowSource, "private async Task LoadPdfPageRailOutOfProcessAsync");
         var railHintCalls = railCore.Split("HintStageFromRailTruth(state, rendered)").Length - 1;
         Assert.Equal(1, railHintCalls);
-        Assert.Contains("SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height), state.Version)", windowSource, StringComparison.Ordinal);
+        Assert.Contains("SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height, singlePage: document.TotalPages == 1), state.Version)", windowSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -266,6 +266,25 @@ public sealed class PreviewWindowSizingTests
         Assert.Equal(workArea.Top, placed.Top);
         Assert.Equal(700, placed.Width);
         Assert.Equal(500, placed.Height);
+    }
+
+    // A one-page document's viewer shows no rail, so its page takes the
+    // width the rail would have had instead of sitting in a stage built for
+    // a rail that never comes.
+    [Fact]
+    public void AOnePageDocumentReservesNoRail()
+    {
+        var portrait = 8.5 / 11;
+        var wide = 4.0 / 3;
+        var paged = Fit(StageFitHint.PageAspect(portrait), Desktop1080);
+        var lone = Fit(StageFitHint.PageAspect(portrait, singlePage: true), Desktop1080);
+        Assert.Equal(paged.Width - 132, lone.Width, precision: 1);
+        Assert.Equal(paged.Height, lone.Height, precision: 1);
+
+        // A wide page that already fills the box keeps the rail's room as page.
+        var widePaged = Fit(StageFitHint.PageAspect(wide), Desktop1080);
+        var wideLone = Fit(StageFitHint.PageAspect(wide, singlePage: true), Desktop1080);
+        Assert.True(wideLone.Height > widePaged.Height || wideLone.Width < widePaged.Width);
     }
 
     [Fact]

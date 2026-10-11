@@ -56,6 +56,9 @@ public sealed class WebPagesMediaTests
 
         Assert.Contains("<html class=\"video\">", lightVideo, StringComparison.Ordinal);
         Assert.Contains("html.video { background: #000; }", lightVideo, StringComparison.Ordinal);
+        // No black frame with controls before the picture.
+        Assert.Contains("html.video:not(.ready) { animation: none; opacity: 0; }", lightVideo, StringComparison.Ordinal);
+        Assert.Contains("media.addEventListener('loadeddata', ready, { once: true });", lightVideo, StringComparison.Ordinal);
         Assert.Contains($"--ctl-text: {WebPagesStyleTests.Hex(Theme.OverlayText)};", lightVideo, StringComparison.Ordinal);
     }
 

@@ -121,6 +121,12 @@ internal static class MediaPlayerPage
 }
 html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; user-select: none; }
 html.video { background: #000; }
+/* A video holds its dissolve for its first frame: black and controls
+   before the picture would be a flash, not an arrival. */
+html.video:not(.ready) { animation: none; opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  html.video.ready { animation: none; }
+}
 body { font-size: 13px; }
 [hidden] { display: none !important; }
 svg { display: block; }
@@ -344,6 +350,13 @@ media.addEventListener('volumechange', () => {
 });
 
 if (isVideo) {
+  // The first frame, a failure, or a slow decoder's 600 ms: whichever
+  // comes first lets the page dissolve in.
+  const ready = () => document.documentElement.classList.add('ready');
+  media.addEventListener('loadeddata', ready, { once: true });
+  media.addEventListener('error', ready, { once: true });
+  setTimeout(ready, 600);
+
   media.addEventListener('click', window.glimpseToggleMedia);
   media.addEventListener('loadedmetadata', () => {
     post({ dims: { w: media.videoWidth || 0, h: media.videoHeight || 0 } });

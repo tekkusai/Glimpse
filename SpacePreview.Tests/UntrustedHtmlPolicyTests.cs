@@ -117,6 +117,9 @@ public sealed class UntrustedHtmlPolicyTests
             PreviewWindow.GeneratedHtmlNavigationAction.Allow,
             PreviewWindow.DecideGeneratedHtmlNavigation(htmlPath, resourceHost, "file:///C:/Users/PreviewUser/AppData/Local/Glimpse/MarkdownHtml/preview.html"));
         Assert.Equal(
+            PreviewWindow.GeneratedHtmlNavigationAction.Allow,
+            PreviewWindow.DecideGeneratedHtmlNavigation(htmlPath, resourceHost, "file:///C:/Users/PreviewUser/AppData/Local/Glimpse/MarkdownHtml/preview.html#getting-started"));
+        Assert.Equal(
             PreviewWindow.GeneratedHtmlNavigationAction.OpenExternally,
             PreviewWindow.DecideGeneratedHtmlNavigation(htmlPath, resourceHost, "https://example.com/docs"));
         Assert.Equal(

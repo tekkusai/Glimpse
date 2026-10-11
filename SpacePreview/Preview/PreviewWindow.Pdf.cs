@@ -213,7 +213,7 @@ public partial class PreviewWindow
             return false;
         }
 
-        SetStageFitHint(StageFitHint.PageAspect(page.WidthPoints / page.HeightPoints), version);
+        SetStageFitHint(StageFitHint.PageAspect(page.WidthPoints / page.HeightPoints, singlePage: page.PageCount == 1), version);
         return true;
     }
 
@@ -355,7 +355,7 @@ public partial class PreviewWindow
             return;
         }
 
-        SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height), state.Version);
+        SetStageFitHint(StageFitHint.PageAspect((double)first.Width / first.Height, singlePage: document.TotalPages == 1), state.Version);
     }
 
     /// <summary>

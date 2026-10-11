@@ -21,12 +21,13 @@ internal readonly struct StageFitHint
         Compact
     }
 
-    private StageFitHint(FitKind kind, double width, double height, double aspect)
+    private StageFitHint(FitKind kind, double width, double height, double aspect, bool singlePage = false)
     {
         Kind = kind;
         Width = width;
         Height = height;
         Aspect = aspect;
+        SinglePage = singlePage;
     }
 
     public FitKind Kind { get; }
@@ -39,6 +40,9 @@ internal readonly struct StageFitHint
     /// <summary>Width over height; meaningful for <see cref="FitKind.PageAspect"/>.</summary>
     public double Aspect { get; }
 
+    /// <summary>A one-page document: its viewer shows no page rail, so the stage reserves none.</summary>
+    public bool SinglePage { get; }
+
     public static StageFitHint Pixels(double pixelWidth, double pixelHeight) =>
         new(FitKind.Pixels, SafePixelDimension(pixelWidth), SafePixelDimension(pixelHeight), 0);
 
@@ -49,9 +53,10 @@ internal readonly struct StageFitHint
     /// A page shape, clamped to sane paper: nothing real is wider than 5:1
     /// or taller than 1:5, and a malformed aspect must not fold the stage.
     /// </summary>
-    public static StageFitHint PageAspect(double widthOverHeight) =>
+    public static StageFitHint PageAspect(double widthOverHeight, bool singlePage = false) =>
         new(FitKind.PageAspect, 0, 0,
-            double.IsFinite(widthOverHeight) ? Math.Clamp(widthOverHeight, 0.2, 5) : 1);
+            double.IsFinite(widthOverHeight) ? Math.Clamp(widthOverHeight, 0.2, 5) : 1,
+            singlePage);
 
     /// <summary>
     /// A spreadsheet: unbounded content with no page shape and no native
@@ -67,7 +72,7 @@ internal readonly struct StageFitHint
     public string Describe() => Kind switch
     {
         FitKind.Pixels or FitKind.ImagePixels => $"{Width:0}x{Height:0} px",
-        FitKind.PageAspect => $"page {Aspect:0.00}",
+        FitKind.PageAspect => SinglePage ? $"page {Aspect:0.00}, one page" : $"page {Aspect:0.00}",
         FitKind.Sheet => "sheet",
         _ => "compact"
     };
@@ -175,7 +180,8 @@ internal static class StageFit
                     boxHeight = workArea.Height * LandscapeBand - ChromeHeight;
                 }
 
-                var pageBoxWidth = boxWidth - documentRailWidth;
+                var railWidth = hint.SinglePage ? 0 : documentRailWidth;
+                var pageBoxWidth = boxWidth - railWidth;
                 var pageHeight = boxHeight;
                 contentWidth = pageHeight * hint.Aspect;
                 if (contentWidth > pageBoxWidth)
@@ -185,7 +191,7 @@ internal static class StageFit
                 }
 
                 contentHeight = pageHeight + Math.Max(0, documentToolbarHeight);
-                extraWidth += documentRailWidth;
+                extraWidth += railWidth;
                 break;
 
             case StageFitHint.FitKind.Sheet:
