@@ -155,6 +155,12 @@ facts the header does not already show, then an optional footer. Nothing moves
 between kinds. Errors use the same card with a warning glyph instead of the
 file visual, one sentence and at most one action.
 
+Folders and archives are both lists of files and share one card: the item's
+own icon, its name, one fact line (`44.6 KB · 4 files`,
+`7 files · 516.4 KB uncompressed`), and a footer list with each row's size and
+an accent bar, largest first once the sizes are known. Folders inside an
+archive open in place.
+
 ## Words
 
 - Sentence case. Straight quotes. No em dashes.
