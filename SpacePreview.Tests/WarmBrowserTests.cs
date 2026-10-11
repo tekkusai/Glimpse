@@ -2,7 +2,9 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using Microsoft.Web.WebView2.Core;
 using SpacePreview.Preview;
+using SpacePreview.Services;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
@@ -181,6 +183,44 @@ public sealed class WarmBrowserTests
             window.Close();
         }
     });
+
+    // Stop can land while Start waits for its controller. The late
+    // controller is closed, and with no other the browser exits.
+    [Fact]
+    public Task AStopDuringAStartClosesTheLateController() => WpfApp.RunAsync(async () =>
+    {
+        var environment = await WebViewEnvironment.GetAsync();
+        await NoBrowserRunningAsync(environment);
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        environment.BrowserProcessExited += (_, _) => exited.TrySetResult();
+        var window = new PreviewWindow { Left = -30000, Top = 0 };
+        new WindowInteropHelper(window).EnsureHandle();
+        try
+        {
+            // The environment is ready, so Start asks for its controller now.
+            var browser = Fields.Get<object>(window, "_warmBrowser");
+            Fields.Call(browser, "Start", window.Hwnd);
+            Fields.Call(browser, "Stop");
+
+            await exited.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.Null(Fields.Get<object?>(browser, "_controller"));
+            Assert.False(WarmBrowserStarted(window));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    private static async Task NoBrowserRunningAsync(CoreWebView2Environment environment)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
+        while (environment.GetProcessInfos().Count > 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "An earlier browser never exited.");
+            await Task.Delay(50);
+        }
+    }
 
     /// <summary>Runs a load that leaves before it reads the file and says whether it started the browser.</summary>
     private static async Task<bool> StartedBeforeReadingAsync(string name)

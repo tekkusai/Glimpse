@@ -71,10 +71,10 @@ public sealed class HookPathArchitectureTests
     }
 
     // The trim's one collection is blocking (IdleTrimTests). It runs off the
-    // dispatcher and never waits on finalizers or compacts the large object
-    // heap, so its pause stays that of a small heap.
+    // dispatcher, never waits on finalizers and never compacts the large
+    // object heap.
     [Fact]
-    public void IdleTrimKeepsItsCollectionShort()
+    public void IdleTrimCollectsOffTheDispatcherWithoutFinalizersOrLargeObjectCompaction()
     {
         var body = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "RunIdleTrim");
 
