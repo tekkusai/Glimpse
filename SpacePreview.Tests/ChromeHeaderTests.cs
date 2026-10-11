@@ -267,7 +267,7 @@ public sealed class ChromeHeaderTests
             1,
             string.Empty,
             new Uri("https://example.invalid/setup.exe.sha256"));
-        var settings = new SettingsWindow(() => release, () => { }, _ => { });
+        var settings = new SettingsWindow(() => release, () => true, () => { }, _ => { }, () => []);
         try
         {
             Assert.StartsWith(Branding.Name, settings.VersionText.Text, StringComparison.Ordinal);
@@ -303,7 +303,7 @@ public sealed class ChromeHeaderTests
             finalReminder: false);
         Window[] dialogs =
         [
-            new SettingsWindow(() => null, () => { }, _ => { }),
+            new SettingsWindow(() => null, () => false, () => { }, _ => { }, () => []),
             new AppUpdateWindow(updates, release),
             notice
         ];

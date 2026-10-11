@@ -157,6 +157,7 @@ internal static class ProbeRunner
                 // Leaves the window pinned with Always on top off through the
                 // final capture, so a live pass can verify the reveal visuals
                 // and taskbar/Alt+Tab reachability from outside the process.
+                // Like a click, it becomes the next pin's default.
                 window.SetPinned(true);
                 window.AlwaysOnTopButton.IsChecked = false;
                 window.UpdateLayout();
@@ -227,10 +228,14 @@ internal static class ProbeRunner
         }
     }
 
-    /// <summary>Renders the settings window off screen. Stub callbacks: the probe never touches live settings.</summary>
+    /// <summary>
+    /// Renders the settings window off screen, after the missing-pieces
+    /// check has landed. Stub callbacks: the probe never touches live
+    /// settings, and with no update check it shows just the version.
+    /// </summary>
     private static async Task CaptureSettingsAsync(string outputPng)
     {
-        var settings = new SettingsWindow(() => null, () => { }, _ => { })
+        var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { })
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             Left = -30000,
@@ -238,7 +243,7 @@ internal static class ProbeRunner
             ShowActivated = false
         };
         settings.Show();
-        await Task.Delay(150);
+        await Task.Delay(600);
         CaptureWindow(settings, outputPng);
         settings.Close();
     }
@@ -255,7 +260,7 @@ internal static class ProbeRunner
     {
         const double Gap = 48;
         var area = SystemParameters.WorkArea;
-        var settings = new SettingsWindow(() => null, () => { }, _ => { })
+        var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { })
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
             ShowActivated = false

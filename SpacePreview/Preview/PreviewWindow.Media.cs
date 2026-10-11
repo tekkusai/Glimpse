@@ -311,24 +311,30 @@ public partial class PreviewWindow
         HeifFailure.NeedsHevc => BuildErrorPreview(
             "Can't preview this image",
             "This image uses HEVC.",
-            new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store")),
+            HevcFix),
         HeifFailure.NeedsHeif => BuildErrorPreview(
             "Can't preview this image",
             "This image uses HEIF.",
-            new PreviewAction("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store")),
+            HeifFix),
         _ => BuildErrorPreview("Can't preview this image", "This image may be damaged.")
     };
+
+    // One definition per fix: the failure cards offer them, and Settings
+    // does too while this PC lacks them.
+    internal static readonly PreviewAction HevcFix = new("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
+    internal static readonly PreviewAction HeifFix = new("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store");
+    private static readonly PreviewAction Av1Fix = new("Get AV1 support", Av1VideoExtensionStoreUri, "Opens AV1 Video Extension in Microsoft Store");
 
     private static PreviewAction? MediaCodecStoreAction(Mp4CodecInfo? codecs)
     {
         if (codecs?.HasHevcVideo == true)
         {
-            return new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
+            return HevcFix;
         }
 
         if (codecs?.HasAv1Video == true)
         {
-            return new PreviewAction("Get AV1 support", Av1VideoExtensionStoreUri, "Opens AV1 Video Extension in Microsoft Store");
+            return Av1Fix;
         }
 
         return null;

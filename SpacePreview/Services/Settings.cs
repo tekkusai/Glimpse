@@ -26,8 +26,8 @@ internal sealed record Settings
     public bool MediaMuted { get; init; }
 
     /// <summary>
-    /// Whether a newly pinned preview starts above other windows. Each pinned
-    /// window can still override this for its own lifetime.
+    /// Whether a newly pinned preview starts above other windows: wherever
+    /// the user last left Always on top on a pinned preview.
     /// </summary>
     public bool PinnedAlwaysOnTopDefault { get; init; } = true;
 
