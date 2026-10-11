@@ -58,6 +58,10 @@ internal sealed class SpacePreviewController : IDisposable
     private bool _browseInFlight;
     private int _browsePendingDelta;
     private long _browseInputStamp;
+
+    // The last key or click that moved a picker's selection; its settled
+    // read shows the new file.
+    private long _pickerInputStamp;
     private IReadOnlyList<string>? _multiSelection;
     private int _multiSelectionSelectedCount;
     private int _multiIndex;
@@ -542,6 +546,7 @@ internal sealed class SpacePreviewController : IDisposable
                 FollowExplorer(vk, PreviewKeyMap.EditsSelection(facts), stamp);
                 return;
             case KeyAction.FollowPicker:
+                _pickerInputStamp = stamp;
                 _commonFileDialogMonitor.RequestRefresh(_previewOwnerRootHwnd, settleMilliseconds: 55);
                 return;
         }
@@ -601,12 +606,13 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void QueueMouseDown(int message, int screenX, int screenY)
     {
+        var stamp = Stopwatch.GetTimestamp();
         _dispatcher.BeginInvoke(
-            () => OnMouseDown(message, screenX, screenY),
+            () => OnMouseDown(message, screenX, screenY, stamp),
             DispatcherPriority.Input);
     }
 
-    private void OnMouseDown(int message, int screenX, int screenY)
+    private void OnMouseDown(int message, int screenX, int screenY, long stamp)
     {
         ClearPendingFileDialogPreview();
 
@@ -651,6 +657,7 @@ internal sealed class SpacePreviewController : IDisposable
             && _lastSelectionSource == SelectionSource.CommonFileDialog
             && hit == _previewOwnerRootHwnd)
         {
+            _pickerInputStamp = stamp;
             _commonFileDialogMonitor.RequestRefresh(_previewOwnerRootHwnd, settleMilliseconds: 60);
             return;
         }
@@ -1578,8 +1585,12 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
+        // The reveal clock starts at the key or click that moved the picker,
+        // not when the settled read lands.
+        var stamp = _pickerInputStamp != 0 ? _pickerInputStamp : Stopwatch.GetTimestamp();
+        _pickerInputStamp = 0;
         DiagnosticLog.Write($"file dialog selection changed -> {selection.Path}");
-        ShowPreview(selection, Stopwatch.GetTimestamp());
+        ShowPreview(selection, stamp);
     }
 
     private void HidePreviewAndRestoreOwner(IntPtr owner)
@@ -1672,6 +1683,7 @@ internal sealed class SpacePreviewController : IDisposable
         _queuedRefreshRequest = null;
         _pendingKeyUpVerification = null;
         _browsePendingDelta = 0;
+        _pickerInputStamp = 0;
         _previewOwnerRootHwnd = IntPtr.Zero;
         _lastExplorerHwnd = IntPtr.Zero;
         _lastSelectionSource = SelectionSource.Explorer;
