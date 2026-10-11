@@ -48,6 +48,35 @@ public sealed class CardsArchiveListingTests
         Assert.DoesNotContain("Partial list", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
     }
 
+    // Moving past an entry inflates all of it; the clock and the user stop
+    // that inside the entry instead of after four gigabytes.
+    [Fact]
+    public async Task ATarballWalkOutOfTimeStopsInsideAHugeEntry()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "huge.tar.gz");
+        WriteTarGzWithHugeFirstEntry(path);
+
+        var listing = await Task.Run(() => ArchivePreviewLoader.TryLoad(path, TimeSpan.FromMilliseconds(50), CancellationToken.None))
+            .WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.NotNull(listing);
+        Assert.True(listing!.Stopped);
+        Assert.StartsWith("At least ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ACancelledTarballWalkStopsInsideAHugeEntry()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "huge.tar.gz");
+        WriteTarGzWithHugeFirstEntry(path);
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            Task.Run(() => ArchivePreviewLoader.TryLoad(path, TimeSpan.FromMinutes(5), cancel.Token)).WaitAsync(TimeSpan.FromSeconds(3)));
+    }
+
     [Fact]
     public void ASingleCompressedFileStillListsAsOneFile()
     {
@@ -119,5 +148,100 @@ public sealed class CardsArchiveListingTests
         {
             DataStream = new MemoryStream(System.Text.Encoding.ASCII.GetBytes(text))
         });
+    }
+
+    /// <summary>
+    /// big.bin, four gigabytes of zeros, then small.txt. The deflate stream
+    /// is written by hand with fixed codes, one 258-zero repeat per 13 bits,
+    /// so the file is 27 MB and quick to make. No walk reaches the gzip
+    /// trailer, so its checksum stays zero.
+    /// </summary>
+    private static void WriteTarGzWithHugeFirstEntry(string path)
+    {
+        const long size = 4L << 30;
+        using var file = new BufferedStream(File.Create(path), 1 << 16);
+        file.Write([0x1F, 0x8B, 8, 0, 0, 0, 0, 0, 0, 0xFF]);
+        var bits = new DeflateBits(file);
+        bits.Write(1, 1); // the final block
+        bits.Write(1, 2); // fixed codes
+        bits.Literals(TarHeader("big.bin", size));
+        bits.Literals([0]);
+        var left = size - 1;
+        for (; left >= 258; left -= 258)
+        {
+            bits.Write(0xA3, 13); // length 258 (code 285), distance 1 (code 0)
+        }
+
+        bits.Literals(new byte[left]);
+        bits.Literals(TarHeader("small.txt", 5));
+        bits.Literals("tail\n"u8);
+        bits.Literals(new byte[507 + 1024]); // the block's padding, then the two empty end blocks
+        bits.Write(0, 7); // end of block
+        bits.Flush();
+        file.Write(new byte[8]);
+    }
+
+    private static byte[] TarHeader(string name, long size)
+    {
+        var header = new byte[512];
+        void Put(int at, string text) => System.Text.Encoding.ASCII.GetBytes(text).CopyTo(header, at);
+        Put(0, name);
+        Put(100, "0000644\0");
+        Put(108, "0000000\0");
+        Put(116, "0000000\0");
+        Put(124, Convert.ToString(size, 8).PadLeft(11, '0') + "\0");
+        Put(136, "00000000000\0");
+        Put(148, "        ");
+        header[156] = (byte)'0';
+        Put(257, "ustar\0");
+        Put(263, "00");
+        Put(148, Convert.ToString(header.Sum(b => b), 8).PadLeft(6, '0') + "\0 ");
+        return header;
+    }
+
+    /// <summary>Deflate's bit order: fields low bit first, Huffman codes high bit first.</summary>
+    private sealed class DeflateBits(Stream output)
+    {
+        private ulong _bits;
+        private int _count;
+
+        public void Write(uint value, int length)
+        {
+            _bits |= (ulong)value << _count;
+            _count += length;
+            while (_count >= 8)
+            {
+                output.WriteByte((byte)_bits);
+                _bits >>= 8;
+                _count -= 8;
+            }
+        }
+
+        /// <summary>Each byte as a fixed-code literal.</summary>
+        public void Literals(ReadOnlySpan<byte> bytes)
+        {
+            foreach (var value in bytes)
+            {
+                var (code, length) = value < 144 ? (0x30u + value, 8) : (0x190u + value - 144u, 9);
+                uint reversed = 0;
+                for (var i = 0; i < length; i++)
+                {
+                    reversed |= ((code >> i) & 1) << (length - 1 - i);
+                }
+
+                Write(reversed, length);
+            }
+        }
+
+        public void Flush()
+        {
+            if (_count > 0)
+            {
+                output.WriteByte((byte)_bits);
+            }
+
+            _bits = 0;
+            _count = 0;
+        }
     }
 }

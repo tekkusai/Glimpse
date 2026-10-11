@@ -1,10 +1,12 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.IO.Compression;
 using System.Numerics;
 using System.Text;
 using System.Text.Json;
 using System.Windows.Media.Media3D;
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
@@ -223,8 +225,161 @@ public sealed class MeshPreviewLoaderTests
         Assert.NotNull(MeshPreviewLoader.TryLoadStepOutline(step, CancellationToken.None));
     }
 
+    // One mesh of many points placed again by every node: the placed total
+    // has a budget, so the file is refused instead of filling memory.
+    [Fact]
+    public void GlbInstancesPastTheVertexBudgetAreRefused()
+    {
+        using var temp = new TempDirectory();
+        var atBudget = Path.Combine(temp.Path, "at-budget.glb");
+        var past = Path.Combine(temp.Path, "past.glb");
+        const int points = 100_000;
+        WriteInstancedGlb(atBudget, points, triangles: 1, instances: MeshPreviewLoader.MaxPlacedVertices / points);
+        WriteInstancedGlb(past, points, triangles: 1, instances: MeshPreviewLoader.MaxPlacedVertices / points + 1);
+
+        Assert.Equal(MeshPreviewLoader.MaxPlacedVertices / points, Load(atBudget).SourceTriangles);
+        Assert.Null(MeshPreviewLoader.TryLoad(past, CancellationToken.None));
+    }
+
+    [Fact]
+    public void GlbInstancesPastTheTriangleBudgetAreRefused()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "past.glb");
+        const int triangles = 100_000;
+        WriteInstancedGlb(path, points: 3, triangles, instances: MeshPreviewLoader.MaxPlacedTriangles / triangles + 1);
+
+        Assert.Null(MeshPreviewLoader.TryLoad(path, CancellationToken.None));
+    }
+
+    [Fact]
+    public void ThreeMfBuildItemsPastTheVertexBudgetAreRefused()
+    {
+        using var temp = new TempDirectory();
+        var atBudget = Path.Combine(temp.Path, "at-budget.3mf");
+        var past = Path.Combine(temp.Path, "past.3mf");
+        const int points = 10_000;
+        var model = Object3mf(Enumerable.Range(0, points).Select(i => new Vector3(i, i % 2, 0)), [(0, 1, 2)]);
+        Write3mf(atBudget, model, items: MeshPreviewLoader.MaxPlacedVertices / points);
+        Write3mf(past, model, items: MeshPreviewLoader.MaxPlacedVertices / points + 1);
+
+        Assert.Equal(MeshPreviewLoader.MaxPlacedVertices / points, Load(atBudget).SourceTriangles);
+        Assert.Null(MeshPreviewLoader.TryLoad(past, CancellationToken.None));
+    }
+
+    // XDocument slows with the square of nesting depth; a model nested past
+    // the limit is refused before it is built.
+    [Fact]
+    public void A3mfNestedPastTheLimitIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var deep = Path.Combine(temp.Path, "deep.3mf");
+        var ordinary = Path.Combine(temp.Path, "ordinary.3mf");
+        var cube = CubeQuads();
+        var model = Object3mf(cube.Vertices, cube.Faces.SelectMany(f => new[] { (f[0], f[1], f[2]), (f[0], f[2], f[3]) }));
+        Write3mf(deep, model, items: 1, extra: Nested("m", XmlNesting.MaxDepth + 50));
+        Write3mf(ordinary, model, items: 1, extra: Nested("m", 20));
+
+        Assert.Null(MeshPreviewLoader.TryLoad(deep, CancellationToken.None));
+        Assert.Equal(12, Load(ordinary).SourceTriangles);
+    }
+
+    // Three points and one face repeated: every corner sits on a vertex of a
+    // quarter million faces, which smoothing used to scan for every corner.
+    [Fact]
+    public async Task ARepeatedFaceShadesWithoutScanningEveryNeighbor()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "repeat.obj");
+        File.WriteAllText(path, "v 0 0 0\nv 1 0 0\nv 0 1 0\n" + string.Concat(Enumerable.Repeat("f 1 2 3\n", MeshPreviewLoader.MaxRenderedTriangles)));
+
+        var preview = await Task.Run(() => MeshPreviewLoader.TryLoad(path, CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(MeshPreviewLoader.MaxRenderedTriangles, preview!.SourceTriangles);
+        Assert.Equal(new Vector3D(0, 0, 1), preview.Mesh.Normals[0]);
+    }
+
+    // Every vertex sits in about as many faces as still smooth, the slowest
+    // shading there is; a cancel landing in it stops it.
+    [Fact]
+    public void ShadingStopsWhenTheLoadIsCancelled()
+    {
+        const int triangles = 500_000;
+        var vertices = 3 * triangles / MeshPreviewLoader.MaxSmoothedFaces;
+        var positions = Enumerable.Range(0, vertices).Select(i => new Vector3(i, i * i % 97, i % 13)).ToArray();
+        var corners = Enumerable.Range(0, 3 * triangles).Select(i => i % vertices).ToArray();
+        using var cancel = new CancellationTokenSource(TimeSpan.FromMilliseconds(20));
+
+        Assert.ThrowsAny<OperationCanceledException>(() => MeshPreviewLoader.CreaseNormals(positions, corners, cancel.Token));
+    }
+
     private static MeshPreview Load(string path) =>
         MeshPreviewLoader.TryLoad(path, CancellationToken.None) ?? throw new Xunit.Sdk.XunitException($"{path} did not load");
+
+    private static string Nested(string name, int depth) =>
+        string.Concat(Enumerable.Repeat($"<{name}>", depth)) + string.Concat(Enumerable.Repeat($"</{name}>", depth));
+
+    private static string Object3mf(IEnumerable<Vector3> vertices, IEnumerable<(int A, int B, int C)> triangles) =>
+        "<object id=\"1\" type=\"model\"><mesh><vertices>"
+        + string.Concat(vertices.Select(v => FormattableString.Invariant($"<vertex x=\"{v.X}\" y=\"{v.Y}\" z=\"{v.Z}\"/>")))
+        + "</vertices><triangles>"
+        + string.Concat(triangles.Select(t => $"<triangle v1=\"{t.A}\" v2=\"{t.B}\" v3=\"{t.C}\"/>"))
+        + "</triangles></mesh></object>";
+
+    /// <summary>A 3MF whose build places object 1 <paramref name="items"/> times.</summary>
+    private static void Write3mf(string path, string objects, int items, string extra = "")
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        using var writer = new StreamWriter(archive.CreateEntry("3D/3dmodel.model").Open());
+        writer.Write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            + "<model unit=\"millimeter\" xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
+            + extra
+            + $"<resources>{objects}</resources>"
+            + $"<build>{string.Concat(Enumerable.Repeat("<item objectid=\"1\"/>", items))}</build>"
+            + "</model>");
+    }
+
+    /// <summary>
+    /// A GLB whose one mesh has <paramref name="points"/> positions and the
+    /// triangle 0 1 2 <paramref name="triangles"/> times, placed by
+    /// <paramref name="instances"/> scene nodes.
+    /// </summary>
+    private static void WriteInstancedGlb(string path, int points, int triangles, int instances)
+    {
+        var indexOffset = points * 12;
+        var bin = new byte[(indexOffset + triangles * 6 + 3) / 4 * 4];
+        for (var i = 0; i < points; i++)
+        {
+            BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(i * 12), i);
+            BinaryPrimitives.WriteSingleLittleEndian(bin.AsSpan(i * 12 + 4), i % 2);
+        }
+
+        for (var t = 0; t < triangles; t++)
+        {
+            BinaryPrimitives.WriteUInt16LittleEndian(bin.AsSpan(indexOffset + t * 6 + 2), 1);
+            BinaryPrimitives.WriteUInt16LittleEndian(bin.AsSpan(indexOffset + t * 6 + 4), 2);
+        }
+
+        var json = $$"""
+            {
+              "asset": { "version": "2.0" },
+              "scene": 0,
+              "scenes": [ { "nodes": [{{string.Join(",", Enumerable.Range(0, instances))}}] } ],
+              "nodes": [{{string.Join(",", Enumerable.Repeat("""{ "mesh": 0 }""", instances))}}],
+              "meshes": [ { "primitives": [ { "attributes": { "POSITION": 0 }, "indices": 1 } ] } ],
+              "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": {{points}}, "type": "VEC3" },
+                { "bufferView": 1, "componentType": 5123, "count": {{triangles * 3}}, "type": "SCALAR" }
+              ],
+              "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": {{indexOffset}} },
+                { "buffer": 0, "byteOffset": {{indexOffset}}, "byteLength": {{triangles * 6}} }
+              ],
+              "buffers": [ { "byteLength": {{bin.Length}} } ]
+            }
+            """;
+        WriteGlbChunks(path, json, bin);
+    }
 
     private static int RenderedTriangles(MeshPreview preview) => preview.Mesh.Positions.Count / 3;
 
@@ -381,6 +536,11 @@ public sealed class MeshPreviewLoaderTests
               "buffers": [ { "byteLength": {{bin.Count}} } ]
             }
             """;
+        WriteGlbChunks(path, json, [.. bin]);
+    }
+
+    private static void WriteGlbChunks(string path, string json, byte[] bin)
+    {
         using var _ = JsonDocument.Parse(json);
         var jsonBytes = Encoding.UTF8.GetBytes(json).ToList();
         while (jsonBytes.Count % 4 != 0)
@@ -391,13 +551,13 @@ public sealed class MeshPreviewLoaderTests
         using var writer = new BinaryWriter(File.Create(path));
         writer.Write("glTF"u8);
         writer.Write(2u);
-        writer.Write((uint)(12 + 8 + jsonBytes.Count + 8 + bin.Count));
+        writer.Write((uint)(12 + 8 + jsonBytes.Count + 8 + bin.Length));
         writer.Write((uint)jsonBytes.Count);
         writer.Write("JSON"u8);
         writer.Write(jsonBytes.ToArray());
-        writer.Write((uint)bin.Count);
+        writer.Write((uint)bin.Length);
         writer.Write("BIN\0"u8);
-        writer.Write(bin.ToArray());
+        writer.Write(bin);
     }
 
     private static string CubeStep()

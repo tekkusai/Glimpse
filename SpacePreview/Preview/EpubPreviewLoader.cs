@@ -14,6 +14,7 @@ internal static partial class EpubPreviewLoader
 {
     private const int MaxBookCharacters = 500_000;
     private const long MaxImageBytes = 2 * 1024 * 1024;
+    private const long MaxXmlBytes = 5 * 1024 * 1024;
 
     // One budget for the whole book, cover included: a comic must not
     // become a page of hundreds of megabytes.
@@ -330,6 +331,9 @@ internal static partial class EpubPreviewLoader
         }
 
         builder.Append('>');
+
+        // LoadXml refused anything nested past XmlNesting.MaxDepth, so this
+        // recursion ends there.
         foreach (var child in element.Nodes())
         {
             AppendSanitizedNode(builder, child, context);
@@ -426,18 +430,18 @@ internal static partial class EpubPreviewLoader
     {
         cancellationToken.ThrowIfCancellationRequested();
         var entry = archive.GetEntry(NormalizeEntryPath(entryPath));
-        if (entry is null || entry.Length > 5 * 1024 * 1024)
+        if (entry is null || entry.Length > MaxXmlBytes)
         {
             return null;
         }
 
-        using var stream = entry.Open();
-        using var reader = XmlReader.Create(stream, new XmlReaderSettings
+        var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Ignore,
-            XmlResolver = null
-        });
-        var document = XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+            XmlResolver = null,
+            MaxCharactersInDocument = MaxXmlBytes
+        };
+        var document = XmlNesting.Load(entry.Open, settings, LoadOptions.PreserveWhitespace);
         cancellationToken.ThrowIfCancellationRequested();
         return document;
     }

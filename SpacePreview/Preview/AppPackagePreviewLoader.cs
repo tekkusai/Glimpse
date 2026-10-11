@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using System.Xml;
 using System.Xml.Linq;
 using SpacePreview.Services;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
@@ -268,13 +269,12 @@ internal static class AppPackagePreviewLoader
             return (null, false);
         }
 
-        using var stream = entry.Open();
-        using var reader = XmlReader.Create(stream, new XmlReaderSettings
+        var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
             XmlResolver = null
-        });
-        return (XDocument.Load(reader, LoadOptions.None), isBundle);
+        };
+        return (XmlNesting.Load(entry.Open, settings, LoadOptions.None), isBundle);
     }
 
     private static string? CleanValue(string? value)

@@ -131,7 +131,10 @@ internal static class OfficeOpenXmlPreview
         return true;
     }
 
-    /// <summary>Paragraphs and tables in reading order, through content controls.</summary>
+    /// <summary>
+    /// Paragraphs and tables in reading order, through content controls,
+    /// which nest no deeper than <see cref="XmlNesting.MaxDepth"/> allows.
+    /// </summary>
     private static IEnumerable<XElement> Blocks(XElement container)
     {
         foreach (var element in container.Elements())
@@ -679,14 +682,13 @@ internal static class OfficeOpenXmlPreview
             throw new InvalidDataException("Office XML entry is too large for preview.");
         }
 
-        using var stream = entry.Open();
-        using var reader = XmlReader.Create(stream, new XmlReaderSettings
+        var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
             XmlResolver = null,
             MaxCharactersInDocument = MaxXmlEntryBytes
-        });
-        return XDocument.Load(reader, LoadOptions.None);
+        };
+        return XmlNesting.Load(entry.Open, settings, LoadOptions.None);
     }
 
     private static bool IsOn(XElement? toggle) =>

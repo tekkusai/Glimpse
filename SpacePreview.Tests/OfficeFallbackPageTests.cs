@@ -110,6 +110,22 @@ public sealed class OfficeFallbackPageTests
         Assert.Contains("<p>First point</p>", html, StringComparison.Ordinal);
     }
 
+    // Content controls nested past the limit refuse the page instead of
+    // recursing until the stack runs out; the usual few keep reading order.
+    [Fact]
+    public void ContentControlsNestedPastTheLimitAreRefused()
+    {
+        using var temp = new TempDirectory();
+        var deep = Path.Combine(temp.Path, "deep.docx");
+        var ordinary = Path.Combine(temp.Path, "ordinary.docx");
+        WriteNestedControls(deep, XmlNesting.MaxDepth / 2 + 50);
+        WriteNestedControls(ordinary, 3);
+
+        Assert.Null(OfficeOpenXmlPreview.TryBuild(deep, OfficeKind.Document, CancellationToken.None));
+        var html = File.ReadAllText(OfficeOpenXmlPreview.TryBuild(ordinary, OfficeKind.Document, CancellationToken.None)!.DocumentPath);
+        Assert.Contains("<p>Before</p><p>Inside</p><p>After</p>", html, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ANonZipFileHasNoPage()
     {
@@ -145,6 +161,24 @@ public sealed class OfficeFallbackPageTests
         var media = archive.CreateEntry("word/media/image1.png");
         using var stream = media.Open();
         stream.Write(Pixel);
+    }
+
+    /// <summary>One paragraph inside <paramref name="depth"/> content controls, between two plain ones.</summary>
+    private static void WriteNestedControls(string path, int depth)
+    {
+        using var archive = ZipFile.Open(path, ZipArchiveMode.Create);
+        var open = string.Concat(Enumerable.Repeat("<w:sdt><w:sdtContent>", depth));
+        var close = string.Concat(Enumerable.Repeat("</w:sdtContent></w:sdt>", depth));
+        Entry(archive, "word/document.xml", $"""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p><w:r><w:t>Before</w:t></w:r></w:p>
+                {open}<w:p><w:r><w:t>Inside</w:t></w:r></w:p>{close}
+                <w:p><w:r><w:t>After</w:t></w:r></w:p>
+              </w:body>
+            </w:document>
+            """);
     }
 
     private static void WriteWorkbook(string path)
