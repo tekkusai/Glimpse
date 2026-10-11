@@ -550,12 +550,13 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         {
             var version = pending.VersionText;
             // Install now says each step as it happens, and Installing only
-            // once setup starts. Between steps it claims nothing.
+            // once setup starts. Between steps, and while it asks GitHub,
+            // the update is ready: the caption stays, so the window keeps its height.
             if (state.Installing)
             {
                 return state.SetupStarted ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
                     : state.Downloading ? new(null, FooterLink.None, $"Downloading {version}.")
-                    : new(state.Checking ? "Checking for updates" : null, FooterLink.None, null);
+                    : new(state.Checking ? "Checking for updates" : null, FooterLink.None, $"{version} is ready to install.");
             }
 
             // A failed Install now gives way once the update installs on its own.

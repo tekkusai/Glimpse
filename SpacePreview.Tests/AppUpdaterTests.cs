@@ -640,12 +640,8 @@ public sealed class AppUpdaterTests
         // Off while the background download is held, then Install now at once.
         var check = updates.CheckNowAsync();
         await WaitUntilAsync(() => updates.State.Downloading);
-        var footers = new List<string?>();
-        updates.Changed += () =>
-        {
-            var footer = UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now);
-            footers.Add(footer.Caption ?? footer.Status);
-        };
+        var footers = new List<UpdateFooter>();
+        updates.Changed += () => footers.Add(UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now));
         updates.SetInstallAutomatically(false);
         var install = updates.InstallNowAsync();
         await check;
@@ -658,9 +654,14 @@ public sealed class AppUpdaterTests
         Assert.False(updates.State.InstallFailed);
 
         // The stopped download hands over to Install now's own without a
-        // word of Installing. Between the download and setup it claims nothing.
+        // word of Installing before setup starts.
         Assert.Equal(
-            ["3.1.0 is ready to install.", "Downloading 3.1.0.", null, "Installing 3.1.0. Back in a few seconds."],
+            [
+                new(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
+                new(null, FooterLink.None, "Downloading 3.1.0."),
+                new(null, FooterLink.None, "3.1.0 is ready to install."),
+                new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds.")
+            ],
             footers.Where((footer, i) => i == 0 || footer != footers[i - 1]));
     });
 

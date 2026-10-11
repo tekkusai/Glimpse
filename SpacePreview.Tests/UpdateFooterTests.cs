@@ -104,10 +104,13 @@ public sealed class UpdateFooterTests
         var installNow = new UpdateState { Pending = Release, Installing = true, Installer = Installer };
 
         // Asking GitHub once more before the launch.
-        Assert.Equal(new UpdateFooter("Checking for updates", FooterLink.None, null), Describe(installNow with { Checking = true }, Checked));
+        Assert.Equal(
+            new UpdateFooter("Checking for updates", FooterLink.None, "3.1.0 is ready to install."),
+            Describe(installNow with { Checking = true }, Checked));
 
-        // Between steps: the link is gone, and nothing is claimed.
-        Assert.Equal(new UpdateFooter(null, FooterLink.None, null), Describe(installNow, Checked));
+        // Between steps the link is gone and the update is only ready, though
+        // it would install on its own: Install now is installing it now.
+        Assert.Equal(new UpdateFooter(null, FooterLink.None, "3.1.0 is ready to install."), Describe(installNow with { InstallNowPressed = true }, Checked));
     }
 
     [Fact]
