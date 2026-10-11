@@ -20,8 +20,8 @@ public sealed class TrayWindowTests
         // Twice: a second window registers its class afresh.
         for (var round = 0; round < 2; round++)
         {
-            int clicked = 0, created = 0, changed = 0;
-            using var window = new TrayWindow(() => clicked++, () => created++, () => changed++);
+            int clicked = 0, created = 0, changed = 0, balloon = 0;
+            using var window = new TrayWindow(() => clicked++, () => created++, () => changed++, () => balloon++);
 
             // Broadcasts go to the top-level windows EnumWindows lists; a
             // message-only window is not among them.
@@ -38,6 +38,11 @@ public sealed class TrayWindowTests
             NativeMethods.SendMessage(window.Handle, NativeMethods.WM_TRAYICON, IntPtr.Zero, NativeMethods.WM_LBUTTONUP);
             Assert.Equal(1, clicked);
             Assert.Equal(1, created);
+
+            // A click on our balloon (the major-version notice) is its own message.
+            NativeMethods.SendMessage(window.Handle, NativeMethods.WM_TRAYICON, IntPtr.Zero, NativeMethods.NIN_BALLOONUSERCLICK);
+            Assert.Equal(1, balloon);
+            Assert.Equal(1, clicked);
         }
 
         return Task.CompletedTask;

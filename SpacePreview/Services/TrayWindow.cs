@@ -21,12 +21,14 @@ internal sealed class TrayWindow : IDisposable
     private readonly Action _clicked;
     private readonly Action _taskbarCreated;
     private readonly Action _settingChanged;
+    private readonly Action _balloonClicked;
 
-    public TrayWindow(Action clicked, Action taskbarCreated, Action settingChanged)
+    public TrayWindow(Action clicked, Action taskbarCreated, Action settingChanged, Action balloonClicked)
     {
         _clicked = clicked;
         _taskbarCreated = taskbarCreated;
         _settingChanged = settingChanged;
+        _balloonClicked = balloonClicked;
         _wndProc = WindowProc;
 
         var module = NativeMethods.GetModuleHandle(null);
@@ -78,6 +80,10 @@ internal sealed class TrayWindow : IDisposable
                 case NativeMethods.WM_RBUTTONUP:
                 case NativeMethods.WM_CONTEXTMENU:
                     _clicked();
+                    break;
+
+                case NativeMethods.NIN_BALLOONUSERCLICK:
+                    _balloonClicked();
                     break;
             }
 

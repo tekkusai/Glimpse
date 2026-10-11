@@ -42,13 +42,33 @@ internal sealed record Settings
     public bool PreviewAccessWarningDismissedForever { get; init; }
 
     /// <summary>
-    /// The release whose automatic update prompt was most recently dismissed.
-    /// A different release always gets its own first prompt.
+    /// Off: checks still run, and nothing downloads or installs until the
+    /// user presses Install now in Settings.
     /// </summary>
-    public string? UpdateNotificationVersion { get; init; }
+    public bool InstallUpdatesAutomatically { get; init; } = true;
 
-    /// <summary>When that release may be offered automatically again.</summary>
-    public DateTimeOffset? UpdateNotificationSnoozedUntilUtc { get; init; }
+    /// <summary>
+    /// The last time Glimpse knew it was current: a check that reached
+    /// GitHub, or the first launch. Settings speaks up once it is 3 days old.
+    /// </summary>
+    public DateTimeOffset? LastUpdateCheckUtc { get; init; }
+
+    /// <summary>A release whose signature or checksum failed. It is never downloaded again.</summary>
+    public string? SkippedUpdateVersion { get; init; }
+
+    /// <summary>The last update setup started, and when.</summary>
+    public string? UpdateAttemptVersion { get; init; }
+
+    public DateTimeOffset? UpdateAttemptUtc { get; init; }
+
+    /// <summary>The version that last ran. A newer one running means an update landed.</summary>
+    public string? LastVersionSeen { get; init; }
+
+    /// <summary>When the running version first ran as an update.</summary>
+    public DateTimeOffset? UpdatedAtUtc { get; init; }
+
+    /// <summary>A new major version landed and its one tray notice has not shown yet.</summary>
+    public bool MajorUpdateNoticeDue { get; init; }
 
     // Stage size is deliberately not persisted: content shapes the stage,
     // and a border-drag holds only until the preview closes.
@@ -105,7 +125,7 @@ internal sealed record Settings
 
         try
         {
-            var loaded = Normalize(JsonSerializer.Deserialize<Settings>(json, Options) ?? throw new JsonException("null settings"));
+            var loaded = JsonSerializer.Deserialize<Settings>(json, Options) ?? throw new JsonException("null settings");
 
             // 2.x kept the names of elevated apps the user opened file
             // dialogs in. Nothing reads them any more; the first load
@@ -132,27 +152,6 @@ internal sealed record Settings
             DiagnosticLog.Write($"settings corrupt, kept as {Path.GetFileName(aside)} and reset: {ex.GetType().Name}: {ex.Message}");
             return new Settings();
         }
-    }
-
-    internal static Settings Normalize(Settings settings)
-    {
-        var notificationVersion = settings.UpdateNotificationVersion?.Trim();
-        var snoozedUntil = settings.UpdateNotificationSnoozedUntilUtc?.ToUniversalTime();
-        if (!AppUpdateService.TryParseVersion(notificationVersion, out var parsedNotificationVersion))
-        {
-            notificationVersion = null;
-            snoozedUntil = null;
-        }
-        else
-        {
-            notificationVersion = parsedNotificationVersion.ToString(3);
-        }
-
-        return settings with
-        {
-            UpdateNotificationVersion = notificationVersion,
-            UpdateNotificationSnoozedUntilUtc = snoozedUntil
-        };
     }
 
     /// <summary>

@@ -41,6 +41,7 @@ internal static class NativeMethods
     public const uint NIIF_RESPECT_QUIET_TIME = 0x00000080;
     public const uint WM_APP = 0x8000;
     public const uint WM_TRAYICON = WM_APP + 1;
+    public const int NIN_BALLOONUSERCLICK = 0x0405;
 
     public const int VK_RETURN = 0x0D;
     public const int VK_ESCAPE = 0x1B;
@@ -622,6 +623,37 @@ internal static class NativeMethods
     [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool Shell_NotifyIcon(int dwMessage, ref NOTIFYICONDATA lpData);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        public uint dwTime;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    /// <summary>How long since the last keyboard or mouse input in this session. Zero when Windows cannot say.</summary>
+    public static TimeSpan TimeSinceLastInput()
+    {
+        var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+
+        // Both are 32-bit tick counts and wrap together.
+        return GetLastInputInfo(ref info)
+            ? TimeSpan.FromMilliseconds(unchecked((uint)Environment.TickCount - info.dwTime))
+            : TimeSpan.Zero;
+    }
+
+    private const int QUNS_ACCEPTS_NOTIFICATIONS = 5;
+
+    [DllImport("shell32.dll")]
+    private static extern int SHQueryUserNotificationState(out int state);
+
+    /// <summary>False while presenting, in a full-screen D3D app, or in quiet time.</summary>
+    public static bool AcceptsNotifications() =>
+        SHQueryUserNotificationState(out var state) == 0 && state == QUNS_ACCEPTS_NOTIFICATIONS;
 
     [DllImport("shell32.dll")]
     private static extern int SHGetKnownFolderPath(

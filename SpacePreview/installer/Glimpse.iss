@@ -88,6 +88,7 @@ var
   StartupRegisteredAtStart: Boolean;
   ExplicitTaskSelectionAtStart: Boolean;
   StartupDefaultApplied: Boolean;
+  InstallFinished: Boolean;
 
 // Only engines the app's converter can actually drive count as present.
 function HasOfficeEngineRegistry(const RootKey: Integer; const SubKey: String): Boolean;
@@ -324,6 +325,35 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   QuitResident(ExpandConstant('{app}\{#MyAppExeName}'));
   Result := '';
+end;
+
+// From here the [Run] section starts Glimpse --updated.
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+    InstallFinished := True;
+end;
+
+// A silent update that does not finish must not leave the user without
+// Glimpse, which PrepareToInstall already quit. Inno Setup 6.7.3 calls
+// DeinitializeSetup however setup ends, and ssPostInstall only once the
+// install finished ("Pascal Scripting: Event Functions"). An error before
+// then is rolled back ("Installation Order"), so this exe is the one that
+// was running. {app} is spelled out: an early failure may leave it unset.
+procedure DeinitializeSetup();
+var
+  ExePath: String;
+  ResultCode: Integer;
+begin
+  ExePath := ExpandConstant('{localappdata}\Programs\{#MyAppName}\{#MyAppExeName}');
+  if AutoUpdateRequested()
+    and not InstallFinished
+    and not CheckForMutexes('{#MyMutexName}')
+    and FileExists(ExePath) then
+  begin
+    Log('Update did not finish; starting the installed Glimpse again.');
+    Exec(ExePath, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

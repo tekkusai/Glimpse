@@ -1,6 +1,8 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Native;
@@ -12,7 +14,8 @@ namespace SpacePreview.Tests;
 
 /// <summary>
 /// Settings as the user meets it: the version line claims "Up to date" only
-/// after a real check, the missing pieces say only what is certain, saved
+/// after a check reached GitHub, the update line says what will happen and
+/// fits, the missing pieces say only what is certain, saved
 /// ink goes on the second click, and the rows that were cut stay cut. The
 /// collection runs alone because the ink test moves the data root.
 /// </summary>
@@ -23,39 +26,211 @@ public sealed class SettingsWindowTests
     private static readonly Guid PngContainer = new("1B7CFAF4-713F-473C-BBCD-6137425FAEAF");
 
     [Fact]
-    public Task UpToDateIsClaimedOnlyAfterACheckFoundNothingNewer() => WpfApp.RunAsync(() =>
+    public Task UpToDateIsClaimedOnlyAfterACheckReachedGitHub() => WpfApp.RunAsync(async () =>
     {
-        var release = new AppUpdateRelease(
-            new Version(9, 1, 0),
-            "v9.1.0",
-            new Uri("https://example.invalid/setup.exe"),
-            1,
-            string.Empty,
-            new Uri("https://example.invalid/setup.exe.sha256"));
-        var neverChecked = Open(update: null, updateChecked: false);
-        var current = Open(update: null, updateChecked: true);
-        var behind = Open(update: release, updateChecked: true);
+        using var scope = new UpdateSettingsScope();
+        using var nothingNewer = new ReleaseFixture { NoRelease = true };
+        using var root = new TempDirectory();
+        using var offline = ReleaseFixture.QuietUpdater();
+        using var current = new AppUpdater(nothingNewer.Service(root.Path));
+        var neverChecked = Open(offline);
+        var checkedOk = Open(current);
         try
         {
-            Assert.Equal($"{Branding.Name} {AppUpdateService.DetectCurrentVersion().ToString(3)}", neverChecked.VersionText.Text);
-            Assert.Equal(Visibility.Collapsed, neverChecked.UpToDateText.Visibility);
+            Assert.Equal($"{Branding.Name} 3.0.0", neverChecked.VersionText.Text);
+            Assert.Equal(Visibility.Collapsed, neverChecked.UpdateStatusText.Visibility);
+            Assert.Equal(Visibility.Visible, neverChecked.CheckLink.Visibility);
             Assert.Equal(Visibility.Collapsed, neverChecked.UpdateLink.Visibility);
+            Assert.Equal(Visibility.Collapsed, neverChecked.UpdateCaption.Visibility);
 
-            Assert.Equal(Visibility.Visible, current.UpToDateText.Visibility);
-            Assert.Equal("Up to date", current.UpToDateText.Text);
+            await offline.CheckNowAsync();
+            Assert.Equal(Visibility.Collapsed, neverChecked.UpdateStatusText.Visibility);
 
-            Assert.Equal(Visibility.Collapsed, behind.UpToDateText.Visibility);
-            Assert.Equal(Visibility.Visible, behind.UpdateLink.Visibility);
-            Assert.Equal("Update to 9.1.0", behind.UpdateLink.Content);
+            await current.CheckNowAsync();
+            Assert.Equal(Visibility.Visible, checkedOk.UpdateStatusText.Visibility);
+            Assert.Equal("Up to date", checkedOk.UpdateStatusText.Text);
+            Assert.Equal(Visibility.Visible, checkedOk.CheckLink.Visibility);
         }
         finally
         {
             neverChecked.Close();
-            current.Close();
-            behind.Close();
+            checkedOk.Close();
+        }
+    });
+
+    [Fact]
+    public Task CheckForUpdatesAsksGitHubAndSaysSoWhileItRuns() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture { NoRelease = true, HoldCheck = new() };
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path));
+        var settings = Open(updates);
+        try
+        {
+            Click(settings.CheckLink);
+            Assert.Equal("Checking for updates", settings.UpdateStatusText.Text);
+            Assert.Equal(Visibility.Collapsed, settings.CheckLink.Visibility);
+
+            release.HoldCheck.SetResult();
+            await WaitUntilAsync(() => !updates.State.Checking);
+            Assert.Equal("Up to date", settings.UpdateStatusText.Text);
+            Assert.Equal(1, release.RequestsFor("/releases/latest"));
+        }
+        finally
+        {
+            settings.Close();
+        }
+    });
+
+    [Fact]
+    public Task APendingUpdateOffersInstallNowAndSaysWhenItWillInstall() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launched = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            isMetered: () => true,
+            launch: (_, _, _) =>
+            {
+                launched++;
+                return Task.CompletedTask;
+            });
+        await updates.CheckNowAsync();
+        var settings = Open(updates);
+        try
+        {
+            Assert.Equal($"{Branding.Name} 3.0.0", settings.VersionText.Text);
+            Assert.Equal(Visibility.Collapsed, settings.UpdateStatusText.Visibility);
+            Assert.Equal("Install now", settings.UpdateLink.Content);
+            Assert.Equal("Install update now", AutomationProperties.GetName(settings.UpdateLink));
+            Assert.Equal("3.1.0 installs the next time you step away.", settings.UpdateCaption.Text);
+
+            // Off, it waits for the user; the open window follows at once.
+            settings.AutoUpdateToggle.IsChecked = false;
+            Assert.False(Settings.Current.InstallUpdatesAutomatically);
+            Assert.Equal("3.1.0 is ready to install.", settings.UpdateCaption.Text);
+
+            Click(settings.UpdateLink);
+            await WaitUntilAsync(() => launched == 1);
+            Assert.Equal(1, launched);
+            Assert.Equal("Installing 3.1.0. Back in a few seconds.", settings.UpdateCaption.Text);
+            Assert.Equal(Visibility.Collapsed, settings.UpdateLink.Visibility);
+        }
+        finally
+        {
+            settings.Close();
+        }
+    });
+
+    [Fact]
+    public Task AFreshUpdateNamesItselfAndLinksItsReleaseNotes() => WpfApp.RunAsync(() =>
+    {
+        using var scope = new UpdateSettingsScope(settings => settings with { UpdatedAtUtc = DateTimeOffset.Now });
+        var settings = Open();
+        try
+        {
+            Assert.Equal("Updated today", settings.UpdateStatusText.Text);
+            Assert.Equal("What's new", settings.UpdateLink.Content);
+            Assert.Equal("See what's new in 3.0.0", AutomationProperties.GetName(settings.UpdateLink));
+            Assert.Equal(Visibility.Collapsed, settings.CheckLink.Visibility);
+        }
+        finally
+        {
+            settings.Close();
         }
 
         return Task.CompletedTask;
+    });
+
+    [Fact]
+    public Task TheAutomaticInstallToggleStartsOnAndSavesTheChoice() => WpfApp.RunAsync(() =>
+    {
+        using var scope = new UpdateSettingsScope();
+        var settings = Open();
+        try
+        {
+            Assert.True(settings.AutoUpdateToggle.IsChecked);
+            Assert.Equal("Install updates automatically", AutomationProperties.GetName(settings.AutoUpdateToggle));
+
+            settings.AutoUpdateRow.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left)
+            {
+                RoutedEvent = UIElement.MouseLeftButtonUpEvent
+            });
+            Assert.False(Settings.Current.InstallUpdatesAutomatically);
+        }
+        finally
+        {
+            settings.Close();
+        }
+
+        return Task.CompletedTask;
+    });
+
+    [Fact]
+    public Task EveryUpdateStatusFitsBesideCopyDiagnostics() => WpfApp.RunAsync(async () =>
+    {
+        // Each footer at its natural width, against the window's content width.
+        using var scope = new UpdateSettingsScope(settings => settings with { SkippedUpdateVersion = "10.10.10" });
+        using var nothingNewer = new ReleaseFixture { NoRelease = true, HoldCheck = new() };
+        using var newer = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var checking = new AppUpdater(nothingNewer.Service(root.Path));
+        using var pending = new AppUpdater(newer.Service(root.Path), isMetered: () => true);
+        var footers = new List<(string Words, double Width)>();
+        void Measure(SettingsWindow settings)
+        {
+            settings.Footer.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            var words = new object?[]
+            {
+                settings.UpdateStatusText.Text,
+                settings.UpdateLink.Visibility == Visibility.Visible ? settings.UpdateLink.Content : null,
+                settings.CheckLink.Visibility == Visibility.Visible ? settings.CheckLink.Content : null,
+                settings.UpdateCaption.Text
+            };
+            footers.Add((string.Join(" | ", words.Where(word => word is not (null or ""))), settings.Footer.DesiredSize.Width));
+        }
+
+        var windows = new List<SettingsWindow>();
+        SettingsWindow Open2(AppUpdater? updates = null)
+        {
+            var window = Open(updates);
+            windows.Add(window);
+            return window;
+        }
+
+        try
+        {
+            var first = Open2(checking);
+            Measure(first);
+            _ = checking.CheckNowAsync();
+            Measure(first);
+            nothingNewer.HoldCheck.SetResult();
+            await WaitUntilAsync(() => checking.State.UpToDate);
+            Measure(first);
+
+            await pending.CheckNowAsync();
+            Measure(Open2(pending));
+
+            Settings.Update(settings => settings with { UpdatedAtUtc = DateTimeOffset.Now.AddDays(-1) });
+            Measure(Open2());
+
+            Settings.Update(settings => settings with { UpdatedAtUtc = null, LastUpdateCheckUtc = DateTimeOffset.Now.AddDays(-30) });
+            Measure(Open2());
+
+            var content = first.Width - 40;
+            Assert.All(footers, footer => Assert.True(footer.Width <= content, $"\"{footer.Words}\" needs {footer.Width:0} of {content:0} px"));
+            Assert.Equal(6, footers.Count);
+            Assert.Contains(footers, footer => footer.Words.StartsWith("Up to date | Check for updates", StringComparison.Ordinal));
+            Assert.Contains(footers, footer => footer.Words.StartsWith("Updated yesterday | What's new", StringComparison.Ordinal));
+            Assert.Contains(footers, footer => footer.Words.StartsWith("Couldn't check for updates since", StringComparison.Ordinal) || footer.Words.Contains("| Couldn't check", StringComparison.Ordinal));
+        }
+        finally
+        {
+            windows.ForEach(window => window.Close());
+        }
     });
 
     [Fact]
@@ -307,10 +482,9 @@ public sealed class SettingsWindowTests
     });
 
     private static SettingsWindow Open(
-        AppUpdateRelease? update = null,
-        bool updateChecked = false,
+        AppUpdater? updates = null,
         Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null) =>
-        new(() => update, () => updateChecked, () => { }, _ => { }, findMissingPieces ?? (() => []));
+        new(updates ?? ReleaseFixture.QuietUpdater(), _ => { }, findMissingPieces ?? (() => []));
 
     private static (Button Trash, ButtonBase Keep, ButtonBase Delete) Controls(SettingsWindow settings, int row)
     {

@@ -157,13 +157,60 @@ public sealed class ReleaseHygieneTests
     }
 
     [Fact]
+    public void InstallerBuildSignsTheChecksumAndChecksItWithTheAppsKey()
+    {
+        var script = TestSource.Read(@"SpacePreview\scripts\build-installer.ps1");
+
+        // A missing key stops the build before the long part, not after it.
+        var keyCheck = script.IndexOf("Test-Path -LiteralPath $signingKey", StringComparison.Ordinal);
+        Assert.InRange(keyCheck, 0, script.IndexOf("publish.ps1", StringComparison.Ordinal));
+        Assert.Contains("$env:GLIMPSE_UPDATE_KEY", script, StringComparison.Ordinal);
+        Assert.Contains(@"GlimpseRelease\update-signing-key.pem", script, StringComparison.Ordinal);
+        Assert.Contains("$signatureFile = \"$checksum.sig\"", script, StringComparison.Ordinal);
+        Assert.Contains("$signer.SignData($checksumBytes", script, StringComparison.Ordinal);
+        Assert.Contains("$verifier.VerifyData($checksumBytes", script, StringComparison.Ordinal);
+        Assert.Contains(@"Services\AppUpdateService.cs", script, StringComparison.Ordinal);
+        Assert.Contains("& pwsh -NoProfile -File $PSCommandPath", script, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ReleaseDocsNameAllThreeAssetsTheKeyBackupAndTheRepositoryRule()
+    {
+        var release = TestSource.Read(@"docs\RELEASE.md");
+
+        Assert.Contains("attach all three assets", release, StringComparison.Ordinal);
+        Assert.Contains("`Glimpse-Setup-<version>.exe.sha256.sig`", release, StringComparison.Ordinal);
+        Assert.Contains("IEEE P1363", release, StringComparison.Ordinal);
+        Assert.Contains("GLIMPSE_UPDATE_KEY", release, StringComparison.Ordinal);
+        Assert.Contains("Back up the key", release, StringComparison.Ordinal);
+        Assert.Contains("Renaming the repository or transferring it", release, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ASilentUpdateThatDoesNotFinishStartsTheOldGlimpseAgain()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+        var deinitialize = installer[installer.IndexOf("procedure DeinitializeSetup();", StringComparison.Ordinal)..];
+
+        Assert.Contains("if CurStep = ssPostInstall then", installer, StringComparison.Ordinal);
+        Assert.Contains("InstallFinished := True;", installer, StringComparison.Ordinal);
+        Assert.Contains("AutoUpdateRequested()", deinitialize, StringComparison.Ordinal);
+        Assert.Contains("and not InstallFinished", deinitialize, StringComparison.Ordinal);
+        // Setup failed before quitting a running Glimpse: a second launch would only open Settings.
+        Assert.Contains("and not CheckForMutexes('{#MyMutexName}')", deinitialize, StringComparison.Ordinal);
+        Assert.Contains(@"{localappdata}\Programs\{#MyAppName}\{#MyAppExeName}", deinitialize, StringComparison.Ordinal);
+        Assert.Contains("Exec(ExePath, '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);", deinitialize, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void InAppUpdateUsesTheExistingInstallerWithoutASecondLibreOfficeDownload()
     {
         var updater = TestSource.Read(@"SpacePreview\Services\AppUpdateService.cs");
         var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("Update to {update.VersionText}", tray, StringComparison.Ordinal);
+        // Updates never add to the tray menu: it stays a door to Settings.
+        Assert.DoesNotContain("Update to", tray, StringComparison.Ordinal);
         Assert.Contains("/GLIMPSEUPDATE", updater, StringComparison.Ordinal);
         Assert.Contains("function AutoUpdateRequested", installer, StringComparison.Ordinal);
         Assert.Contains("Parameters: \"--updated\"; Check: AutoUpdateRequested", installer, StringComparison.Ordinal);

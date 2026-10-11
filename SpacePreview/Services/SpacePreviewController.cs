@@ -75,11 +75,13 @@ internal sealed class SpacePreviewController : IDisposable
 
     public event Action<PreviewAccessWarningInfo>? PreviewAccessWarningDetected;
 
-    internal bool CanShowUpdateNotification =>
+    /// <summary>No glance on screen and no pinned window: nothing of Glimpse the user could be in.</summary>
+    internal bool NoPreviewOpen =>
         !_disposed
         && !_previewVisible
-        && _pinnedWindows.Count == 0
-        && !_fullscreenInputSuspension.IsSuspended;
+        && _pinnedWindows.Count == 0;
+
+    internal bool InputSuspendedForFullscreen => _fullscreenInputSuspension.IsSuspended;
 
     public SpacePreviewController(Dispatcher dispatcher)
     {
