@@ -205,9 +205,13 @@ archive open in place.
 
 ## Web pages
 
-A user's own web page (`.html`, `.htm`) opens at a desktop browser's size,
-up to 1440 wide and 85 % of the work area tall, so its layout is the one its
-author designed rather than the tablet one.
+The window's size follows what the content is, in three rules. Content
+with a shape (photos, video, PDF pages, slides) opens in that shape.
+Content you scroll through (web pages, Markdown, code, text, spreadsheets)
+opens at one size, a desktop browser's: up to 1440 wide and 85 % of the
+work area tall, so a page shows the layout its author designed. A single
+object (a file card, a folder, an archive, audio, a font) opens at the
+compact default.
 
 Pages Glimpse writes (code, markdown, text, media player, image viewer,
 spreadsheets, EPUB) take their colors from one CSS block generated from the

@@ -17,8 +17,7 @@ internal readonly struct StageFitHint
         Pixels,
         ImagePixels,
         PageAspect,
-        Sheet,
-        WebPage,
+        Scroll,
         Compact
     }
 
@@ -60,16 +59,12 @@ internal readonly struct StageFitHint
             singlePage);
 
     /// <summary>
-    /// A spreadsheet: unbounded content with no page shape and no native
-    /// pixels. It earns a broad workspace, not the generic default.
+    /// Content you scroll through: web pages, Markdown, code, text and
+    /// spreadsheets. It has no shape of its own, so all of it takes one: a
+    /// desktop browser's window, where a page shows its desktop layout and
+    /// more window is simply more on screen.
     /// </summary>
-    public static StageFitHint Sheet() => new(FitKind.Sheet, 0, 0, 0);
-
-    /// <summary>
-    /// A web page: laid out by its own CSS for a desktop browser window, so
-    /// it gets one. Narrower, and its responsive layout falls back to tablet.
-    /// </summary>
-    public static StageFitHint WebPage() => new(FitKind.WebPage, 0, 0, 0);
+    public static StageFitHint Scroll() => new(FitKind.Scroll, 0, 0, 0);
 
     public static StageFitHint Compact() => new(FitKind.Compact, 0, 0, 0);
 
@@ -80,8 +75,7 @@ internal readonly struct StageFitHint
     {
         FitKind.Pixels or FitKind.ImagePixels => $"{Width:0}x{Height:0} px",
         FitKind.PageAspect => SinglePage ? $"page {Aspect:0.00}, one page" : $"page {Aspect:0.00}",
-        FitKind.Sheet => "sheet",
-        FitKind.WebPage => "web page",
+        FitKind.Scroll => "scroll",
         _ => "compact"
     };
 }
@@ -116,23 +110,10 @@ internal static class StageFit
     internal const double LandscapeAspect = 1.15;
 
     /// <summary>
-    /// Spreadsheets scroll in both directions, so more window is simply
-    /// more data on screen. They take a broad workspace, capped so a huge
-    /// monitor still shows a preview rather than an application.
-    /// </summary>
-    internal const double SheetBand = 0.72;
-
-    internal const double SheetHeightBand = 0.82;
-
-    internal const double SheetMaxWidth = 1200;
-
-    internal const double SheetMaxHeight = 900;
-
-    /// <summary>
     /// A desktop browser's width: pages designed at 1280 to 1440 show their
     /// desktop layout. Taller is simply more page.
     /// </summary>
-    internal const double WebPageMaxWidth = 1440;
+    internal const double ScrollMaxWidth = 1440;
 
     /// <summary>
     /// Dead zone for rounding churn only. Meaningfully different shapes are
@@ -208,15 +189,9 @@ internal static class StageFit
                 extraWidth += railWidth;
                 break;
 
-            case StageFitHint.FitKind.Sheet:
+            case StageFitHint.FitKind.Scroll:
                 return Clamp(new Size(
-                    Math.Min(workArea.Width * SheetBand, SheetMaxWidth),
-                    Math.Min(workArea.Height * SheetHeightBand, SheetMaxHeight)),
-                    workArea, minWindow);
-
-            case StageFitHint.FitKind.WebPage:
-                return Clamp(new Size(
-                    Math.Min(workArea.Width * Band, WebPageMaxWidth),
+                    Math.Min(workArea.Width * Band, ScrollMaxWidth),
                     workArea.Height * Band),
                     workArea, minWindow);
 

@@ -82,7 +82,7 @@
                     AutomationProperties.Name="Close settings" />
         </Grid>
 
-        <Border x:Name="StartupRow" Style="{StaticResource SettingsRow}">
+        <Border x:Name="StartupRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
@@ -96,7 +96,7 @@
             </Grid>
         </Border>
 
-        <Border x:Name="AutoUpdateRow" Style="{StaticResource SettingsRow}">
+        <Border x:Name="AutoUpdateRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />

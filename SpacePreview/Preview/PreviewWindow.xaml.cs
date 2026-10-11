@@ -929,9 +929,10 @@ public partial class PreviewWindow : Window
                 return;
             }
 
-            if (FileKinds.IsHtml(contentPath))
+            // Shapeless content you scroll through all opens at one size.
+            if (FileKinds.IsHtml(contentPath) || FileKinds.IsMarkdown(contentPath) || FileKinds.IsText(contentPath))
             {
-                SetStageFitHint(StageFitHint.WebPage(), version);
+                SetStageFitHint(StageFitHint.Scroll(), version);
                 return;
             }
 
@@ -964,11 +965,10 @@ public partial class PreviewWindow : Window
             if (FileKinds.IsOffice(contentPath))
             {
                 // Spreadsheets convert to HTML, not pages: no PDF to probe
-                // and no meaningful page size to declare. They ask for the
-                // broad workspace directly.
+                // and no page size to declare. They scroll, like a page.
                 if (FileKinds.IsSpreadsheet(contentPath))
                 {
-                    SetStageFitHint(StageFitHint.Sheet(), version);
+                    SetStageFitHint(StageFitHint.Scroll(), version);
                     return;
                 }
 

@@ -175,6 +175,7 @@ public partial class PreviewWindow
             Background = Brushes.Transparent,
             Child = row,
             Opacity = locked ? 0.62 : 1,
+            Cursor = locked ? null : System.Windows.Input.Cursors.Hand,
             ToolTip = locked ? "Set for all users in the file's Properties" : null
         };
         if (!locked)

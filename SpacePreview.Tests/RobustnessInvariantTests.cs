@@ -35,7 +35,7 @@ public sealed class RobustnessInvariantTests
                 0 => StageFitHint.Pixels(RandomDimension(random, iteration), RandomDimension(random, iteration + 1)),
                 1 => StageFitHint.ImagePixels(RandomDimension(random, iteration), RandomDimension(random, iteration + 1)),
                 2 => StageFitHint.PageAspect(RandomAspect(random, iteration)),
-                3 => StageFitHint.Sheet(),
+                3 => StageFitHint.Scroll(),
                 _ => StageFitHint.Compact()
             };
 

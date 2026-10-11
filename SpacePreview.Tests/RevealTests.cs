@@ -284,7 +284,7 @@ public sealed class StandInTests
         Assert.Null(StandIn.LandingIn(LandingKind.None, 1, 0, 0, new Size(1000, 800)));
         Assert.Null(StandIn.LandingIn(LandingKind.Pixels, double.NaN, 0, 0, new Size(1000, 800)));
         Assert.False(StandIn.KnowsShape(null));
-        Assert.False(StandIn.KnowsShape(StageFitHint.Sheet()));
+        Assert.False(StandIn.KnowsShape(StageFitHint.Scroll()));
         Assert.True(StandIn.KnowsShape(StageFitHint.PageAspect(0.77)));
     }
 

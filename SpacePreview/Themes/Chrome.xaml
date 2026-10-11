@@ -198,6 +198,7 @@
 
     <!-- The switch. The thumb slides rather than teleports; accent means on. -->
     <Style x:Key="HouseToggle" TargetType="{x:Type ToggleButton}">
+        <Setter Property="Cursor" Value="Hand" />
         <Setter Property="Width" Value="40" />
         <Setter Property="Height" Value="20" />
         <Setter Property="Focusable" Value="True" />

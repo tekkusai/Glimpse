@@ -49,18 +49,21 @@ public sealed class PreviewWindowSizingTests
     }
 
     [Fact]
-    public void WebPagesOpenAtADesktopBrowsersSize()
+    public void ContentYouScrollThroughOpensAtADesktopBrowsersSize()
     {
-        // 2.0 and 3.0.0 gave them the 900 x 675 default, where a page built
-        // for a desktop browser falls back to its tablet layout.
+        // 2.0 and 3.0.0 gave web pages, Markdown, code and text the 900 x
+        // 675 default, where a page built for a desktop browser falls back
+        // to its tablet layout, and sheets a size of their own.
+        var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        Assert.Contains("FileKinds.IsHtml(contentPath) || FileKinds.IsMarkdown(contentPath) || FileKinds.IsText(contentPath)", windowSource, StringComparison.Ordinal);
         var work1440 = new Rect(0, 0, 2560, 1392);
-        var page = Fit(StageFitHint.WebPage(), work1440);
-        Assert.Equal(StageFit.WebPageMaxWidth, page.Width, 1);
+        var page = Fit(StageFitHint.Scroll(), work1440);
+        Assert.Equal(StageFit.ScrollMaxWidth, page.Width, 1);
         Assert.Equal(1392 * StageFit.Band, page.Height, 1);
         Assert.True(page.Width > PreviewWindow.StageSize(work1440).Width);
 
         var laptop = new Rect(0, 0, 1366, 728);
-        var small = Fit(StageFitHint.WebPage(), laptop);
+        var small = Fit(StageFitHint.Scroll(), laptop);
         Assert.Equal(1366 * StageFit.Band, small.Width, 1);
         Assert.Equal(728 * StageFit.Band, small.Height, 1);
     }
@@ -305,30 +308,13 @@ public sealed class PreviewWindowSizingTests
     }
 
     [Fact]
-    public void SpreadsheetsEarnTheBroadWorkspace()
+    public void SpreadsheetsScrollLikeAPage()
     {
         // Sheets convert to HTML, so no page probe can shape them; the
-        // hint asks for the workspace directly.
+        // hint asks for the scroll stage directly.
         var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         Assert.Contains("FileKinds.IsSpreadsheet(contentPath)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("StageFitHint.Sheet()", windowSource, StringComparison.Ordinal);
-
-        // The workspace is broad on a laptop, capped on a huge monitor,
-        // and always bigger than the generic default stage.
-        var workArea = new Rect(0, 0, 2560, 1400);
-        var sheet = StageFit.WindowFor(
-            StageFitHint.Sheet(), workArea, 1, documentRailWidth: 132, DocumentToolbarHeight, MinWindow);
-        Assert.Equal(1200, sheet.Width, 1);
-        Assert.Equal(900, sheet.Height, 1);
-
-        var generic = PreviewWindow.StageSize(workArea);
-        Assert.True(sheet.Width > generic.Width);
-        Assert.True(sheet.Height > generic.Height);
-
-        var laptop = new Rect(0, 0, 1280, 720);
-        var laptopSheet = StageFit.WindowFor(
-            StageFitHint.Sheet(), laptop, 1, documentRailWidth: 132, DocumentToolbarHeight, MinWindow);
-        Assert.Equal(1280 * StageFit.SheetBand, laptopSheet.Width, 1);
+        Assert.Equal(2, System.Text.RegularExpressions.Regex.Matches(windowSource, @"StageFitHint\.Scroll\(\)").Count);
     }
 
     [Fact]

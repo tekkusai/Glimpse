@@ -25,7 +25,7 @@
 - Run as administrator appears only for files that can run that way
 - Audio shows the track's cover and tags; heading links in Markdown work
 - Space in a second Explorer window moves the preview there
-- Web pages open at the size of a desktop browser window, so they show the layout their author designed
+- Web pages, Markdown, code, text and spreadsheets open at the size of a desktop browser window, so a page shows the layout its author designed
 - Launching Glimpse while it is already running opens Settings, which replaces the Hide tray icon option
 - Settings lists anything this PC is missing for full previews, with one button to get each, and the signatures you've saved, which you can delete there
 - Copy diagnostics in Settings copies the version and recent log lines for a bug report
