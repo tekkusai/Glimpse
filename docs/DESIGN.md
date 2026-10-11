@@ -91,7 +91,7 @@ Header controls are 30 px tall: icon buttons 30 x 30, pills 30 high.
 Left to right, in priority order when space runs out:
 
 1. The file name always keeps at least 160 px.
-2. Details (`PDF · 5.7 MB · 81 pages`) trim first.
+2. Details (`5.7 MB · 81 pages · Today 4:35 PM`) trim first.
 3. Tools appear only for kinds that have tools (rotate for images, Sign for
    PDFs, zoom for spreadsheets). No reserved empty slot.
 4. **Open** is one pill: the default app's 16 px icon, the word Open and a
@@ -99,6 +99,15 @@ Left to right, in priority order when space runs out:
    tooltip names the app. The chevron menu holds "Open with…", Show in
    Explorer, Share and the kind's extra actions.
 5. Pin, fill screen and close are icon buttons.
+
+The details give the size, then at most one fact the content already knows
+(an image's pixel size, a document's page count once the viewer has counted
+it), then when the item last changed. The name shows the extension, so a kind
+appears only where the name cannot say it: `Folder`, and `File` for a name
+with no extension. The time is as short as it can be: `Today 4:35 PM`,
+`Yesterday 9:12 AM`, the weekday within the last week, `Aug 27` this year and
+`Aug 27, 2025` before, with time and month names in the user's culture. The
+full time shows on hover.
 
 Browse arrows sit before the identity when browsing is possible, with the
 position (`2 of 14`) beside them when a multi-selection is open.
@@ -145,6 +154,12 @@ One card layout for every file that has no richer view: the visual centered at
 facts the header does not already show, then an optional footer. Nothing moves
 between kinds. Errors use the same card with a warning glyph instead of the
 file visual, one sentence and at most one action.
+
+Folders and archives are both lists of files and share one card: the item's
+own icon, its name, one fact line (`44.6 KB · 4 files`,
+`7 files · 516.4 KB uncompressed`), and a footer list with each row's size and
+an accent bar, largest first once the sizes are known. Folders inside an
+archive open in place.
 
 ## Words
 

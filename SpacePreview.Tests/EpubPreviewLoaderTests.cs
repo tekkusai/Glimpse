@@ -53,6 +53,20 @@ public sealed class EpubPreviewLoaderTests
     }
 
     [Fact]
+    public void ABooksLongCodeChipsAloneMayWrap()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "code.epub");
+        CreateMinimalEpub(path, chapter2Text: "Run <code>collab.py --help</code> in <code>SpacePreview/Preview/EpubPreviewLoader.cs</code>.");
+
+        var body = EpubPreviewLoader.TryBuildBody(path);
+
+        Assert.NotNull(body);
+        Assert.Contains("<code>collab.py --help</code>", body!, StringComparison.Ordinal);
+        Assert.Contains("<code class=\"long\">SpacePreview/Preview/EpubPreviewLoader.cs</code>", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TryBuildBodyShowsHonestTruncationForLongBooks()
     {
         using var temp = new TempDirectory();

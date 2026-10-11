@@ -629,7 +629,7 @@ internal sealed class TrayIcon : IDisposable
     private void RebuildIcon()
     {
         var previous = _icon;
-        _icon = TrayIconRenderer.Create(_hwnd);
+        _icon = TrayIconRenderer.Create();
         if (previous != IntPtr.Zero)
         {
             NativeMethods.DestroyIcon(previous);
@@ -681,32 +681,38 @@ internal sealed class TrayIcon : IDisposable
 /// </summary>
 internal static class TrayIconRenderer
 {
-    public static IntPtr Create(IntPtr hwnd)
+    public static IntPtr Create() => ToHIcon(Render(TaskbarDpi(), TaskbarIsLight()));
+
+    /// <summary>
+    /// The glyph at the tray's pixel size for <paramref name="dpi"/>. It is
+    /// drawn in pixels, so the bitmap stays at 96: a bitmap at the real DPI
+    /// would scale the drawing a second time and crop it.
+    /// </summary>
+    internal static BitmapSource Render(uint dpi, bool lightTaskbar)
     {
-        // Render at the icon's true pixel size so it stays crisp at 100% and 150%.
-        var dpi = hwnd != IntPtr.Zero ? NativeMethods.GetDpiForWindow(hwnd) : 96u;
-        if (dpi == 0)
-        {
-            dpi = 96;
-        }
-
-        var size = (int)Math.Round(16 * dpi / 96.0);
-        size = Math.Max(16, size);
-
-        var visual = BuildVisual(size);
-        var bitmap = new RenderTargetBitmap(size, size, dpi, dpi, PixelFormats.Pbgra32);
-        bitmap.Render(visual);
-
-        return ToHIcon(bitmap, size);
+        var size = NativeMethods.GetSystemMetricsForDpi(NativeMethods.SM_CXSMICON, dpi);
+        var bitmap = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        bitmap.Render(BuildVisual(size, lightTaskbar));
+        return bitmap;
     }
 
-    private static DrawingVisual BuildVisual(int size)
+    // The tray lives on the taskbar's monitor. The message-only window lives
+    // on none, so its own DPI is no answer.
+    private static uint TaskbarDpi()
+    {
+        var monitor = NativeMethods.MonitorFromWindow(
+            NativeMethods.FindWindow("Shell_TrayWnd", null),
+            NativeMethods.MONITOR_DEFAULTTOPRIMARY);
+        return NativeMethods.GetDpiForMonitor(monitor, NativeMethods.MDT_EFFECTIVE_DPI, out var dpi, out _) == 0 ? dpi : 96;
+    }
+
+    private static DrawingVisual BuildVisual(int size, bool lightTaskbar)
     {
         var visual = new DrawingVisual();
         using var dc = visual.RenderOpen();
 
         double s = size;
-        var fill = new SolidColorBrush(TaskbarIsLight()
+        var fill = new SolidColorBrush(lightTaskbar
             ? Color.FromRgb(0x2A, 0x2C, 0x33)
             : Color.FromRgb(0xF2, 0xF3, 0xF6));
         fill.Freeze();
@@ -737,10 +743,11 @@ internal static class TrayIconRenderer
         }
     }
 
-    private static IntPtr ToHIcon(RenderTargetBitmap bitmap, int size)
+    private static IntPtr ToHIcon(BitmapSource bitmap)
     {
         // Pull BGRA pixels out of WPF and hand them to GDI as the icon's colour
         // bitmap. A zeroed mask keeps the per-pixel alpha (32-bit icons ignore it).
+        var size = bitmap.PixelWidth;
         var stride = size * 4;
         var pixels = new byte[stride * size];
         bitmap.CopyPixels(pixels, stride, 0);

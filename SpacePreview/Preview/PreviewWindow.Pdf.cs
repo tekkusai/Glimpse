@@ -475,6 +475,7 @@ public partial class PreviewWindow
     private void ApplyPdfPageCount(PdfPageRailState state, int totalPages, double pageAspect)
     {
         state.Document = new PdfPreviewDocument([], totalPages);
+        ShowHeaderFact(FolderScanner.Count(totalPages, "page", "pages"), state.Version);
         if (double.IsFinite(pageAspect) && pageAspect > 0)
         {
             state.PageAspect = Math.Clamp(pageAspect, 0.2, 5);

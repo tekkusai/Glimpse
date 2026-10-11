@@ -368,14 +368,7 @@ public partial class PreviewWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center
         }, TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
-        // The one key to learn, breathing; still when animations are off.
-        var keycapGlow = new DropShadowEffect
-        {
-            Color = Theme.Current.Accent,
-            BlurRadius = 24,
-            ShadowDepth = 0,
-            Opacity = 0.3
-        };
+        // The one key to learn: a plain raised key.
         var keycap = Themed(Themed(new Border
         {
             Width = 136,
@@ -384,7 +377,6 @@ public partial class PreviewWindow : Window
             Margin = new Thickness(0, 40, 0, 0),
             HorizontalAlignment = HorizontalAlignment.Center,
             BorderThickness = new Thickness(1),
-            Effect = keycapGlow,
             Child = Themed(new TextBlock
             {
                 Text = "Space",
@@ -394,15 +386,6 @@ public partial class PreviewWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             }, TextBlock.ForegroundProperty, "Theme.TextPrimary")
         }, Border.BackgroundProperty, "Theme.RaisedBg"), Border.BorderBrushProperty, "Theme.RaisedBorder");
-        if (Motion.Enabled)
-        {
-            keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.2, 0.5, TimeSpan.FromSeconds(2.4))
-            {
-                AutoReverse = true,
-                RepeatBehavior = RepeatBehavior.Forever,
-                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
-            });
-        }
 
         var lesson = Themed(new TextBlock
         {
@@ -610,13 +593,10 @@ public partial class PreviewWindow : Window
             return await LoadOfficePreviewAsync(path, officeKind, version, token);
         }
 
-        if (FileKinds.IsArchive(path) || (useSignatureRouting && FileSignatures.IsArchive(signature)))
+        if ((FileKinds.IsArchive(path) || (useSignatureRouting && FileSignatures.IsArchive(signature)))
+            && await TryBuildArchiveCardAsync(path, token) is { } archive)
         {
-            var listing = await Task.Run(() => ArchivePreviewLoader.TryLoad(path, token), token);
-            if (listing is not null)
-            {
-                return BuildArchivePreview(listing);
-            }
+            return archive;
         }
 
         if (FileKinds.IsMesh(path))

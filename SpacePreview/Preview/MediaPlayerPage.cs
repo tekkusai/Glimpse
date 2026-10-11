@@ -135,7 +135,8 @@ svg { display: block; }
 .time { min-width: 40px; color: var(--ctl-text-3); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 #elapsed { text-align: right; }
 
-input[type=range] { -webkit-appearance: none; appearance: none; height: 20px; margin: 0; background: transparent; }
+/* Seek and volume are one slider: the played or set part in the accent. */
+input[type=range] { -webkit-appearance: none; appearance: none; height: 20px; margin: 0; background: transparent; --fill: var(--accent); }
 input[type=range]::-webkit-slider-runnable-track {
   height: 4px;
   border-radius: 2px;
@@ -153,8 +154,8 @@ input[type=range]::-webkit-slider-thumb {
 input[type=range]:hover::-webkit-slider-thumb {
   background: radial-gradient(circle, var(--fill) 0 4px, var(--ctl-raised) 4.5px);
 }
-#seek { flex: 1; --fill: var(--accent); }
-#volume { width: 88px; --fill: var(--ctl-text-2); }
+#seek { flex: 1; }
+#volume { width: 88px; }
 
 #controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; width: 100%; margin-top: 8px; }
 #buttons { display: flex; align-items: center; gap: 16px; grid-column: 2; }

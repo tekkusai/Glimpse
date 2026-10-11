@@ -258,6 +258,50 @@ public sealed class ChromeHeaderTests
     });
 
     [Fact]
+    public Task TheDetailsGiveSizeAFactAndWhenWithTheFullTimeOnHover() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var image = WritePng(temp.Path, "cover.png", 400, 300);
+        var pdf = Path.Combine(temp.Path, "Lease.pdf");
+        File.WriteAllText(pdf, "%PDF-1.4 a lease");
+        var window = OpenStage(900, 650);
+        try
+        {
+            window.ShowPreview(image, IntPtr.Zero);
+            await WaitForRevealAsync(window);
+
+            // The name already says PNG; the details say what it cannot.
+            var culture = System.Globalization.CultureInfo.CurrentCulture;
+            var modified = File.GetLastWriteTime(image);
+            var size = FileKinds.FormatSize(new FileInfo(image).Length);
+            Assert.Equal($"{size} · 400×300 · Today {modified.ToString("t", culture)}", window.SubtitleText.Text);
+            Assert.Equal($"Modified {modified.ToString("f", culture)}", window.SubtitleText.ToolTip);
+
+            // A PDF's pages join once its content has counted them, and only
+            // while that PDF is still the item on screen.
+            var version = Fields.Get<long>(window, "_loadVersion");
+            Fields.Call(window, "ResetForNewItem");
+            Fields.Set(window, "CurrentPath", pdf);
+            Fields.Call(window, "ShowHeader", pdf, pdf, 1, false, version, CancellationToken.None);
+            var pdfSize = FileKinds.FormatSize(new FileInfo(pdf).Length);
+            Assert.StartsWith($"{pdfSize} · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
+
+            Fields.Call(window, "ShowHeaderFact", "81 pages", version - 1);
+            Assert.DoesNotContain("pages", window.SubtitleText.Text, StringComparison.Ordinal);
+
+            // The line is rebuilt from what the header already read: the
+            // late fact costs no trip to the disk.
+            File.Delete(pdf);
+            Fields.Call(window, "ShowHeaderFact", "81 pages", version);
+            Assert.StartsWith($"{pdfSize} · 81 pages · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task TheWelcomeStartsWithNoToolsFromThePreviousItem() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
@@ -278,12 +322,50 @@ public sealed class ChromeHeaderTests
             Assert.Equal(Visibility.Collapsed, window.OpenControl.Visibility);
             Assert.Equal(Visibility.Collapsed, window.BrowseControls.Visibility);
             Assert.Equal(string.Empty, window.FileNameText.Text);
-            Assert.Equal(Visibility.Visible, window.FileIconImage.Visibility);
+
+            // Empty but for the window's buttons: no mark, no stale hover.
+            Assert.NotEqual(Visibility.Visible, window.FileIconImage.Visibility);
+            Assert.Null(window.SubtitleText.ToolTip);
         }
         finally
         {
             window.Close();
         }
+    });
+
+    [Fact]
+    public Task TheWelcomeKeyIsAPlainKeyThatNeverAnimates() => WpfApp.RunAsync(() =>
+    {
+        var build = typeof(PreviewWindow).GetMethod("BuildWelcomeContent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var content = (UIElement)build.Invoke(null, null)!;
+
+        var elements = new List<UIElement>();
+        void Walk(object node)
+        {
+            if (node is UIElement element)
+            {
+                elements.Add(element);
+            }
+
+            if (node is DependencyObject parent)
+            {
+                foreach (var child in LogicalTreeHelper.GetChildren(parent))
+                {
+                    Walk(child);
+                }
+            }
+        }
+
+        Walk(content);
+        Assert.Contains(elements, element => element is Border { Child: TextBlock { Text: "Space" } });
+
+        // No glow, and no clock that would keep WPF rendering while it sits.
+        Assert.All(elements, element =>
+        {
+            Assert.Null(element.Effect);
+            Assert.False(element.HasAnimatedProperties);
+        });
+        return Task.CompletedTask;
     });
 
     [Fact]

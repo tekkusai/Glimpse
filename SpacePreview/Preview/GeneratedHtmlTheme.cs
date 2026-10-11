@@ -12,6 +12,12 @@ namespace SpacePreview.Preview;
 internal static class GeneratedHtmlTheme
 {
     /// <summary>
+    /// Inline code longer than this many characters is marked "long" when a
+    /// page is built, and only those chips may wrap.
+    /// </summary>
+    public const int LongChip = 40;
+
+    /// <summary>
     /// Tokens, the canvas, the in-page reveal, scrollbars, selection and the
     /// font stacks. Every page starts here.
     /// </summary>
@@ -213,16 +219,21 @@ code, pre, samp {
   font-variant-ligatures: none;
 }
 
-/* Inline code in prose; a chip that wraps stays a chip on each line. */
+/* Inline code in prose stays one piece: a break inside a command reads as
+   two chips and misquotes it. Only a chip over LongChip characters
+   (code.long) wraps, and stays a chip on each line. */
 :not(pre) > code {
   font-size: 0.87em;
   padding: 1px 6px;
   background: var(--raised);
   border: 1px solid var(--raised-border);
   border-radius: 6px;
+  white-space: nowrap;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
+
+:not(pre) > code.long { white-space: normal; }
 
 /* Fenced blocks in Markdown */
 pre.block {

@@ -103,6 +103,20 @@ public sealed class ReleaseHygieneTests
     }
 
     [Fact]
+    public void TheInstallerFollowsTheThemeAndShowsNoBorrowedArt()
+    {
+        var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
+
+        // Inno fills every unset picture slot with its own software box, and
+        // under dynamic the dark slots fall back on their own.
+        Assert.Contains("WizardStyle=modern dynamic", installer, StringComparison.Ordinal);
+        foreach (var slot in new[] { "WizardImageFile", "WizardSmallImageFile", "WizardImageFileDynamicDark", "WizardSmallImageFileDynamicDark" })
+        {
+            Assert.Matches($@"(?m)^{slot}=\r?$", installer);
+        }
+    }
+
+    [Fact]
     public void UninstallRemovesOnlyTheLibreOfficeImageOwnedByGlimpse()
     {
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");

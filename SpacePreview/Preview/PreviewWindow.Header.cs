@@ -1,5 +1,6 @@
 using System.Collections.Specialized;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -56,7 +57,11 @@ public partial class PreviewWindow
     private OpenTarget _openTarget = new(null, null);
     private HeaderTool _headerTool;
     private int _selectedCount = 1;
-    private bool _headerShowsBrand;
+    // The item the details describe, read once per item, and the one fact
+    // beside its size: an image's pixels, or what the content learned later,
+    // such as a PDF's pages. A fact that lands re-renders without the disk.
+    private FileSystemInfo? _headerItem;
+    private string? _headerFact;
 
     /// <summary>
     /// What one item leaves behind goes before the next arrives, for a
@@ -98,6 +103,8 @@ public partial class PreviewWindow
         }
 
         _selectedCount = selectedCount;
+        _headerItem = null;
+        _headerFact = null;
         ApplyHeaderSubtitle(path, _shortcutTarget);
 
         _openActions = BuildOpenActions(path, contentPath, isDirectory);
@@ -108,27 +115,25 @@ public partial class PreviewWindow
         ShowTool(ToolFor(contentPath, isDirectory, fileDialogMode));
         SyncHeaderTools();
 
-        // Only a window on screen keeps its old icon; a fresh open, or the
-        // welcome's mark, would name the wrong item.
-        if (_headerShowsBrand || !IsVisible)
+        // Only a window on screen keeps its old icon; on a fresh open it
+        // would name the wrong item. The welcome hid it already.
+        if (!IsVisible)
         {
-            _headerShowsBrand = false;
             FileIconImage.Visibility = Visibility.Hidden;
         }
 
         _ = UpdateFileIconAsync(path, version, token);
     }
 
-    /// <summary>The welcome's header is the brand mark; its body says the rest.</summary>
+    /// <summary>The welcome's header is empty but for the window's buttons; its body says the rest.</summary>
     private void ShowWelcomeHeader()
     {
         FileNameText.Text = string.Empty;
         SubtitleText.Inlines.Clear();
+        SubtitleText.ToolTip = null;
         _openActions = [];
         _openTarget = new OpenTarget(null, null);
-        FileIconImage.Source = BrandMark.CreateImage();
-        FileIconImage.Visibility = Visibility.Visible;
-        _headerShowsBrand = true;
+        FileIconImage.Visibility = Visibility.Hidden;
         OpenControl.Visibility = Visibility.Collapsed;
         PinButton.Visibility = Visibility.Collapsed;
         SetBrowseControlsVisible(false);
@@ -455,9 +460,16 @@ public partial class PreviewWindow
     {
         var pickerCount = _isFileDialogMode ? _selectedCount : 1;
         SubtitleText.Inlines.Clear();
+        SubtitleText.ToolTip = null;
         if (shortcutTarget is null)
         {
-            SubtitleText.Text = BuildHeaderSubtitle(path, null, pickerCount);
+            var (details, modified) = DescribeHeaderItem(path);
+            SubtitleText.Text = pickerCount > 1 ? $"{details} · {pickerCount} selected" : details;
+            if (modified is { } when)
+            {
+                SubtitleText.ToolTip = $"Modified {when.ToString("f", CultureInfo.CurrentCulture)}";
+            }
+
             return;
         }
 
@@ -489,38 +501,44 @@ public partial class PreviewWindow
         }
     }
 
-    private static string BuildHeaderSubtitle(string path, string? shortcutTarget, int selectedCount)
+    /// <summary>
+    /// The details line and the time it names. The directory entry, and an
+    /// image's pixel size from its header bytes, are read on the item's first
+    /// line only. Nothing when the item is gone.
+    /// </summary>
+    private (string Details, DateTime? Modified) DescribeHeaderItem(string path)
     {
-        string subtitle;
-        if (shortcutTarget is not null)
+        try
         {
-            subtitle = $"Shortcut → {shortcutTarget}";
-        }
-        else if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
-            && LooksLikeLocalDrivePath(path)
-            && ImageHeader.TryRead(path) is { } image)
-        {
-            try
+            if (_headerItem is null)
             {
-                var file = new FileInfo(path);
-                subtitle = $"{FileKinds.FriendlyKind(path)} · {image.Width}×{image.Height} · {FileKinds.FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
+                _headerItem = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
+                if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
+                    && LooksLikeLocalDrivePath(path)
+                    && ImageHeader.TryRead(path) is { } image)
+                {
+                    _headerFact = $"{image.Width}×{image.Height}";
+                }
             }
-            catch
-            {
-                subtitle = FileKinds.BuildSubtitle(path);
-            }
+
+            return (FileKinds.Describe(_headerItem, _headerFact, DateTime.Now, CultureInfo.CurrentCulture), _headerItem.LastWriteTime);
         }
-        else
+        catch
         {
-            subtitle = FileKinds.BuildSubtitle(path);
+            return (string.Empty, null);
+        }
+    }
+
+    /// <summary>A fact the content found after the header went up, for the item still showing.</summary>
+    private void ShowHeaderFact(string fact, long version)
+    {
+        if (version != _loadVersion || CurrentPath is not { } path)
+        {
+            return;
         }
 
-        if (selectedCount > 1)
-        {
-            subtitle += $" · {selectedCount} selected";
-        }
-
-        return subtitle;
+        _headerFact = fact;
+        ApplyHeaderSubtitle(path, _shortcutTarget);
     }
 
     private static string? TryResolveShortcutTarget(string path)

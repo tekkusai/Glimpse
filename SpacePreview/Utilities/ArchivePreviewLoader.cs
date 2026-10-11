@@ -11,7 +11,6 @@ internal sealed record ArchiveNode(
     string Name,
     bool IsDirectory,
     long Size,
-    int FileCount,
     IReadOnlyList<ArchiveNode> Children);
 
 /// <summary>
@@ -19,7 +18,6 @@ internal sealed record ArchiveNode(
 /// <see cref="Stopped"/>: the walk ended early, so the totals are a floor too.
 /// </summary>
 internal sealed record ArchiveListing(
-    string Kind,
     int TotalEntries,
     long TotalUncompressed,
     IReadOnlyList<ArchiveNode> Roots,
@@ -47,9 +45,9 @@ internal static class ArchivePreviewLoader
             // ArchiveFactory reads a compressed tar as a seekable archive and
             // can stop after the first entry without an error, so a tar
             // inside gzip, bzip2, xz or zstd is always walked forward instead.
-            if (CompressionSuffix(path) is { } suffix)
+            if (CompressionSuffix(path) is not null)
             {
-                var walked = TryWalkCompressedTar(path, suffix, compressedTarBudget, token);
+                var walked = TryWalkCompressedTar(path, compressedTarBudget, token);
                 if (walked is not null)
                 {
                     return walked;
@@ -70,8 +68,7 @@ internal static class ArchivePreviewLoader
                 tree.Add(key, entry.IsDirectory, entry.Size, token);
             }
 
-            var kind = Path.GetExtension(path).TrimStart('.').ToUpperInvariant();
-            return tree.Build(string.IsNullOrEmpty(kind) ? "Archive" : $"{kind} archive", stopped: false);
+            return tree.Build(stopped: false);
         }
         catch (OperationCanceledException)
         {
@@ -85,25 +82,28 @@ internal static class ArchivePreviewLoader
     }
 
     /// <summary>
-    /// The card's summary line: kind, file count and size, with "At least"
-    /// when the walk stopped early and a note when the tree is cut.
+    /// The card's fact line: what it holds and how big that is unpacked,
+    /// with "At least" when the walk stopped early and a note when the tree
+    /// is cut. The header already names the kind.
     /// </summary>
     public static string Describe(ArchiveListing listing)
     {
         if (listing.TotalEntries == 0 && !listing.Stopped)
         {
-            return $"{listing.Kind} · Empty";
+            return "Empty archive";
         }
 
         var files = FolderScanner.Count(listing.TotalEntries, "file", "files");
-        var size = $"{FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed";
-        var summary = listing.Stopped
-            ? $"{listing.Kind} · At least {files} · {size}"
-            : $"{listing.Kind} · {files} · {size}";
+        if (listing.Stopped)
+        {
+            files = $"At least {files}";
+        }
+
+        var summary = $"{files} · {FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed";
         return listing.Truncated && !listing.Stopped ? $"{summary} · Partial list" : summary;
     }
 
-    private static ArchiveListing? TryWalkCompressedTar(string path, string suffix, TimeSpan budget, CancellationToken token)
+    private static ArchiveListing? TryWalkCompressedTar(string path, TimeSpan budget, CancellationToken token)
     {
         using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         IReader reader;
@@ -161,7 +161,7 @@ internal static class ArchivePreviewLoader
                 }
             }
 
-            return tree.Build($"TAR.{suffix} archive", stopped);
+            return tree.Build(stopped);
         }
     }
 
@@ -263,8 +263,8 @@ internal static class ArchivePreviewLoader
             }
         }
 
-        public ArchiveListing Build(string kind, bool stopped) =>
-            new(kind, _entries, _bytes, _root.ToImmutableChildren(), _truncated || stopped, stopped);
+        public ArchiveListing Build(bool stopped) =>
+            new(_entries, _bytes, _root.ToImmutableChildren(), _truncated || stopped, stopped);
     }
 
     private sealed class Node
@@ -281,7 +281,6 @@ internal static class ArchivePreviewLoader
         public Dictionary<string, Node> Children { get; } = new(StringComparer.OrdinalIgnoreCase);
 
         private long? _totalSize;
-        private int? _totalFiles;
 
         public bool TryGetOrAddChild(string name, bool isDirectory, ref int nodeCount, out Node child)
         {
@@ -305,12 +304,13 @@ internal static class ArchivePreviewLoader
             return true;
         }
 
+        // Largest first, like a folder's rows once its walk is done.
         public IReadOnlyList<ArchiveNode> ToImmutableChildren()
         {
             return Children.Values
-                .OrderByDescending(c => c.IsDirectory)
+                .Select(c => new ArchiveNode(c.Name, c.IsDirectory, c.TotalSize(), c.ToImmutableChildren()))
+                .OrderByDescending(c => c.Size)
                 .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(c => new ArchiveNode(c.Name, c.IsDirectory, c.TotalSize(), c.TotalFiles(), c.ToImmutableChildren()))
                 .ToList();
         }
 
@@ -318,12 +318,6 @@ internal static class ArchivePreviewLoader
         {
             _totalSize ??= Size + Children.Values.Sum(c => c.TotalSize());
             return _totalSize.Value;
-        }
-
-        private int TotalFiles()
-        {
-            _totalFiles ??= (IsDirectory ? 0 : 1) + Children.Values.Sum(c => c.TotalFiles());
-            return _totalFiles.Value;
         }
     }
 }
