@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Windows.Threading;
 using Microsoft.Win32;
+using SpacePreview.Native;
 using Windows.Networking.Connectivity;
 
 namespace SpacePreview.Services;
@@ -22,8 +23,7 @@ internal readonly record struct InstallState
 
     public bool FullscreenSuspended { get; init; }
 
-    /// <summary>Not presenting, not in a full-screen game, not in quiet time.</summary>
-    public bool AcceptsNotifications { get; init; }
+    public NativeMethods.UserNotificationState Notifications { get; init; }
 
     public TimeSpan Idle { get; init; }
 }
@@ -247,15 +247,16 @@ internal sealed class AppUpdater : IDisposable
     /// Whether an automatic install may start now. The release has been
     /// public for 48 hours (or the user asked for it), nothing of Glimpse
     /// is on screen, nothing is full screen, Windows would show a
-    /// notification, and nobody has touched the keyboard or mouse for 3
-    /// minutes.
+    /// notification or the PC is locked, and nobody has touched the
+    /// keyboard or mouse for 3 minutes.
     /// </summary>
     internal static bool CanInstallNow(InstallState state) =>
         (state.InstallNowPressed || state.ReleaseAge >= ReleaseAgeBeforeInstall)
         && !state.TriedRecently
         && !state.PreviewOpen
         && !state.FullscreenSuspended
-        && state.AcceptsNotifications
+        && state.Notifications is NativeMethods.UserNotificationState.AcceptsNotifications
+            or NativeMethods.UserNotificationState.NotPresent
         && state.Idle >= IdleBeforeInstall;
 
     /// <summary>

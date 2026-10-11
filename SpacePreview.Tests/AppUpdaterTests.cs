@@ -23,7 +23,7 @@ public sealed class AppUpdaterTests
     private static readonly InstallState Away = new()
     {
         ReleaseAge = TimeSpan.FromHours(48),
-        AcceptsNotifications = true,
+        Notifications = NativeMethods.UserNotificationState.AcceptsNotifications,
         Idle = TimeSpan.FromMinutes(3)
     };
 
@@ -57,8 +57,30 @@ public sealed class AppUpdaterTests
         Assert.False(AppUpdater.CanInstallNow(Away with { FullscreenSuspended = true }));
 
     [Fact]
-    public void PresentationModeFullScreenD3DAndQuietTimeHoldIt() =>
-        Assert.False(AppUpdater.CanInstallNow(Away with { AcceptsNotifications = false }));
+    public void FullScreenAppsPresentationModeAndQuietTimeHoldIt()
+    {
+        foreach (var state in new[]
+        {
+            NativeMethods.UserNotificationState.Unknown,
+            NativeMethods.UserNotificationState.Busy,
+            NativeMethods.UserNotificationState.RunningD3DFullScreen,
+            NativeMethods.UserNotificationState.PresentationMode,
+            NativeMethods.UserNotificationState.QuietTime,
+            NativeMethods.UserNotificationState.App
+        })
+        {
+            Assert.False(AppUpdater.CanInstallNow(Away with { Notifications = state }), state.ToString());
+        }
+    }
+
+    [Fact]
+    public void ALockedPcOrAScreenSaverCountsAsAway()
+    {
+        var locked = Away with { Notifications = NativeMethods.UserNotificationState.NotPresent };
+
+        Assert.True(AppUpdater.CanInstallNow(locked));
+        Assert.False(AppUpdater.CanInstallNow(locked with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
+    }
 
     [Fact]
     public void TheUserMustBeAwayForThreeMinutes() =>
@@ -83,7 +105,7 @@ public sealed class AppUpdaterTests
         var app = TestSource.Read(@"SpacePreview\App.xaml.cs");
         Assert.Contains("PreviewOpen = _controller?.NoPreviewOpen != true", app, StringComparison.Ordinal);
         Assert.Contains("FullscreenSuspended = _controller?.InputSuspendedForFullscreen != false", app, StringComparison.Ordinal);
-        Assert.Contains("AcceptsNotifications = NativeMethods.AcceptsNotifications()", app, StringComparison.Ordinal);
+        Assert.Contains("Notifications = NativeMethods.QueryUserNotificationState()", app, StringComparison.Ordinal);
         Assert.Contains("Idle = NativeMethods.TimeSinceLastInput()", app, StringComparison.Ordinal);
         Assert.Contains(
             "SystemEvents.PowerModeChanged += OnPowerModeChanged",
@@ -92,7 +114,7 @@ public sealed class AppUpdaterTests
 
         // The calls themselves answer on this PC without throwing.
         Assert.InRange(NativeMethods.TimeSinceLastInput(), TimeSpan.Zero, TimeSpan.FromDays(50));
-        _ = NativeMethods.AcceptsNotifications();
+        Assert.InRange(NativeMethods.QueryUserNotificationState(), NativeMethods.UserNotificationState.NotPresent, NativeMethods.UserNotificationState.App);
         _ = AppUpdater.ConnectionIsMetered();
     }
 
