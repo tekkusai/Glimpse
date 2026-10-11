@@ -81,7 +81,7 @@ public sealed class SettingsWindowTests
 
             Assert.NotEqual(uiThread, askedOn);
             var row = Assert.Single(lacking.MissingPiecesList.Children.OfType<Grid>());
-            Assert.Equal("Word, Excel and PowerPoint open as basic previews.", row.Children.OfType<TextBlock>().Single().Text);
+            Assert.Equal("Office files open as basic previews.", row.Children.OfType<TextBlock>().Single().Text);
             Assert.Equal("Get LibreOffice", row.Children.OfType<ButtonBase>().Single().Content);
             Assert.Equal(2, VisibleDividers(lacking));
 
@@ -110,19 +110,123 @@ public sealed class SettingsWindowTests
         var all = MissingPieces.Describe(officeEngine: false, hevcDecoder: false, heifDecoder: false);
         Assert.Equal([PreviewWindow.LibreOfficeFix, PreviewWindow.HevcFix, PreviewWindow.HeifFix], all.Select(piece => piece.Fix));
         Assert.All(all, piece => Assert.DoesNotContain('—', piece.Text));
+
+        // HEIC needs both decoders; with both missing it is named once.
+        Assert.Single(all, piece => piece.Text.Contains("HEIC", StringComparison.Ordinal));
+        var heif = Assert.Single(MissingPieces.Describe(officeEngine: true, hevcDecoder: true, heifDecoder: false));
+        Assert.Equal("HEIC and HEIF photos won't open.", heif.Text);
     }
+
+    [Fact]
+    public Task EveryActionInTheDialogIsReachableFromTheKeyboard() => WpfApp.RunAsync(async () =>
+    {
+        _ = Settings.Current;
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        SettingsWindow? settings = null;
+        try
+        {
+            File.WriteAllBytes(Path.Combine(temp.CreateDirectory("signatures"), "sig-20261010-120000-000.png"), InkPng());
+            settings = Open(findMissingPieces: () => MissingPieces.Describe(officeEngine: false, hevcDecoder: true, heifDecoder: true));
+            await WaitUntilAsync(() => settings.MissingPiecesSection.Visibility == Visibility.Visible);
+
+            var fix = settings.MissingPiecesList.Children.OfType<Grid>().Single().Children.OfType<ButtonBase>().Single();
+            var (trash, keep, delete) = Controls(settings, 0);
+            Assert.All(new ButtonBase[] { fix, trash, keep, delete }, button => Assert.True(button.Focusable, $"{button.Content} is out of the Tab order"));
+        }
+        finally
+        {
+            settings?.Close();
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    });
+
+    [Fact]
+    public Task ADeleteThatFailsPutsTheTrashBackAndKeepsTheTile() => WpfApp.RunAsync(async () =>
+    {
+        _ = Settings.Current;
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        SettingsWindow? settings = null;
+        try
+        {
+            var signature = Path.Combine(temp.CreateDirectory("signatures"), "sig-20261010-120000-000.png");
+            File.WriteAllBytes(signature, InkPng());
+            settings = Open();
+            await InkLoadedAsync(settings);
+            var (trash, _, delete) = Controls(settings, 0);
+
+            using (new FileStream(signature, FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Click(trash);
+                Click(delete);
+            }
+
+            Assert.True(File.Exists(signature));
+            Assert.Single(settings.SignaturesList.Children);
+            Assert.Equal(Visibility.Visible, trash.Visibility);
+            Assert.Equal(Visibility.Collapsed, ((FrameworkElement)VisualParent(delete)).Visibility);
+        }
+        finally
+        {
+            settings?.Close();
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    });
+
+    [Fact]
+    public Task TheHeadingNamesWhatIsSaved() => WpfApp.RunAsync(async () =>
+    {
+        _ = Settings.Current;
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        var opened = new List<SettingsWindow>();
+        async Task<string> Heading()
+        {
+            var settings = Open();
+            opened.Add(settings);
+            await InkLoadedAsync(settings);
+            return settings.SignaturesHeading.Text;
+        }
+
+        try
+        {
+            File.WriteAllBytes(SignatureStore.StampPath, InkPng());
+            Assert.Equal("Saved stamp", await Heading());
+
+            File.WriteAllBytes(Path.Combine(temp.CreateDirectory("signatures"), "sig-20261010-120000-000.png"), InkPng());
+            Assert.Equal("Saved signatures and stamp", await Heading());
+
+            File.Delete(SignatureStore.StampPath);
+            Assert.Equal("Saved signatures", await Heading());
+        }
+        finally
+        {
+            opened.ForEach(settings => settings.Close());
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    });
 
     [Fact]
     public void TheCodecChecksTellAnInstalledDecoderFromAMissingOne()
     {
         Assert.True(MediaCodecs.HasImageDecoder(PngContainer));
         Assert.False(MediaCodecs.HasImageDecoder(Guid.NewGuid()));
+        Assert.NotNull(MediaCodecs.HasImageDecoder(MediaCodecs.HeifContainer));
+
+        // Windows N without its media pack has no Media Foundation: every
+        // video question is rightly unanswerable there.
+        if (MediaCodecs.HasVideoDecoder(H264Video) is null)
+        {
+            return;
+        }
+
         Assert.True(MediaCodecs.HasVideoDecoder(H264Video));
         Assert.False(MediaCodecs.HasVideoDecoder(Guid.NewGuid()));
-
-        // The real questions get an answer, whichever it is on this PC.
         Assert.NotNull(MediaCodecs.HasVideoDecoder(MediaCodecs.HevcVideo));
-        Assert.NotNull(MediaCodecs.HasImageDecoder(MediaCodecs.HeifContainer));
     }
 
     [Fact]
@@ -214,6 +318,13 @@ public sealed class SettingsWindowTests
     }
 
     private static void Click(ButtonBase button) => button.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static DependencyObject VisualParent(DependencyObject child) => LogicalTreeHelper.GetParent(child);
+
+    // The ink decodes on a worker; a test that locks or deletes a file waits for it.
+    private static Task InkLoadedAsync(SettingsWindow settings) =>
+        WaitUntilAsync(() => settings.SignaturesList.Children.OfType<Grid>()
+            .All(row => ((Image)row.Children.OfType<Border>().Single().Child).Source is not null));
 
     /// <summary>
     /// Dividers the user would see: visible themselves and inside visible

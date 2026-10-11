@@ -25,19 +25,19 @@ internal static class MissingPieces
         var pieces = new List<MissingPiece>();
         if (!officeEngine)
         {
-            pieces.Add(new("Word, Excel and PowerPoint open as basic previews.", PreviewWindow.LibreOfficeFix));
+            pieces.Add(new("Office files open as basic previews.", PreviewWindow.LibreOfficeFix));
         }
 
         // HEIC is HEIF holding HEVC and needs both decoders, so either line
-        // may name it.
+        // may name it, but only one does.
         if (hevcDecoder == false)
         {
-            pieces.Add(new("HEIC photos and HEVC videos can't be previewed.", PreviewWindow.HevcFix));
+            pieces.Add(new("HEIC photos and HEVC videos won't open.", PreviewWindow.HevcFix));
         }
 
         if (heifDecoder == false)
         {
-            pieces.Add(new("HEIC and HEIF photos can't be previewed.", PreviewWindow.HeifFix));
+            pieces.Add(new(hevcDecoder == false ? "HEIF photos won't open." : "HEIC and HEIF photos won't open.", PreviewWindow.HeifFix));
         }
 
         return pieces;

@@ -273,7 +273,7 @@ public partial class PreviewWindow
         AutomationProperties.SetName(MaximizeButton, IsStageMaximized ? "Restore preview size" : "Fill screen");
     }
 
-    private static Rect GetWorkAreaDips(IntPtr hwnd)
+    internal static Rect GetWorkAreaDips(IntPtr hwnd)
     {
         try
         {

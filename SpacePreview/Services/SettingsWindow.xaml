@@ -143,10 +143,21 @@
 
         <StackPanel x:Name="SignaturesSection" Visibility="Collapsed">
             <Border Style="{StaticResource Divider}" />
-            <TextBlock Margin="0,9,0,8"
+            <TextBlock x:Name="SignaturesHeading"
+                       Margin="0,9,0,8"
                        Text="Saved signatures"
                        Style="{StaticResource RowLabel}" />
-            <StackPanel x:Name="SignaturesList" Margin="0,0,0,5" />
+            <!-- Four tiles, then the list scrolls: the dialog never outgrows a small screen. -->
+            <ScrollViewer MaxHeight="208"
+                          Margin="0,0,0,5"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          Focusable="False">
+                <ScrollViewer.Resources>
+                    <Style TargetType="ScrollBar" BasedOn="{StaticResource PreviewScrollBar}" />
+                </ScrollViewer.Resources>
+                <StackPanel x:Name="SignaturesList" />
+            </ScrollViewer>
         </StackPanel>
 
         <Border Style="{StaticResource Divider}" />

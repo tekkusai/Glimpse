@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
 using SpacePreview.Preview;
@@ -27,6 +28,7 @@ public partial class SettingsWindow : Window
     private readonly DispatcherTimer _copiedTimer;
     private IReadOnlyList<MissingPiece> _missingPieces = [];
     private IReadOnlyList<(string Path, DateTime Written)> _signatures = [];
+    private Task _missingPiecesChecked = Task.CompletedTask;
     private bool _findingMissingPieces;
     private bool _closed;
     private bool _syncing;
@@ -79,8 +81,15 @@ public partial class SettingsWindow : Window
         // The registry can change while the window sits open; returning to it
         // re-reads the world instead of trusting a snapshot.
         Activated += (_, _) => SyncAll();
+        SizeChanged += (_, _) => KeepOnScreen();
         SyncAll();
     }
+
+    /// <summary>The latest look for missing pieces; opening waits briefly on it.</summary>
+    internal Task MissingPiecesChecked => _missingPiecesChecked;
+
+    /// <summary>An update check finished while the window was open.</summary>
+    internal void RefreshUpdateStatus() => SyncAbout();
 
     private void SyncAll()
     {
@@ -102,7 +111,26 @@ public partial class SettingsWindow : Window
             _syncing = false;
         }
 
-        _ = FindMissingPiecesAsync();
+        if (!_findingMissingPieces)
+        {
+            _missingPiecesChecked = FindMissingPiecesAsync();
+        }
+    }
+
+    // A row that lands after the window is up grows it downward; the whole
+    // dialog stays on its screen.
+    private void KeepOnScreen()
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        var area = PreviewWindow.GetWorkAreaDips(new WindowInteropHelper(this).Handle);
+        if (Top + ActualHeight > area.Bottom)
+        {
+            Top = Math.Max(area.Top, area.Bottom - ActualHeight);
+        }
     }
 
     private void SyncAbout()
@@ -164,6 +192,9 @@ public partial class SettingsWindow : Window
     private Grid BuildMissingPieceRow(MissingPiece piece)
     {
         var fix = PreviewWindow.BuildActionPill(piece.Fix);
+        // House pills stay out of Tab in the preview, where keys browse; in
+        // a dialog every action must be reachable.
+        fix.Focusable = true;
         fix.Margin = new Thickness(16, 0, 0, 0);
         fix.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(fix, 1);
@@ -207,6 +238,13 @@ public partial class SettingsWindow : Window
         }
 
         _signatures = saved;
+        var stamp = SignatureStore.HasStamp;
+        SignaturesHeading.Text = (saved.Count - (stamp ? 1 : 0), stamp) switch
+        {
+            (0, true) => "Saved stamp",
+            (_, true) => "Saved signatures and stamp",
+            _ => "Saved signatures"
+        };
         SignaturesList.Children.Clear();
         foreach (var (path, _) in saved)
         {
@@ -243,6 +281,7 @@ public partial class SettingsWindow : Window
         var trash = new Button
         {
             Style = (Style)FindResource("IconButton"),
+            Focusable = true,
             Content = "\uE74D",
             ToolTip = $"Delete this {what}",
             HorizontalAlignment = HorizontalAlignment.Right,
@@ -257,24 +296,48 @@ public partial class SettingsWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Visibility = Visibility.Collapsed
         };
-        var keep = HousePill.Build("Keep", () =>
+        // Focus follows the choice for a keyboard user; a collapsed button
+        // would keep it otherwise.
+        void CloseConfirm()
         {
+            var keyboard = confirm.IsKeyboardFocusWithin;
             confirm.Visibility = Visibility.Collapsed;
             trash.Visibility = Visibility.Visible;
-        }, PillRole.Ghost);
+            if (keyboard)
+            {
+                trash.Focus();
+            }
+        }
+
+        var keep = HousePill.Build("Keep", CloseConfirm, PillRole.Ghost);
         var delete = HousePill.Build("Delete", () =>
         {
             SignatureStore.Remove(path);
+            if (File.Exists(path))
+            {
+                // Locked or protected: the tile stays, and so must the truth.
+                DiagnosticLog.Write($"saved {what} could not be deleted");
+                CloseConfirm();
+                return;
+            }
+
             SyncSignatures();
         });
+        keep.Focusable = true;
+        delete.Focusable = true;
         delete.Margin = new Thickness(0);
         confirm.Children.Add(keep);
         confirm.Children.Add(delete);
 
         trash.Click += (_, _) =>
         {
+            var keyboard = trash.IsKeyboardFocused;
             trash.Visibility = Visibility.Collapsed;
             confirm.Visibility = Visibility.Visible;
+            if (keyboard)
+            {
+                keep.Focus();
+            }
         };
 
         var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };

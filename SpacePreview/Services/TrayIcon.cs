@@ -181,13 +181,34 @@ internal sealed class TrayIcon : IDisposable
                 PickTheme);
             _settingsWindow = window;
             window.Closed += (_, _) => _settingsWindow = null;
-            window.Show();
+            _ = ShowSettingsWhenWholeAsync(window);
+        }
+        else if (_settingsWindow.IsVisible)
+        {
+            BringForward(_settingsWindow);
+        }
+    }
+
+    // Opening waits up to the house beat for what this PC lacks, so the
+    // dialog appears whole instead of growing under the pointer.
+    private async Task ShowSettingsWhenWholeAsync(SettingsWindow window)
+    {
+        await Task.WhenAny(window.MissingPiecesChecked, Task.Delay(Motion.OpenWait));
+        if (_disposed || _settingsWindow != window)
+        {
+            return;
         }
 
-        // A launch from Start gives the foreground to the second instance,
-        // which exits; take it the way a click on a preview does.
-        NativeMethods.ForceForeground(new System.Windows.Interop.WindowInteropHelper(_settingsWindow).Handle);
-        _settingsWindow.Activate();
+        window.Show();
+        BringForward(window);
+    }
+
+    // A launch from Start gives the foreground to the second instance,
+    // which exits; take it the way a click on a preview does.
+    private static void BringForward(Window window)
+    {
+        NativeMethods.ForceForeground(new System.Windows.Interop.WindowInteropHelper(window).Handle);
+        window.Activate();
     }
 
     private void ShowMenu()
@@ -257,6 +278,7 @@ internal sealed class TrayIcon : IDisposable
             _availableUpdate = update;
             _updateChecked = true;
             RefreshUpdateItem();
+            _settingsWindow?.RefreshUpdateStatus();
             if (update is not null)
             {
                 DiagnosticLog.Write(
