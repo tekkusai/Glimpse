@@ -411,16 +411,23 @@ internal sealed partial class AppUpdateService : IDisposable
 
     /// <summary>
     /// The signature asset, when the release has exactly one at the pinned
-    /// URL. Missing is not a failed check: the release is skipped by name.
+    /// URL. One listed but still uploading fails the check, as a sidecar
+    /// would, and it is asked again later. Missing from a release whose
+    /// assets are all up is not a failed check: the release is skipped by
+    /// name.
     /// </summary>
     internal static Uri? FindSignatureUri(GitHubRelease release, AppUpdateRelease update)
     {
         var name = update.InstallerFileName + ".sha256.sig";
         var matches = release.Assets
             .OfType<GitHubAsset>()
-            .Where(asset => string.Equals(asset.Name, name, StringComparison.Ordinal)
-                && string.Equals(asset.State, "uploaded", StringComparison.Ordinal))
+            .Where(asset => string.Equals(asset.Name, name, StringComparison.Ordinal))
             .ToArray();
+        if (matches.Any(asset => !string.Equals(asset.State, "uploaded", StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException($"The release's {name} is still uploading.");
+        }
+
         return matches is [{ Size: > 0 and <= MaxSignatureBytes } signature]
             && Uri.TryCreate(signature.BrowserDownloadUrl, UriKind.Absolute, out var uri)
             && IsExpectedReleaseAssetUri(uri, update.Tag, name)

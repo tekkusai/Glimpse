@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Services;
@@ -335,6 +336,30 @@ public sealed class AppUpdaterTests
         Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
         Assert.Equal(0, release.RequestsFor(".sha256"));
         Assert.Equal(0, release.RequestsFor(".exe"));
+    });
+
+    [Fact]
+    public Task ASignatureStillUploadingIsAskedForAgainNotSkipped() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var uploaded = release.Json;
+        var uploading = JsonNode.Parse(uploaded)!;
+        uploading["assets"]!.AsArray().Single(asset => ((string)asset!["name"]!).EndsWith(".sig", StringComparison.Ordinal))!["state"] = "open";
+        release.Json = uploading.ToJsonString();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.Null(updates.State.Pending);
+        Assert.False(updates.State.UpToDate);
+        Assert.Null(Settings.Current.SkippedUpdateVersion);
+        Assert.Equal(0, release.RequestsFor(".sha256"));
+
+        // Uploaded by the next check, it is offered.
+        release.Json = uploaded;
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0", updates.State.Pending?.VersionText);
     });
 
     [Fact]

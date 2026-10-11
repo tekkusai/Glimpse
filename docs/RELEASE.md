@@ -52,7 +52,7 @@ Create the release as a draft, attach all three assets, then publish it as a sta
 - `Glimpse-Setup-<version>.exe.sha256`
 - `Glimpse-Setup-<version>.exe.sha256.sig`
 
-Keep the release tag (`v<version>`) and all three asset names on the same three-part version. The in-app updater rejects missing, renamed, or mismatched assets. A copy that checks while the release has no valid `.sig` skips that version for good, so attach everything before publishing. If a published release turns out wrong, ship the next patch version instead of replacing its assets. The installer should be the obvious choice for users; GitHub's source archives are for developers.
+Keep the release tag (`v<version>`) and all three asset names on the same three-part version. The in-app updater rejects missing, renamed, or mismatched assets. A copy that checks while the `.sig` is still uploading asks again later, but one that finds the release's assets all uploaded and no `.sig` among them, or a `.sig` that does not verify, skips that version for good. Attach everything before publishing. If a published release turns out wrong, ship the next patch version instead of replacing its assets. The installer should be the obvious choice for users; GitHub's source archives are for developers.
 
 Installed copies install a release on their own 48 hours after it is published, at a moment when their user is away. Until then only people who press Install now in Settings get it. Those two days are the time to catch a bad release: deleting the release, or marking it a prerelease, stops it reaching anyone else.
 
