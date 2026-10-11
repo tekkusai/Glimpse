@@ -61,18 +61,18 @@ internal static class BrandMark
         };
 
     // The tray at every scale Windows offers from 100 to 300 percent. The
-    // stroke is the nearest whole pixel to a twelfth, and never under 2,
-    // so the sign weighs about what the system's glyphs beside it do.
+    // stroke is the system glyphs' own weight beside it: 2 px up to 32,
+    // 3 px from 36.
     internal static readonly IReadOnlyDictionary<int, Sign> HintedGlyphs = new Dictionary<int, Sign>
     {
         [16] = new(2, 4, 14, 11, 2),
         [20] = new(2, 5, 18, 14, 2),
         [24] = new(3, 6, 21, 17, 2),
         [28] = new(4, 7, 24, 19, 2),
-        [32] = new(4, 8, 28, 22, 3),
+        [32] = new(4, 8, 28, 22, 2),
         [36] = new(4, 9, 32, 25, 3),
         [40] = new(5, 10, 35, 28, 3),
-        [48] = new(6, 12, 42, 34, 4),
+        [48] = new(6, 12, 42, 34, 3),
     };
 
     /// <summary>The app tile in a square of <paramref name="size"/>: hinted where a row exists, vectors otherwise.</summary>
@@ -100,10 +100,28 @@ internal static class BrandMark
     }
 
     /// <summary>
-    /// The tile fitted to a square of <paramref name="size"/>, drawn from the
-    /// row for the device pixels it covers, since a row scaled to another
-    /// size blurs: the welcome's 64 is the 64 row at 100 percent, the 80 row
-    /// at 125 and the 96 row at 150. Other scales draw the vectors.
+    /// The drawing for a tile covering <paramref name="pixels"/> device
+    /// pixels: its own row, else a row it doubles or triples exactly, since
+    /// whole pixels scaled by a whole number stay whole; the vectors only
+    /// when neither exists.
+    /// </summary>
+    internal static Drawing TileDrawingFor(int pixels)
+    {
+        foreach (var times in (ReadOnlySpan<int>)[1, 2, 3])
+        {
+            if (pixels % times == 0 && HintedTiles.ContainsKey(pixels / times))
+            {
+                return TileDrawing(pixels / times);
+            }
+        }
+
+        return TileDrawing(pixels);
+    }
+
+    /// <summary>
+    /// The tile fitted to a square of <paramref name="size"/>, drawn for the
+    /// device pixels it covers: the welcome's 64 is the 64 row at 100
+    /// percent, 80 at 125, 96 at 150, and a row doubled at 200 to 300.
     /// </summary>
     public static FrameworkElement Create(double size)
     {
@@ -116,7 +134,7 @@ internal static class BrandMark
 
         void Draw()
         {
-            var source = new DrawingImage(TileDrawing(Math.Round(size * VisualTreeHelper.GetDpi(image).DpiScaleX)));
+            var source = new DrawingImage(TileDrawingFor((int)Math.Round(size * VisualTreeHelper.GetDpi(image).DpiScaleX)));
             source.Freeze();
             image.Source = source;
         }

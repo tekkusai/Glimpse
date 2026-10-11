@@ -103,10 +103,11 @@ ends turned up. `BrandMark` draws it, and nothing else does.
   200, 225, 250 and 300 percent, 16 to 48 px. It sits a little above
   center, as the system's chevron does. Any other scale draws the vectors.
 - The welcome's tile is the 64, 80 or 96 px row at 100, 125 or 150 percent,
-  and the vectors at any other scale.
+  a row doubled exactly at 200, 225, 250 and 300 percent, and the vectors
+  at any other scale.
 - On the tile the stroke rounds up, never thinner than the shape. In the
-  tray it is a twelfth of the square to the nearest pixel and at least
-  2 px, about the weight of the system's glyphs beside it.
+  tray it is the weight of the system's glyphs beside it: 2 px up to
+  32 px, 3 px from 36.
 - `scripts/render-icon.ps1` writes `Glimpse.ico` from `BrandMark`, and a test
   fails when the two disagree.
 

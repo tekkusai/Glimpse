@@ -31,7 +31,8 @@ public sealed class BrandMarkTests
         }
 
         // Every target size Microsoft lists for an app icon: the title bar,
-        // the taskbar and Start from 100 to 400 percent.
+        // the taskbar and Start at the scales in its table (100, 125, 150,
+        // 200, 250, 300 and 400 percent).
         Assert.Equal(IconSizes, sizes.Order());
         return Task.CompletedTask;
     });
@@ -56,14 +57,13 @@ public sealed class BrandMarkTests
         {
             AssertNear(BrandMark.Alone.Scaled(pixels, 0), sign, pixels);
 
-            // The nearest pixel to a twelfth, at least 2: about the weight of
-            // the system's glyphs beside it.
-            Assert.Equal(Math.Max(2, Math.Round(pixels / 12.0)), sign.Stroke);
+            // The weight of the system's glyphs beside it.
+            Assert.Equal(pixels <= 32 ? 2 : 3, sign.Stroke);
         }
     }
 
     [Fact]
-    public void EverySizeWindowsAsksForIsHinted()
+    public void EveryListedSizeIsHinted()
     {
         // The app icon below 256, and the tray at 100, 125, 150, 175, 200,
         // 225, 250 and 300 percent.
@@ -108,6 +108,21 @@ public sealed class BrandMarkTests
         bitmap.Render(mark);
 
         Assert.True(Bgra(BrandMark.RenderTile(pixels)).SequenceEqual(Bgra(bitmap)), $"the welcome tile at {dpi} dpi is not the {pixels} row");
+        return Task.CompletedTask;
+    });
+
+    [Theory]
+    [InlineData(192, 64)]
+    [InlineData(216, 72)]
+    [InlineData(240, 80)]
+    [InlineData(288, 96)]
+    public Task AboveOneAndAHalfTheWelcomeDoublesARowRatherThanDrawVectors(int dpi, int row) => WpfApp.RunAsync(() =>
+    {
+        var mark = (System.Windows.Controls.Image)BrandMark.Create(64);
+        VisualTreeHelper.SetRootDpi(mark, new DpiScale(dpi / 96.0, dpi / 96.0));
+
+        // The drawing is the row's own square; the image doubles it exactly.
+        Assert.Equal(row, ((DrawingImage)mark.Source).Width);
         return Task.CompletedTask;
     });
 

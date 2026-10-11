@@ -18,10 +18,10 @@ public sealed class TrayIconRendererTests
     [InlineData(120u, 20, 2)]
     [InlineData(144u, 24, 2)]
     [InlineData(168u, 28, 2)]
-    [InlineData(192u, 32, 3)]
+    [InlineData(192u, 32, 2)]
     [InlineData(216u, 36, 3)]
     [InlineData(240u, 40, 3)]
-    [InlineData(288u, 48, 4)]
+    [InlineData(288u, 48, 3)]
     public Task TheGlyphIsCrispAndCenteredInTheTraysSize(uint dpi, int pixels, int stroke) => WpfApp.RunAsync(() =>
     {
         foreach (var light in new[] { false, true })

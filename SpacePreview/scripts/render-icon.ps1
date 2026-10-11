@@ -2,8 +2,9 @@
 # BrandMark.RenderTile from the built Glimpse.dll, so the icon and the app
 # cannot drift into two marks. The sizes are every target size Microsoft
 # lists for an app icon, 16 to 96 and 256, which cover the title bar, the
-# taskbar and Start from 100 to 400 percent (Microsoft Learn, "Construct
-# your Windows app's icon"). Frames are PNG, which Windows reads at every
+# taskbar and Start at the scales in its table: 100, 125, 150, 200, 250,
+# 300 and 400 percent (Microsoft Learn, "Construct your Windows app's
+# icon"). Frames are PNG, which Windows reads at every
 # size.
 # Usage:  dotnet build -c Release, then pwsh -File render-icon.ps1
 #         (writes ..\Assets\Glimpse.ico; build again to embed it)

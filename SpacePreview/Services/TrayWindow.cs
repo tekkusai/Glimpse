@@ -109,8 +109,8 @@ internal sealed class TrayWindow : IDisposable
         }
 
         // The window sits on the primary display, where the tray is, so a
-        // new scale there arrives as WM_DPICHANGED even when the taskbar
-        // is not recreated.
+        // new scale there may arrive as WM_DPICHANGED even when the taskbar
+        // is not recreated; a new resolution and TaskbarCreated redraw too.
         if (msg is NativeMethods.WM_SETTINGCHANGE or NativeMethods.WM_DPICHANGED or NativeMethods.WM_DISPLAYCHANGE)
         {
             _redraw();
