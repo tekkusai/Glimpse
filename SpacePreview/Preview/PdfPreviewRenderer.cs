@@ -189,10 +189,11 @@ internal static class PdfPreviewRenderer
         PdfiumGate.Wait(cancellationToken);
         try
         {
+            IDocReader? document = null;
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                using var document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint));
+                document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint));
                 if (pageIndex < 0 || pageIndex >= document.GetPageCount())
                 {
                     return null;
@@ -209,6 +210,10 @@ internal static class PdfPreviewRenderer
             catch
             {
                 return null;
+            }
+            finally
+            {
+                Close(document);
             }
         }
         finally
@@ -437,14 +442,21 @@ internal static class PdfPreviewRenderer
             measured.GetPageWidth(),
             measured.GetPageHeight(),
             PixelsPerPoint);
-        using var document = DocLib.Instance.GetDocReader(path, new PageDimensions(scale));
-        if (pageIndex >= document.GetPageCount())
+        var document = DocLib.Instance.GetDocReader(path, new PageDimensions(scale));
+        try
         {
-            return null;
-        }
+            if (pageIndex >= document.GetPageCount())
+            {
+                return null;
+            }
 
-        using var pageReader = document.GetPageReader(pageIndex);
-        return RenderPage(pageReader, thumbnail: false);
+            using var pageReader = document.GetPageReader(pageIndex);
+            return RenderPage(pageReader, thumbnail: false);
+        }
+        finally
+        {
+            Close(document);
+        }
     }
 
     internal static bool IsRasterSizeSafe(int width, int height, bool thumbnail)

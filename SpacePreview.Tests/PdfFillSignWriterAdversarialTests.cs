@@ -60,7 +60,15 @@ public sealed class PdfFillSignWriterAdversarialTests
         finally
         {
             File.Delete(source);
-            File.Delete(output);
+            // The test host skips pdfium's teardown (TestPdfium), so the
+            // rendered output stays open until the host exits.
+            try
+            {
+                File.Delete(output);
+            }
+            catch (IOException)
+            {
+            }
         }
     }
 
