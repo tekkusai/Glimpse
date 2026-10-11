@@ -14,6 +14,7 @@ public partial class AppUpdateWindow : Window
 
     private readonly AppUpdateService _updateService;
     private readonly AppUpdateRelease _release;
+    private readonly Func<bool> _canQuit;
     private CancellationTokenSource? _downloadCancellation;
     private bool _busy;
     private bool _closing;
@@ -21,10 +22,11 @@ public partial class AppUpdateWindow : Window
     internal bool InstallerLaunched { get; private set; }
     internal bool SnoozeRequested { get; private set; }
 
-    internal AppUpdateWindow(AppUpdateService updateService, AppUpdateRelease release)
+    internal AppUpdateWindow(AppUpdateService updateService, AppUpdateRelease release, Func<bool>? canQuit = null)
     {
         _updateService = updateService;
         _release = release;
+        _canQuit = canQuit ?? (() => true);
 
         InitializeComponent();
         Title = $"Update {Branding.Name}";
@@ -94,7 +96,8 @@ public partial class AppUpdateWindow : Window
 
     private async Task DownloadAndInstallAsync()
     {
-        if (_busy)
+        // Setup closes the app, so unsaved signing work holds the update.
+        if (_busy || !_canQuit())
         {
             return;
         }

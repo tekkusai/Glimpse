@@ -187,6 +187,13 @@ internal static class PreviewKeyMap
 
     public static KeyDecision Route(in KeyFacts f)
     {
+        // Esc with Ctrl, Alt or Win is the shell's: Task Manager, Start,
+        // window cycling. A swallowed down would cost the user a second press.
+        if (f.Vk == NativeMethods.VK_ESCAPE && (f.Ctrl || f.Alt || f.Win))
+        {
+            return Pass;
+        }
+
         if (f.Target == KeyTarget.Pinned)
         {
             return RoutePinned(f);
@@ -277,7 +284,9 @@ internal static class PreviewKeyMap
             return f.Target == KeyTarget.Preview ? Let(KeyAction.NoteFind) : Pass;
         }
 
-        // The shortcuts the tooltips name work from the glance too.
+        // The shortcuts the tooltips name work from the glance too, except
+        // rotation: it rewrites the file, so it needs the preview in front,
+        // and in Explorer Ctrl+R stays Refresh.
         if (ours)
         {
             if (vk == NativeMethods.VK_F11 && bare)
@@ -285,7 +294,9 @@ internal static class PreviewKeyMap
                 return Claim(KeyAction.FillScreen);
             }
 
-            if (vk == NativeMethods.VK_R && f.Ctrl && !f.Alt && !f.Win && f.CanRotate)
+            if (vk == NativeMethods.VK_R
+                && f.Target == KeyTarget.Preview
+                && f.Ctrl && !f.Alt && !f.Win && f.CanRotate)
             {
                 return Claim(KeyAction.Rotate);
             }

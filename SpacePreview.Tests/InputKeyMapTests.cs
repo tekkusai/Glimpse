@@ -63,6 +63,13 @@ public sealed class InputKeyMapTests
         ("Esc closes the index sheet or slideshow first", Owner(Esc) with { EscapeLayer = true }, true, KeyAction.EscapeLayer),
         ("An armed find bar takes Esc first", OnPreview(Esc) with { FindBarArmed = true }, false, KeyAction.YieldEscape),
         ("Esc in an unrelated app is left alone", Elsewhere(Esc, null), false, KeyAction.None),
+        ("Ctrl+Shift+Esc in Explorer opens Task Manager", Owner(Esc) with { Ctrl = true, Shift = true }, false, KeyAction.None),
+        ("Ctrl+Shift+Esc in the preview opens Task Manager", OnPreview(Esc) with { Ctrl = true, Shift = true }, false, KeyAction.None),
+        ("Ctrl+Esc in Explorer opens Start", Owner(Esc) with { Ctrl = true }, false, KeyAction.None),
+        ("Alt+Esc in the preview cycles windows", OnPreview(Esc) with { Alt = true }, false, KeyAction.None),
+        ("Win+Esc over the index sheet is the shell's", Owner(Esc) with { Win = true, EscapeLayer = true }, false, KeyAction.None),
+        ("Ctrl+Esc during an open lookup is Start, not a cancel", Idle(Esc, ExplorerWindow) with { OpenPending = true, Ctrl = true }, false, KeyAction.None),
+        ("Shift+Esc still ends the glance", Owner(Esc) with { Shift = true }, true, KeyAction.Hide),
 
         // Enter.
         ("Enter in Explorer ends the glance and Explorer opens the file", Owner(Enter), false, KeyAction.Hide),
@@ -104,14 +111,21 @@ public sealed class InputKeyMapTests
         ("Sign mode: Esc walks the mode's layers", OnPreview(Esc) with { FillSign = true }, true, KeyAction.FillSignEscape),
         ("Sign mode: Esc from Explorer asks too", Owner(Esc) with { FillSign = true }, true, KeyAction.FillSignEscape),
         ("Sign mode: Esc in the date editor reaches the editor", OnPreview(Esc) with { FillSign = true, TextFocus = true }, false, KeyAction.None),
+        ("Sign mode: Ctrl+Shift+Esc opens Task Manager", OnPreview(Esc) with { FillSign = true, Ctrl = true, Shift = true }, false, KeyAction.None),
+        ("Sign mode: Ctrl+Esc from Explorer opens Start", Owner(Esc) with { FillSign = true, Ctrl = true }, false, KeyAction.None),
 
         // The shortcuts the tooltips name work from the glance.
         ("F11 fills the screen from Explorer", Owner(NativeMethods.VK_F11), true, KeyAction.FillScreen),
         ("F11 fills the screen from the preview", OnPreview(NativeMethods.VK_F11), true, KeyAction.FillScreen),
-        ("Ctrl+R rotates an image from Explorer", Owner(NativeMethods.VK_R) with { Ctrl = true, CanRotate = true }, true, KeyAction.Rotate),
-        ("Ctrl+Shift+R rotates back", Owner(NativeMethods.VK_R) with { Ctrl = true, Shift = true, CanRotate = true }, true, KeyAction.Rotate),
-        ("Ctrl+R with nothing to rotate stays Explorer's refresh", Owner(NativeMethods.VK_R) with { Ctrl = true }, false, KeyAction.None),
+        // Rotation rewrites the file, so it needs the preview itself in front.
+        ("Ctrl+R rotates an image in the preview", OnPreview(NativeMethods.VK_R) with { Ctrl = true, CanRotate = true }, true, KeyAction.Rotate),
+        ("Ctrl+Shift+R rotates back in the preview", OnPreview(NativeMethods.VK_R) with { Ctrl = true, Shift = true, CanRotate = true }, true, KeyAction.Rotate),
+        ("Ctrl+R in Explorer stays Explorer's refresh over a rotatable image", Owner(NativeMethods.VK_R) with { Ctrl = true, CanRotate = true }, false, KeyAction.None),
+        ("Ctrl+Shift+R in Explorer never rotates", Owner(NativeMethods.VK_R) with { Ctrl = true, Shift = true, CanRotate = true }, false, KeyAction.None),
+        ("Ctrl+R in the preview with nothing to rotate is the window's", OnPreview(NativeMethods.VK_R) with { Ctrl = true }, false, KeyAction.None),
         ("Ctrl+Plus zooms from Explorer", Owner(NativeMethods.VK_OEM_PLUS) with { Ctrl = true, HeaderZoom = true }, true, KeyAction.Zoom),
+        ("Ctrl+Minus zooms out from Explorer", Owner(NativeMethods.VK_OEM_MINUS) with { Ctrl = true, HeaderZoom = true }, true, KeyAction.Zoom),
+        ("Ctrl+0 resets zoom from Explorer", Owner(NativeMethods.VK_0) with { Ctrl = true, HeaderZoom = true }, true, KeyAction.Zoom),
         ("Ctrl+0 resets zoom from the preview", OnPreview(NativeMethods.VK_0) with { Ctrl = true, HeaderZoom = true }, true, KeyAction.Zoom),
         ("Ctrl+Plus with nothing to zoom is left alone", Owner(NativeMethods.VK_OEM_PLUS) with { Ctrl = true }, false, KeyAction.None),
         ("F11 in an unrelated app is left alone", Elsewhere(NativeMethods.VK_F11, null), false, KeyAction.None),
@@ -125,6 +139,8 @@ public sealed class InputKeyMapTests
         ("A pinned player seeks with Left", Pinned(Left) with { Media = true }, true, KeyAction.NudgeMedia),
         ("Enter in a pinned window is the window's", Pinned(Enter), false, KeyAction.None),
         ("Esc in a signing pinned window asks before it closes", Pinned(Esc) with { FillSign = true }, true, KeyAction.FillSignEscape),
+        ("Ctrl+Shift+Esc in a pinned window opens Task Manager", Pinned(Esc) with { Ctrl = true, Shift = true }, false, KeyAction.None),
+        ("Alt+Esc in a signing pinned window cycles windows", Pinned(Esc) with { FillSign = true, Alt = true }, false, KeyAction.None),
         ("Space in a signing pinned window reaches the page", Pinned(Space) with { FillSign = true, Media = true }, false, KeyAction.None),
     ];
 

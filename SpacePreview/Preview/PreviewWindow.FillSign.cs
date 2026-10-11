@@ -50,6 +50,9 @@ public partial class PreviewWindow
         return _fillSignSurface?.TryLeave() != false;
     }
 
+    /// <summary>Placed ink not yet saved. Unlike TryLeaveFillSign, it never brings up the save choice.</summary>
+    internal bool HoldsSigningWork => _fillSignSurface?.HasWork == true;
+
     private async Task EnterFillSignModeAsync()
     {
         if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))

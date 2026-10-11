@@ -1,5 +1,8 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
@@ -105,7 +108,7 @@ public sealed class InputSessionTests
         WithSigningPreview((controller, window, surface) =>
         {
             // A point no window of this test owns.
-            Fields.Call(controller, "OnMouseDown", 0x0201, -32000, -32000);
+            Fields.Call(controller, "OnMouseDown", 0x0201, -32000, -32000, 0L);
 
             Assert.True(Fields.Get<bool>(controller, "_previewVisible"));
             Assert.True(SignMode.SaveChoiceShown(surface));
@@ -215,6 +218,82 @@ public sealed class InputSessionTests
                 window.Close();
             }
         });
+    }
+
+    [Fact]
+    public void APickerArrowStartsTheRevealClockAtThePress() => PickerMoveShowsWithItsInputStamp(click: false);
+
+    [Fact]
+    public void APickerClickStartsTheRevealClockAtTheClick() => PickerMoveShowsWithItsInputStamp(click: true);
+
+    /// <summary>
+    /// The picker moves natively and a settled read follows it. The file that
+    /// read finds is timed from the key or click, not from the read.
+    /// </summary>
+    private static void PickerMoveShowsWithItsInputStamp(bool click)
+    {
+        Sta.Run(() =>
+        {
+            using var temp = new TempDirectory();
+            var png = WritePng(temp.Path);
+            using var dialog = HiddenWindow();
+            var controller = new SpacePreviewController(Dispatcher.CurrentDispatcher);
+
+            // As if a fullscreen app were in front, so showing the glance
+            // never installs a real mouse hook.
+            var suspension = Fields.Get<FullscreenInputSuspension>(controller, "_fullscreenInputSuspension");
+            Fields.Set(suspension, "_suspended", true);
+
+            // Parked off screen and frozen, like the probe.
+            var window = new PreviewWindow { Left = -30000, Top = 0, Width = 640, Height = 480 };
+            window.MarkGeometryUserPinnedForProbe();
+
+            // A click lands on whatever window sits under it, so that window
+            // plays the picker; a key goes to the dialog in front.
+            var owner = click ? NativeMethods.GetRootWindowAt(-32000, -32000) : dialog.Handle;
+            try
+            {
+                Fields.Set(controller, "_previewWindow", window);
+                Fields.Set(controller, "_previewVisible", true);
+                Fields.Set(controller, "_lastSelectionSource", SelectionSource.CommonFileDialog);
+                Fields.Set(controller, "_previewOwnerRootHwnd", owner);
+
+                // The press, a fifth of a second before the read lands.
+                var stamp = Stopwatch.GetTimestamp() - Stopwatch.Frequency / 5;
+                if (click)
+                {
+                    Fields.Set(suspension, "_suspended", false);
+                    Fields.Call(controller, "OnMouseDown", 0x0201, -32000, -32000, stamp);
+                    Fields.Set(suspension, "_suspended", true);
+                }
+                else
+                {
+                    Fields.Call(controller, "Perform", KeyAction.FollowPicker, new KeyFacts { Vk = NativeMethods.VK_DOWN }, null, stamp);
+                }
+
+                Fields.Call(controller, "OnCommonFileDialogSelectionChanged", owner, new ExplorerSelection(png, owner));
+
+                var presentation = Fields.Get<object>(window, "_presentation");
+                Assert.Equal(stamp, (long)presentation.GetType().GetProperty("InputTimestamp")!.GetValue(presentation)!);
+            }
+            finally
+            {
+                // Dispose closes the glance.
+                controller.Dispose();
+            }
+        });
+    }
+
+    private static string WritePng(string directory)
+    {
+        var pixels = Enumerable.Repeat((byte)0x80, 64 * 48 * 4).ToArray();
+        var bitmap = BitmapSource.Create(64, 48, 96, 96, PixelFormats.Bgra32, null, pixels, 64 * 4);
+        var path = Path.Combine(directory, "picked.png");
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(path);
+        encoder.Save(stream);
+        return path;
     }
 
     private static bool BelongsToGlance(SpacePreviewController controller, IntPtr root) =>

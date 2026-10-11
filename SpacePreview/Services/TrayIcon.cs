@@ -33,6 +33,10 @@ internal sealed class TrayIcon : IDisposable
     private readonly DispatcherTimer _updateTimer;
     private readonly DispatcherTimer _updateNotificationTimer;
     private readonly Func<bool> _canShowUpdateNotification;
+
+    // Quitting and updating both end the app. Unsaved signing work comes
+    // forward first and holds both.
+    private readonly Func<bool> _canQuit;
     private IntPtr _hwnd;
     private IntPtr _icon;
     private ushort _classAtom;
@@ -55,11 +59,12 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>Raised when the user picks Quit.</summary>
     public event Action? QuitRequested;
 
-    public TrayIcon(Func<bool>? canShowUpdateNotification = null)
+    public TrayIcon(Func<bool>? canShowUpdateNotification = null, Func<bool>? canQuit = null)
     {
         _wndProc = WindowProc;
         _taskbarCreatedMessage = NativeMethods.RegisterWindowMessage("TaskbarCreated");
         _canShowUpdateNotification = canShowUpdateNotification ?? (() => true);
+        _canQuit = canQuit ?? (() => true);
 
         _updateItem = MakeItem("Update", ShowAvailableUpdate);
         _updateItem.Visibility = Visibility.Collapsed;
@@ -145,7 +150,13 @@ internal sealed class TrayIcon : IDisposable
         settings.Style = itemStyle;
         _updateItem.Style = itemStyle;
 
-        var quit = MakeItem("Quit", () => QuitRequested?.Invoke());
+        var quit = MakeItem("Quit", () =>
+        {
+            if (_canQuit())
+            {
+                QuitRequested?.Invoke();
+            }
+        });
         quit.Style = itemStyle;
 
         // See ShowMenu: clicking the icon while the menu is open must close
@@ -332,7 +343,7 @@ internal sealed class TrayIcon : IDisposable
         bool activate,
         bool automatic)
     {
-        var window = new AppUpdateWindow(_updateService, update)
+        var window = new AppUpdateWindow(_updateService, update, _canQuit)
         {
             ShowActivated = activate
         };
