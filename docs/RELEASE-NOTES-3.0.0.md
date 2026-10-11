@@ -14,6 +14,7 @@
 
 **Also in this release**
 
+- A new icon: the Space key, the one key Glimpse asks you to learn, in the taskbar, the tray and the welcome
 - Files without a richer view share one card layout, so titles no longer jump between file types
 - Compressed tar archives list every file inside
 - A damaged HEIC photo says it may be damaged instead of sending you to the Microsoft Store

@@ -86,6 +86,22 @@ same window chrome as the preview, not a drawn card with a fake shadow.
 Spacing follows a 4 px grid. The header is 52 px with 12 px side padding.
 Header controls are 30 px tall: icon buttons 30 x 30, pills 30 high.
 
+## Mark
+
+The mark is the sign for the Space key, an open box drawn as a bar with its
+ends turned up. `BrandMark` draws it, and nothing else does.
+
+- The app icon and the welcome show the sign in white on an accent tile,
+  `#4E80F5` at the top to `#3B72E8` at the bottom, with corners a fifth of
+  the tile. The tile sits on the square keyline of Microsoft's 48 px icon
+  grid, 42 of 48.
+- The tray shows the sign alone, in the taskbar's own light or dark ink.
+- The sizes Windows asks for (16 to 64 px for the icon, 16 to 48 px for the
+  tray) are hinted by hand, so every straight edge lands on a whole pixel.
+  Larger sizes draw the vectors.
+- `scripts/render-icon.ps1` writes `Glimpse.ico` from `BrandMark`, and a test
+  fails when the two disagree.
+
 ## Header
 
 Left to right, in priority order when space runs out:
