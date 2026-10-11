@@ -518,6 +518,28 @@ public sealed class SignDraftTests
     });
 
     [Fact]
+    public Task AClosedWindowHoldsNoSigningSession() => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        var sessions = (System.Collections.IDictionary)typeof(PreviewWindow)
+            .GetField("SignSessions", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        var first = SignablePdf(root);
+        var second = Path.Combine(root, "docs", "lease.pdf");
+        FillSignBehaviorTests.WritePdf(second, 612, 792);
+
+        // Signs one file, moves on to the next and signs that, then closes.
+        await EnterAsync(window, first);
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+        Fields.Call(window, "ResetForNewItem");
+        window.PreviewContent.Content = null;
+        Assert.NotNull(await EnterAsync(window, second));
+        window.Close();
+
+        Assert.False(sessions.Contains(SignDrafts.Canonical(first)));
+        Assert.False(sessions.Contains(SignDrafts.Canonical(second)));
+    });
+
+    [Fact]
     public Task AnEntryThatFailedLeavesTheFileFreeToSign() => InDataRootAsync(async root =>
     {
         var first = new PreviewWindow();

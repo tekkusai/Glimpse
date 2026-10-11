@@ -309,6 +309,10 @@ public partial class PreviewWindow
             return null;
         }
 
+        // Any earlier session here ended when the window moved on; letting
+        // it go keeps a closed window from living on in the table.
+        EndSignSession(_signSession);
+
         // A new item or a hide cancels the load, and the session with it.
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_loadCancellation?.Token ?? CancellationToken.None);
         var session = new SignSession(this, key, _loadVersion, cancellation);
