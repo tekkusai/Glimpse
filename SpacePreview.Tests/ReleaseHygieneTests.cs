@@ -231,9 +231,11 @@ public sealed class ReleaseHygieneTests
         Assert.Contains("Back up the key", release, StringComparison.Ordinal);
         Assert.Contains("Renaming the repository or transferring it", release, StringComparison.Ordinal);
 
-        // 2.0's updater offers 3.0.0 at once: it gets no two days.
-        Assert.Contains("3.0.0 has no such window", release, StringComparison.Ordinal);
-        Assert.Contains("Test 3.0.0 fully before it goes public.", release, StringComparison.Ordinal);
+        // 2.0's updater offers every release at once: no release gets two days there.
+        Assert.Contains("Copies still on 2.x get no such window, for every release, for as long as any 2.x copy exists.", release, StringComparison.Ordinal);
+        Assert.Contains("Test every release fully before it goes public.", release, StringComparison.Ordinal);
+        Assert.Contains("Before every install, automatic or through Install now, a copy asks GitHub once more", release, StringComparison.Ordinal);
+        Assert.Contains("If a check found it in the last minute, the copy does not ask again.", release, StringComparison.Ordinal);
     }
 
     [Fact]
