@@ -291,6 +291,18 @@ public partial class PreviewWindow
         };
     }
 
+    /// <summary>
+    /// A window that has shown a page keeps its browser for the next glance.
+    /// A pinned one never serves another.
+    /// </summary>
+    private void WarmBrowserForNextGlance()
+    {
+        if (!IsPinned)
+        {
+            _warmBrowser.Start(Hwnd);
+        }
+    }
+
     private StagedWebView CreateWebView(
         WebSurfaceKind kind,
         Func<Uri> getSource,
@@ -304,6 +316,7 @@ public partial class PreviewWindow
         var failureReported = 0;
         var initializationStarted = 0;
         var webView = new StagedWebView(kind);
+        WarmBrowserForNextGlance();
         if (trackAsPreviewDisposable)
         {
             _nextDisposable = webView;

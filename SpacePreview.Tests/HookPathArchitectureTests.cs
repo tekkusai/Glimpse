@@ -70,15 +70,16 @@ public sealed class HookPathArchitectureTests
         Assert.DoesNotContain(".Result", body, StringComparison.Ordinal);
     }
 
+    // The trim's one collection is blocking (IdleTrimTests). It runs off the
+    // dispatcher and never waits on finalizers or compacts the large object
+    // heap, so its pause stays that of a small heap.
     [Fact]
-    public void IdleTrimDoesNotBlockTheDispatcherWithCompactingGc()
+    public void IdleTrimKeepsItsCollectionShort()
     {
         var body = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "RunIdleTrim");
 
         Assert.Contains("Task.Run", body, StringComparison.Ordinal);
         Assert.DoesNotContain("WaitForPendingFinalizers", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("blocking: true", body, StringComparison.Ordinal);
-        Assert.DoesNotContain("compacting: true", body, StringComparison.Ordinal);
         Assert.DoesNotContain("LargeObjectHeapCompactionMode", body, StringComparison.Ordinal);
     }
 

@@ -467,6 +467,7 @@ public partial class PreviewWindow
         {
             // A pinned window leaves browse mode; the set surfaces go with it.
             DetachBrowseContext(restoreSlideshowSize: true);
+            _warmBrowser.Stop();
         }
 
         SetBrowseControlsVisible(CurrentPath is not null && !pinned && !_isFileDialogMode);

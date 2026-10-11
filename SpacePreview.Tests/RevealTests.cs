@@ -1,10 +1,13 @@
+using System.Reflection;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
@@ -293,6 +296,51 @@ public sealed class StandInTests
         Assert.False(StandIn.IsHonestPoster(Bitmap(96, 128), 0.75));
         Assert.False(StandIn.IsHonestPoster(Bitmap(1024, 1024), 0.75));
         Assert.False(StandIn.IsHonestPoster(null, 0.75));
+    }
+
+    [Fact]
+    public Task TheSheenStopsTickingWhenTheStandInGoes() => WpfApp.RunAsync(async () =>
+    {
+        if (!Motion.Enabled)
+        {
+            return;
+        }
+
+        // Clocks tick only where WPF renders: an off-screen window.
+        var standIn = StandIn.Create(StageFitHint.PageAspect(0.75), 1, 132, 40, null);
+        var host = new Window { Left = -30000, Top = 0, Width = 400, Height = 300, ShowActivated = false, Content = standIn };
+        host.Show();
+        try
+        {
+            var shift = Fields.Get<TranslateTransform>(standIn, "_sheenShift");
+            standIn.StartSheen();
+            var clock = AppliedClock(shift, TranslateTransform.XProperty);
+            await Task.Delay(150);
+            Assert.Equal(ClockState.Active, clock.CurrentState);
+
+            standIn.Stop();
+            await Task.Delay(150);
+
+            // A clock only detached would still be Active, ticking WPF's
+            // renderer at 64 Hz until a GC found it.
+            Assert.False(shift.HasAnimatedProperties);
+            Assert.Equal(ClockState.Stopped, clock.CurrentState);
+        }
+        finally
+        {
+            host.Close();
+        }
+    });
+
+    /// <summary>The clock driving a property, read from WPF's own animation storage.</summary>
+    private static AnimationClock AppliedClock(Animatable target, DependencyProperty property)
+    {
+        const BindingFlags Hidden = BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
+        var storageType = typeof(Animatable).Assembly.GetType("System.Windows.Media.Animation.AnimationStorage")!;
+        var storage = storageType.GetMethod("GetStorage", Hidden)!.Invoke(null, [target, property])!;
+        var clocks = storageType.GetField("_animationClocks", Hidden)!.GetValue(storage)!;
+        var count = (int)clocks.GetType().GetProperty("Count")!.GetValue(clocks)!;
+        return (AnimationClock)clocks.GetType().GetMethod("get_Item")!.Invoke(clocks, [count - 1])!;
     }
 
     private static BitmapSource Bitmap(int width, int height) =>

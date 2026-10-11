@@ -16,7 +16,7 @@ public partial class PreviewWindow
     /// <summary>
     /// Every Office file comes through here, found by name or by content: a
     /// finished conversion, else the engine's job, else the text-only page.
-    /// Leaving stops the waiting, not the job.
+    /// Leaving stops the job unless another preview of the file still waits.
     /// </summary>
     private async Task<FrameworkElement> LoadOfficePreviewAsync(string path, OfficeKind kind, long version, CancellationToken token)
     {
@@ -28,6 +28,9 @@ public partial class PreviewWindow
                 return BuildConvertedOfficePreview(cached, null, version, token);
             }
 
+            // A conversion takes a second or more and ends in a page: the
+            // browser starts alongside it instead of after it.
+            WarmBrowserForNextGlance();
             var job = OfficeDocumentPdfConverter.Convert(path, kind, token);
             if (OfficeDocumentPdfConverter.EngineName is { } engine)
             {
@@ -264,8 +267,8 @@ public partial class PreviewWindow
             }
             catch (OperationCanceledException)
             {
-                // The preview moved on, maybe before it ever showed: the job
-                // finishes without it.
+                // The preview moved on, maybe before it ever showed. The job
+                // stops unless another preview still waits for it.
                 ReleasePartial();
             }
         }
