@@ -1360,6 +1360,15 @@ internal static class PdfFillSignWriter
                 }
             }
 
+            // A startxref off its mark (a damaged file, or bytes before the
+            // header) is one every viewer repairs from the last trailer, so
+            // the writer reads that one, as it always has.
+            var last = text.LastIndexOf("trailer", StringComparison.Ordinal);
+            if (last >= 0 && At(text, SkipSpace(text, last + "trailer".Length), "<<"))
+            {
+                return last + "trailer".Length;
+            }
+
             throw new InvalidOperationException(UnsupportedStructure);
         }
 

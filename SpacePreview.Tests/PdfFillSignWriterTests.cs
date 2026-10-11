@@ -416,6 +416,35 @@ public sealed class PdfFillSignWriterTests
         AssertInkWherePlaced(output, stamp);
     }
 
+    [Theory]
+    [InlineData("junk before the header")]
+    [InlineData("a startxref off its mark")]
+    public void ADamagedXrefOffsetStillSignsFromTheLastTrailer(string damage)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "damaged.pdf");
+        var output = Path.Combine(temp.Path, "damaged-signed.pdf");
+
+        // Viewers repair both from the last trailer, and so did the writer
+        // before it learned to read the newest section.
+        new PdfBuilder()
+            .Object(1, Catalog)
+            .Object(2, OnePage)
+            .Object(3, WidePage)
+            .Stream(4, "")
+            .Table("/Size 5 /Root 1 0 R")
+            .Save(source);
+        var text = Encoding.Latin1.GetString(File.ReadAllBytes(source));
+        text = damage == "junk before the header"
+            ? "junk\r\n" + text
+            : System.Text.RegularExpressions.Regex.Replace(text, @"startxref\s+(\d+)", match => $"startxref\n{int.Parse(match.Groups[1].Value) + 7}");
+        File.WriteAllBytes(source, Encoding.Latin1.GetBytes(text));
+
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
     [Fact]
     public void NewObjectsAreNumberedPastTheLatestSectionsSize()
     {
