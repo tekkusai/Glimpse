@@ -119,19 +119,21 @@ tags:
     }
 
     [Fact]
-    public void TryBuildCodeLeavesJsonByteShapeAlone()
+    public void TryBuildCodeShowsMinifiedJsonIndentedInItsOwnOrder()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "settings.json");
-        File.WriteAllText(path, "{\"b\":1,\"a\":[2,3]}");
+        File.WriteAllText(path, "{\"b\":1.50,\"a\":[2,3]}");
 
         var document = GeneratedHtmlPreview.TryBuildCodeForPreview(path).Document;
 
         Assert.NotNull(document);
         var html = File.ReadAllText(document!.HtmlPath);
         var visibleText = System.Net.WebUtility.HtmlDecode(System.Text.RegularExpressions.Regex.Replace(html, "<[^>]+>", string.Empty));
-        Assert.Contains("{\"b\":1,\"a\":[2,3]}", visibleText, StringComparison.Ordinal);
-        Assert.DoesNotContain("\n  &quot;b&quot;", html, StringComparison.Ordinal);
+        // Only whitespace changes: keys keep their order, numbers their text.
+        var b = visibleText.IndexOf("\"b\": 1.50,", StringComparison.Ordinal);
+        var a = visibleText.IndexOf("\"a\": [", StringComparison.Ordinal);
+        Assert.True(b >= 0 && a > b, visibleText);
     }
 
     [Fact]

@@ -44,8 +44,7 @@ internal static class ImageOrientation
     /// </summary>
     public static int Read(string path)
     {
-        var query = MetadataQueryFor(path);
-        if (query is null)
+        if (MetadataQueryFor(path) is null)
         {
             return Normal;
         }
@@ -57,7 +56,22 @@ internal static class ImageOrientation
                 stream,
                 BitmapCreateOptions.DelayCreation | BitmapCreateOptions.IgnoreColorProfile,
                 BitmapCacheOption.None);
-            if (decoder.Frames[0].Metadata is BitmapMetadata metadata
+            return ReadFrom(decoder.Frames[0], path);
+        }
+        catch
+        {
+            // Unreadable metadata displays as stored.
+            return Normal;
+        }
+    }
+
+    /// <summary>The orientation tag of a frame already open, read with the query for its file type.</summary>
+    public static int ReadFrom(BitmapFrame frame, string path)
+    {
+        try
+        {
+            if (MetadataQueryFor(path) is { } query
+                && frame.Metadata is BitmapMetadata metadata
                 && metadata.GetQuery(query) is ushort value
                 && value is >= 1 and <= 8)
             {

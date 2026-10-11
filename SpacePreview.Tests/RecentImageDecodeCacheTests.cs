@@ -74,8 +74,9 @@ public sealed class RecentImageDecodeCacheTests
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32BigEndian(header.AsSpan(20), 8399);
         File.WriteAllBytes(path, header);
 
-        Assert.True(PreviewWindow.TryGetImagePixelSize(path, out var size));
-        Assert.Equal(new Size(9800, 8399), size);
+        var image = ImageHeader.TryRead(path);
+        Assert.NotNull(image);
+        Assert.Equal((9800, 8399), (image.Width, image.Height));
     }
 
     [Fact]
@@ -99,14 +100,29 @@ public sealed class RecentImageDecodeCacheTests
     }
 
     [Fact]
-    public void UserRotationWinsOverALateFullDecode()
+    public void PendingTurnsRideOnTopOfALateFullDecode()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "preview.webp");
         File.WriteAllBytes(path, [1]);
-        var first = Bitmap(8, 6);
-        var session = new ImageRotationSession(path, first, ImageOrientation.Normal);
+        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal);
         session.Rotate(1);
+
+        // Rotating while the stand-in shows must not freeze the stand-in.
+        Assert.True(session.TryUpgradeDecoded(Bitmap(16, 12), ImageOrientation.Normal));
+        Assert.Equal(12, session.CurrentBitmap.PixelWidth);
+        Assert.Equal(16, session.CurrentBitmap.PixelHeight);
+    }
+
+    [Fact]
+    public void ADecodeThatPredatesACommittedRotationIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "preview.jpg");
+        File.WriteAllBytes(path, [1]);
+        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal);
+        session.Rotate(1);
+        session.Commit();
 
         Assert.False(session.TryUpgradeDecoded(Bitmap(16, 12), ImageOrientation.Normal));
         Assert.Equal(6, session.CurrentBitmap.PixelWidth);

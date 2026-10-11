@@ -561,12 +561,14 @@ public partial class PreviewWindow
         {
             subtitle = $"Shortcut → {shortcutTarget}";
         }
-        else if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path)) && TryGetImagePixelSize(path, out var pixelSize))
+        else if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
+            && LooksLikeLocalDrivePath(path)
+            && ImageHeader.TryRead(path) is { } image)
         {
             try
             {
                 var file = new FileInfo(path);
-                subtitle = $"{FileKinds.FriendlyKind(path)} · {(int)pixelSize.Width}×{(int)pixelSize.Height} · {FileKinds.FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
+                subtitle = $"{FileKinds.FriendlyKind(path)} · {image.Width}×{image.Height} · {FileKinds.FormatSize(file.Length)} · Modified {file.LastWriteTime:g}";
             }
             catch
             {

@@ -1,47 +1,74 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Text;
-using System.Windows.Media;
+using System.Text.Json;
 using System.Windows.Media.Media3D;
 using System.Xml.Linq;
 using SpacePreview.Services;
-using SpacePreview.Utilities;
+using Quaternion = System.Numerics.Quaternion;
 
 namespace SpacePreview.Preview;
 
+/// <param name="SourceTriangles">Triangles in the file; 0 for a wireframe.</param>
 internal sealed record MeshPreview(
     MeshGeometry3D Mesh,
     string FormatName,
-    string CountLabel);
+    string CountLabel,
+    int SourceTriangles);
 
 /// <summary>
-/// Loads printable/scannable mesh formats (STL, OBJ, PLY, 3MF) into one
-/// normalized <see cref="MeshGeometry3D"/> for the rotating viewport. Large
-/// meshes are step-sampled to a render cap; totals stay accurate in the label.
+/// Loads mesh formats (STL, OBJ, PLY, 3MF, GLB) into one normalized
+/// <see cref="MeshGeometry3D"/> for the rotating viewport. A mesh over the
+/// render cap is simplified by vertex clustering, which keeps a closed
+/// coarse surface instead of a sample of loose triangles. The label keeps
+/// the file's true count.
 /// </summary>
 internal static class MeshPreviewLoader
 {
-    private const int MaxRenderedTriangles = 45_000;
-    private const long MaxTextMeshBytes = 96L * 1024 * 1024;
+    /// <summary>The most triangles the viewport gets; Viewport3D still rotates smoothly here.</summary>
+    internal const int MaxRenderedTriangles = 250_000;
+
+    private const long MaxTextMeshBytes = 256L * 1024 * 1024;
     private const long Max3MfModelBytes = 32L * 1024 * 1024;
-    private const int MaxIndexedVertices = 500_000;
-    private const int MaxIndexedFaces = 700_000;
+    private const long MaxGlbJsonBytes = 64L * 1024 * 1024;
     private const int MaxPolygonCorners = 1024;
 
-    public static MeshPreview? TryLoad(string path)
+    // Faces that turn less than about 45 degrees from each other share a
+    // smoothed normal; a sharper turn stays a crease.
+    private const float CreaseCosine = 0.7f;
+
+    public static MeshPreview? TryLoad(string path, CancellationToken token) =>
+        TryLoad(path, MaxRenderedTriangles, token);
+
+    internal static MeshPreview? TryLoad(string path, int triangleCap, CancellationToken token)
     {
         try
         {
-            var extension = Path.GetExtension(path).ToLowerInvariant();
-            return extension switch
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var preview = Path.GetExtension(path).ToLowerInvariant() switch
             {
-                ".stl" => TryLoadStl(path),
-                ".obj" => TryLoadObj(path),
-                ".ply" => TryLoadPly(path),
-                ".3mf" => TryLoad3mf(path),
+                ".stl" => TryLoadStl(path, triangleCap, token),
+                ".obj" => TryLoadObj(path, triangleCap, token),
+                ".ply" => TryLoadPly(path, triangleCap, token),
+                ".3mf" => TryLoad3mf(path, triangleCap, token),
+                ".glb" => TryLoadGlb(path, triangleCap, token),
                 _ => null
             };
+            if (preview is not null)
+            {
+                DiagnosticLog.Write(
+                    $"mesh loaded {preview.SourceTriangles} -> {preview.Mesh.Positions.Count / 3} triangles in {System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:0} ms {path}");
+            }
+
+            return preview;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -52,186 +79,170 @@ internal static class MeshPreviewLoader
 
     // -------------------------------------------------------------- STL --
 
-    private static MeshPreview? TryLoadStl(string path)
+    private static MeshPreview? TryLoadStl(string path, int cap, CancellationToken token)
     {
-        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-        if (TryLoadBinaryStl(path, stream, out var binaryPreview))
+        using var stream = OpenRead(path);
+        if (TryReadBinaryStlCount(stream, out var count))
         {
-            return binaryPreview;
+            return Build(BinaryStlTriangles(stream, count), "STL mesh", cap, token);
+        }
+
+        if (stream.Length > MaxTextMeshBytes)
+        {
+            return null;
         }
 
         stream.Position = 0;
-        return TryLoadAsciiStl(path, stream);
+        var mesh = new IndexedMesh();
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+        int first = 0, second = 0, pending = 0, lines = 0;
+        while (reader.ReadLine() is { } text)
+        {
+            if ((++lines & 4095) == 0)
+            {
+                token.ThrowIfCancellationRequested();
+            }
+
+            var line = text.AsSpan();
+            if (!NextToken(ref line, out var keyword)
+                || !keyword.Equals("vertex", StringComparison.OrdinalIgnoreCase)
+                || !TryReadVector(ref line, out var vertex))
+            {
+                continue;
+            }
+
+            var index = mesh.AddVertex(vertex);
+            switch (pending++)
+            {
+                case 0:
+                    first = index;
+                    break;
+                case 1:
+                    second = index;
+                    break;
+                default:
+                    mesh.AddTriangle(first, second, index);
+                    pending = 0;
+                    break;
+            }
+        }
+
+        return Build(mesh.Triangles, "STL mesh", cap, token);
     }
 
-    private static bool TryLoadBinaryStl(string path, Stream stream, out MeshPreview? preview)
+    private static bool TryReadBinaryStlCount(Stream stream, out uint count)
     {
-        preview = null;
+        count = 0;
         if (stream.Length < 84)
         {
             return false;
         }
 
         stream.Position = 80;
-        Span<byte> countBytes = stackalloc byte[4];
-        stream.ReadExactly(countBytes);
-        var totalTriangles = BitConverter.ToUInt32(countBytes);
-        var expectedLength = 84L + totalTriangles * 50L;
-        if (totalTriangles == 0 || expectedLength > stream.Length || totalTriangles > int.MaxValue)
-        {
-            return false;
-        }
-
-        var geometry = new GeometryAccumulator();
-        var step = Math.Max(1, (int)Math.Ceiling(totalTriangles / (double)MaxRenderedTriangles));
-        Span<byte> triangleBytes = stackalloc byte[50];
-
-        for (var triangleIndex = 0; triangleIndex < totalTriangles; triangleIndex++)
-        {
-            if (triangleIndex % step != 0)
-            {
-                stream.Seek(50, SeekOrigin.Current);
-                continue;
-            }
-
-            stream.ReadExactly(triangleBytes);
-            var normal = new Vector3D(
-                ReadSingle(triangleBytes, 0),
-                ReadSingle(triangleBytes, 4),
-                ReadSingle(triangleBytes, 8));
-            var p1 = ReadPoint(triangleBytes, 12);
-            var p2 = ReadPoint(triangleBytes, 24);
-            var p3 = ReadPoint(triangleBytes, 36);
-            geometry.AddTriangle(p1, p2, p3, normal);
-        }
-
-        preview = BuildPreview(geometry, "STL mesh", (int)totalTriangles);
-        return preview is not null;
+        Span<byte> bytes = stackalloc byte[4];
+        stream.ReadExactly(bytes);
+        count = BinaryPrimitives.ReadUInt32LittleEndian(bytes);
+        return count > 0 && 84L + count * 50L <= stream.Length;
     }
 
-    private static MeshPreview? TryLoadAsciiStl(string path, Stream stream)
+    // The body streams from disk on every pass, so a million-facet part
+    // never has to sit in memory whole.
+    private static TriangleStream BinaryStlTriangles(Stream stream, uint count) =>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)] (visit, token) =>
+        {
+            const int batchTriangles = 4096;
+            var buffer = new byte[50 * batchTriangles];
+            stream.Position = 84;
+            for (var done = 0u; done < count;)
+            {
+                token.ThrowIfCancellationRequested();
+                var batch = (int)Math.Min(batchTriangles, count - done);
+                stream.ReadExactly(buffer, 0, batch * 50);
+                for (var i = 0; i < batch; i++)
+                {
+                    var record = buffer.AsSpan(i * 50, 50);
+                    VisitFinite(visit, ReadVector(record[12..]), ReadVector(record[24..]), ReadVector(record[36..]));
+                }
+
+                done += (uint)batch;
+            }
+        };
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static Vector3 ReadVector(ReadOnlySpan<byte> bytes) => new(
+        BinaryPrimitives.ReadSingleLittleEndian(bytes),
+        BinaryPrimitives.ReadSingleLittleEndian(bytes[4..]),
+        BinaryPrimitives.ReadSingleLittleEndian(bytes[8..]));
+
+    // -------------------------------------------------------------- OBJ --
+
+    private static MeshPreview? TryLoadObj(string path, int cap, CancellationToken token)
     {
+        using var stream = OpenRead(path);
         if (stream.Length > MaxTextMeshBytes)
         {
             return null;
         }
 
-        var geometry = new GeometryAccumulator();
-        var pending = new List<Point3D>(3);
-        var totalTriangles = 0;
-
-        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
-        while (reader.ReadLine() is { } line)
+        var mesh = new IndexedMesh();
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        var lines = 0;
+        while (reader.ReadLine() is { } text)
         {
-            var trimmed = line.TrimStart();
-            if (!trimmed.StartsWith("vertex", StringComparison.OrdinalIgnoreCase))
+            if ((++lines & 4095) == 0)
+            {
+                token.ThrowIfCancellationRequested();
+            }
+
+            var line = text.AsSpan();
+            if (!NextToken(ref line, out var keyword))
             {
                 continue;
             }
 
-            var parts = trimmed.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 4
-                || !double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
-                || !double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
-                || !double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+            if (keyword is "v")
             {
-                continue;
-            }
-
-            pending.Add(new Point3D(x, y, z));
-            if (pending.Count != 3)
-            {
-                continue;
-            }
-
-            totalTriangles++;
-            if (geometry.TriangleCount < MaxRenderedTriangles)
-            {
-                geometry.AddTriangle(pending[0], pending[1], pending[2], default);
-            }
-
-            pending.Clear();
-        }
-
-        return BuildPreview(geometry, "STL mesh", totalTriangles);
-    }
-
-    // -------------------------------------------------------------- OBJ --
-
-    private static MeshPreview? TryLoadObj(string path)
-    {
-        var vertices = new List<Point3D>();
-        var faces = new List<(int A, int B, int C)>();
-
-        using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
-        using (var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true))
-        {
-            if (stream.Length > MaxTextMeshBytes)
-            {
-                return null;
-            }
-
-            while (reader.ReadLine() is { } line)
-            {
-                if (line.Length < 3)
+                if (TryReadVector(ref line, out var vertex))
                 {
-                    continue;
+                    mesh.AddVertex(vertex);
                 }
-
-                if (line[0] == 'v' && char.IsWhiteSpace(line[1]))
+            }
+            else if (keyword is "f")
+            {
+                // Fan-triangulate polygons; each corner is "v", "v/t", "v//n"
+                // or "v/t/n" with 1-based (or negative relative) vertex indices.
+                int first = -1, previous = -1, corners = 0;
+                while (corners < MaxPolygonCorners && NextToken(ref line, out var corner))
                 {
-                    var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length >= 4
-                        && double.TryParse(parts[1], NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
-                        && double.TryParse(parts[2], NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
-                        && double.TryParse(parts[3], NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+                    var index = ParseObjIndex(corner, mesh.VertexCount);
+                    corners++;
+                    if (corners == 1)
                     {
-                        if (vertices.Count >= MaxIndexedVertices)
-                        {
-                            return null;
-                        }
-
-                        vertices.Add(new Point3D(x, y, z));
+                        first = index;
                     }
-                }
-                else if (line[0] == 'f' && char.IsWhiteSpace(line[1]))
-                {
-                    var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                    if (parts.Length < 4)
+                    else if (corners >= 3 && first >= 0 && previous >= 0 && index >= 0)
                     {
-                        continue;
+                        mesh.AddTriangle(first, previous, index);
                     }
 
-                    // Fan-triangulate polygons; each corner is "v", "v/t",
-                    // "v//n" or "v/t/n" with 1-based (or negative relative)
-                    // vertex indices.
-                    var first = ParseObjIndex(parts[1], vertices.Count);
-                    for (var corner = 2; corner < parts.Length - 1; corner++)
-                    {
-                        var second = ParseObjIndex(parts[corner], vertices.Count);
-                        var third = ParseObjIndex(parts[corner + 1], vertices.Count);
-                        if (first >= 0 && second >= 0 && third >= 0)
-                        {
-                            if (faces.Count >= MaxIndexedFaces)
-                            {
-                                return null;
-                            }
-
-                            faces.Add((first, second, third));
-                        }
-                    }
+                    previous = index;
                 }
             }
         }
 
-        return BuildFromIndexed(vertices, faces, "OBJ mesh");
+        return Build(mesh.Triangles, "OBJ mesh", cap, token);
     }
 
-    private static int ParseObjIndex(string token, int vertexCount)
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static int ParseObjIndex(ReadOnlySpan<char> corner, int vertexCount)
     {
-        var slash = token.IndexOf('/');
-        var span = slash < 0 ? token : token[..slash];
-        if (!int.TryParse(span, NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
+        var slash = corner.IndexOf('/');
+        if (slash >= 0)
+        {
+            corner = corner[..slash];
+        }
+
+        if (!int.TryParse(corner, NumberStyles.Integer, CultureInfo.InvariantCulture, out var index))
         {
             return -1;
         }
@@ -246,9 +257,9 @@ internal static class MeshPreviewLoader
 
     private sealed record PlyElement(string Name, int Count, List<PlyProperty> Properties);
 
-    private static MeshPreview? TryLoadPly(string path)
+    private static MeshPreview? TryLoadPly(string path, int cap, CancellationToken token)
     {
-        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var stream = OpenRead(path);
         if (stream.Length > MaxTextMeshBytes)
         {
             return null;
@@ -307,7 +318,7 @@ internal static class MeshPreviewLoader
                 case "format" when parts.Length >= 2:
                     format = parts[1];
                     break;
-                case "element" when parts.Length >= 3 && int.TryParse(parts[2], out var count):
+                case "element" when parts.Length >= 3 && int.TryParse(parts[2], out var count) && count >= 0:
                     elements.Add(new PlyElement(parts[1], count, []));
                     break;
                 case "property" when elements.Count > 0 && parts.Length >= 3:
@@ -329,16 +340,7 @@ internal static class MeshPreviewLoader
             return null;
         }
 
-        var vertexBudget = elements.FirstOrDefault(element => element.Name == "vertex")?.Count ?? 0;
-        var faceBudget = elements.FirstOrDefault(element => element.Name == "face")?.Count ?? 0;
-        if (vertexBudget > MaxIndexedVertices || faceBudget > MaxIndexedFaces)
-        {
-            return null;
-        }
-
-        var vertices = new List<Point3D>();
-        var faces = new List<(int A, int B, int C)>();
-
+        var mesh = new IndexedMesh();
         if (format == "ascii")
         {
             using var reader = new StreamReader(stream, Encoding.ASCII, detectEncodingFromByteOrderMarks: false, leaveOpen: true);
@@ -346,6 +348,11 @@ internal static class MeshPreviewLoader
             {
                 for (var row = 0; row < element.Count; row++)
                 {
+                    if ((row & 4095) == 0)
+                    {
+                        token.ThrowIfCancellationRequested();
+                    }
+
                     var line = reader.ReadLine();
                     if (line is null)
                     {
@@ -354,32 +361,28 @@ internal static class MeshPreviewLoader
 
                     if (element.Name == "vertex")
                     {
-                        if (vertices.Count >= MaxIndexedVertices)
-                        {
-                            return null;
-                        }
-
-                        ParsePlyAsciiVertex(line, element, vertices);
+                        ParsePlyAsciiVertex(line, element, mesh);
                     }
                     else if (element.Name == "face")
                     {
-                        if (faces.Count >= MaxIndexedFaces)
-                        {
-                            return null;
-                        }
-
-                        ParsePlyAsciiFace(line, faces);
+                        ParsePlyAsciiFace(line, mesh);
                     }
                 }
             }
         }
         else
         {
-            using var reader = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
+            using var reader = new BinaryReader(new BufferedStream(stream, 1 << 16), Encoding.ASCII, leaveOpen: true);
+            var indices = new int[MaxPolygonCorners];
             foreach (var element in elements)
             {
                 for (var row = 0; row < element.Count; row++)
                 {
+                    if ((row & 4095) == 0)
+                    {
+                        token.ThrowIfCancellationRequested();
+                    }
+
                     if (element.Name == "vertex")
                     {
                         double x = 0, y = 0, z = 0;
@@ -400,48 +403,34 @@ internal static class MeshPreviewLoader
                             }
                         }
 
-                        vertices.Add(new Point3D(x, y, z));
+                        mesh.AddVertex(x, y, z);
+                        continue;
                     }
-                    else
+
+                    foreach (var property in element.Properties)
                     {
-                        foreach (var property in element.Properties)
+                        if (property.ListCountType is null)
                         {
-                            if (property.ListCountType is null)
-                            {
-                                ReadPlyScalar(reader, property.Type);
-                                continue;
-                            }
+                            ReadPlyScalar(reader, property.Type);
+                            continue;
+                        }
 
-                            var count = (int)ReadPlyScalar(reader, property.ListCountType);
-                            if (count < 0 || count > MaxPolygonCorners)
-                            {
-                                throw new InvalidDataException("PLY face is too large for preview.");
-                            }
+                        var count = (int)ReadPlyScalar(reader, property.ListCountType);
+                        if (count < 0 || count > MaxPolygonCorners)
+                        {
+                            throw new InvalidDataException("PLY face is too large for preview.");
+                        }
 
-                            if (element.Name == "face" && property.Name.Contains("vertex", StringComparison.OrdinalIgnoreCase) && count >= 3)
-                            {
-                                var indices = new int[count];
-                                for (var i = 0; i < count; i++)
-                                {
-                                    indices[i] = (int)ReadPlyScalar(reader, property.Type);
-                                }
+                        for (var i = 0; i < count; i++)
+                        {
+                            indices[i] = (int)ReadPlyScalar(reader, property.Type);
+                        }
 
-                                for (var corner = 1; corner < count - 1; corner++)
-                                {
-                                    if (faces.Count >= MaxIndexedFaces)
-                                    {
-                                        return null;
-                                    }
-
-                                    faces.Add((indices[0], indices[corner], indices[corner + 1]));
-                                }
-                            }
-                            else
+                        if (element.Name == "face" && property.Name.Contains("vertex", StringComparison.OrdinalIgnoreCase))
+                        {
+                            for (var corner = 1; corner < count - 1; corner++)
                             {
-                                for (var i = 0; i < count; i++)
-                                {
-                                    ReadPlyScalar(reader, property.Type);
-                                }
+                                mesh.AddTriangle(indices[0], indices[corner], indices[corner + 1]);
                             }
                         }
                     }
@@ -449,10 +438,11 @@ internal static class MeshPreviewLoader
             }
         }
 
-        return BuildFromIndexed(vertices, faces, "PLY mesh");
+        return Build(mesh.Triangles, "PLY mesh", cap, token);
     }
 
-    private static void ParsePlyAsciiVertex(string line, PlyElement element, List<Point3D> vertices)
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void ParsePlyAsciiVertex(string line, PlyElement element, IndexedMesh mesh)
     {
         var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         double x = 0, y = 0, z = 0;
@@ -487,10 +477,11 @@ internal static class MeshPreviewLoader
             column++;
         }
 
-        vertices.Add(new Point3D(x, y, z));
+        mesh.AddVertex(x, y, z);
     }
 
-    private static void ParsePlyAsciiFace(string line, List<(int A, int B, int C)> faces)
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void ParsePlyAsciiFace(string line, IndexedMesh mesh)
     {
         var parts = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length < 4 || !int.TryParse(parts[0], out var count) || count < 3 || count > MaxPolygonCorners || parts.Length < count + 1)
@@ -498,7 +489,7 @@ internal static class MeshPreviewLoader
             return;
         }
 
-        var indices = new int[count];
+        Span<int> indices = stackalloc int[count];
         for (var i = 0; i < count; i++)
         {
             if (!int.TryParse(parts[i + 1], out indices[i]))
@@ -509,10 +500,11 @@ internal static class MeshPreviewLoader
 
         for (var corner = 1; corner < count - 1; corner++)
         {
-            faces.Add((indices[0], indices[corner], indices[corner + 1]));
+            mesh.AddTriangle(indices[0], indices[corner], indices[corner + 1]);
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static void SkipPlyList(BinaryReader reader, PlyProperty property)
     {
         var count = (int)ReadPlyScalar(reader, property.ListCountType!);
@@ -527,6 +519,7 @@ internal static class MeshPreviewLoader
         }
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private static double ReadPlyScalar(BinaryReader reader, string type) => type switch
     {
         "char" or "int8" => reader.ReadSByte(),
@@ -540,6 +533,393 @@ internal static class MeshPreviewLoader
         _ => throw new InvalidDataException($"Unknown PLY type {type}")
     };
 
+    // -------------------------------------------------------------- GLB --
+
+    /// <summary>
+    /// glTF binary: a JSON chunk naming scenes, nodes, meshes and accessors,
+    /// then a BIN chunk with their bytes. Every triangle primitive the
+    /// default scene places is read with its node transform; materials,
+    /// textures and animation are not. A skinned mesh shows its bind pose.
+    /// glTF is Y-up and the viewport Z-up, so Y and Z trade places.
+    /// </summary>
+    private static MeshPreview? TryLoadGlb(string path, int cap, CancellationToken token)
+    {
+        using var stream = OpenRead(path);
+        Span<byte> header = stackalloc byte[20];
+        if (stream.Length < header.Length)
+        {
+            return null;
+        }
+
+        stream.ReadExactly(header);
+        var jsonLength = BinaryPrimitives.ReadUInt32LittleEndian(header[12..]);
+        if (!header[..4].SequenceEqual("glTF"u8)
+            || BinaryPrimitives.ReadUInt32LittleEndian(header[4..]) != 2
+            || !header[16..].SequenceEqual("JSON"u8)
+            || jsonLength > MaxGlbJsonBytes
+            || header.Length + 8L + jsonLength > stream.Length)
+        {
+            return null;
+        }
+
+        var json = new byte[jsonLength];
+        stream.ReadExactly(json);
+        Span<byte> chunk = stackalloc byte[8];
+        stream.ReadExactly(chunk);
+        var binLength = BinaryPrimitives.ReadUInt32LittleEndian(chunk);
+        var binStart = stream.Position;
+        if (!chunk[4..].SequenceEqual("BIN\0"u8) || binStart + binLength > stream.Length)
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(json);
+        var gltf = new Gltf(document.RootElement, stream, binStart, binLength, new IndexedMesh(), token);
+        if (gltf.Root.TryGetProperty("meshes", out var meshes) && meshes.ValueKind == JsonValueKind.Array)
+        {
+            if (TryGetSceneRoots(gltf.Root, out var roots))
+            {
+                var visits = 0;
+                foreach (var root in roots)
+                {
+                    EmitGltfNode(gltf, root, Matrix4x4.Identity, depth: 0, ref visits);
+                }
+            }
+
+            if (gltf.Mesh.TriangleCount == 0)
+            {
+                // No scene to place them: show every mesh where it lies.
+                for (var index = 0; index < meshes.GetArrayLength(); index++)
+                {
+                    EmitGltfMesh(gltf, index, Matrix4x4.Identity);
+                }
+            }
+        }
+
+        return Build(gltf.Mesh.Triangles, "glTF model", cap, token);
+    }
+
+    private sealed record Gltf(
+        JsonElement Root,
+        Stream Stream,
+        long BinStart,
+        long BinLength,
+        IndexedMesh Mesh,
+        CancellationToken Token);
+
+    private static bool TryGetSceneRoots(JsonElement root, out List<int> roots)
+    {
+        roots = [];
+        if (!root.TryGetProperty("scenes", out var scenes) || scenes.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        var sceneIndex = GetInt(root, "scene", 0);
+        if (sceneIndex < 0 || sceneIndex >= scenes.GetArrayLength()
+            || !scenes[sceneIndex].TryGetProperty("nodes", out var nodes)
+            || nodes.ValueKind != JsonValueKind.Array)
+        {
+            return false;
+        }
+
+        foreach (var node in nodes.EnumerateArray())
+        {
+            if (node.TryGetInt32(out var index))
+            {
+                roots.Add(index);
+            }
+        }
+
+        return true;
+    }
+
+    private static void EmitGltfNode(Gltf gltf, int index, Matrix4x4 parent, int depth, ref int visits)
+    {
+        // Nodes form a forest, but a malformed file can loop or share; both
+        // limits keep a hostile graph from running away.
+        if (depth > 64 || ++visits > 100_000
+            || !gltf.Root.TryGetProperty("nodes", out var nodes)
+            || nodes.ValueKind != JsonValueKind.Array
+            || index < 0 || index >= nodes.GetArrayLength())
+        {
+            return;
+        }
+
+        gltf.Token.ThrowIfCancellationRequested();
+        var node = nodes[index];
+        var world = GltfNodeMatrix(node) * parent;
+        var meshIndex = GetInt(node, "mesh", -1);
+        if (meshIndex >= 0)
+        {
+            // A skinned mesh ignores its node's transform; its vertices
+            // already sit in the bind pose.
+            EmitGltfMesh(gltf, meshIndex, node.TryGetProperty("skin", out _) ? Matrix4x4.Identity : world);
+        }
+
+        if (node.TryGetProperty("children", out var children) && children.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var child in children.EnumerateArray())
+            {
+                if (child.TryGetInt32(out var childIndex))
+                {
+                    EmitGltfNode(gltf, childIndex, world, depth + 1, ref visits);
+                }
+            }
+        }
+    }
+
+    private static Matrix4x4 GltfNodeMatrix(JsonElement node)
+    {
+        // glTF matrices are column-major for column vectors; read in order
+        // they are the row-major, row-vector matrix System.Numerics uses.
+        if (ReadFloats(node, "matrix", 16) is { } m)
+        {
+            return new Matrix4x4(
+                m[0], m[1], m[2], m[3],
+                m[4], m[5], m[6], m[7],
+                m[8], m[9], m[10], m[11],
+                m[12], m[13], m[14], m[15]);
+        }
+
+        var scale = ReadFloats(node, "scale", 3) is { } s ? new Vector3(s[0], s[1], s[2]) : Vector3.One;
+        var rotation = ReadFloats(node, "rotation", 4) is { } r ? new Quaternion(r[0], r[1], r[2], r[3]) : Quaternion.Identity;
+        var translation = ReadFloats(node, "translation", 3) is { } t ? new Vector3(t[0], t[1], t[2]) : Vector3.Zero;
+        return Matrix4x4.CreateScale(scale)
+            * Matrix4x4.CreateFromQuaternion(Quaternion.Normalize(rotation))
+            * Matrix4x4.CreateTranslation(translation);
+    }
+
+    private static void EmitGltfMesh(Gltf gltf, int meshIndex, Matrix4x4 transform)
+    {
+        if (!gltf.Root.TryGetProperty("meshes", out var meshes)
+            || meshIndex >= meshes.GetArrayLength()
+            || !meshes[meshIndex].TryGetProperty("primitives", out var primitives)
+            || primitives.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        // A mirroring transform turns the winding inside out; swap it back
+        // so normals still face out.
+        var mirrored = transform.GetDeterminant() < 0;
+        foreach (var primitive in primitives.EnumerateArray())
+        {
+            var mode = GetInt(primitive, "mode", 4);
+            if (mode is not (4 or 5 or 6)
+                || !primitive.TryGetProperty("attributes", out var attributes)
+                || ReadGltfPositions(gltf, GetInt(attributes, "POSITION", -1)) is not { } positions)
+            {
+                continue;
+            }
+
+            int[]? indices = null;
+            if (primitive.TryGetProperty("indices", out _))
+            {
+                indices = ReadGltfIndices(gltf, GetInt(primitive, "indices", -1));
+                if (indices is null)
+                {
+                    continue;
+                }
+            }
+
+            var mesh = gltf.Mesh;
+            var first = mesh.VertexCount;
+            foreach (var position in positions)
+            {
+                var placed = Vector3.Transform(position, transform);
+                mesh.AddVertex(new Vector3(placed.X, -placed.Z, placed.Y));
+            }
+
+            var corners = indices?.Length ?? positions.Length;
+            int Corner(int i) => first + (indices is null ? i : indices[i]);
+            void Add(int a, int b, int c)
+            {
+                if (mirrored)
+                {
+                    mesh.AddTriangle(Corner(a), Corner(c), Corner(b));
+                }
+                else
+                {
+                    mesh.AddTriangle(Corner(a), Corner(b), Corner(c));
+                }
+            }
+
+            switch (mode)
+            {
+                case 4:
+                    for (var i = 0; i + 2 < corners; i += 3)
+                    {
+                        Add(i, i + 1, i + 2);
+                    }
+
+                    break;
+                case 5:
+                    for (var i = 0; i + 2 < corners; i++)
+                    {
+                        if ((i & 1) == 0)
+                        {
+                            Add(i, i + 1, i + 2);
+                        }
+                        else
+                        {
+                            Add(i + 1, i, i + 2);
+                        }
+                    }
+
+                    break;
+                case 6:
+                    for (var i = 1; i + 1 < corners; i++)
+                    {
+                        Add(0, i, i + 1);
+                    }
+
+                    break;
+            }
+        }
+    }
+
+    private static Vector3[]? ReadGltfPositions(Gltf gltf, int accessorIndex)
+    {
+        // Float VEC3 only: quantized or Draco-compressed positions have no
+        // readable float data here, and that primitive is skipped.
+        if (ReadGltfAccessor(gltf, accessorIndex, "VEC3", out var componentType, out var count, out var stride, out var bytes)
+            && componentType == 5126)
+        {
+            var positions = new Vector3[count];
+            for (var i = 0; i < count; i++)
+            {
+                positions[i] = ReadVector(bytes.AsSpan(i * stride, 12));
+            }
+
+            return positions;
+        }
+
+        return null;
+    }
+
+    private static int[]? ReadGltfIndices(Gltf gltf, int accessorIndex)
+    {
+        if (!ReadGltfAccessor(gltf, accessorIndex, "SCALAR", out var componentType, out var count, out var stride, out var bytes))
+        {
+            return null;
+        }
+
+        var indices = new int[count];
+        for (var i = 0; i < count; i++)
+        {
+            var at = bytes.AsSpan(i * stride);
+            indices[i] = componentType switch
+            {
+                5121 => at[0],
+                5123 => BinaryPrimitives.ReadUInt16LittleEndian(at),
+                5125 => (int)Math.Min(BinaryPrimitives.ReadUInt32LittleEndian(at), int.MaxValue),
+                _ => -1
+            };
+        }
+
+        return componentType is 5121 or 5123 or 5125 ? indices : null;
+    }
+
+    /// <summary>
+    /// The bytes behind one accessor, sliced from the BIN chunk: element i
+    /// starts at i * stride. Sparse accessors and external buffers are not
+    /// read.
+    /// </summary>
+    private static bool ReadGltfAccessor(
+        Gltf gltf,
+        int accessorIndex,
+        string type,
+        out int componentType,
+        out int count,
+        out int stride,
+        out byte[] bytes)
+    {
+        componentType = 0;
+        count = 0;
+        stride = 0;
+        bytes = [];
+        if (!gltf.Root.TryGetProperty("accessors", out var accessors)
+            || accessorIndex < 0 || accessorIndex >= accessors.GetArrayLength())
+        {
+            return false;
+        }
+
+        var accessor = accessors[accessorIndex];
+        componentType = GetInt(accessor, "componentType", 0);
+        count = GetInt(accessor, "count", 0);
+        var viewIndex = GetInt(accessor, "bufferView", -1);
+        if (count <= 0
+            || accessor.TryGetProperty("sparse", out _)
+            || !accessor.TryGetProperty("type", out var typeName)
+            || typeName.GetString() != type
+            || !gltf.Root.TryGetProperty("bufferViews", out var views)
+            || viewIndex < 0 || viewIndex >= views.GetArrayLength())
+        {
+            return false;
+        }
+
+        var view = views[viewIndex];
+        var componentBytes = componentType switch
+        {
+            5120 or 5121 => 1,
+            5122 or 5123 => 2,
+            5125 or 5126 => 4,
+            _ => 0
+        };
+        var elementBytes = componentBytes * (type == "VEC3" ? 3 : 1);
+        var declaredStride = GetInt(view, "byteStride", 0);
+        stride = declaredStride > 0 ? declaredStride : elementBytes;
+        long viewOffset = GetInt(view, "byteOffset", 0);
+        long viewLength = GetInt(view, "byteLength", 0);
+        long accessorOffset = GetInt(accessor, "byteOffset", 0);
+        var span = (count - 1L) * stride + elementBytes;
+        if (elementBytes == 0
+            || GetInt(view, "buffer", 0) != 0
+            || stride < elementBytes
+            || viewOffset < 0 || accessorOffset < 0
+            || viewOffset + viewLength > gltf.BinLength
+            || accessorOffset + span > viewLength
+            || span > int.MaxValue)
+        {
+            return false;
+        }
+
+        gltf.Token.ThrowIfCancellationRequested();
+        bytes = new byte[span];
+        gltf.Stream.Position = gltf.BinStart + viewOffset + accessorOffset;
+        gltf.Stream.ReadExactly(bytes);
+        return true;
+    }
+
+    private static int GetInt(JsonElement element, string name, int fallback) =>
+        element.ValueKind == JsonValueKind.Object
+        && element.TryGetProperty(name, out var value)
+        && value.TryGetInt32(out var number)
+            ? number
+            : fallback;
+
+    private static float[]? ReadFloats(JsonElement element, string name, int length)
+    {
+        if (!element.TryGetProperty(name, out var array)
+            || array.ValueKind != JsonValueKind.Array
+            || array.GetArrayLength() != length)
+        {
+            return null;
+        }
+
+        var values = new float[length];
+        for (var i = 0; i < length; i++)
+        {
+            if (!array[i].TryGetSingle(out values[i]))
+            {
+                return null;
+            }
+        }
+
+        return values;
+    }
+
     // ------------------------------------------------------------- STEP --
 
     /// <summary>
@@ -551,11 +931,11 @@ internal static class MeshPreviewLoader
     /// assembly puts them, not at their local origins. Splines draw their
     /// control polygon; anything unknown draws the segment between endpoints.
     /// </summary>
-    public static MeshPreview? TryLoadStepOutline(string path)
+    public static MeshPreview? TryLoadStepOutline(string path, CancellationToken token)
     {
         try
         {
-            var entities = ParseStepEntities(path);
+            var entities = ParseStepEntities(path, token);
             if (entities.Count == 0)
             {
                 return null;
@@ -647,30 +1027,36 @@ internal static class MeshPreviewLoader
             const int wireframeTriangleBudget = 120_000;
             var step = Math.Max(1, (int)Math.Ceiling(totalSegments * (double)trianglesPerSegment / wireframeTriangleBudget));
             var thickness = maxDimension / 700;
-            var geometry = new GeometryAccumulator();
+            var mesh = new IndexedMesh();
             var drawnEdges = 0;
             for (var index = 0; index < polylines.Count; index += step)
             {
+                if ((drawnEdges & 1023) == 0)
+                {
+                    token.ThrowIfCancellationRequested();
+                }
+
                 var polyline = polylines[index];
                 for (var i = 0; i < polyline.Count - 1; i++)
                 {
-                    AddStrut(geometry, polyline[i], polyline[i + 1], thickness);
+                    AddStrut(mesh, polyline[i], polyline[i + 1], thickness);
                 }
 
                 drawnEdges++;
             }
 
-            if (geometry.TriangleCount == 0)
-            {
-                return null;
-            }
-
-            return BuildFromAccumulator(
-                geometry,
+            return Build(
+                mesh.Triangles,
                 "STEP wireframe",
+                int.MaxValue,
+                token,
                 drawnEdges < polylines.Count
                     ? $"{drawnEdges:N0} of {polylines.Count:N0} edges"
                     : $"{polylines.Count:N0} edges");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -998,7 +1384,7 @@ internal static class MeshPreviewLoader
     /// can span lines. Complex (multi-type) instances are kept under the
     /// type "*" with their full body, for the relationship scan.
     /// </summary>
-    private static Dictionary<int, (string Type, string Args)> ParseStepEntities(string path)
+    private static Dictionary<int, (string Type, string Args)> ParseStepEntities(string path, CancellationToken token)
     {
         const long maxReadBytes = 64 * 1024 * 1024;
         var entities = new Dictionary<int, (string, string)>();
@@ -1011,8 +1397,14 @@ internal static class MeshPreviewLoader
 
         using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
         var statement = new StringBuilder();
+        var lines = 0;
         while (reader.ReadLine() is { } line)
         {
+            if ((++lines & 4095) == 0)
+            {
+                token.ThrowIfCancellationRequested();
+            }
+
             statement.Append(line);
             if (!line.TrimEnd().EndsWith(';'))
             {
@@ -1276,7 +1668,7 @@ internal static class MeshPreviewLoader
     }
 
     /// <summary>A thin 3-sided prism between two points; visible from every angle.</summary>
-    private static void AddStrut(GeometryAccumulator geometry, Point3D from, Point3D to, double thickness)
+    private static void AddStrut(IndexedMesh mesh, Point3D from, Point3D to, double thickness)
     {
         var axis = to - from;
         if (axis.LengthSquared < 1e-18)
@@ -1304,24 +1696,19 @@ internal static class MeshPreviewLoader
             var cornerB = from + offsets[(i + 1) % 3];
             var cornerC = to + offsets[i];
             var cornerD = to + offsets[(i + 1) % 3];
-            geometry.AddTriangle(cornerA, cornerB, cornerC, default);
-            geometry.AddTriangle(cornerB, cornerD, cornerC, default);
+            mesh.AddTriangle(ToVector(cornerA), ToVector(cornerB), ToVector(cornerC));
+            mesh.AddTriangle(ToVector(cornerB), ToVector(cornerD), ToVector(cornerC));
         }
     }
 
     // -------------------------------------------------------------- 3MF --
 
-    private static MeshPreview? TryLoad3mf(string path)
+    private static MeshPreview? TryLoad3mf(string path, int cap, CancellationToken token)
     {
         using var archive = ZipFile.OpenRead(path);
         var modelEntry = archive.Entries.FirstOrDefault(entry =>
             entry.FullName.EndsWith(".model", StringComparison.OrdinalIgnoreCase));
-        if (modelEntry is null)
-        {
-            return null;
-        }
-
-        if (modelEntry.Length > Max3MfModelBytes)
+        if (modelEntry is null || modelEntry.Length > Max3MfModelBytes)
         {
             return null;
         }
@@ -1338,8 +1725,9 @@ internal static class MeshPreviewLoader
             document = XDocument.Load(reader);
         }
 
+        token.ThrowIfCancellationRequested();
         var ns = document.Root?.Name.Namespace ?? XNamespace.None;
-        var meshesById = new Dictionary<string, (List<Point3D> Vertices, List<(int A, int B, int C)> Faces)>();
+        var objects = new Dictionary<string, (List<Vector3> Vertices, List<(int A, int B, int C)> Faces)>();
         foreach (var objectElement in document.Descendants(ns + "object"))
         {
             var id = objectElement.Attribute("id")?.Value;
@@ -1349,101 +1737,86 @@ internal static class MeshPreviewLoader
                 continue;
             }
 
-            var vertices = new List<Point3D>();
+            var vertices = new List<Vector3>();
             foreach (var vertex in meshElement.Element(ns + "vertices")?.Elements(ns + "vertex") ?? [])
             {
-                if (vertices.Count >= MaxIndexedVertices)
-                {
-                    return null;
-                }
-
-                vertices.Add(new Point3D(
-                    ParseXmlDouble(vertex.Attribute("x")),
-                    ParseXmlDouble(vertex.Attribute("y")),
-                    ParseXmlDouble(vertex.Attribute("z"))));
+                vertices.Add(new Vector3(
+                    (float)ParseXmlDouble(vertex.Attribute("x")),
+                    (float)ParseXmlDouble(vertex.Attribute("y")),
+                    (float)ParseXmlDouble(vertex.Attribute("z"))));
             }
 
+            token.ThrowIfCancellationRequested();
             var faces = new List<(int A, int B, int C)>();
             foreach (var triangle in meshElement.Element(ns + "triangles")?.Elements(ns + "triangle") ?? [])
             {
-                var a = ParseXmlInt(triangle.Attribute("v1"));
-                var b = ParseXmlInt(triangle.Attribute("v2"));
-                var c = ParseXmlInt(triangle.Attribute("v3"));
-                if (a >= 0 && b >= 0 && c >= 0)
-                {
-                    if (faces.Count >= MaxIndexedFaces)
-                    {
-                        return null;
-                    }
-
-                    faces.Add((a, b, c));
-                }
+                faces.Add((
+                    ParseXmlInt(triangle.Attribute("v1")),
+                    ParseXmlInt(triangle.Attribute("v2")),
+                    ParseXmlInt(triangle.Attribute("v3"))));
             }
 
-            meshesById[id] = (vertices, faces);
+            objects[id] = (vertices, faces);
         }
 
-        if (meshesById.Count == 0)
+        // Assemble what the build plate references (with placement
+        // transforms); a model with no build items shows every mesh where
+        // it lies.
+        var mesh = new IndexedMesh();
+        foreach (var item in document.Root?.Element(ns + "build")?.Elements(ns + "item") ?? [])
         {
-            return null;
-        }
-
-        // Assemble what the build plate references (with placement transforms);
-        // a model with no build items just shows every mesh where it lies.
-        var vertices2 = new List<Point3D>();
-        var faces2 = new List<(int A, int B, int C)>();
-        var buildItems = document.Root?.Element(ns + "build")?.Elements(ns + "item").ToList();
-        if (buildItems is { Count: > 0 })
-        {
-            foreach (var item in buildItems)
+            var objectId = item.Attribute("objectid")?.Value;
+            if (objectId is not null && objects.TryGetValue(objectId, out var source))
             {
-                var objectId = item.Attribute("objectid")?.Value;
-                if (objectId is null || !meshesById.TryGetValue(objectId, out var mesh))
-                {
-                    continue;
-                }
-
-                AppendTransformed(vertices2, faces2, mesh.Vertices, mesh.Faces, ParseMatrix(item.Attribute("transform")?.Value));
+                Append3mfObject(mesh, source.Vertices, source.Faces, Parse3mfMatrix(item.Attribute("transform")?.Value));
             }
         }
 
-        if (faces2.Count == 0)
+        if (mesh.TriangleCount == 0)
         {
-            foreach (var mesh in meshesById.Values)
+            foreach (var (vertices, faces) in objects.Values)
             {
-                AppendTransformed(vertices2, faces2, mesh.Vertices, mesh.Faces, null);
+                Append3mfObject(mesh, vertices, faces, null);
             }
         }
 
-        return BuildFromIndexed(vertices2, faces2, "3MF model");
+        return Build(mesh.Triangles, "3MF model", cap, token);
     }
 
-    private static void AppendTransformed(
-        List<Point3D> vertices,
+    private static void Append3mfObject(
+        IndexedMesh mesh,
+        List<Vector3> vertices,
         List<(int A, int B, int C)> faces,
-        List<Point3D> sourceVertices,
-        List<(int A, int B, int C)> sourceFaces,
-        Matrix3D? transform)
+        Matrix4x4? transform)
     {
-        if (vertices.Count + sourceVertices.Count > MaxIndexedVertices || faces.Count + sourceFaces.Count > MaxIndexedFaces)
+        var first = mesh.VertexCount;
+        foreach (var vertex in vertices)
         {
-            throw new InvalidDataException("3MF model is too large for preview.");
+            mesh.AddVertex(transform is { } matrix ? Vector3.Transform(vertex, matrix) : vertex);
         }
 
-        var offset = vertices.Count;
-        foreach (var vertex in sourceVertices)
+        // A mirroring placement turns the winding inside out.
+        var mirrored = transform?.GetDeterminant() < 0;
+        foreach (var (a, b, c) in faces)
         {
-            vertices.Add(transform?.Transform(vertex) ?? vertex);
-        }
+            if (a < 0 || b < 0 || c < 0 || a >= vertices.Count || b >= vertices.Count || c >= vertices.Count)
+            {
+                continue;
+            }
 
-        foreach (var (a, b, c) in sourceFaces)
-        {
-            faces.Add((a + offset, b + offset, c + offset));
+            if (mirrored)
+            {
+                mesh.AddTriangle(first + a, first + c, first + b);
+            }
+            else
+            {
+                mesh.AddTriangle(first + a, first + b, first + c);
+            }
         }
     }
 
-    /// <summary>3MF transform: 12 numbers, a row-major 4x3 affine matrix.</summary>
-    private static Matrix3D? ParseMatrix(string? value)
+    /// <summary>3MF transform: 12 numbers, a row-major 4x3 affine matrix for row vectors.</summary>
+    private static Matrix4x4? Parse3mfMatrix(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -1456,16 +1829,16 @@ internal static class MeshPreviewLoader
             return null;
         }
 
-        var m = new double[12];
+        var m = new float[12];
         for (var i = 0; i < 12; i++)
         {
-            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out m[i]))
+            if (!float.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out m[i]))
             {
                 return null;
             }
         }
 
-        return new Matrix3D(
+        return new Matrix4x4(
             m[0], m[1], m[2], 0,
             m[3], m[4], m[5], 0,
             m[6], m[7], m[8], 0,
@@ -1478,148 +1851,427 @@ internal static class MeshPreviewLoader
     private static int ParseXmlInt(XAttribute? attribute) =>
         attribute is not null && int.TryParse(attribute.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : -1;
 
-    // ---------------------------------------------------------- shared --
+    // ----------------------------------------------------------- shared --
 
-    /// <summary>Samples an indexed triangle list down to the render cap and builds the preview.</summary>
-    private static MeshPreview? BuildFromIndexed(
-        List<Point3D> vertices,
-        List<(int A, int B, int C)> faces,
-        string formatName)
+    // The first preview after launch runs the per-vertex and per-triangle
+    // paths millions of times before tiering would promote them, so they
+    // start optimized.
+    private delegate void TriangleVisitor(Vector3 a, Vector3 b, Vector3 c);
+
+    /// <summary>Visits every source triangle in order; building may ask for more than one pass.</summary>
+    private delegate void TriangleStream(TriangleVisitor visit, CancellationToken token);
+
+    /// <summary>A shape ready for normals: shared positions and the corners that index them.</summary>
+    private sealed record MeshShape(Vector3[] Positions, int[] Corners)
     {
-        if (vertices.Count == 0 || faces.Count == 0)
-        {
-            return null;
-        }
-
-        var geometry = new GeometryAccumulator();
-        var step = Math.Max(1, (int)Math.Ceiling(faces.Count / (double)MaxRenderedTriangles));
-        for (var faceIndex = 0; faceIndex < faces.Count; faceIndex += step)
-        {
-            var (a, b, c) = faces[faceIndex];
-            if (a < vertices.Count && b < vertices.Count && c < vertices.Count && a >= 0 && b >= 0 && c >= 0)
-            {
-                geometry.AddTriangle(vertices[a], vertices[b], vertices[c], default);
-            }
-        }
-
-        return BuildPreview(geometry, formatName, faces.Count);
+        public int TriangleCount => Corners.Length / 3;
     }
 
-    private static MeshPreview? BuildPreview(
-        GeometryAccumulator geometry,
+    /// <summary>
+    /// One path for every format: measure the source, keep it whole when it
+    /// fits the cap or simplify it when it does not, then shade it.
+    /// </summary>
+    private static MeshPreview? Build(
+        TriangleStream source,
         string formatName,
-        int totalTriangles)
+        int cap,
+        CancellationToken token,
+        string? countLabel = null)
     {
-        var renderedTriangles = geometry.TriangleCount;
-        var countLabel = renderedTriangles < totalTriangles
-            ? $"{renderedTriangles:N0} sampled of {totalTriangles:N0} triangles"
-            : $"{renderedTriangles:N0} triangles";
-        return BuildFromAccumulator(geometry, formatName, countLabel);
-    }
+        var count = 0;
+        var min = new Vector3(float.PositiveInfinity);
+        var max = new Vector3(float.NegativeInfinity);
+        var area = 0.0;
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
+        {
+            count++;
+            min = Vector3.Min(min, Vector3.Min(a, Vector3.Min(b, c)));
+            max = Vector3.Max(max, Vector3.Max(a, Vector3.Max(b, c)));
+            area += Vector3.Cross(b - a, c - a).Length() * 0.5;
+        }, token);
 
-    /// <summary>Centers and normalizes accumulated geometry into the viewport's frame.</summary>
-    private static MeshPreview? BuildFromAccumulator(GeometryAccumulator geometry, string formatName, string countLabel)
-    {
-        if (geometry.TriangleCount == 0 || !geometry.Bounds.HasValue)
+        if (count == 0)
         {
             return null;
         }
 
-        var originalBounds = geometry.Bounds.ToRect3D();
-        var maxDimension = Math.Max(originalBounds.SizeX, Math.Max(originalBounds.SizeY, originalBounds.SizeZ));
-        if (maxDimension <= 0 || double.IsNaN(maxDimension) || double.IsInfinity(maxDimension))
+        var shape = count <= cap
+            ? Weld(source, count, token)
+            : Simplify(source, min, max, area, cap, token);
+        if (shape.TriangleCount == 0)
         {
-            maxDimension = 1;
+            return null;
         }
 
-        var center = new Point3D(
-            originalBounds.X + originalBounds.SizeX / 2,
-            originalBounds.Y + originalBounds.SizeY / 2,
-            originalBounds.Z + originalBounds.SizeZ / 2);
-        var scale = 3.1 / maxDimension;
-        var mesh = new MeshGeometry3D
-        {
-            Positions = new Point3DCollection(geometry.Points.Select(point => new Point3D(
-                (point.X - center.X) * scale,
-                (point.Y - center.Y) * scale,
-                (point.Z - center.Z) * scale))),
-            TriangleIndices = new Int32Collection(geometry.Indices),
-            Normals = new Vector3DCollection(geometry.Normals)
-        };
-        mesh.Freeze();
-
-        return new MeshPreview(mesh, formatName, countLabel);
+        countLabel ??= shape.TriangleCount < count
+            ? $"{count:N0} triangles, simplified to {shape.TriangleCount:N0}"
+            : $"{count:N0} triangles";
+        return new MeshPreview(ToGeometry(shape, min, max), formatName, countLabel, count);
     }
 
-    private sealed class GeometryAccumulator
+    /// <summary>
+    /// Joins corners that sit at exactly the same point, so neighboring
+    /// faces can share a normal even when the file stores each facet alone.
+    /// </summary>
+    private static MeshShape Weld(TriangleStream source, int count, CancellationToken token)
     {
-        public List<Point3D> Points { get; } = [];
-
-        public List<Vector3D> Normals { get; } = [];
-
-        public List<int> Indices { get; } = [];
-
-        public BoundsAccumulator Bounds;
-
-        public GeometryAccumulator()
+        var ids = new Dictionary<Vector3, int>(Math.Min(count, 1 << 20));
+        var positions = new List<Vector3>();
+        var corners = new int[count * 3];
+        var next = 0;
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        int Id(Vector3 point)
         {
-            Bounds = BoundsAccumulator.Empty;
+            if (!ids.TryGetValue(point, out var id))
+            {
+                id = positions.Count;
+                positions.Add(point);
+                ids[point] = id;
+            }
+
+            return id;
         }
 
-        public int TriangleCount => Points.Count / 3;
-
-        public void AddTriangle(Point3D p1, Point3D p2, Point3D p3, Vector3D normal)
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
         {
-            // Text formats can carry literal NaN/Infinity coordinates; one
-            // such vertex would poison the normalized bounds and blank the
-            // whole render.
-            if (!IsFinite(p1) || !IsFinite(p2) || !IsFinite(p3))
+            if (next < corners.Length)
+            {
+                corners[next++] = Id(a);
+                corners[next++] = Id(b);
+                corners[next++] = Id(c);
+            }
+        }, token);
+
+        return new MeshShape([.. positions], next == corners.Length ? corners : corners[..next]);
+    }
+
+    /// <summary>
+    /// Vertex clustering: snap every corner to a grid cell, merge each
+    /// cell's corners into their mean, and keep the triangles whose three
+    /// corners land in three different cells, once each. Linear in the
+    /// source, and the result is still a closed surface. The cell size comes
+    /// from the surface area; a result over the cap, or far under it, takes
+    /// another pass with cells resized from the count it got.
+    /// </summary>
+    private static MeshShape Simplify(
+        TriangleStream source,
+        Vector3 min,
+        Vector3 max,
+        double area,
+        int cap,
+        CancellationToken token)
+    {
+        var extent = max - min;
+        double longest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
+        if (!(longest > 0) || !double.IsFinite(longest))
+        {
+            return new MeshShape([], []);
+        }
+
+        // A smooth closed surface keeps about two triangles per occupied
+        // cell and crosses about one and a half cells per cell-sized patch
+        // of area, so with these cells a dense sphere lands at 1.4 times the
+        // cap. CAD meshes, whose flat faces carry few vertices at any cell
+        // size, land under it: a mouse shell at 0.4. A third of the cap is
+        // plenty to show.
+        var floor = longest / 1_000_000;
+        var cell = Math.Sqrt(1.6 * area / cap);
+        if (!(cell > floor))
+        {
+            cell = longest / 512;
+        }
+
+        var shape = ClusterOnce(source, min, cell, token);
+        if (shape.TriangleCount < cap / 3)
+        {
+            cell = Math.Max(floor, cell * Math.Sqrt(shape.TriangleCount / (0.8 * cap)));
+            shape = ClusterOnce(source, min, cell, token);
+        }
+
+        // Each pass widens the cells by at least 17 percent, so this ends.
+        while (shape.TriangleCount > cap * 1.1)
+        {
+            cell *= Math.Sqrt(shape.TriangleCount / (0.8 * cap));
+            shape = ClusterOnce(source, min, cell, token);
+        }
+
+        return shape;
+    }
+
+    private static MeshShape ClusterOnce(TriangleStream source, Vector3 origin, double cell, CancellationToken token)
+    {
+        const long axisCells = 1L << 21;
+        var inverse = 1 / cell;
+        var cells = new Dictionary<long, int>();
+        var sums = new List<(double X, double Y, double Z, int Count)>();
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        int Cell(Vector3 point)
+        {
+            var x = Math.Min(axisCells - 1, (long)((point.X - origin.X) * inverse));
+            var y = Math.Min(axisCells - 1, (long)((point.Y - origin.Y) * inverse));
+            var z = Math.Min(axisCells - 1, (long)((point.Z - origin.Z) * inverse));
+            var key = (x * axisCells + y) * axisCells + z;
+            if (!cells.TryGetValue(key, out var id))
+            {
+                id = sums.Count;
+                cells[key] = id;
+                sums.Add(default);
+            }
+
+            var sum = sums[id];
+            sums[id] = (sum.X + point.X, sum.Y + point.Y, sum.Z + point.Z, sum.Count + 1);
+            return id;
+        }
+
+        var seen = new HashSet<(int, int, int)>();
+        var corners = new List<int>();
+        source([MethodImpl(MethodImplOptions.AggressiveOptimization)] (a, b, c) =>
+        {
+            int ia = Cell(a), ib = Cell(b), ic = Cell(c);
+            if (ia == ib || ib == ic || ia == ic)
             {
                 return;
             }
 
-            if (normal.LengthSquared < 0.0000001 || double.IsNaN(normal.X) || double.IsNaN(normal.Y) || double.IsNaN(normal.Z))
+            var low = Math.Min(ia, Math.Min(ib, ic));
+            var high = Math.Max(ia, Math.Max(ib, ic));
+            if (seen.Add((low, ia + ib + ic - low - high, high)))
             {
-                normal = Vector3D.CrossProduct(p2 - p1, p3 - p1);
+                corners.Add(ia);
+                corners.Add(ib);
+                corners.Add(ic);
+            }
+        }, token);
+
+        // Only cells a surviving triangle uses become vertices.
+        var remap = new int[sums.Count];
+        Array.Fill(remap, -1);
+        var positions = new List<Vector3>();
+        var result = new int[corners.Count];
+        for (var i = 0; i < result.Length; i++)
+        {
+            var id = corners[i];
+            if (remap[id] < 0)
+            {
+                var sum = sums[id];
+                remap[id] = positions.Count;
+                positions.Add(new Vector3((float)(sum.X / sum.Count), (float)(sum.Y / sum.Count), (float)(sum.Z / sum.Count)));
             }
 
-            if (normal.LengthSquared < 0.0000001)
-            {
-                normal = new Vector3D(0, 0, 1);
-            }
-            else
-            {
-                normal.Normalize();
-            }
-
-            var start = Points.Count;
-            Points.Add(p1);
-            Points.Add(p2);
-            Points.Add(p3);
-            Normals.Add(normal);
-            Normals.Add(normal);
-            Normals.Add(normal);
-            Indices.Add(start);
-            Indices.Add(start + 1);
-            Indices.Add(start + 2);
-            Bounds.Include(p1);
-            Bounds.Include(p2);
-            Bounds.Include(p3);
+            result[i] = remap[id];
         }
 
-        private static bool IsFinite(Point3D point) =>
-            double.IsFinite(point.X) && double.IsFinite(point.Y) && double.IsFinite(point.Z);
+        return new MeshShape([.. positions], result);
     }
 
-    private static Point3D ReadPoint(ReadOnlySpan<byte> bytes, int offset) => new(
-        ReadSingle(bytes, offset),
-        ReadSingle(bytes, offset + 4),
-        ReadSingle(bytes, offset + 8));
-
-    private static float ReadSingle(ReadOnlySpan<byte> bytes, int offset)
+    /// <summary>
+    /// Per-corner normals. A corner averages the faces around its vertex
+    /// that turn less than the crease angle from its own face, weighted by
+    /// area, so curved surfaces shade smooth and hard edges stay sharp.
+    /// </summary>
+    private static Vector3[] CreaseNormals(MeshShape shape)
     {
-        var value = BitConverter.ToSingle(bytes.Slice(offset, 4));
-        return float.IsFinite(value) ? value : 0;
+        var corners = shape.Corners;
+        var positions = shape.Positions;
+        var weighted = new Vector3[shape.TriangleCount];
+        var unit = new Vector3[shape.TriangleCount];
+        for (var t = 0; t < weighted.Length; t++)
+        {
+            var a = positions[corners[t * 3]];
+            weighted[t] = Vector3.Cross(positions[corners[t * 3 + 1]] - a, positions[corners[t * 3 + 2]] - a);
+            var length = weighted[t].Length();
+            unit[t] = length > 0 ? weighted[t] / length : Vector3.Zero;
+        }
+
+        // The faces around each vertex, as one flat list with offsets.
+        var start = new int[positions.Length + 1];
+        foreach (var vertex in corners)
+        {
+            start[vertex + 1]++;
+        }
+
+        for (var v = 0; v < positions.Length; v++)
+        {
+            start[v + 1] += start[v];
+        }
+
+        var cursor = start[..^1];
+        var around = new int[corners.Length];
+        for (var i = 0; i < corners.Length; i++)
+        {
+            around[cursor[corners[i]]++] = i / 3;
+        }
+
+        var normals = new Vector3[corners.Length];
+        for (var i = 0; i < corners.Length; i++)
+        {
+            var own = unit[i / 3];
+            var vertex = corners[i];
+            var sum = Vector3.Zero;
+            for (var k = start[vertex]; k < start[vertex + 1]; k++)
+            {
+                var face = around[k];
+                if (Vector3.Dot(unit[face], own) >= CreaseCosine)
+                {
+                    sum += weighted[face];
+                }
+            }
+
+            var length = sum.Length();
+            normals[i] = length > 0 ? sum / length : Vector3.UnitZ;
+        }
+
+        return normals;
+    }
+
+    /// <summary>Centers the shape and scales its longest side to the viewport's frame.</summary>
+    private static MeshGeometry3D ToGeometry(MeshShape shape, Vector3 min, Vector3 max)
+    {
+        var center = (min + max) / 2;
+        var extent = max - min;
+        double longest = Math.Max(extent.X, Math.Max(extent.Y, extent.Z));
+        var scale = longest > 0 && double.IsFinite(longest) ? 3.1 / longest : 1;
+        var normals = CreaseNormals(shape);
+        var positions = new Point3D[shape.Corners.Length];
+        var vectors = new Vector3D[shape.Corners.Length];
+        for (var i = 0; i < positions.Length; i++)
+        {
+            var point = shape.Positions[shape.Corners[i]];
+            positions[i] = new Point3D(
+                (point.X - center.X) * scale,
+                (point.Y - center.Y) * scale,
+                (point.Z - center.Z) * scale);
+            vectors[i] = new Vector3D(normals[i].X, normals[i].Y, normals[i].Z);
+        }
+
+        // No index list: each three positions are one triangle. The
+        // collections take whole arrays in one copy instead of an Add each.
+        var geometry = new MeshGeometry3D
+        {
+            Positions = new Point3DCollection(positions),
+            Normals = new Vector3DCollection(vectors)
+        };
+        geometry.Freeze();
+        return geometry;
+    }
+
+    /// <summary>Triangles held in memory: float positions and the corners that index them.</summary>
+    private sealed class IndexedMesh
+    {
+        private Vector3[] _positions = new Vector3[1024];
+        private int[] _corners = new int[3 * 1024];
+
+        public int VertexCount { get; private set; }
+
+        public int TriangleCount { get; private set; }
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public int AddVertex(Vector3 position)
+        {
+            if (VertexCount == _positions.Length)
+            {
+                Array.Resize(ref _positions, _positions.Length * 2);
+            }
+
+            _positions[VertexCount] = position;
+            return VertexCount++;
+        }
+
+        public int AddVertex(double x, double y, double z) => AddVertex(new Vector3((float)x, (float)y, (float)z));
+
+        /// <summary>A corner outside the vertex list drops its triangle.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public void AddTriangle(int a, int b, int c)
+        {
+            if ((uint)a >= (uint)VertexCount || (uint)b >= (uint)VertexCount || (uint)c >= (uint)VertexCount)
+            {
+                return;
+            }
+
+            var at = TriangleCount * 3;
+            if (at + 3 > _corners.Length)
+            {
+                Array.Resize(ref _corners, _corners.Length * 2);
+            }
+
+            _corners[at] = a;
+            _corners[at + 1] = b;
+            _corners[at + 2] = c;
+            TriangleCount++;
+        }
+
+        public void AddTriangle(Vector3 a, Vector3 b, Vector3 c) => AddTriangle(AddVertex(a), AddVertex(b), AddVertex(c));
+
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public void Triangles(TriangleVisitor visit, CancellationToken token)
+        {
+            for (var t = 0; t < TriangleCount; t++)
+            {
+                if ((t & 4095) == 0)
+                {
+                    token.ThrowIfCancellationRequested();
+                }
+
+                var at = t * 3;
+                VisitFinite(visit, _positions[_corners[at]], _positions[_corners[at + 1]], _positions[_corners[at + 2]]);
+            }
+        }
+    }
+
+    // Text formats can carry literal NaN or Infinity coordinates, and binary
+    // ones garbage floats; one such corner would poison the bounds and blank
+    // the whole render, so its triangle is dropped.
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static void VisitFinite(TriangleVisitor visit, Vector3 a, Vector3 b, Vector3 c)
+    {
+        if (IsFinite(a) && IsFinite(b) && IsFinite(c))
+        {
+            visit(a, b, c);
+        }
+    }
+
+    private static bool IsFinite(Vector3 v) => float.IsFinite(v.X) && float.IsFinite(v.Y) && float.IsFinite(v.Z);
+
+    private static Vector3 ToVector(Point3D point) => new((float)point.X, (float)point.Y, (float)point.Z);
+
+    private static FileStream OpenRead(string path) => new(
+        path,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.ReadWrite | FileShare.Delete,
+        bufferSize: 1 << 16,
+        FileOptions.SequentialScan);
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static bool NextToken(ref ReadOnlySpan<char> line, out ReadOnlySpan<char> token)
+    {
+        line = line.TrimStart();
+        if (line.IsEmpty)
+        {
+            token = default;
+            return false;
+        }
+
+        var end = line.IndexOfAny(' ', '\t');
+        token = end < 0 ? line : line[..end];
+        line = end < 0 ? default : line[end..];
+        return true;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+    private static bool TryReadVector(ref ReadOnlySpan<char> line, out Vector3 vector)
+    {
+        vector = default;
+        if (!NextToken(ref line, out var xText) || !NextToken(ref line, out var yText) || !NextToken(ref line, out var zText)
+            || !double.TryParse(xText, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
+            || !double.TryParse(yText, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
+            || !double.TryParse(zText, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
+        {
+            return false;
+        }
+
+        vector = new Vector3((float)x, (float)y, (float)z);
+        return true;
     }
 
     private struct BoundsAccumulator

@@ -683,44 +683,9 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsImage(path) || (useSignatureRouting && FileSignatures.IsImage(signature)))
         {
-            var decoded = await Task.Run(() => DecodeImageFirstFrame(path), token);
-            if (decoded is not null)
+            if (await TryBuildImagePreviewAsync(path, version, token) is { } image)
             {
-                // Camera photos carry their upright direction as metadata;
-                // Explorer and its thumbnails honor it, so the preview must
-                // agree with what sits next to it.
-                var session = new ImageRotationSession(path, decoded.Bitmap, decoded.Orientation);
-                if (!token.IsCancellationRequested)
-                {
-                    // A superseded load must not hand its session to the
-                    // preview that replaced it.
-                    _rotationSession = session;
-                }
-
-                if (!decoded.IsFullDecode)
-                {
-                    _ = CompleteLargeImageDecodeAsync(
-                        path,
-                        decoded.Stamp,
-                        decoded.CacheGeneration,
-                        session,
-                        version,
-                        token);
-                }
-
-                // A local image's source header already supplied its real,
-                // EXIF-oriented dimensions. A giant image may be painted
-                // first from whatever size Explorer happened to cache; that
-                // thumbnail is not geometry truth and must not shrink the
-                // stage. Network and signature-routed images skip the sync
-                // probe, so their decoded pixels still provide the fallback.
-                if (_stageFitVersion != version)
-                {
-                    SetStageFitHint(
-                        StageFitHint.ImagePixels(session.CurrentBitmap.PixelWidth, session.CurrentBitmap.PixelHeight),
-                        version);
-                }
-                return BuildZoomableImageViewer(session.CurrentBitmap, session);
+                return image;
             }
 
             if (FileKinds.IsHeif(path) || signature == FileSignatureKind.Heif)
@@ -742,17 +707,9 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsPhotoshop(path))
         {
-            var composite = await Task.Run(() => PsdPreviewLoader.TryLoad(path), token);
-            if (composite is not null)
+            if (await TryBuildPsdPreviewAsync(path, version, token) is { } composite)
             {
-                // The PSD header names the full canvas before its composite
-                // is decoded. Large composites are deliberately downsampled,
-                // so they are only sizing truth when the header probe failed.
-                if (_stageFitVersion != version)
-                {
-                    SetStageFitHint(StageFitHint.ImagePixels(composite.PixelWidth, composite.PixelHeight), version);
-                }
-                return BuildZoomableImageViewer(composite);
+                return composite;
             }
 
             // No readable composite: the generic card below still shows a
@@ -761,7 +718,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsFont(path))
         {
-            return BuildFontPreview(path);
+            return await BuildFontPreviewAsync(path, token);
         }
 
         var zipPackage = useSignatureRouting && signature == FileSignatureKind.Zip
@@ -806,7 +763,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsMesh(path))
         {
-            var meshPreview = await Task.Run(() => MeshPreviewLoader.TryLoad(path), token);
+            var meshPreview = await Task.Run(() => MeshPreviewLoader.TryLoad(path, token), token);
             if (meshPreview is not null)
             {
                 return BuildMeshPreview(meshPreview);
@@ -826,7 +783,7 @@ public partial class PreviewWindow : Window
         {
             // A rotating vertex outline beats a static card. True surfaces
             // would need a CAD kernel; the cloud still shows the shape.
-            var outline = await Task.Run(() => MeshPreviewLoader.TryLoadStepOutline(path), token);
+            var outline = await Task.Run(() => MeshPreviewLoader.TryLoadStepOutline(path, token), token);
             if (outline is not null)
             {
                 return BuildMeshPreview(outline);
@@ -1161,12 +1118,9 @@ public partial class PreviewWindow : Window
             }
 
             if ((FileKinds.IsImage(contentPath) || FileKinds.IsBrowserImage(contentPath) || FileKinds.IsPhotoshop(contentPath))
-                && TryGetImagePixelSize(contentPath, out var pixels))
+                && ImageHeader.TryRead(contentPath) is { } image)
             {
-                var oriented = ImageOrientation.SwapsAxes(ImageOrientation.Read(contentPath))
-                    ? new Size(pixels.Height, pixels.Width)
-                    : pixels;
-                SetStageFitHint(StageFitHint.ImagePixels(oriented.Width, oriented.Height), version);
+                SetStageFitHint(StageFitHint.ImagePixels(image.Width, image.Height), version);
                 return;
             }
 

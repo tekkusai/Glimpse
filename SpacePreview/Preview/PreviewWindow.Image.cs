@@ -30,19 +30,112 @@ namespace SpacePreview.Preview;
 public partial class PreviewWindow
 {
     // ---------------------------------------------------------------------
-    // Images: decode capped to keep 100-megapixel photos cheap, displayed in
-    // a zoomable viewer (wheel zooms at the cursor, drag pans, double-click
-    // toggles fit/actual size).
+    // Images: the header is read once and names the true pixels. The first
+    // frame is the quickest image that is sharp at the stage's size, and a
+    // giant image decodes in full a beat later for zoom. One viewer owns the
+    // gestures (docs/DESIGN.md, Zoom and pan).
     // ---------------------------------------------------------------------
+
+    // The window's keyboard zoom reaches whichever image is on screen.
+    private IZoomableImage? _imageZoom;
 
     private sealed record ImageFirstFrame(
         BitmapSource Bitmap,
         int Orientation,
         bool IsFullDecode,
+        bool CoversStage,
         ImageFileStamp? Stamp,
         int CacheGeneration);
 
-    private ImageFirstFrame? DecodeImageFirstFrame(string path)
+    private async Task<FrameworkElement?> TryBuildImagePreviewAsync(string path, long version, CancellationToken token)
+    {
+        var stage = StageContentPixels();
+        var (header, decoded) = await Task.Run(() =>
+        {
+            var read = ImageHeader.TryRead(path);
+            return (read, DecodeImageFirstFrame(path, read, stage));
+        }, token);
+        if (decoded is null)
+        {
+            return null;
+        }
+
+        // Camera photos carry their upright direction as metadata; Explorer
+        // and its thumbnails honor it, so the preview must agree with what
+        // sits next to it.
+        var session = new ImageRotationSession(path, decoded.Bitmap, decoded.Orientation);
+        if (!token.IsCancellationRequested)
+        {
+            // A superseded load must not hand its session to the preview
+            // that replaced it.
+            _rotationSession = session;
+        }
+
+        if (!decoded.IsFullDecode)
+        {
+            _ = CompleteLargeImageDecodeAsync(path, header, decoded, session, version, token);
+        }
+
+        // The header is the geometry truth, and a local image gave it to the
+        // stage before decoding. A first frame may be a downsampled stand-in,
+        // so it sizes the stage only when nothing else did.
+        if (_stageFitVersion != version)
+        {
+            SetStageFitHint(
+                header is null
+                    ? StageFitHint.ImagePixels(session.CurrentBitmap.PixelWidth, session.CurrentBitmap.PixelHeight)
+                    : StageFitHint.ImagePixels(header.Width, header.Height),
+                version);
+        }
+
+        return BuildZoomableImageViewer(session.CurrentBitmap, header?.LongSide ?? 0, session);
+    }
+
+    private async Task<FrameworkElement?> TryBuildPsdPreviewAsync(string path, long version, CancellationToken token)
+    {
+        var (header, composite) = await Task.Run(
+            () => (ImageHeader.TryRead(path), PsdPreviewLoader.TryLoad(path, token)),
+            token);
+        if (composite is null)
+        {
+            return null;
+        }
+
+        // The PSD header names the full canvas before its composite decodes.
+        // A large composite is downsampled, so it sizes the stage only when
+        // nothing else did.
+        if (_stageFitVersion != version)
+        {
+            SetStageFitHint(
+                header is null
+                    ? StageFitHint.ImagePixels(composite.PixelWidth, composite.PixelHeight)
+                    : StageFitHint.ImagePixels(header.Width, header.Height),
+                version);
+        }
+
+        return BuildZoomableImageViewer(composite, header?.LongSide ?? 0);
+    }
+
+    /// <summary>The content area this item's stage will have, in device pixels.</summary>
+    private Size StageContentPixels()
+    {
+        var dpi = DpiScaleFor(Hwnd);
+        var window = Hwnd == IntPtr.Zero || IsStageMaximized || _itemStageSize is not null
+            ? new Size(ActualWidth, ActualHeight)
+            : ComputeStageTarget(GetWorkAreaDips(Hwnd), Hwnd);
+        return new Size(
+            Math.Max(1, (window.Width - StageFit.ChromeWidth) * dpi),
+            Math.Max(1, (window.Height - StageFit.ChromeHeight) * dpi));
+    }
+
+    /// <summary>
+    /// A cached decode when there is one. A giant image (past the decode
+    /// cap) first shows the quickest picture that is sharp at the stage:
+    /// Explorer's cached thumbnail when it covers the stage, otherwise a
+    /// JPEG decoded straight to stage size. Everything else decodes once,
+    /// in full.
+    /// </summary>
+    private ImageFirstFrame? DecodeImageFirstFrame(string path, ImageHeader? header, Size stagePixels)
     {
         var hasStamp = ImageFileStamp.TryCreate(path, out var stamp);
         if (hasStamp && _imageDecodeCache.TryGet(stamp, out var cached) && cached is not null)
@@ -52,33 +145,61 @@ public partial class PreviewWindow
                 cached.Bitmap,
                 cached.Orientation,
                 IsFullDecode: true,
+                CoversStage: true,
                 stamp,
                 _imageDecodeCache.CaptureGeneration());
         }
 
         var cacheGeneration = _imageDecodeCache.CaptureGeneration();
-        if (TryGetImagePixelSize(path, out var pixels)
-            && Math.Max(pixels.Width, pixels.Height) > MaxImageDecodePixels
-            && ShellThumbnailProvider.TryGetCachedThumbnail(path, LargeImageFirstFramePixels) is { } cachedThumbnail)
+        ImageFileStamp? fileStamp = hasStamp ? stamp : null;
+        var needed = header is null
+            ? 0
+            : (int)Math.Ceiling(header.LongSide * ZoomGestures.Fit(new Size(header.Width, header.Height), stagePixels));
+        if (header is not null && header.LongSide > MaxImageDecodePixels && needed < MaxImageDecodePixels)
         {
-            DiagnosticLog.Write(
-                $"image cached first frame {cachedThumbnail.Bitmap.PixelWidth}x{cachedThumbnail.Bitmap.PixelHeight} {path}");
-            // Explorer already applies EXIF orientation to its thumbnail.
-            return new ImageFirstFrame(
-                cachedThumbnail.Bitmap,
-                ImageOrientation.Normal,
-                IsFullDecode: false,
-                hasStamp ? stamp : null,
-                cacheGeneration);
+            if (ShellThumbnailProvider.TryGetCachedThumbnail(path, needed) is { } thumbnail)
+            {
+                // Short of the stage it would be a blurred stand-in. A JPEG
+                // gets a sharp frame almost as fast, so it never takes one;
+                // other formats would wait on a full inflate, so they take
+                // any real thumbnail, but never an icon-sized one.
+                var have = Math.Max(thumbnail.Bitmap.PixelWidth, thumbnail.Bitmap.PixelHeight);
+                var covers = have >= needed - 1;
+                if (covers || (!header.IsJpeg && have * 2 >= needed))
+                {
+                    DiagnosticLog.Write(
+                        $"image cached first frame {thumbnail.Bitmap.PixelWidth}x{thumbnail.Bitmap.PixelHeight} for {needed} {path}");
+                    // Explorer already applies EXIF orientation to its thumbnail.
+                    return new ImageFirstFrame(
+                        thumbnail.Bitmap,
+                        ImageOrientation.Normal,
+                        IsFullDecode: false,
+                        CoversStage: covers,
+                        fileStamp,
+                        cacheGeneration);
+                }
+            }
+
+            if (header.IsJpeg && TryDecodeImage(path, header, needed) is { } staged)
+            {
+                DiagnosticLog.Write($"image stage-size first frame {staged.PixelWidth}x{staged.PixelHeight} {path}");
+                return new ImageFirstFrame(
+                    staged,
+                    header.Orientation,
+                    IsFullDecode: false,
+                    CoversStage: true,
+                    fileStamp,
+                    cacheGeneration);
+            }
         }
 
-        var bitmap = TryDecodeImage(path);
+        var bitmap = TryDecodeImage(path, header);
         if (bitmap is null)
         {
             return null;
         }
 
-        var orientation = ImageOrientation.Read(path);
+        var orientation = header?.Orientation ?? ImageOrientation.Normal;
         if (hasStamp)
         {
             _imageDecodeCache.Store(
@@ -91,40 +212,42 @@ public partial class PreviewWindow
             bitmap,
             orientation,
             IsFullDecode: true,
-            hasStamp ? stamp : null,
+            CoversStage: true,
+            fileStamp,
             cacheGeneration);
     }
 
     private async Task CompleteLargeImageDecodeAsync(
         string path,
-        ImageFileStamp? stamp,
-        int cacheGeneration,
+        ImageHeader? header,
+        ImageFirstFrame first,
         ImageRotationSession session,
         long version,
         CancellationToken token)
     {
         try
         {
-            await Task.Delay(LargeImageFullDecodeDelay, token);
+            // A first frame that is already sharp at fit can wait, so
+            // scrubbing past giant images never stacks full decodes. A soft
+            // one cannot.
+            if (first.CoversStage)
+            {
+                await Task.Delay(LargeImageFullDecodeDelay, token);
+            }
+
             await _imageDecodeGate.WaitAsync(token);
-            CachedImageDecode? decoded;
+            BitmapSource? bitmap;
             try
             {
                 token.ThrowIfCancellationRequested();
-                decoded = await Task.Run(() =>
-                {
-                    var bitmap = TryDecodeImage(path);
-                    return bitmap is null
-                        ? null
-                        : new CachedImageDecode(bitmap, ImageOrientation.Read(path));
-                }, token);
+                bitmap = await Task.Run(() => TryDecodeImage(path, header), token);
             }
             finally
             {
                 _imageDecodeGate.Release();
             }
 
-            if (decoded is null
+            if (bitmap is null
                 || token.IsCancellationRequested
                 || version != _loadVersion
                 || !ReferenceEquals(_rotationSession, session))
@@ -132,17 +255,15 @@ public partial class PreviewWindow
                 return;
             }
 
-            if (stamp is { } fileStamp)
+            var decoded = new CachedImageDecode(bitmap, header?.Orientation ?? ImageOrientation.Normal);
+            if (first.Stamp is { } fileStamp)
             {
-                _imageDecodeCache.Store(
-                    fileStamp,
-                    decoded,
-                    cacheGeneration);
+                _imageDecodeCache.Store(fileStamp, decoded, first.CacheGeneration);
             }
 
             if (session.TryUpgradeDecoded(decoded.Bitmap, decoded.Orientation))
             {
-                DiagnosticLog.Write($"image full decode ready {decoded.Bitmap.PixelWidth}x{decoded.Bitmap.PixelHeight} {path}");
+                DiagnosticLog.Write($"image full decode ready {bitmap.PixelWidth}x{bitmap.PixelHeight} {path}");
             }
         }
         catch (OperationCanceledException)
@@ -155,10 +276,24 @@ public partial class PreviewWindow
         }
     }
 
-    private static BitmapSource? TryDecodeImage(string path)
+    /// <summary>
+    /// Decodes at most <paramref name="longSide"/> pixels on the long side.
+    /// A JPEG scales while it decodes, which is what makes a stage-size first
+    /// frame cheap. An icon decodes its largest frame.
+    /// </summary>
+    internal static BitmapSource? TryDecodeImage(string path, ImageHeader? header, int longSide = MaxImageDecodePixels)
     {
         try
         {
+            if (Path.GetExtension(path).Equals(".ico", StringComparison.OrdinalIgnoreCase))
+            {
+                using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                var frame = ImageHeader.LargestFrame(
+                    BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.OnLoad));
+                frame.Freeze();
+                return frame;
+            }
+
             var bitmap = new BitmapImage();
             bitmap.BeginInit();
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
@@ -166,15 +301,15 @@ public partial class PreviewWindow
             // cache so an externally changed file can never inherit pixels
             // held alive by the previous entry.
             bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile | BitmapCreateOptions.IgnoreImageCache;
-            if (TryGetImagePixelSize(path, out var pixelSize))
+            if (header is not null && header.LongSide > longSide)
             {
-                if (pixelSize.Width >= pixelSize.Height && pixelSize.Width > MaxImageDecodePixels)
+                if (header.StoredWidth >= header.StoredHeight)
                 {
-                    bitmap.DecodePixelWidth = MaxImageDecodePixels;
+                    bitmap.DecodePixelWidth = longSide;
                 }
-                else if (pixelSize.Height > pixelSize.Width && pixelSize.Height > MaxImageDecodePixels)
+                else
                 {
-                    bitmap.DecodePixelHeight = MaxImageDecodePixels;
+                    bitmap.DecodePixelHeight = longSide;
                 }
             }
 
@@ -189,182 +324,29 @@ public partial class PreviewWindow
         }
     }
 
-    private static FrameworkElement BuildZoomableImageViewer(BitmapSource bitmap, ImageRotationSession? rotation = null)
+    private FrameworkElement BuildZoomableImageViewer(BitmapSource bitmap, int sourceLongSide, ImageRotationSession? rotation = null)
     {
-        var palette = Theme.Current;
-        var container = new Grid
-        {
-            Background = Theme.Brush(palette.CanvasBg),
-            ClipToBounds = true
-        };
-
-        var scale = new ScaleTransform(1, 1);
-        var translate = new TranslateTransform();
-        var image = new Image
-        {
-            Source = bitmap,
-            Stretch = Stretch.Uniform,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            SnapsToDevicePixels = true,
-            RenderTransformOrigin = new Point(0.5, 0.5),
-            RenderTransform = new TransformGroup { Children = { scale, translate } }
-        };
-        RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
-        container.Children.Add(image);
-
-        var hudText = new TextBlock
-        {
-            FontSize = Metrics.FontLabel,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(Theme.OverlayText)
-        };
-        var hud = new Border
-        {
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 0, 0, 18),
-            Padding = new Thickness(12, 6, 12, 7),
-            CornerRadius = Metrics.PillCorner,
-            Background = Theme.Brush(Theme.OverlayScrim),
-            IsHitTestVisible = false,
-            Opacity = 0,
-            Child = hudText
-        };
-        container.Children.Add(hud);
-
-        var zoom = 1.0;
-        var current = bitmap;
-
-        void ShowHud()
-        {
-            var fitted = image.ActualWidth;
-            var percent = fitted > 0 && current.Width > 0 ? zoom * fitted / current.Width * 100 : zoom * 100;
-            hudText.Text = zoom <= 1.0001 ? "Fit" : $"{Math.Round(percent)}%";
-            hud.BeginAnimation(OpacityProperty, null);
-            hud.Opacity = 1;
-            hud.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(260))
-            {
-                BeginTime = TimeSpan.FromMilliseconds(800)
-            });
-        }
-
-        void ClampTranslate()
-        {
-            var maxX = Math.Max(0, (image.ActualWidth * zoom - container.ActualWidth) / 2);
-            var maxY = Math.Max(0, (image.ActualHeight * zoom - container.ActualHeight) / 2);
-            translate.X = Math.Clamp(translate.X, -maxX, maxX);
-            translate.Y = Math.Clamp(translate.Y, -maxY, maxY);
-        }
-
-        void SetZoom(double next, Point anchor)
-        {
-            next = Math.Clamp(next, 1.0, 12.0);
-            var center = new Point(container.ActualWidth / 2, container.ActualHeight / 2);
-            var rel = anchor - center;
-            translate.X = rel.X - (rel.X - translate.X) * (next / zoom);
-            translate.Y = rel.Y - (rel.Y - translate.Y) * (next / zoom);
-            zoom = next;
-            scale.ScaleX = zoom;
-            scale.ScaleY = zoom;
-            if (zoom <= 1.0001)
-            {
-                translate.X = 0;
-                translate.Y = 0;
-            }
-
-            ClampTranslate();
-            container.Cursor = zoom > 1.0001 ? Cursors.SizeAll : Cursors.Arrow;
-            ShowHud();
-        }
-
-        container.MouseWheel += (_, e) =>
-        {
-            var factor = e.Delta > 0 ? 1.18 : 1 / 1.18;
-            SetZoom(zoom * factor, e.GetPosition(container));
-            e.Handled = true;
-        };
-
-        var dragging = false;
-        var lastPosition = new Point();
-        container.MouseLeftButtonDown += (_, e) =>
-        {
-            if (e.ClickCount == 2)
-            {
-                if (zoom > 1.0001)
-                {
-                    SetZoom(1.0, e.GetPosition(container));
-                }
-                else if (image.ActualWidth > 0)
-                {
-                    // Zoom to actual pixels at the click point.
-                    SetZoom(Math.Max(1.0, current.Width / image.ActualWidth), e.GetPosition(container));
-                }
-
-                e.Handled = true;
-                return;
-            }
-
-            if (zoom <= 1.0001)
-            {
-                return;
-            }
-
-            dragging = true;
-            lastPosition = e.GetPosition(container);
-            container.CaptureMouse();
-            e.Handled = true;
-        };
-        container.MouseMove += (_, e) =>
-        {
-            if (!dragging)
-            {
-                return;
-            }
-
-            var position = e.GetPosition(container);
-            translate.X += position.X - lastPosition.X;
-            translate.Y += position.Y - lastPosition.Y;
-            lastPosition = position;
-            ClampTranslate();
-        };
-        container.MouseLeftButtonUp += (_, _) =>
-        {
-            dragging = false;
-            container.ReleaseMouseCapture();
-        };
-        container.MouseLeave += (_, _) =>
-        {
-            dragging = false;
-            container.ReleaseMouseCapture();
-        };
-        container.SizeChanged += (_, _) => ClampTranslate();
-
-        if (rotation is not null)
-        {
-            // A quarter turn is a new composition: swap the source and let
-            // the viewer re-fit rather than spinning a zoomed crop.
-            rotation.ViewChanged += () =>
-            {
-                current = rotation.CurrentBitmap;
-                image.Source = current;
-                zoom = 1.0;
-                scale.ScaleX = 1;
-                scale.ScaleY = 1;
-                translate.X = 0;
-                translate.Y = 0;
-                container.Cursor = Cursors.Arrow;
-            };
-            rotation.QualityUpgraded += () =>
-            {
-                current = rotation.CurrentBitmap;
-                image.Source = current;
-                ClampTranslate();
-            };
-        }
-
-        return container;
+        var viewer = new ImageViewer(bitmap, sourceLongSide, rotation);
+        RegisterImageZoom(viewer.Element, viewer);
+        return viewer.Element;
     }
+
+    // The image on screen owns the keyboard zoom: it claims it when it joins
+    // the window and lets go when it leaves, unless a newer image took it.
+    private void RegisterImageZoom(FrameworkElement element, IZoomableImage zoom)
+    {
+        element.Loaded += (_, _) => _imageZoom = zoom;
+        element.Unloaded += (_, _) =>
+        {
+            if (ReferenceEquals(_imageZoom, zoom))
+            {
+                _imageZoom = null;
+            }
+        };
+    }
+
+    /// <summary>Dev probe: the double-click gesture at the center of the image on screen.</summary>
+    internal void ProbeImageToggle() => _imageZoom?.ToggleActualSize();
 
     private void UpdateRotateButtons()
     {
@@ -407,198 +389,179 @@ public partial class PreviewWindow
         DiagnosticLog.Write($"rotate {(direction > 0 ? "cw" : "ccw")} path={session.Path} persist={session.Persistence}");
     }
 
-    internal static bool TryGetImagePixelSize(string path, out Size size)
-    {
-        size = Size.Empty;
-        if (FileKinds.IsPhotoshop(path))
-        {
-            return PsdPreviewLoader.TryReadPixelSize(path, out size);
-        }
-
-        // PNG puts its dimensions in the fixed IHDR header. Asking WIC to
-        // construct a decoder just to read these 24 bytes cost ~34 ms on the
-        // giant Downloads sample and this method runs in the input path.
-        if (TryReadPngPixelSize(path, out size))
-        {
-            return true;
-        }
-
-        try
-        {
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
-            var frame = decoder.Frames[0];
-            size = new Size(Math.Max(1, frame.PixelWidth), Math.Max(1, frame.PixelHeight));
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static bool TryReadPngPixelSize(string path, out Size size)
-    {
-        size = Size.Empty;
-        if (!Path.GetExtension(path).Equals(".png", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        try
-        {
-            Span<byte> header = stackalloc byte[24];
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            stream.ReadExactly(header);
-            ReadOnlySpan<byte> signature = [137, 80, 78, 71, 13, 10, 26, 10];
-            if (!header[..8].SequenceEqual(signature)
-                || !header[12..16].SequenceEqual("IHDR"u8))
-            {
-                return false;
-            }
-
-            var width = BinaryPrimitives.ReadUInt32BigEndian(header[16..20]);
-            var height = BinaryPrimitives.ReadUInt32BigEndian(header[20..24]);
-            if (width == 0 || height == 0 || width > int.MaxValue || height > int.MaxValue)
-            {
-                return false;
-            }
-
-            size = new Size(width, height);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private FrameworkElement BuildBrowserImagePreview(string path)
     {
         var palette = Theme.Current;
         var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
         var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
-        grid.Children.Add(CreateWebView(
+        var webView = CreateWebView(
             background,
             () => WriteImageHtml(path),
             $"browser image {path}",
-            ex => _ = ShowFileCardFallbackAsync(path)));
+            ex => _ = ShowFileCardFallbackAsync(path));
+        grid.Children.Add(webView);
+        RegisterImageZoom(grid, new WebImageZoom(webView));
         return grid;
     }
 
-    private static Uri WriteImageHtml(string imagePath)
+    /// <summary>Keyboard zoom for the web image page; the page owns the gesture math.</summary>
+    private sealed class WebImageZoom(WebView2 webView) : IZoomableImage
     {
+        public void ZoomBy(int direction) => _ = webView.CoreWebView2?.ExecuteScriptAsync($"glimpseZoom({direction})");
+
+        public void ToggleActualSize() => _ = webView.CoreWebView2?.ExecuteScriptAsync("glimpseToggle()");
+    }
+
+    /// <summary>
+    /// The page for images the web engine draws (animated GIF, SVG, AVIF).
+    /// It follows the same gesture spec as the native viewer, written in from
+    /// <see cref="ZoomGestures"/>: raster images measure in device pixels;
+    /// an SVG measures in its own units, which are CSS pixels.
+    /// </summary>
+    internal static Uri WriteImageHtml(string imagePath)
+    {
+        static string Hex(Color color) => $"#{color.R:X2}{color.G:X2}{color.B:X2}";
+        static string Css(Color color) =>
+            $"rgba({color.R},{color.G},{color.B},{(color.A / 255.0).ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)})";
+        static string Number(double value) => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
         var palette = Theme.Current;
-        var background = $"#{palette.CanvasBg.R:X2}{palette.CanvasBg.G:X2}{palette.CanvasBg.B:X2}";
-        var svgSize = FileKinds.IsSvg(imagePath) && SvgSizeProbe.TryReadCanvasSize(imagePath, out var canvasSize)
-            ? canvasSize
-            : Size.Empty;
-        var svgWidth = svgSize.Width.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-        var svgHeight = svgSize.Height.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
-        // Key carries the full content recipe (v6 = hook handles arrow browse,
-        // page listener removed); an existing file is already correct, and
-        // skipping the rewrite avoids racing another window's navigation
-        // read of the same file.
-        var htmlPath = TempHtmlPath("ImageHtml", imagePath + background + $"|svg:{svgWidth}x{svgHeight}|v7");
+        var isSvg = FileKinds.IsSvg(imagePath);
+        var svgSize = isSvg && SvgSizeProbe.TryReadCanvasSize(imagePath, out var canvasSize) ? canvasSize : new Size(0, 0);
+        var checker = isSvg || (FileKinds.IsGif(imagePath) && GifHasTransparency(imagePath));
+        var recipe = string.Join(
+            '|',
+            imagePath,
+            Hex(palette.CanvasBg),
+            Hex(palette.RaisedBg),
+            Hex(palette.RaisedBorder),
+            Number(svgSize.Width),
+            Number(svgSize.Height),
+            checker,
+            "v8");
+        // The key carries the full recipe, so an existing file is already
+        // correct, and skipping the rewrite avoids racing another window's
+        // navigation read of the same file.
+        var htmlPath = TempHtmlPath("ImageHtml", recipe);
         if (File.Exists(htmlPath))
         {
             return new Uri(htmlPath, UriKind.Absolute);
         }
 
         var source = WebUtility.HtmlEncode(new Uri(imagePath, UriKind.Absolute).AbsoluteUri);
-
-        // Same gestures as the native image viewer: wheel zooms at the
-        // cursor, drag pans, double-click toggles fit/actual. Zoom resizes
-        // the img itself (not a transform) so SVG re-rasterizes crisp.
         var html = $$"""
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-html,body{margin:0;width:100%;height:100%;background:{{background}};overflow:hidden;}
+html,body{margin:0;width:100%;height:100%;background:{{Hex(palette.CanvasBg)}};overflow:hidden;}
 html{animation:sp-reveal 160ms ease-out;}
 @keyframes sp-reveal{from{opacity:0} }
-#pic{position:absolute;left:0;top:0;transform-origin:0 0;cursor:grab;user-select:none;-webkit-user-drag:none;}
+#pic{position:absolute;left:0;top:0;user-select:none;-webkit-user-drag:none;}
+#pic.checker{background:repeating-conic-gradient({{Hex(palette.RaisedBg)}} 0 25%,{{Hex(palette.RaisedBorder)}} 0 50%) 0 0/16px 16px;}
+#pic.pixelated{image-rendering:pixelated;}
+#hud{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);padding:6px 12px 7px;border-radius:{{Number(Metrics.RadiusSurface)}}px;background:{{Css(Theme.OverlayScrim)}};color:{{Hex(Theme.OverlayText)}};font:600 {{Number(Metrics.FontLabel)}}px "Segoe UI Variable Text","Segoe UI",sans-serif;opacity:0;pointer-events:none;}
+#hud.fade{transition:opacity {{Number(ZoomGestures.HudFade.TotalMilliseconds)}}ms ease {{Number(ZoomGestures.HudHold.TotalMilliseconds)}}ms;}
+@media (prefers-reduced-motion:reduce){#hud.fade{transition:opacity 0s linear {{Number(ZoomGestures.HudHold.TotalMilliseconds)}}ms;} }
 </style>
 </head>
 <body>
-<img id="pic" src="{{source}}">
+<img id="pic" src="{{source}}"{{(checker ? " class=\"checker\"" : "")}}>
+<div id="hud"></div>
 <script>
+const STEP = {{Number(ZoomGestures.WheelStep)}}, MAX = {{Number(ZoomGestures.MaxScale)}}, EPS = {{Number(ZoomGestures.Tolerance)}};
+const VECTOR = {{(isSvg ? "true" : "false")}}, HINT_W = {{Number(svgSize.Width)}}, HINT_H = {{Number(svgSize.Height)}};
 const pic = document.getElementById('pic');
-let scale = 1, fit = 1, x = 0, y = 0, baseW = 0, baseH = 0, interacted = false;
-const hintedW = {{svgWidth}};
-const hintedH = {{svgHeight}};
+const hud = document.getElementById('hud');
+let natW = 0, natH = 0, scale = 1, fit = 1, x = 0, y = 0, atFit = true;
 
-// A percentage-sized SVG can report a browser default instead of its viewBox;
-// prefer the probed canvas so the first fit sees the drawing's real shape.
-// carries the right aspect, so measure that instead of collapsing to 0px.
-function measureBase() {
-  if (hintedW > 0 && hintedH > 0) {
-    baseW = hintedW;
-    baseH = hintedH;
-    return;
-  }
+// A raster pixel is one device pixel at 1:1; an SVG unit is a CSS pixel.
+const unit = () => VECTOR ? 1 : 1 / (window.devicePixelRatio || 1);
+const isAt = (a, b) => Math.abs(a - b) <= EPS * Math.max(b, EPS);
+const clampScale = s => Math.min(Math.max(s, fit), Math.max(fit, MAX));
+const clampOffset = (o, content, view) => content <= view ? (view - content) / 2 : Math.min(0, Math.max(view - content, o));
 
-  baseW = pic.naturalWidth;
-  baseH = pic.naturalHeight;
-  if (!baseW || !baseH) {
-    pic.style.width = '';
-    pic.style.height = '';
+function measure() {
+  // A percentage-sized SVG can report a browser default instead of its
+  // viewBox; the probed canvas carries the drawing's real shape.
+  natW = HINT_W > 0 ? HINT_W : pic.naturalWidth;
+  natH = HINT_H > 0 ? HINT_H : pic.naturalHeight;
+  if (!natW || !natH) {
     const box = pic.getBoundingClientRect();
-    baseW = box.width || 300;
-    baseH = box.height || 150;
+    natW = box.width || 300;
+    natH = box.height || 150;
   }
 }
 
 function layout() {
-  pic.style.width = (baseW * scale) + 'px';
-  pic.style.height = (baseH * scale) + 'px';
-  pic.style.transform = `translate(${x}px, ${y}px)`;
+  if (!natW) return;
+  const baseW = natW * unit(), baseH = natH * unit();
+  fit = Math.min(1, innerWidth / baseW, innerHeight / baseH);
+  scale = atFit ? fit : clampScale(scale);
+  const w = baseW * scale, h = baseH * scale;
+  x = clampOffset(x, w, innerWidth);
+  y = clampOffset(y, h, innerHeight);
+  // Whole device pixels at the origin keep 1:1 crisp.
+  const r = window.devicePixelRatio || 1;
+  pic.style.width = w + 'px';
+  pic.style.height = h + 'px';
+  pic.style.transform = `translate(${Math.round(x * r) / r}px, ${Math.round(y * r) / r}px)`;
+  pic.classList.toggle('pixelated', !VECTOR && scale > 1 + EPS);
+  document.body.style.cursor = w > innerWidth + 0.5 || h > innerHeight + 0.5 ? 'move' : '';
 }
 
-function fitToWindow() {
-  measureBase();
-  fit = Math.min(window.innerWidth / baseW, window.innerHeight / baseH, 1);
-  scale = fit;
-  x = (window.innerWidth - baseW * scale) / 2;
-  y = (window.innerHeight - baseH * scale) / 2;
+function showHud() {
+  hud.textContent = Math.round(scale * 100) + '%';
+  hud.classList.remove('fade');
+  hud.style.opacity = 1;
+  void hud.offsetWidth;
+  hud.classList.add('fade');
+  hud.style.opacity = 0;
+}
+
+function zoomAt(cx, cy, target) {
+  target = clampScale(target);
+  x = cx - (cx - x) * target / scale;
+  y = cy - (cy - y) * target / scale;
+  scale = target;
+  atFit = isAt(scale, fit);
   layout();
+  showHud();
 }
 
-function zoomAt(cx, cy, next) {
-  next = Math.max(Math.min(next, 40), Math.min(fit, 1) * 0.25);
-  x = cx - (cx - x) * next / scale;
-  y = cy - (cy - y) * next / scale;
-  scale = next;
-  interacted = true;
-  layout();
-}
+const doubleClickTarget = () => !isAt(scale, fit) ? fit : fit >= 1 - EPS ? 2 * fit : 1;
+window.glimpseZoom = d => {
+  if (d === 0) { atFit = true; layout(); showHud(); return; }
+  zoomAt(innerWidth / 2, innerHeight / 2, scale * Math.pow(STEP, Math.sign(d)));
+};
+window.glimpseToggle = () => zoomAt(innerWidth / 2, innerHeight / 2, doubleClickTarget());
 
-pic.addEventListener('load', fitToWindow);
-if (pic.complete) fitToWindow();
-window.addEventListener('resize', () => { if (!interacted) fitToWindow(); });
+pic.addEventListener('load', () => { measure(); layout(); });
+if (pic.complete) { measure(); layout(); }
+window.addEventListener('resize', layout);
 
 window.addEventListener('wheel', e => {
   e.preventDefault();
-  zoomAt(e.clientX, e.clientY, scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15));
+  const steps = Math.max(-3, Math.min(3, -e.deltaY / (e.deltaMode === 1 ? 3 : 100)));
+  zoomAt(e.clientX, e.clientY, scale * Math.pow(STEP, steps));
 }, { passive: false });
 
-window.addEventListener('dblclick', e => {
-  if (Math.abs(scale - fit) < 0.001) {
-    zoomAt(e.clientX, e.clientY, Math.max(1, fit * 2));
-  } else {
-    interacted = false;
-    fitToWindow();
-  }
+window.addEventListener('dblclick', e => zoomAt(e.clientX, e.clientY, doubleClickTarget()));
+
+window.addEventListener('keydown', e => {
+  if (!e.ctrlKey || e.altKey) return;
+  const d = e.key === '+' || e.key === '=' ? 1 : e.key === '-' ? -1 : e.key === '0' ? 0 : null;
+  if (d === null) return;
+  e.preventDefault();
+  window.glimpseZoom(d);
 });
 
 let dragging = false, lastX = 0, lastY = 0;
 window.addEventListener('pointerdown', e => {
-  if (e.button !== 0) return;
+  if (e.button !== 0 || document.body.style.cursor !== 'move') return;
   dragging = true;
   lastX = e.clientX; lastY = e.clientY;
-  pic.style.cursor = 'grabbing';
   document.body.setPointerCapture(e.pointerId);
 });
 window.addEventListener('pointermove', e => {
@@ -606,15 +569,46 @@ window.addEventListener('pointermove', e => {
   x += e.clientX - lastX;
   y += e.clientY - lastY;
   lastX = e.clientX; lastY = e.clientY;
-  interacted = true;
   layout();
 });
-window.addEventListener('pointerup', () => { dragging = false; pic.style.cursor = 'grab'; });
+const endDrag = () => { dragging = false; };
+window.addEventListener('pointerup', endDrag);
+document.body.addEventListener('lostpointercapture', endDrag);
 </script>
 </body>
 </html>
 """;
         File.WriteAllText(htmlPath, html);
         return new Uri(htmlPath, UriKind.Absolute);
+    }
+
+    /// <summary>Whether a GIF declares a transparent color in a graphic control block near its start.</summary>
+    internal static bool GifHasTransparency(string path)
+    {
+        try
+        {
+            var buffer = new byte[64 * 1024];
+            int read;
+            using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                read = stream.ReadAtLeast(buffer, buffer.Length, throwOnEndOfStream: false);
+            }
+
+            // 21 F9 04 opens a graphic control block; bit 0 of the next byte
+            // flags a transparent color.
+            for (var at = 0; at + 3 < read; at++)
+            {
+                if (buffer[at] == 0x21 && buffer[at + 1] == 0xF9 && buffer[at + 2] == 0x04 && (buffer[at + 3] & 1) != 0)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch
+        {
+            return false;
+        }
     }
 }

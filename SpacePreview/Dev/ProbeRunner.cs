@@ -133,6 +133,26 @@ internal static class ProbeRunner
                 DiagnosticLog.Write($"probe buttons {window.ProbeButtonAudit()}");
                 break;
 
+            case "zoomkey":
+                // The window's Ctrl+Plus, Ctrl+Minus and Ctrl+0 path.
+                window.TryAdjustZoomFromShortcut(value switch
+                {
+                    "+" => Native.NativeMethods.VK_OEM_PLUS,
+                    "-" => Native.NativeMethods.VK_OEM_MINUS,
+                    _ => Native.NativeMethods.VK_0
+                });
+                await Task.Delay(250);
+                break;
+
+            case "imagetoggle":
+                window.ProbeImageToggle();
+                await Task.Delay(250);
+                break;
+
+            case "meshspin":
+                DiagnosticLog.Write($"probe meshspin {await window.ProbeMeshSpinAsync()}");
+                break;
+
             case "pinnedoff":
                 // Leaves the window pinned with Always on top off through the
                 // final capture, so a live pass can verify the reveal visuals

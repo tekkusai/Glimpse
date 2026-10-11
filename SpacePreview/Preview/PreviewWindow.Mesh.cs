@@ -31,9 +31,10 @@ public partial class PreviewWindow
 {
     private static FrameworkElement BuildMeshPreview(MeshPreview preview)
     {
+        var palette = Theme.Current;
         var grid = new Grid
         {
-            Background = Theme.Brush(Theme.Current.CanvasBg),
+            Background = Theme.Brush(palette.CanvasBg),
             ClipToBounds = true
         };
 
@@ -51,9 +52,12 @@ public partial class PreviewWindow
         };
         viewport.Camera = camera;
 
+        // Light clay tinted a quarter toward the accent, the same in both
+        // themes: shading carries the form on either canvas.
+        var body = Blend(Theme.Dark.TextSecondary, palette.Accent, 0.25);
         var material = new MaterialGroup();
-        material.Children.Add(new DiffuseMaterial(new SolidColorBrush(Color.FromRgb(69, 165, 255))));
-        material.Children.Add(new SpecularMaterial(new SolidColorBrush(Color.FromRgb(215, 240, 255)), 34));
+        material.Children.Add(new DiffuseMaterial(Theme.Brush(body)));
+        material.Children.Add(new SpecularMaterial(Theme.Brush(Color.FromRgb(0x30, 0x30, 0x30)), 40));
 
         var yaw = new AxisAngleRotation3D(new Vector3D(0, 0, 1), -18);
         var pitch = new AxisAngleRotation3D(new Vector3D(1, 0, 0), -8);
@@ -68,9 +72,10 @@ public partial class PreviewWindow
         };
 
         var scene = new Model3DGroup();
-        scene.Children.Add(new AmbientLight(Color.FromRgb(70, 74, 84)));
-        scene.Children.Add(new DirectionalLight(Color.FromRgb(246, 248, 255), new Vector3D(-0.55, 0.85, -1.1)));
-        scene.Children.Add(new DirectionalLight(Color.FromRgb(74, 132, 255), new Vector3D(0.75, -0.35, -0.45)));
+        // White key light from the upper left, a dim neutral fill opposite it.
+        scene.Children.Add(new AmbientLight(Color.FromRgb(0x38, 0x38, 0x38)));
+        scene.Children.Add(new DirectionalLight(Color.FromRgb(0xE8, 0xE8, 0xE8), new Vector3D(-0.7, 0.45, -0.55)));
+        scene.Children.Add(new DirectionalLight(Color.FromRgb(0x40, 0x40, 0x40), new Vector3D(0.8, 0.2, -0.3)));
         scene.Children.Add(model);
 
         viewport.Children.Add(new ModelVisual3D { Content = scene });
@@ -83,7 +88,7 @@ public partial class PreviewWindow
             VerticalAlignment = VerticalAlignment.Bottom,
             Margin = new Thickness(18),
             Padding = new Thickness(12, 8, 12, 9),
-            CornerRadius = Metrics.PillCorner,
+            CornerRadius = Metrics.SurfaceCorner,
             Background = Theme.Brush(Theme.OverlayScrim),
             BorderBrush = Theme.Brush(Theme.OverlayBorder),
             BorderThickness = new Thickness(1),
@@ -177,5 +182,50 @@ public partial class PreviewWindow
         };
 
         return grid;
+    }
+
+    private static Color Blend(Color from, Color to, double amount) => Color.FromRgb(
+        (byte)Math.Round(from.R + (to.R - from.R) * amount),
+        (byte)Math.Round(from.G + (to.G - from.G) * amount),
+        (byte)Math.Round(from.B + (to.B - from.B) * amount));
+
+    /// <summary>
+    /// Dev probe: spins the mesh on screen for two seconds, one step per
+    /// frame, and reports the frame intervals WPF achieved.
+    /// </summary>
+    internal async Task<string> ProbeMeshSpinAsync()
+    {
+        if (FindVisualChild<Viewport3D>(PreviewContent) is not { } viewport
+            || viewport.Children.OfType<ModelVisual3D>().FirstOrDefault()?.Content is not Model3DGroup scene
+            || scene.Children.OfType<GeometryModel3D>().FirstOrDefault() is not { Transform: Transform3DGroup transform }
+            || transform.Children.OfType<RotateTransform3D>().LastOrDefault()?.Rotation is not AxisAngleRotation3D yaw)
+        {
+            return "no mesh";
+        }
+
+        var frames = new List<TimeSpan>();
+        var done = new TaskCompletionSource();
+        var started = DateTime.UtcNow;
+        void OnRendering(object? sender, EventArgs e)
+        {
+            frames.Add(((RenderingEventArgs)e).RenderingTime);
+            yaw.Angle += 3;
+            if (DateTime.UtcNow - started > TimeSpan.FromSeconds(2))
+            {
+                CompositionTarget.Rendering -= OnRendering;
+                done.TrySetResult();
+            }
+        }
+
+        CompositionTarget.Rendering += OnRendering;
+        await done.Task;
+        var intervals = frames.Zip(frames.Skip(1), (a, b) => (b - a).TotalMilliseconds).Where(ms => ms > 0).Order().ToList();
+        if (intervals.Count == 0)
+        {
+            return "no frames";
+        }
+
+        var median = intervals[intervals.Count / 2];
+        return $"frames={intervals.Count + 1} median={median:0.0}ms p95={intervals[(int)(intervals.Count * 0.95)]:0.0}ms max={intervals[^1]:0.0}ms slow={intervals.Count(ms => ms > median * 1.5)}";
     }
 }

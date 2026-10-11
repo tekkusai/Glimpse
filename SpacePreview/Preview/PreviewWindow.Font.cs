@@ -29,67 +29,205 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
-    private static FrameworkElement BuildFontPreview(string path)
+    private const string Pangram = "The quick brown fox jumps over the lazy dog";
+    private const string Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ\nabcdefghijklmnopqrstuvwxyz\n0123456789 &@?!%*(){}";
+    private static readonly double[] SpecimenSizes = [12, 16, 24, 32, 48, 72];
+    private const double SpecimenInset = 40;
+
+    /// <param name="Family">Resolves to this file alone, never its folder.</param>
+    internal sealed record FontSpecimen(
+        FontFamily Family,
+        FontStyle Style,
+        FontWeight Weight,
+        FontStretch Stretch,
+        string FamilyName,
+        string Details,
+        string Hero,
+        string Alphabet,
+        string Sample);
+
+    private async Task<FrameworkElement> BuildFontPreviewAsync(string path, CancellationToken token)
     {
-        var palette = Theme.Current;
-        string familyName;
-        FontFamily? fontFamily = null;
+        var specimen = await Task.Run(() => TryLoadFontSpecimen(path), token);
+        return specimen is null
+            ? await BuildFileCardAsync(path, token)
+            : BuildFontPreview(specimen);
+    }
+
+    /// <summary>
+    /// Reads the face this file holds. The family points at the file itself
+    /// and the weight, style and stretch come from its own tables, so a Bold
+    /// file shows bold even when its Regular sibling sits in the same folder.
+    /// Runs off the UI thread: parsing the font is the slow part.
+    /// </summary>
+    internal static FontSpecimen? TryLoadFontSpecimen(string path)
+    {
         try
         {
-            var glyph = new GlyphTypeface(new Uri(path, UriKind.Absolute));
-            familyName = glyph.FamilyNames.Values.FirstOrDefault() ?? Path.GetFileNameWithoutExtension(path);
-            var folder = Path.GetDirectoryName(path);
-            if (!string.IsNullOrWhiteSpace(folder))
+            var uri = new Uri(path, UriKind.Absolute);
+            var glyphs = new GlyphTypeface(uri);
+            var familyName = Localized(glyphs.FamilyNames) ?? Path.GetFileNameWithoutExtension(path);
+            var family = new FontFamily(uri, "./" + Uri.EscapeDataString(Path.GetFileName(path)) + "#" + familyName);
+            var typeface = new Typeface(family, glyphs.Style, glyphs.Weight, glyphs.Stretch);
+            if (!typeface.TryGetGlyphTypeface(out _))
             {
-                fontFamily = new FontFamily(new Uri(folder + Path.DirectorySeparatorChar, UriKind.Absolute), "./#" + familyName);
+                return null;
             }
+
+            // A symbol or non-Latin font gets samples from its own characters
+            // rather than a row of empty boxes.
+            bool Covers(string text) => text.All(c => char.IsWhiteSpace(c) || glyphs.CharacterToGlyphMap.ContainsKey(c));
+            var own = new string(glyphs.CharacterToGlyphMap.Keys
+                .Order()
+                .Where(code => code > ' ' && code < 0xFFFF && !char.IsControl((char)code) && !char.IsSurrogate((char)code))
+                .Take(78)
+                .Select(code => (char)code)
+                .ToArray());
+            if (own.Length == 0)
+            {
+                return null;
+            }
+
+            var face = Localized(glyphs.FaceNames) ?? "Regular";
+            var version = Localized(glyphs.VersionStrings)?.Split(';')[0].Trim();
+            var details = string.Join(
+                " · ",
+                new[] { face, version, $"{glyphs.GlyphCount:N0} glyphs" }.Where(part => !string.IsNullOrWhiteSpace(part)));
+            return new FontSpecimen(
+                family,
+                glyphs.Style,
+                glyphs.Weight,
+                glyphs.Stretch,
+                familyName,
+                details,
+                Covers("Aa") ? "Aa" : own[..Math.Min(2, own.Length)],
+                Covers(Alphabet) ? Alphabet : string.Join('\n', own.Chunk(26).Select(line => new string(line))),
+                Covers(Pangram) ? Pangram : own[..Math.Min(40, own.Length)]);
         }
         catch
         {
-            familyName = Path.GetFileNameWithoutExtension(path);
+            return null;
+        }
+    }
+
+    private static string? Localized(IDictionary<System.Globalization.CultureInfo, string> names) =>
+        names.TryGetValue(System.Globalization.CultureInfo.GetCultureInfo("en-US"), out var english)
+            ? english
+            : names.Values.FirstOrDefault();
+
+    /// <summary>
+    /// A type specimen: the family's name and facts, a large "Aa" beside the
+    /// alphabet, then a ladder of sizes. The large sizes follow the stage's
+    /// width, so the page fills a wide stage and still fits a narrow one.
+    /// </summary>
+    private static FrameworkElement BuildFontPreview(FontSpecimen specimen)
+    {
+        var palette = Theme.Current;
+
+        // Lines too long for the stage run on into the right inset and fade
+        // out at the window's edge instead of being cut through a letter.
+        // Anything that fits ends before the fade starts.
+        var edgeFade = new LinearGradientBrush
+        {
+            MappingMode = BrushMappingMode.Absolute,
+            GradientStops =
+            {
+                new GradientStop(Colors.Black, 0),
+                new GradientStop(Colors.Transparent, 1)
+            }
+        };
+        TextBlock Specimen(string text, double size, Color color) => new()
+        {
+            Text = text,
+            FontFamily = specimen.Family,
+            FontStyle = specimen.Style,
+            FontWeight = specimen.Weight,
+            FontStretch = specimen.Stretch,
+            FontSize = size,
+            Foreground = Theme.Brush(color),
+            TextWrapping = TextWrapping.NoWrap
+        };
+
+        var title = new TextBlock
+        {
+            Text = specimen.FamilyName,
+            Margin = new Thickness(0, 0, SpecimenInset, 0),
+            FontSize = Metrics.FontTitle,
+            FontWeight = FontWeights.SemiBold,
+            Foreground = Theme.Brush(palette.TextPrimary),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        var details = new TextBlock
+        {
+            Text = specimen.Details,
+            Margin = new Thickness(0, 4, SpecimenInset, 0),
+            FontSize = Metrics.FontBody,
+            Foreground = Theme.Brush(palette.TextSecondary),
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+
+        var hero = Specimen(specimen.Hero, 140, palette.TextPrimary);
+        hero.Margin = new Thickness(0, 0, 40, 0);
+        hero.VerticalAlignment = VerticalAlignment.Center;
+        var alphabet = Specimen(specimen.Alphabet, 28, palette.TextSecondary);
+        alphabet.VerticalAlignment = VerticalAlignment.Center;
+        alphabet.LineHeight = 28 * 1.3;
+        alphabet.LineStackingStrategy = LineStackingStrategy.BlockLineHeight;
+        var showcase = new Grid
+        {
+            Margin = new Thickness(0, 28, 0, 0),
+            ColumnDefinitions = { new ColumnDefinition { Width = GridLength.Auto }, new ColumnDefinition() },
+            OpacityMask = edgeFade
+        };
+        Grid.SetColumn(alphabet, 1);
+        showcase.Children.Add(hero);
+        showcase.Children.Add(alphabet);
+
+        var ladder = new StackPanel { Margin = new Thickness(0, 28, 0, 0), OpacityMask = edgeFade };
+        foreach (var size in SpecimenSizes)
+        {
+            var label = new TextBlock
+            {
+                Text = $"{size:0}",
+                Width = 40,
+                FontSize = Metrics.FontCaption,
+                Foreground = Theme.Brush(palette.TextTertiary),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var line = Specimen(specimen.Sample, size, palette.TextPrimary);
+            var row = new DockPanel { Margin = new Thickness(0, 0, 0, size / 3), LastChildFill = true };
+            DockPanel.SetDock(label, Dock.Left);
+            row.Children.Add(label);
+            row.Children.Add(line);
+            ladder.Children.Add(row);
         }
 
-        var stack = new StackPanel { Margin = new Thickness(34, 28, 34, 34) };
-        stack.Children.Add(new TextBlock
+        var page = new StackPanel
         {
-            Text = familyName,
-            FontSize = 16,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(palette.TextPrimary)
-        });
-        stack.Children.Add(new Border
-        {
-            Margin = new Thickness(0, 18, 0, 0),
-            Padding = new Thickness(32, 30, 32, 34),
-            CornerRadius = Metrics.CardCorner,
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Child = new StackPanel
+            Margin = new Thickness(SpecimenInset, 32, 0, 40),
+            ClipToBounds = true,
+            Children =
             {
-                Children =
-                {
-                    new TextBlock
-                    {
-                        Text = "AaBbCc 0123456789",
-                        FontFamily = fontFamily ?? new FontFamily("Segoe UI"),
-                        FontSize = 46,
-                        Foreground = Theme.Brush(palette.TextPrimary),
-                        TextWrapping = TextWrapping.Wrap
-                    },
-                    new TextBlock
-                    {
-                        Text = "The quick brown fox jumps over the lazy dog.",
-                        Margin = new Thickness(0, 18, 0, 0),
-                        FontFamily = fontFamily ?? new FontFamily("Segoe UI"),
-                        FontSize = 24,
-                        Foreground = Theme.Brush(palette.TextSecondary),
-                        TextWrapping = TextWrapping.Wrap
-                    }
-                }
+                title,
+                details,
+                showcase,
+                new Border { Height = 1, Margin = new Thickness(0, 28, SpecimenInset, 0), Background = Theme.Brush(palette.Border) },
+                ladder
             }
-        });
+        };
 
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
+        // The showcase scales with the stage: a wide stage gets a bigger
+        // "Aa" and alphabet, a narrow one keeps both on screen.
+        page.SizeChanged += (_, e) =>
+        {
+            var width = e.NewSize.Width;
+            edgeFade.StartPoint = new Point(Math.Max(0, width - SpecimenInset), 0);
+            edgeFade.EndPoint = new Point(width, 0);
+            hero.FontSize = Math.Clamp(width * 0.17, 88, 200);
+            alphabet.FontSize = Math.Clamp(width * 0.032, 18, 36);
+            alphabet.LineHeight = alphabet.FontSize * 1.3;
+        };
+
+        return BuildScrollSurface(page, new Thickness(0), horizontal: false, palette.CanvasBg);
     }
 }

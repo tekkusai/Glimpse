@@ -15,9 +15,10 @@ internal sealed class ImageRotationSession
     private static readonly TimeSpan CommitDelay = TimeSpan.FromSeconds(1);
 
     private BitmapSource _decoded;
+    private BitmapSource? _current;
     private int _baseOrientation;
     private int _quarterTurns;
-    private bool _viewWasRotated;
+    private bool _committed;
     private DispatcherTimer? _commitTimer;
     private Task _saveChain = Task.CompletedTask;
 
@@ -43,13 +44,13 @@ internal sealed class ImageRotationSession
     }
 
     public BitmapSource CurrentBitmap =>
-        ImageOrientation.Apply(_decoded, ImageOrientation.RotateCw(_baseOrientation, _quarterTurns));
+        _current ??= ImageOrientation.Apply(_decoded, ImageOrientation.RotateCw(_baseOrientation, _quarterTurns));
 
     /// <summary>Rotates the view a quarter turn. Positive is clockwise.</summary>
     public void Rotate(int direction)
     {
-        _viewWasRotated = true;
         _quarterTurns = ((_quarterTurns + direction) % 4 + 4) % 4;
+        _current = null;
         ViewChanged?.Invoke();
 
         _commitTimer?.Stop();
@@ -65,19 +66,21 @@ internal sealed class ImageRotationSession
     }
 
     /// <summary>
-    /// Replaces a shell-cached first frame with the real decoded pixels. A
-    /// rotation is user intent and wins the race: once touched, the session
-    /// keeps its current composition rather than rebasing under the user.
+    /// Replaces a first frame with the full decode. Pending turns ride on
+    /// top of the better pixels, so rotating early never freezes a stand-in
+    /// on screen. Once a commit has rebased the view, a decode that started
+    /// before the write no longer matches it and is refused.
     /// </summary>
     public bool TryUpgradeDecoded(BitmapSource decoded, int baseOrientation)
     {
-        if (_viewWasRotated)
+        if (_committed)
         {
             return false;
         }
 
         _decoded = decoded;
         _baseOrientation = baseOrientation;
+        _current = null;
         QualityUpgraded?.Invoke();
         return true;
     }
@@ -101,6 +104,8 @@ internal sealed class ImageRotationSession
         // file takes over carrying the rotation. A failed write leaves the
         // view rotated for this preview only; the log names it.
         _quarterTurns = 0;
+        _committed = true;
+        _current = null;
         if (Persistence == RotationPersistence.ExifTag)
         {
             _baseOrientation = ImageOrientation.RotateCw(_baseOrientation, turns);
