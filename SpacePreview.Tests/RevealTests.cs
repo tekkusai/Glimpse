@@ -1,5 +1,6 @@
 using System.Text;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -334,6 +335,93 @@ public sealed class StandInTests
         text.Append($"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
         var path = Path.Combine(temp.Path, name);
         File.WriteAllText(path, text.ToString(), Encoding.ASCII);
+        return path;
+    }
+}
+
+/// <summary>
+/// The beat and the wait on the real window. The next item's lane is held
+/// back, and hands its content over when the test says, so each moment the
+/// user sees can be checked in turn.
+/// </summary>
+[Collection(WpfCollection.Name)]
+public sealed class RevealWindowTests
+{
+    [Fact]
+    public Task AStandInTakesTheHeldItemsPlace() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            Assert.Same(held, window.PreviewContent.Content);
+
+            // At 120 ms the stand-in shows over the held item, so its sheen
+            // and reason line show too.
+            await WaitUntilAsync(() => window.StandInLayer.Visibility == Visibility.Visible);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Null(window.PreviewContent.Content);
+
+            // The content dissolves in over the stand-in, then both leave.
+            var next = new Border();
+            Fields.Call(window, "SetPreviewContent", next, null);
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+            Assert.Same(next, window.PreviewContent.Content);
+            Assert.Equal(Visibility.Collapsed, window.StandInLayer.Visibility);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// Opens a parked, frozen stage on an item and waits until it has fully
+    /// arrived and the window has faded in, so the next show is a browse step.
+    /// </summary>
+    private static async Task<PreviewWindow> OpenAsync(string path)
+    {
+        var window = new PreviewWindow { Left = -30000, Top = 0, Width = 900, Height = 650 };
+        window.MarkGeometryUserPinnedForProbe();
+        window.ShowPreview(path, IntPtr.Zero);
+        await WaitUntilAsync(() =>
+            Fields.Get<bool>(window, "_loadFinished")
+            && Fields.Get<byte>(window, "_windowAlpha") == 255
+            && window.StandInLayer.Visibility == Visibility.Collapsed
+            && window.OutgoingContent.Content is null);
+        return window;
+    }
+
+    /// <summary>A browse step whose lane is still working: it hands its content over only when the test does.</summary>
+    private static void Browse(PreviewWindow window, string path)
+    {
+        window.ShowPreview(path, IntPtr.Zero);
+        Fields.Get<CancellationTokenSource>(window, "_loadCancellation").Cancel();
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!condition())
+        {
+            Assert.True(DateTime.UtcNow < deadline, "Timed out waiting for the window.");
+            await Task.Delay(10);
+        }
+    }
+
+    private static string Png(TempDirectory temp, string name)
+    {
+        const int width = 400;
+        const int height = 300;
+        var pixels = Enumerable.Repeat((byte)0x80, width * height * 4).ToArray();
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
+        var path = Path.Combine(temp.Path, name);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        using var stream = File.Create(path);
+        encoder.Save(stream);
         return path;
     }
 }

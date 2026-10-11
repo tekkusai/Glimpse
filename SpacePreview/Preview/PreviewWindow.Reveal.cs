@@ -202,6 +202,17 @@ public partial class PreviewWindow
         _standIn = standIn;
         _standInOwner = p;
         StandInLayer.Content = standIn;
+
+        // A held item steps under the stand-in, which takes its place: the
+        // wait and its sheen and reason show over it, not behind it.
+        var dissolve = StandInLayer.Visibility != Visibility.Visible;
+        if (p.Holding is { } held && ReferenceEquals(PreviewContent.Content, held))
+        {
+            p.Holding = null;
+            MoveShownToOutgoing();
+            dissolve = true;
+        }
+
         if (withWindow)
         {
             Motion.Settle(StandInLayer, 1);
@@ -210,7 +221,7 @@ public partial class PreviewWindow
         {
             // One stand-in replaces another where it stands; a new one
             // dissolves in over what shows.
-            if (StandInLayer.Visibility != Visibility.Visible)
+            if (dissolve)
             {
                 Motion.Settle(StandInLayer, 0);
             }
