@@ -7,18 +7,11 @@ using Windows.Networking.Connectivity;
 namespace SpacePreview.Services;
 
 /// <summary>
-/// Everything an automatic install waits on, read fresh each minute. The
-/// PC's half comes from the app; the release's half from the updater.
+/// The PC's half of what an automatic install waits on, read fresh from
+/// the app each minute. The release's half is <see cref="AppUpdater.InstallsWhenAway"/>.
 /// </summary>
 internal readonly record struct InstallState
 {
-    public TimeSpan ReleaseAge { get; init; }
-
-    public bool InstallNowPressed { get; init; }
-
-    /// <summary>This version's setup already ran in the last day and Glimpse is still the old one.</summary>
-    public bool TriedRecently { get; init; }
-
     public bool PreviewOpen { get; init; }
 
     public bool FullscreenSuspended { get; init; }
@@ -40,6 +33,12 @@ internal sealed record UpdateState
     public AppUpdateRelease? Pending { get; init; }
 
     public bool Downloading { get; init; }
+
+    /// <summary>The pending release's installer, verified on disk.</summary>
+    public string? Installer { get; init; }
+
+    /// <summary>The user pressed Install now for the pending release, which waives its two days.</summary>
+    public bool InstallNowPressed { get; init; }
 
     /// <summary>Setup is on its way; Glimpse closes for a few seconds.</summary>
     public bool Installing { get; init; }
@@ -74,9 +73,7 @@ internal sealed class AppUpdater : IDisposable
     private DispatcherTimer? _gateTimer;
     private CancellationTokenSource? _downloadCancel;
     private Task<string?>? _download;
-    private string? _installer;
     private DateTimeOffset _downloadRetryAt;
-    private bool _installNowPressed;
     private bool _disposed;
 
     /// <param name="observe">The PC's side of <see cref="InstallState"/>: what is open, full screen, quiet time and idle.</param>
@@ -133,11 +130,6 @@ internal sealed class AppUpdater : IDisposable
                 : latest.Version == State.Pending?.Version ? State.Pending
                 : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
-            if (pending?.Version != State.Pending?.Version)
-            {
-                DropDownload();
-            }
-
             Set(State with { Checking = false, UpToDate = latest is null, Pending = pending });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
@@ -170,14 +162,14 @@ internal sealed class AppUpdater : IDisposable
             return;
         }
 
-        _installNowPressed = true;
+        Set(State with { InstallNowPressed = true });
         if (!_canQuit())
         {
             return;
         }
 
         Set(State with { Installing = true });
-        var installer = _installer ?? await DownloadAsync(release);
+        var installer = State.Installer ?? await DownloadAsync(release, download: true);
 
         // Signing may have started while it downloaded.
         if (installer is null || !_canQuit())
@@ -219,45 +211,52 @@ internal sealed class AppUpdater : IDisposable
             return;
         }
 
-        if (_installer is null)
+        if (State.Installer is not { } installer)
         {
+            // Metered, only an installer already on disk will do: checking
+            // it costs the sidecar and .sig, not the download.
+            var download = !_isMetered();
             if (_download is not { IsCompleted: false }
                 && DateTimeOffset.UtcNow >= _downloadRetryAt
-                && !_isMetered())
+                && (download || _service.IsOnDisk(release)))
             {
-                await DownloadAsync(release);
+                await DownloadAsync(release, download);
             }
 
             return;
         }
 
-        var state = _observe() with
+        if (InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow) && IsAway(_observe()))
         {
-            ReleaseAge = release.PublishedAt is { } published ? DateTimeOffset.UtcNow - published : TimeSpan.Zero,
-            InstallNowPressed = _installNowPressed,
-            TriedRecently = TriedRecently(Settings.Current, release, DateTimeOffset.UtcNow)
-        };
-        if (CanInstallNow(state))
-        {
-            await LaunchAsync(release, _installer, asked: false);
+            await LaunchAsync(release, installer, asked: false);
         }
     }
 
     /// <summary>
-    /// Whether an automatic install may start now. The release has been
-    /// public for 48 hours (or the user asked for it), nothing of Glimpse
-    /// is on screen, nothing is full screen, Windows would show a
-    /// notification or the PC is locked, and nobody has touched the
-    /// keyboard or mouse for 3 minutes.
+    /// The release's half of an automatic install, and what Settings says
+    /// about it: the switch is on, the verified installer is on disk, the
+    /// release has been public for 48 hours or the user pressed Install
+    /// now, and no setup of this version ran in the last day. When this
+    /// holds, the update installs the next time the user is away.
     /// </summary>
-    internal static bool CanInstallNow(InstallState state) =>
-        (state.InstallNowPressed || state.ReleaseAge >= ReleaseAgeBeforeInstall)
-        && !state.TriedRecently
-        && !state.PreviewOpen
-        && !state.FullscreenSuspended
-        && state.Notifications is NativeMethods.UserNotificationState.AcceptsNotifications
+    internal static bool InstallsWhenAway(UpdateState state, Settings settings, DateTimeOffset now) =>
+        state.Pending is { } release
+        && state.Installer is not null
+        && settings.InstallUpdatesAutomatically
+        && (state.InstallNowPressed || release.PublishedAt is { } published && now - published >= ReleaseAgeBeforeInstall)
+        && !TriedRecently(settings, release, now);
+
+    /// <summary>
+    /// The PC's half: nothing of Glimpse is on screen, nothing is full
+    /// screen, Windows would show a notification or the PC is locked, and
+    /// nobody has touched the keyboard or mouse for 3 minutes.
+    /// </summary>
+    internal static bool IsAway(InstallState pc) =>
+        !pc.PreviewOpen
+        && !pc.FullscreenSuspended
+        && pc.Notifications is NativeMethods.UserNotificationState.AcceptsNotifications
             or NativeMethods.UserNotificationState.NotPresent
-        && state.Idle >= IdleBeforeInstall;
+        && pc.Idle >= IdleBeforeInstall;
 
     /// <summary>
     /// A setup that fails starts the old Glimpse again, which would find
@@ -359,24 +358,26 @@ internal sealed class AppUpdater : IDisposable
         }
     }
 
-    private Task<string?> DownloadAsync(AppUpdateRelease release) =>
-        _download is { IsCompleted: false } running ? running : _download = RunDownloadAsync(release);
+    /// <param name="download">False: use only an installer already on disk.</param>
+    private Task<string?> DownloadAsync(AppUpdateRelease release, bool download) =>
+        _download is { IsCompleted: false } running ? running : _download = RunDownloadAsync(release, download);
 
-    private async Task<string?> RunDownloadAsync(AppUpdateRelease release)
+    private async Task<string?> RunDownloadAsync(AppUpdateRelease release, bool download)
     {
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _downloadCancel = cancel;
         Set(State with { Downloading = true });
         try
         {
-            var installer = await _service.DownloadAndVerifyAsync(release, cancel.Token);
-            if (State.Pending?.Version != release.Version)
+            var installer = await _service.DownloadAndVerifyAsync(release, download, cancel.Token);
+            if (installer is null || State.Pending != release)
             {
                 return null;
             }
 
-            DiagnosticLog.Write($"update downloaded version={release.VersionText}");
-            return _installer = installer;
+            DiagnosticLog.Write($"update {(download ? "downloaded" : "found on disk")} version={release.VersionText}");
+            Set(State with { Installer = installer });
+            return installer;
         }
         catch (UpdateRejectedException ex)
         {
@@ -429,8 +430,7 @@ internal sealed class AppUpdater : IDisposable
         {
             // The file vanished or changed on disk: fetch it again.
             DiagnosticLog.Write($"update install failed version={release.VersionText}: {ex.GetType().Name}: {ex.Message}");
-            _installer = null;
-            Set(State with { Installing = false });
+            Set(State with { Installer = null, Installing = false });
         }
     }
 
@@ -447,8 +447,7 @@ internal sealed class AppUpdater : IDisposable
         }
 
         DiagnosticLog.Write($"update setup did not finish version={release.VersionText}");
-        _installer = null;
-        Set(State with { Installing = false });
+        Set(State with { Installer = null, Installing = false });
     }
 
     private void Skip(AppUpdateRelease release, Exception reason)
@@ -457,22 +456,22 @@ internal sealed class AppUpdater : IDisposable
         Settings.Update(settings => settings with { SkippedUpdateVersion = release.VersionText });
         if (State.Pending?.Version == release.Version)
         {
-            DropDownload();
             Set(State with { Pending = null, Installing = false });
         }
     }
 
-    private void DropDownload()
-    {
-        _downloadCancel?.Cancel();
-        _download = null;
-        _installer = null;
-        _installNowPressed = false;
-        _downloadRetryAt = default;
-    }
-
     private void Set(UpdateState state)
     {
+        // Another release, or none, starts clean: the download, the
+        // installer and the press belonged to the old one.
+        if (state.Pending != State.Pending)
+        {
+            _downloadCancel?.Cancel();
+            _download = null;
+            _downloadRetryAt = default;
+            state = state with { Installer = null, InstallNowPressed = false };
+        }
+
         if (state == State)
         {
             return;

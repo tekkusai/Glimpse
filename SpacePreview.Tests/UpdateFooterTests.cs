@@ -22,7 +22,12 @@ public sealed class UpdateFooterTests
         new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe"),
         ReleaseFixture.InstallerSize,
         new string('A', 64),
-        new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe.sha256"));
+        new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe.sha256"))
+    {
+        PublishedAt = Now.AddDays(-3)
+    };
+
+    private const string Installer = @"C:\Updates\Glimpse-Setup-3.1.0.exe";
 
     private static readonly Settings Checked = new() { LastUpdateCheckUtc = Now.AddHours(-1) };
 
@@ -45,16 +50,37 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked));
 
     [Fact]
-    public void APendingUpdateSaysWhenItInstalls() =>
+    public void AnUpdateThatWillInstallOnItsOwnSaysWhen() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 installs the next time you step away."),
-            Describe(new UpdateState { Pending = Release }, Checked));
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked));
+
+    [Fact]
+    public void UntilItWouldInstallOnItsOwnItIsOnlyReady()
+    {
+        const string Ready = "3.1.0 is ready to install.";
+
+        // Not on disk yet: a metered connection, or a download that failed.
+        Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, Ready), Describe(new UpdateState { Pending = Release }, Checked));
+
+        // Its first two days, unless Install now was pressed.
+        var fresh = new UpdateState { Pending = Release with { PublishedAt = Now.AddHours(-47) }, Installer = Installer };
+        Assert.Equal(Ready, Describe(fresh, Checked).Caption);
+        Assert.Equal("3.1.0 installs the next time you step away.", Describe(fresh with { InstallNowPressed = true }, Checked).Caption);
+
+        // A setup of it ran in the last day.
+        Assert.Equal(Ready, Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked with
+        {
+            UpdateAttemptVersion = "3.1.0",
+            UpdateAttemptUtc = Now.AddHours(-2)
+        }).Caption);
+    }
 
     [Fact]
     public void WithAutomaticInstallsOffItWaitsForTheUser() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
-            Describe(new UpdateState { Pending = Release }, Checked with { InstallUpdatesAutomatically = false }));
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked with { InstallUpdatesAutomatically = false }));
 
     [Fact]
     public void InstallNowSaysGlimpseWillBeBack() =>
@@ -118,6 +144,7 @@ public sealed class UpdateFooterTests
         var words = new[]
         {
             Describe(new UpdateState { Pending = Release }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installing = true }, Checked).Caption,
             Describe(new UpdateState(), Checked with { LastUpdateCheckUtc = Now.AddDays(-9) }).Caption,

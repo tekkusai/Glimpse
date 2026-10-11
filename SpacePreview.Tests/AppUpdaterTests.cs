@@ -19,42 +19,63 @@ public sealed class AppUpdaterTests
     private static readonly Func<AppUpdateRelease, string, CancellationToken, Task> NeverLaunch =
         (_, _, _) => throw new InvalidOperationException("This test never installs.");
 
-    // Everything an automatic install waits for, all met.
+    // The PC's half of an automatic install, all met.
     private static readonly InstallState Away = new()
     {
-        ReleaseAge = TimeSpan.FromHours(48),
         Notifications = NativeMethods.UserNotificationState.AcceptsNotifications,
         Idle = TimeSpan.FromMinutes(3)
     };
 
+    private static readonly DateTimeOffset Now = new(2026, 10, 10, 19, 0, 0, TimeSpan.Zero);
+
+    private static readonly Settings Automatic = new() { InstallUpdatesAutomatically = true };
+
+    // The release's half, all met: two days old, its installer on disk.
+    private static readonly UpdateState Ready = new()
+    {
+        Pending = Release("3.1.0") with { PublishedAt = Now.AddHours(-48) },
+        Installer = @"C:\Updates\Glimpse-Setup-3.1.0.exe"
+    };
+
     [Fact]
-    public void AnAutomaticInstallStartsWhenEveryRuleHolds() =>
-        Assert.True(AppUpdater.CanInstallNow(Away));
+    public void AnAutomaticInstallStartsWhenEveryRuleHolds()
+    {
+        Assert.True(AppUpdater.InstallsWhenAway(Ready, Automatic, Now));
+        Assert.True(AppUpdater.IsAway(Away));
+    }
 
     [Fact]
     public void AReleaseWaitsTwoDaysAfterItIsPublished()
     {
-        Assert.False(AppUpdater.CanInstallNow(Away with { ReleaseAge = TimeSpan.FromHours(48) - TimeSpan.FromSeconds(1) }));
-        Assert.False(AppUpdater.CanInstallNow(Away with { ReleaseAge = TimeSpan.Zero }));
+        Assert.False(AppUpdater.InstallsWhenAway(Ready, Automatic, Now.AddSeconds(-1)));
+        Assert.False(AppUpdater.InstallsWhenAway(Ready with { Pending = Ready.Pending! with { PublishedAt = null } }, Automatic, Now));
     }
 
     [Fact]
     public void InstallNowWaivesOnlyTheTwoDayWait()
     {
-        var pressed = Away with { ReleaseAge = TimeSpan.Zero, InstallNowPressed = true };
+        var pressed = Ready with { Pending = Ready.Pending! with { PublishedAt = Now }, InstallNowPressed = true };
 
-        Assert.True(AppUpdater.CanInstallNow(pressed));
-        Assert.False(AppUpdater.CanInstallNow(pressed with { PreviewOpen = true }));
-        Assert.False(AppUpdater.CanInstallNow(pressed with { Idle = TimeSpan.Zero }));
+        Assert.True(AppUpdater.InstallsWhenAway(pressed, Automatic, Now));
+        Assert.False(AppUpdater.InstallsWhenAway(pressed with { Installer = null }, Automatic, Now));
+        Assert.False(AppUpdater.InstallsWhenAway(pressed, Automatic with { UpdateAttemptVersion = "3.1.0", UpdateAttemptUtc = Now }, Now));
+    }
+
+    [Fact]
+    public void NothingInstallsOnItsOwnWithoutTheInstallerOnDiskOrWithTheSwitchOff()
+    {
+        Assert.False(AppUpdater.InstallsWhenAway(Ready with { Installer = null }, Automatic, Now));
+        Assert.False(AppUpdater.InstallsWhenAway(Ready, Automatic with { InstallUpdatesAutomatically = false }, Now));
+        Assert.False(AppUpdater.InstallsWhenAway(new UpdateState(), Automatic, Now));
     }
 
     [Fact]
     public void AnOpenGlanceOrPinnedWindowHoldsIt() =>
-        Assert.False(AppUpdater.CanInstallNow(Away with { PreviewOpen = true }));
+        Assert.False(AppUpdater.IsAway(Away with { PreviewOpen = true }));
 
     [Fact]
     public void AFullScreenAppHoldsIt() =>
-        Assert.False(AppUpdater.CanInstallNow(Away with { FullscreenSuspended = true }));
+        Assert.False(AppUpdater.IsAway(Away with { FullscreenSuspended = true }));
 
     [Fact]
     public void FullScreenAppsPresentationModeAndQuietTimeHoldIt()
@@ -69,7 +90,7 @@ public sealed class AppUpdaterTests
             NativeMethods.UserNotificationState.App
         })
         {
-            Assert.False(AppUpdater.CanInstallNow(Away with { Notifications = state }), state.ToString());
+            Assert.False(AppUpdater.IsAway(Away with { Notifications = state }), state.ToString());
         }
     }
 
@@ -78,13 +99,13 @@ public sealed class AppUpdaterTests
     {
         var locked = Away with { Notifications = NativeMethods.UserNotificationState.NotPresent };
 
-        Assert.True(AppUpdater.CanInstallNow(locked));
-        Assert.False(AppUpdater.CanInstallNow(locked with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
+        Assert.True(AppUpdater.IsAway(locked));
+        Assert.False(AppUpdater.IsAway(locked with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
     }
 
     [Fact]
     public void TheUserMustBeAwayForThreeMinutes() =>
-        Assert.False(AppUpdater.CanInstallNow(Away with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
+        Assert.False(AppUpdater.IsAway(Away with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
 
     [Fact]
     public void ASetupThatRanInTheLastDayIsNotStartedAgainOnItsOwn()
@@ -96,7 +117,7 @@ public sealed class AppUpdaterTests
         Assert.True(AppUpdater.TriedRecently(tried, release, now));
         Assert.False(AppUpdater.TriedRecently(tried with { UpdateAttemptUtc = now.AddHours(-24) }, release, now));
         Assert.False(AppUpdater.TriedRecently(tried with { UpdateAttemptVersion = "3.0.1" }, release, now));
-        Assert.False(AppUpdater.CanInstallNow(Away with { TriedRecently = true }));
+        Assert.False(AppUpdater.InstallsWhenAway(Ready, Automatic with { UpdateAttemptVersion = "3.1.0", UpdateAttemptUtc = Now.AddHours(-23) }, Now));
     }
 
     [Fact]
@@ -376,6 +397,58 @@ public sealed class AppUpdaterTests
         metered = false;
         await updates.TickAsync();
         Assert.Equal(1, release.RequestsFor(".exe"));
+    });
+
+    [Fact]
+    public Task OnAMeteredConnectionAnInstallerAlreadyOnDiskIsUsed() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var installer = Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe");
+        await File.WriteAllBytesAsync(installer, release.Installer);
+        var launches = new List<string>();
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away,
+            isMetered: () => true,
+            launch: (_, path, _) =>
+            {
+                launches.Add(path);
+                return Task.CompletedTask;
+            });
+
+        // An earlier run downloaded it: checking it costs the sidecar and .sig.
+        await updates.CheckNowAsync();
+        Assert.Equal(installer, updates.State.Installer);
+        Assert.Equal(0, release.RequestsFor(".exe"));
+        Assert.Equal(2, release.RequestsFor(".sha256.sig"));
+
+        await updates.TickAsync();
+        Assert.Equal(installer, Assert.Single(launches));
+        Assert.Equal(0, release.RequestsFor(".exe"));
+    });
+
+    [Fact]
+    public Task OnAMeteredConnectionAnInstallerThatFailsItsChecksumIsDeletedNotReplaced() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var installer = Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe");
+        await File.WriteAllBytesAsync(installer, new byte[ReleaseFixture.InstallerSize]);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.Null(updates.State.Installer);
+        Assert.False(File.Exists(installer));
+        Assert.NotNull(updates.State.Pending);
+
+        // With nothing on disk, a minute's look asks GitHub for nothing.
+        var signatures = release.RequestsFor(".sha256.sig");
+        await updates.TickAsync();
+        Assert.Equal(signatures, release.RequestsFor(".sha256.sig"));
+        Assert.Equal(0, release.RequestsFor(".exe"));
     });
 
     [Fact]

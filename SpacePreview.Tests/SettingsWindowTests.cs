@@ -89,10 +89,11 @@ public sealed class SettingsWindowTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
+        var metered = true;
         var launched = 0;
         using var updates = new AppUpdater(
             release.Service(root.Path),
-            isMetered: () => true,
+            isMetered: () => metered,
             launch: (_, _, _) =>
             {
                 launched++;
@@ -106,6 +107,12 @@ public sealed class SettingsWindowTests
             Assert.Equal(Visibility.Collapsed, settings.UpdateStatusText.Visibility);
             Assert.Equal("Install now", settings.UpdateLink.Content);
             Assert.Equal("Install update now", AutomationProperties.GetName(settings.UpdateLink));
+
+            // Metered, nothing is on disk yet: it installs only when asked.
+            Assert.Equal("3.1.0 is ready to install.", settings.UpdateCaption.Text);
+
+            metered = false;
+            await updates.TickAsync();
             Assert.Equal("3.1.0 installs the next time you step away.", settings.UpdateCaption.Text);
 
             // Off, it waits for the user; the open window follows at once.

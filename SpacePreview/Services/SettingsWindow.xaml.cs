@@ -554,11 +554,11 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
             var version = pending.VersionText;
             return state.Installing
                 ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
-                : new(null, FooterLink.InstallNow, !settings.InstallUpdatesAutomatically
-                    ? $"{version} is ready to install."
-                    : state.Downloading
-                        ? $"Downloading {version} in the background."
-                        : $"{version} installs the next time you step away.");
+                : new(null, FooterLink.InstallNow, state.Downloading && settings.InstallUpdatesAutomatically
+                    ? $"Downloading {version} in the background."
+                    : AppUpdater.InstallsWhenAway(state, settings, now)
+                        ? $"{version} installs the next time you step away."
+                        : $"{version} is ready to install.");
         }
 
         var stale = settings.LastUpdateCheckUtc is { } last && now - last >= StaleAfter

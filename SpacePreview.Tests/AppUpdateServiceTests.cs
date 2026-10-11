@@ -193,7 +193,7 @@ public sealed class AppUpdateServiceTests
         using var service = fixture.Service(root.Path);
         var release = (await service.CheckForUpdateAsync(CancellationToken.None))!;
 
-        var path = await service.DownloadAndVerifyAsync(release, CancellationToken.None);
+        var path = (await service.DownloadAndVerifyAsync(release, download: true, CancellationToken.None))!;
 
         Assert.True(File.Exists(path));
         Assert.Equal(fixture.Sha256, Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(path))));
@@ -212,7 +212,7 @@ public sealed class AppUpdateServiceTests
         fixture.Installer[^1] = 0xFF;
 
         await Assert.ThrowsAsync<UpdateRejectedException>(() =>
-            service.DownloadAndVerifyAsync(release, CancellationToken.None));
+            service.DownloadAndVerifyAsync(release, download: true, CancellationToken.None));
 
         Assert.Empty(Directory.EnumerateFiles(root.Path, "*.partial", SearchOption.TopDirectoryOnly));
         Assert.False(File.Exists(Path.Combine(root.Path, release.InstallerFileName)));
@@ -258,7 +258,7 @@ public sealed class AppUpdateServiceTests
 
         Assert.Null(release.SignatureUri);
         await Assert.ThrowsAsync<UpdateRejectedException>(() => service.VerifyAsync(release, CancellationToken.None));
-        await Assert.ThrowsAsync<UpdateRejectedException>(() => service.DownloadAndVerifyAsync(release, CancellationToken.None));
+        await Assert.ThrowsAsync<UpdateRejectedException>(() => service.DownloadAndVerifyAsync(release, download: true, CancellationToken.None));
         Assert.Equal(0, fixture.RequestsFor(".sha256"));
         Assert.Equal(0, fixture.RequestsFor(".exe"));
     }
@@ -273,7 +273,7 @@ public sealed class AppUpdateServiceTests
         var release = (await service.CheckForUpdateAsync(CancellationToken.None))!;
 
         await Assert.ThrowsAsync<UpdateRejectedException>(() => service.VerifyAsync(release, CancellationToken.None));
-        await Assert.ThrowsAsync<UpdateRejectedException>(() => service.DownloadAndVerifyAsync(release, CancellationToken.None));
+        await Assert.ThrowsAsync<UpdateRejectedException>(() => service.DownloadAndVerifyAsync(release, download: true, CancellationToken.None));
         Assert.Equal(0, fixture.RequestsFor(".exe"));
     }
 
