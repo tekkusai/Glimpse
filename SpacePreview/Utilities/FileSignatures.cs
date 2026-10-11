@@ -21,6 +21,14 @@ internal enum FileSignatureKind
     Gzip
 }
 
+/// <summary>Why a HEIF image did not decode, as far as the file and the decoder can tell.</summary>
+internal enum HeifFailure
+{
+    Damaged,
+    NeedsHevc,
+    NeedsHeif
+}
+
 internal enum ZipPackageKind
 {
     Unknown,
@@ -257,6 +265,77 @@ internal static class FileSignatures
         }
 
         return brands.Count == 0 ? "unknown" : string.Join(",", brands);
+    }
+
+    // Decoder answers that mean the bytes are bad, not that a codec is
+    // missing: WIC's bad image, bad header, missing frame and stream read,
+    // Media Foundation's invalid file format, end of file and invalid data.
+    private static readonly HashSet<int> DamagedImageErrors =
+    [
+        unchecked((int)0x88982F60),
+        unchecked((int)0x88982F61),
+        unchecked((int)0x88982F62),
+        unchecked((int)0x88982F72),
+        unchecked((int)0xC00D36BE),
+        unchecked((int)0x80070026),
+        unchecked((int)0x8007000D)
+    ];
+
+    /// <summary>
+    /// Decodes the file again to hear the decoder's own reason. Only a real
+    /// HEIF header whose decode did not fail on bad data is blamed on a
+    /// missing codec; a truncated or random file is called damaged.
+    /// </summary>
+    public static HeifFailure ClassifyHeifFailure(string path)
+    {
+        try
+        {
+            var header = new byte[HeaderBytes];
+            int read;
+            using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                read = stream.Read(header);
+            }
+
+            return ClassifyHeifFailure(header.AsSpan(0, read), Detect(header.AsSpan(0, read)) == FileSignatureKind.Heif ? DecodeError(path) : null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return HeifFailure.Damaged;
+        }
+    }
+
+    internal static HeifFailure ClassifyHeifFailure(ReadOnlySpan<byte> header, int? decodeError)
+    {
+        if (Detect(header) != FileSignatureKind.Heif || decodeError is not { } error || DamagedImageErrors.Contains(error))
+        {
+            return HeifFailure.Damaged;
+        }
+
+        return HasHevcCodedHeifBrand(header) ? HeifFailure.NeedsHevc : HeifFailure.NeedsHeif;
+    }
+
+    /// <summary>The innermost HRESULT of a full decode, or null when it decodes.</summary>
+    private static int? DecodeError(string path)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var decoder = System.Windows.Media.Imaging.BitmapDecoder.Create(
+                stream,
+                System.Windows.Media.Imaging.BitmapCreateOptions.IgnoreColorProfile,
+                System.Windows.Media.Imaging.BitmapCacheOption.OnLoad);
+            return decoder.Frames.Count > 0 ? null : unchecked((int)0x88982F62);
+        }
+        catch (Exception ex)
+        {
+            while (ex.InnerException is not null)
+            {
+                ex = ex.InnerException;
+            }
+
+            return ex.HResult;
+        }
     }
 
     private static bool StartsWith(ReadOnlySpan<byte> bytes, params byte[] prefix) => bytes.StartsWith(prefix);

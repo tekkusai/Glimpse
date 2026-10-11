@@ -11,7 +11,10 @@ namespace SpacePreview.Preview;
 internal enum AppPackageSignature
 {
     NotSigned,
-    SignedTrusted,
+    Trusted,
+    Untrusted,
+    Expired,
+    Tampered,
     Invalid
 }
 
@@ -26,9 +29,8 @@ internal sealed record AppPackageInfo(
     bool IsBundle,
     IReadOnlyList<string> Capabilities,
     int CapabilityOverflow,
-    AppPackageSignature Signature,
-    string? SignerName,
-    byte[]? LogoBytes);
+    byte[]? LogoBytes,
+    string SourcePath);
 
 internal static class AppPackagePreviewLoader
 {
@@ -42,6 +44,12 @@ internal static class AppPackagePreviewLoader
     private const int TrustENoSignature = unchecked((int)0x800B0100);
     private const int TrustESubjectFormUnknown = unchecked((int)0x800B0003);
     private const int TrustEProviderUnknown = unchecked((int)0x800B0001);
+    private const int TrustEBadDigest = unchecked((int)0x80096010);
+    private const int TrustEExplicitDistrust = unchecked((int)0x800B0111);
+    private const int CertEExpired = unchecked((int)0x800B0101);
+    private const int CertEUntrustedRoot = unchecked((int)0x800B0109);
+    private const int CertEChaining = unchecked((int)0x800B010A);
+    private const int CertEUntrustedTestRoot = unchecked((int)0x800B010D);
 
     private static readonly Guid WintrustActionGenericVerifyV2 = new("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
 
@@ -83,7 +91,6 @@ internal static class AppPackagePreviewLoader
                 ?? visual?.Attribute("Square44x44Logo")?.Value
                 ?? properties?.Elements().FirstOrDefault(e => e.Name.LocalName.Equals("Logo", StringComparison.OrdinalIgnoreCase))?.Value;
             var logo = TryReadLogo(archive, logoPath);
-            var (signature, signer) = SignatureFor(path);
 
             return new AppPackageInfo(
                 title,
@@ -96,9 +103,8 @@ internal static class AppPackagePreviewLoader
                 isBundle,
                 allCapabilities.Take(MaxCapabilities).ToList(),
                 Math.Max(0, allCapabilities.Count - MaxCapabilities),
-                signature,
-                signer,
-                logo);
+                logo,
+                path);
         }
         catch (Exception ex)
         {
@@ -107,17 +113,45 @@ internal static class AppPackagePreviewLoader
         }
     }
 
+    /// <summary>
+    /// Hashes the whole package, so it runs after the card is on screen.
+    /// </summary>
     internal static (AppPackageSignature Signature, string? Signer) SignatureFor(string path)
     {
-        var result = VerifyTrust(path);
-        if (result == 0)
-        {
-            return (AppPackageSignature.SignedTrusted, SignerName(path));
-        }
+        var signature = ClassifyTrustResult(VerifyTrust(path));
+        var signer = signature is AppPackageSignature.Trusted or AppPackageSignature.Untrusted or AppPackageSignature.Expired
+            ? SignerName(path)
+            : null;
+        return (signature, signer);
+    }
 
-        return result is TrustENoSignature or TrustESubjectFormUnknown or TrustEProviderUnknown
-            ? (AppPackageSignature.NotSigned, null)
-            : (AppPackageSignature.Invalid, null);
+    /// <summary>
+    /// A package signed by a certificate this PC does not trust, the normal
+    /// sideloaded case, is not a tampered one; only a digest mismatch is.
+    /// </summary>
+    internal static AppPackageSignature ClassifyTrustResult(int result) => result switch
+    {
+        0 => AppPackageSignature.Trusted,
+        TrustENoSignature or TrustESubjectFormUnknown or TrustEProviderUnknown => AppPackageSignature.NotSigned,
+        TrustEBadDigest => AppPackageSignature.Tampered,
+        CertEExpired => AppPackageSignature.Expired,
+        CertEUntrustedRoot or CertEChaining or CertEUntrustedTestRoot or TrustEExplicitDistrust => AppPackageSignature.Untrusted,
+        _ => AppPackageSignature.Invalid
+    };
+
+    /// <summary>The trust line's words, and whether they warn.</summary>
+    internal static (string Text, bool Warning) DescribeSignature(AppPackageSignature signature, string? signer)
+    {
+        var by = string.IsNullOrWhiteSpace(signer) ? "Signed" : $"Signed by {signer}";
+        return signature switch
+        {
+            AppPackageSignature.Trusted => (by, false),
+            AppPackageSignature.Untrusted => ($"{by}, not trusted on this PC", true),
+            AppPackageSignature.Expired => ($"{by}, certificate expired", true),
+            AppPackageSignature.Tampered => ("Contents don't match the signature", true),
+            AppPackageSignature.NotSigned => ("Not signed", true),
+            _ => ("Signature can't be verified", true)
+        };
     }
 
     private static string? SignerName(string path)

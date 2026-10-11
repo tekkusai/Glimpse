@@ -1,27 +1,12 @@
-using System.Buffers.Binary;
-using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
-using System.Windows.Threading;
-using Microsoft.Web.WebView2.Core;
-using Microsoft.Web.WebView2.Wpf;
-using SpacePreview.Native;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
 
@@ -29,114 +14,179 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
-    private FrameworkElement BuildDirectoryCard(string path, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        var data = CollectDirectoryCardData(path);
-        var palette = Theme.Current;
-        var sizeLine = new TextBlock
-        {
-            Text = "Calculating size…",
-            Margin = new Thickness(0, 4, 0, 0),
-            FontSize = 13,
-            Foreground = Theme.Brush(palette.TextTertiary),
-            TextAlignment = TextAlignment.Center,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-
-        var breakdown = new StackPanel
-        {
-            Width = 340,
-            Margin = new Thickness(0, 16, 0, 0)
-        };
-
-        ContentControl? visualHost = null;
-        var card = BuildFileCard(data, sizeLine, breakdown, host =>
-        {
-            visualHost = host;
-            visualHost.Width = FolderArtworkSlotWidth;
-            visualHost.Height = FolderArtworkSlotHeight;
-            visualHost.VerticalContentAlignment = VerticalAlignment.Center;
-            visualHost.Content = BuildFolderArtwork(data);
-        });
-        if (visualHost is not null)
-        {
-            var folderArtworkData = data;
-            ShellImage? hoveredArtwork = null;
-            var hoveredArtworkIsDirectory = false;
-
-            void RenderArtwork() => visualHost.Content = hoveredArtwork is null
-                ? BuildFolderArtwork(folderArtworkData)
-                : BuildHoverArtwork(folderArtworkData, hoveredArtworkIsDirectory, hoveredArtwork);
-
-            _ = UpdateFolderArtworkAsync(path, icon =>
-            {
-                folderArtworkData = data with { Image = icon };
-                RenderArtwork();
-            }, token);
-            var hover = new FolderHoverThumbnail((isDirectory, shellImage) =>
-            {
-                hoveredArtwork = shellImage;
-                hoveredArtworkIsDirectory = isDirectory;
-                RenderArtwork();
-            }, (int)FolderArtworkSlotWidth);
-            card.Loaded += (_, _) => _folderHover = hover;
-            card.Unloaded += (_, _) =>
-            {
-                if (ReferenceEquals(_folderHover, hover))
-                {
-                    hover.Reset();
-                    _folderHover = null;
-                }
-            };
-        }
-
-        StartFolderSizeScan(path, sizeLine, breakdown, token);
-        return card;
-    }
-
-    private sealed record FolderChild(string Name, long Bytes, bool IsDirectory);
+    private const double FolderArtSide = 184;
+    private const double FolderListWidth = 480;
+    // Three rows: at the smallest stage the list fits without lifting the card.
+    private const double FolderListMinHeight = 84;
     private const int FolderBreakdownRowsCap = 300;
     private const int FolderSizeScanEntryBudget = 25000;
     private static readonly TimeSpan FolderSizeScanStartDelay = TimeSpan.FromMilliseconds(220);
     private static readonly TimeSpan FolderSizeScanTimeBudget = TimeSpan.FromSeconds(2.5);
 
     /// <summary>
-    /// Walks the folder in the background, updating the card line live and
-    /// finishing with a size breakdown of the largest children. One walker
-    /// owns the disk at a time. Superseded requests cancel while waiting, so
-    /// rapid browsing leaves only the newest folder behind the current walk.
+    /// The folder card is the first frame, not the census: its art and title
+    /// are local, the shell icon and the size walk land later. The children
+    /// list is the card's footer and fills the rest of the canvas.
     /// </summary>
-    private void StartFolderSizeScan(string path, TextBlock target, StackPanel breakdown, CancellationToken token)
+    private FrameworkElement BuildDirectoryCard(string path, CancellationToken token)
     {
-        var pulse = new DoubleAnimation(1, 0.45, TimeSpan.FromMilliseconds(700))
+        token.ThrowIfCancellationRequested();
+        var dpi = PixelsPerDip();
+        var visualHost = new ContentControl
         {
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = BuildFolderArtwork(null, dpi)
         };
-        target.BeginAnimation(OpacityProperty, pulse);
 
-        _ = RunFolderSizeScanAsync(path, target, breakdown, token);
+        var list = new EntryList(
+            FolderBreakdownRowsCap,
+            meters: true,
+            activate: (node, _) => OpenFolderChild(Path.Combine(path, node.Name), node.IsDirectory),
+            enter: (node, row) => _folderHover?.OnRowEnter(row, Path.Combine(path, node.Name), node.IsDirectory),
+            leave: (_, row) => _folderHover?.OnRowLeave(row));
+        var listScroll = new ScrollViewer
+        {
+            Width = FolderListWidth,
+            MinHeight = FolderListMinHeight,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            CanContentScroll = false,
+            Content = list.Element
+        };
+        StyleScrollViewer(listScroll);
+
+        var sizeLine = FactLine("Calculating size…", 0);
+        var card = BuildFileCard(visualHost, FolderTitle(path), [sizeLine], listScroll);
+
+        BitmapSource? restingFolder = null;
+        ShellImage? hovered = null;
+        var hoveredIsDirectory = false;
+        void Render() => visualHost.Content = hovered is null
+            ? BuildFolderArtwork(restingFolder, dpi)
+            : BuildHoverArtwork(restingFolder, hoveredIsDirectory, hovered, dpi);
+
+        var folderPixels = DevicePixels(FolderArtSide, dpi);
+        _ = UpdateFolderArtworkAsync(path, folderPixels, icon =>
+        {
+            restingFolder = icon;
+            Render();
+        }, token);
+
+        var hover = new FolderHoverThumbnail((isDirectory, shellImage) =>
+        {
+            hovered = shellImage;
+            hoveredIsDirectory = isDirectory;
+            Render();
+        }, folderPixels, DevicePixels(CardIconSide, dpi));
+        card.Loaded += (_, _) => _folderHover = hover;
+        card.Unloaded += (_, _) =>
+        {
+            if (ReferenceEquals(_folderHover, hover))
+            {
+                hover.Reset();
+                _folderHover = null;
+            }
+        };
+
+        StartFolderSizeScan(path, sizeLine, list, token);
+        return card;
     }
 
-    private async Task RunFolderSizeScanAsync(string path, TextBlock target, StackPanel breakdown, CancellationToken token)
+    private static string FolderTitle(string path)
+    {
+        var title = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.IsNullOrWhiteSpace(title) ? path : title;
+    }
+
+    private void StartFolderSizeScan(string path, TextBlock sizeLine, EntryList list, CancellationToken token)
+    {
+        if (SystemParameters.ClientAreaAnimation)
+        {
+            sizeLine.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.45, TimeSpan.FromMilliseconds(700))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever
+            });
+        }
+
+        _ = RunFolderSizeScanAsync(path, sizeLine, list, token);
+    }
+
+    /// <summary>
+    /// One walker owns the disk at a time. Superseded folders cancel while
+    /// they wait, so rapid browsing leaves only the newest one queued.
+    /// </summary>
+    private async Task RunFolderSizeScanAsync(string path, TextBlock sizeLine, EntryList list, CancellationToken token)
     {
         var entered = false;
         try
         {
             // The first frame wins. Disk enumeration starts only after the
-            // 110 ms swap/reveal beat has had an uncontested dispatcher turn.
+            // swap and reveal have had an uncontested dispatcher turn.
             await Task.Delay(FolderSizeScanStartDelay, token);
             await _folderSizeScanGate.WaitAsync(token);
             entered = true;
-            await Task.Run(() => ScanFolderSize(path, target, breakdown, token), token);
+
+            var dispatcher = sizeLine.Dispatcher;
+            var listed = false;
+            var finished = false;
+            var scan = await Task.Run(
+                () => FolderScanner.Scan(
+                    path,
+                    FolderSizeScanEntryBudget,
+                    FolderSizeScanTimeBudget,
+                    progress => dispatcher.BeginInvoke(() =>
+                    {
+                        // The await below may resume ahead of queued
+                        // progress; a late snapshot never undoes the result.
+                        if (finished || token.IsCancellationRequested)
+                        {
+                            return;
+                        }
+
+                        sizeLine.Text = FolderScanner.DescribeProgress(progress);
+                        ShowFolderRows(list, progress, rebuild: !listed);
+                        listed = true;
+                    }),
+                    token),
+                token);
+
+            finished = true;
+            sizeLine.Text = FolderScanner.Describe(scan);
+            if (!scan.RootUnreadable)
+            {
+                // Sizes are a ranking only when every child has one. Sort
+                // once, at the end, so rows never shuffle under the pointer
+                // while the walk runs.
+                var final = scan.Stopped ? scan : scan with { Children = SortBySize(scan.Children) };
+                ShowFolderRows(list, final, rebuild: !listed || !scan.Stopped);
+                _folderHover?.SetWarmPaths(final.Children
+                    .Where(child => child.IsDirectory)
+                    .Take(FolderBreakdownRowsCap)
+                    .Select(child => Path.Combine(path, child.Name))
+                    .ToList());
+            }
         }
         catch (OperationCanceledException)
         {
             // A newer folder owns the only pending slot.
         }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"folder size scan failed {path}: {ex.GetType().Name}: {ex.Message}");
+            if (!token.IsCancellationRequested)
+            {
+                sizeLine.Text = "Size unavailable";
+            }
+        }
         finally
         {
+            // Done, failed or cancelled: the pulse never outlives the walk.
+            sizeLine.BeginAnimation(OpacityProperty, null);
+            sizeLine.Opacity = 1;
             if (entered)
             {
                 _folderSizeScanGate.Release();
@@ -144,217 +194,31 @@ public partial class PreviewWindow
         }
     }
 
-    private void ScanFolderSize(string path, TextBlock target, StackPanel breakdown, CancellationToken token)
+    private static IReadOnlyList<FolderChild> SortBySize(IReadOnlyList<FolderChild> children) =>
+        children
+            .OrderByDescending(child => child.Bytes ?? -1)
+            .ThenBy(child => child.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static void ShowFolderRows(EntryList list, FolderScan scan, bool rebuild)
     {
-        long totalBytes = 0;
-        long files = 0;
-        long folders = 0;
-        var entriesScanned = 0;
-        var partial = false;
-        var children = new List<FolderChild>();
-        var lastReport = Stopwatch.StartNew();
-        var scanClock = Stopwatch.StartNew();
+        var largest = scan.Children.Max(child => child.Bytes) ?? 0;
+        double Share(FolderChild child) => largest > 0 && child.Bytes is { } bytes ? (double)bytes / largest : 0;
 
-        bool BudgetReached()
+        if (rebuild)
         {
-            entriesScanned++;
-            if (entriesScanned < FolderSizeScanEntryBudget && scanClock.Elapsed < FolderSizeScanTimeBudget)
-            {
-                return false;
-            }
-
-            partial = true;
-            return true;
-        }
-
-        void ReportProgress()
-        {
-            if (lastReport.ElapsedMilliseconds <= 150)
-            {
-                return;
-            }
-
-            lastReport.Restart();
-            var text = $"Calculating… {FileKinds.FormatSize(totalBytes)} so far";
-            target.Dispatcher.BeginInvoke(() =>
-            {
-                if (!token.IsCancellationRequested)
-                {
-                    target.Text = text;
-                }
-            });
-        }
-
-        try
-        {
-            var recursive = new EnumerationOptions
-            {
-                RecurseSubdirectories = true,
-                IgnoreInaccessible = true,
-                AttributesToSkip = FileAttributes.ReparsePoint
-            };
-            var topLevel = new EnumerationOptions
-            {
-                IgnoreInaccessible = true,
-                AttributesToSkip = FileAttributes.ReparsePoint
-            };
-
-            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos("*", topLevel))
-            {
-                token.ThrowIfCancellationRequested();
-                if (BudgetReached())
-                {
-                    break;
-                }
-
-                if (entry is FileInfo file)
-                {
-                    totalBytes += file.Length;
-                    files++;
-                    children.Add(new FolderChild(file.Name, file.Length, IsDirectory: false));
-                }
-                else if (entry is DirectoryInfo directory)
-                {
-                    folders++;
-
-                    // AttributesToSkip only filters what enumeration
-                    // yields; explicitly recursing into a junction still
-                    // follows it. A child junction pointing up the tree
-                    // would otherwise walk forever.
-                    if ((directory.Attributes & FileAttributes.ReparsePoint) != 0)
-                    {
-                        children.Add(new FolderChild(directory.Name, 0, IsDirectory: true));
-                        continue;
-                    }
-
-                    long childBytes = 0;
-                    foreach (var descendant in directory.EnumerateFileSystemInfos("*", recursive))
-                    {
-                        token.ThrowIfCancellationRequested();
-                        if (BudgetReached())
-                        {
-                            break;
-                        }
-
-                        if (descendant is FileInfo descendantFile)
-                        {
-                            childBytes += descendantFile.Length;
-                            files++;
-                        }
-                        else
-                        {
-                            folders++;
-                        }
-
-                        ReportProgress();
-                    }
-
-                    totalBytes += childBytes;
-                    children.Add(new FolderChild(directory.Name, childBytes, IsDirectory: true));
-                }
-
-                ReportProgress();
-
-                if (partial)
-                {
-                    break;
-                }
-            }
-
-            var summary = files == 0 && folders == 0
-                ? partial ? "Still scanning…" : "Empty"
-                : $"{(partial ? "At least " : string.Empty)}{FileKinds.FormatSize(totalBytes)} · {folders:N0} {(folders == 1 ? "folder" : "folders")} · {files:N0} {(files == 1 ? "file" : "files")}";
-            var sorted = children.Where(c => c.Bytes > 0).OrderByDescending(c => c.Bytes).ToList();
-
-            target.Dispatcher.BeginInvoke(() =>
-            {
-                if (token.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                target.Text = summary;
-                target.BeginAnimation(OpacityProperty, null);
-                target.Opacity = 1;
-                FillFolderBreakdown(breakdown, path, sorted);
-            });
-        }
-        catch (OperationCanceledException)
-        {
-            // Preview moved on; stop the background scan.
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"folder size scan failed {path}: {ex.GetType().Name}: {ex.Message}");
-            target.Dispatcher.BeginInvoke(() =>
-            {
-                if (token.IsCancellationRequested)
-                {
-                    return;
-                }
-
-                target.Text = "Size unavailable";
-                target.BeginAnimation(OpacityProperty, null);
-                target.Opacity = 1;
-            });
-        }
-    }
-    private void FillFolderBreakdown(StackPanel breakdown, string rootPath, IReadOnlyList<FolderChild> children)
-    {
-        if (children.Count == 0)
-        {
+            list.Show(
+                scan.Children
+                    .Select(child => new EntryNode(child.Name, child.IsDirectory, FolderScanner.DescribeChild(child), Share(child), child.IsLink))
+                    .ToList(),
+                moreAtLeast: !scan.ListedEveryChild);
             return;
         }
 
-        var palette = Theme.Current;
-        var glyphFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
-        var maxBytes = children[0].Bytes;
-
-        var rows = new StackPanel();
-        var shown = 0;
-        foreach (var child in children.Take(FolderBreakdownRowsCap))
+        for (var i = 0; i < Math.Min(scan.Children.Count, FolderBreakdownRowsCap); i++)
         {
-            AddFolderBreakdownEntry(rows, rootPath, child, maxBytes, palette, glyphFont);
-            shown++;
+            list.Update(i, FolderScanner.DescribeChild(scan.Children[i]), Share(scan.Children[i]));
         }
-
-        _folderHover?.SetWarmPaths(children
-            .Where(child => child.IsDirectory)
-            .Take(FolderBreakdownRowsCap)
-            .Select(child => Path.Combine(rootPath, child.Name))
-            .ToList());
-
-        if (children.Count > shown)
-        {
-            rows.Children.Add(new TextBlock
-            {
-                Text = $"…and {children.Count - shown:N0} more items",
-                FontSize = 12,
-                Margin = new Thickness(4, 8, 0, 4),
-                Foreground = Theme.Brush(palette.TextTertiary)
-            });
-        }
-
-        // One list, always scrollable: about four rows tall, with a half-row
-        // peek of the fifth so it is obvious there is more below. No mode,
-        // no toggle; the wheel is the whole interaction, and the hover
-        // scrollbar is the hint for anyone who needs one.
-        var scroll = new ScrollViewer
-        {
-            MaxHeight = 136,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            CanContentScroll = false,
-            Content = rows
-        };
-        StyleScrollViewer(scroll);
-        breakdown.Children.Add(scroll);
-
-        breakdown.Opacity = 0;
-        breakdown.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        });
     }
 
     /// <summary>
@@ -394,97 +258,11 @@ public partial class PreviewWindow
         }
     }
 
-
-    private void AddFolderBreakdownEntry(StackPanel host, string rootPath, FolderChild child, long maxBytes, ThemePalette palette, FontFamily glyphFont)
-    {
-        var row = new Grid { Margin = new Thickness(6, 0, 6, 0) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var glyph = new TextBlock
-        {
-            Text = child.IsDirectory ? "\uE8B7" : "\uE7C3",
-            FontFamily = glyphFont,
-            FontSize = 11,
-            Margin = new Thickness(0, 0, 8, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(child.IsDirectory ? palette.Accent : palette.TextTertiary)
-        };
-        Grid.SetColumn(glyph, 0);
-        row.Children.Add(glyph);
-
-        var name = new TextBlock
-        {
-            Text = child.Name,
-            FontSize = 12.5,
-            Foreground = Theme.Brush(palette.TextSecondary),
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        Grid.SetColumn(name, 1);
-        row.Children.Add(name);
-
-        var size = new TextBlock
-        {
-            Text = FileKinds.FormatSize(child.Bytes),
-            FontSize = 12,
-            Margin = new Thickness(14, 0, 0, 0),
-            Foreground = Theme.Brush(palette.TextTertiary)
-        };
-        Grid.SetColumn(size, 2);
-        row.Children.Add(size);
-
-        var bar = new Border
-        {
-            Height = 3,
-            CornerRadius = new CornerRadius(1.5),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Width = Math.Max(6, 328.0 * child.Bytes / Math.Max(1, maxBytes)),
-            Margin = new Thickness(6, 3, 6, 5),
-            Background = Theme.Brush(Color.FromArgb(150, palette.Accent.R, palette.Accent.G, palette.Accent.B))
-        };
-
-        var content = new StackPanel { Children = { row, bar } };
-
-        // Each entry is a doorway: folders open, files get revealed.
-        var childPath = Path.Combine(rootPath, child.Name);
-        var isDirectory = child.IsDirectory;
-        var entry = new Border
-        {
-            CornerRadius = Metrics.RowCorner,
-            Padding = new Thickness(0, 4, 0, 0),
-            Margin = new Thickness(0, 0, 0, 1),
-            Background = Brushes.Transparent,
-            Cursor = Cursors.Hand,
-            ToolTip = isDirectory ? "Open folder" : "Show in Explorer",
-            Child = content
-        };
-        entry.MouseEnter += (_, _) =>
-        {
-            entry.Background = Theme.Brush(palette.HoverBg);
-
-            _folderHover?.OnRowEnter(entry, childPath, isDirectory);
-        };
-        entry.MouseLeave += (_, _) =>
-        {
-            entry.Background = Brushes.Transparent;
-            _folderHover?.OnRowLeave(entry);
-        };
-        entry.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        entry.MouseLeftButtonUp += (_, e) =>
-        {
-            OpenFolderChild(childPath, isDirectory);
-            e.Handled = true;
-        };
-
-        host.Children.Add(entry);
-    }
-
     private void OpenFolderChild(string path, bool isDirectory)
     {
         try
         {
-            var arguments = isDirectory ? $"\"{path}\"" : $"/select,\"{path}\"";
+            var arguments = isDirectory ? QuoteArgument(path) : $"/select,{QuoteArgument(path)}";
             Process.Start(new ProcessStartInfo("explorer.exe", arguments) { UseShellExecute = true });
         }
         catch (Exception ex)
@@ -496,31 +274,9 @@ public partial class PreviewWindow
         DismissRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    private const int ArchiveRootCap = 500;
-    private const int ArchiveChildrenCap = 200;
-
-    /// <summary>
-    /// The folder card is the first frame, not the census. Its title comes
-    /// from the path; all shell and filesystem enrichment lands later.
-    /// </summary>
-    private static FileCardData CollectDirectoryCardData(string path)
-    {
-        var title = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (string.IsNullOrWhiteSpace(title))
-        {
-            title = path;
-        }
-
-        return new FileCardData(
-            Image: null,
-            IsThumbnail: false,
-            Title: title,
-            Lines: [],
-            BadgeText: "Folder");
-    }
-
     private async Task UpdateFolderArtworkAsync(
         string path,
+        int pixels,
         Action<BitmapSource> apply,
         CancellationToken token)
     {
@@ -529,9 +285,7 @@ public partial class PreviewWindow
         {
             await _shellIconGate.WaitAsync(token);
             entered = true;
-            var icon = await Task.Run(
-                () => ShellThumbnailProvider.TryGetIcon(path, (int)FolderArtworkSlotWidth),
-                token);
+            var icon = await Task.Run(() => ShellThumbnailProvider.TryGetIcon(path, pixels), token);
             if (token.IsCancellationRequested || icon is null)
             {
                 return;
@@ -543,9 +297,10 @@ public partial class PreviewWindow
         {
             // A newer preview owns the shell lane now.
         }
-        catch
+        catch (Exception ex)
         {
             // The built-in folder mark is the permanent fallback.
+            DiagnosticLog.Write($"folder icon failed {path}: {ex.GetType().Name}");
         }
         finally
         {
@@ -556,11 +311,11 @@ public partial class PreviewWindow
         }
     }
 
-    private static FrameworkElement BuildFolderArtwork(FileCardData data)
+    private static FrameworkElement BuildFolderArtwork(BitmapSource? shellFolder, double pixelsPerDip)
     {
-        if (data.Image is not null)
+        if (shellFolder is not null)
         {
-            return BuildFileCardVisual(data, FolderArtworkSlotWidth, FolderArtworkSlotHeight, 184, 184);
+            return IconVisual(shellFolder, FolderArtSide, pixelsPerDip);
         }
 
         // A complete code-native folder, not a loading glyph. Shell artwork
@@ -569,9 +324,7 @@ public partial class PreviewWindow
         var folder = new Grid
         {
             Width = 184,
-            Height = 150,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
+            Height = 150
         };
 
         folder.Children.Add(new Border
@@ -607,41 +360,34 @@ public partial class PreviewWindow
                 Opacity = Theme.Current.IsDark ? 0.3 : 0.16
             }
         });
-        return folder;
+
+        // The slot shrinks on short stages; the drawing shrinks with it.
+        return new Viewbox
+        {
+            Stretch = Stretch.Uniform,
+            StretchDirection = StretchDirection.DownOnly,
+            Child = folder
+        };
     }
 
     /// <summary>
-    /// A hovered FILE with only an icon renders exactly like its own file
-    /// card would: same side, no blow-up to the artwork slot. Folders and
-    /// real thumbnails keep the large artwork treatment, matching how their
-    /// own cards present.
+    /// A hovered child takes the folder art's slot. A folder keeps the
+    /// resting folder's exact outline; a file shows exactly as its own card
+    /// would, thumbnail or icon.
     /// </summary>
-    private static FrameworkElement BuildHoverArtwork(FileCardData data, bool isDirectory, ShellImage shellImage)
+    private static FrameworkElement BuildHoverArtwork(BitmapSource? restingFolder, bool isDirectory, ShellImage shellImage, double pixelsPerDip)
     {
         if (isDirectory)
         {
-            if (data.Image is { } restingFolder)
-            {
-                shellImage = shellImage with
-                {
-                    Bitmap = MatchFolderArtworkBounds(shellImage.Bitmap, restingFolder)
-                };
-            }
-
-            return BuildFolderArtwork(data with { Image = shellImage.Bitmap, IsThumbnail = shellImage.IsThumbnail });
+            var bitmap = restingFolder is null
+                ? shellImage.Bitmap
+                : MatchFolderArtworkBounds(shellImage.Bitmap, restingFolder);
+            return shellImage.IsThumbnail
+                ? ThumbnailVisual(bitmap, pixelsPerDip)
+                : IconVisual(bitmap, FolderArtSide, pixelsPerDip);
         }
 
-        if (shellImage.IsThumbnail)
-        {
-            return BuildFolderArtwork(data with { Image = shellImage.Bitmap, IsThumbnail = shellImage.IsThumbnail });
-        }
-
-        return BuildFileCardVisual(
-            data with { Image = shellImage.Bitmap, IsThumbnail = false },
-            FolderArtworkSlotWidth,
-            FolderArtworkSlotHeight,
-            FileCardIconSide,
-            FileCardIconSide);
+        return BuildCardVisual(shellImage, pixelsPerDip);
     }
 
     internal static BitmapSource MatchFolderArtworkBounds(BitmapSource artwork, BitmapSource restingFolder)

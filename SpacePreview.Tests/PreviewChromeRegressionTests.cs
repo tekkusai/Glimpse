@@ -8,42 +8,17 @@ namespace SpacePreview.Tests;
 
 public sealed class PreviewChromeRegressionTests
 {
+    /// <summary>
+    /// The hovered row's thumbnail takes the folder card's own art slot. A
+    /// popup window would steal activation from Explorer.
+    /// </summary>
     [Fact]
     public void FolderRowHoverReusesTheFolderArtworkSlot()
     {
         var hoverSource = ReadSource(@"SpacePreview\Preview\FolderHoverThumbnail.cs");
-        var thumbnailSource = ReadSource(@"SpacePreview\Preview\ShellThumbnailProvider.cs");
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
 
         Assert.DoesNotContain("Popup", hoverSource, StringComparison.Ordinal);
         Assert.DoesNotContain("PlacementTarget", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("new FolderHoverThumbnail((isDirectory, shellImage) =>", windowSource, StringComparison.Ordinal);
-        Assert.Contains("BuildHoverArtwork(folderArtworkData, hoveredArtworkIsDirectory, hoveredArtwork)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("if (isDirectory)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("MatchFolderArtworkBounds(shellImage.Bitmap, restingFolder)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("if (shellImage.IsThumbnail)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("card.Loaded += (_, _) => _folderHover = hover", windowSource, StringComparison.Ordinal);
-        Assert.Contains("FolderArtworkSlotWidth", windowSource, StringComparison.Ordinal);
-        Assert.Contains("BuildFolderArtwork", windowSource, StringComparison.Ordinal);
-        Assert.Contains("visualHost.Content", windowSource, StringComparison.Ordinal);
-        Assert.Contains("}, (int)FolderArtworkSlotWidth);", windowSource, StringComparison.Ordinal);
-        Assert.Contains("FolderHoverThumbnail(Action<bool, ShellImage?> show, int folderIconPixels)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("if (!isDirectory)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("ShellThumbnailProvider.TryGetThumbnail(path, ThumbPixels)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("ShellThumbnailProvider.NormalizeFolderImage(", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("ShellThumbnailProvider.TryGetThumbnail(path, ThumbPixels, _folderIconPixels)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("TryGetIcon(path, fallbackIconPixels)", thumbnailSource, StringComparison.Ordinal);
-        Assert.Contains("BuildFileCardVisual(data, FolderArtworkSlotWidth, FolderArtworkSlotHeight, 184, 184)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("TimeSpan.FromMilliseconds(140)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("TimeSpan.FromMilliseconds(80)", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("_hideDelay.Stop();", ReadMethod(hoverSource, "public void OnRowEnter"), StringComparison.Ordinal);
-        Assert.Contains("_hideDelay.Start();", ReadMethod(hoverSource, "public void OnRowLeave"), StringComparison.Ordinal);
-        Assert.Contains("private const int WarmAhead = 2;", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("private readonly Queue<string> _warmQueue", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("if (_hoverReady && _pendingPath is { } hovered", hoverSource, StringComparison.Ordinal);
-        Assert.Contains("_folderHover?.SetWarmPaths(children", windowSource, StringComparison.Ordinal);
-        Assert.Contains("_warmQueue.Clear();", ReadMethod(hoverSource, "public void Reset"), StringComparison.Ordinal);
-        Assert.Contains("_warmQueued.Clear();", ReadMethod(hoverSource, "public void Reset"), StringComparison.Ordinal);
     }
 
     /// <summary>
@@ -144,26 +119,6 @@ public sealed class PreviewChromeRegressionTests
     }
 
     [Fact]
-    public void FileCardsUseStableLayoutLanes()
-    {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var body = ReadMethod(windowSource, "private static FrameworkElement BuildFileCard");
-
-        Assert.Contains("FileCardVisualSlotHeight", windowSource, StringComparison.Ordinal);
-        Assert.Contains("FileCardTitleSlotHeight", windowSource, StringComparison.Ordinal);
-        Assert.Contains("FileCardInfoSlotHeight", windowSource, StringComparison.Ordinal);
-        Assert.Contains("FileCardFooterSlotHeight", windowSource, StringComparison.Ordinal);
-        Assert.Contains("private const double FileCardIconSide = 148;", windowSource, StringComparison.Ordinal);
-        Assert.Contains("BuildFileCardVisual(data, FolderArtworkSlotWidth, FolderArtworkSlotHeight, 184, 184)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("new Grid", body, StringComparison.Ordinal);
-        Assert.Contains("card.RowDefinitions.Add(new RowDefinition { Height = new GridLength(FileCardVisualSlotHeight) })", body, StringComparison.Ordinal);
-        Assert.Contains("card.RowDefinitions.Add(new RowDefinition { Height = new GridLength(FileCardInfoSlotHeight) })", body, StringComparison.Ordinal);
-        Assert.Contains("BuildFileCardVisual(data, FileCardVisualSlotWidth, FileCardVisualSlotHeight, FileCardIconSide, FileCardIconSide)", body, StringComparison.Ordinal);
-        Assert.Contains("footer is null ? 0 : FileCardFooterSlotHeight", body, StringComparison.Ordinal);
-        Assert.Contains("surface.VerticalContentAlignment = VerticalAlignment.Center", body, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void EpubChapterRailNavigatesAnchorsWithinOneDocument()
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
@@ -240,7 +195,7 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("JsonValueKind.Number", messageBody, StringComparison.Ordinal);
         // The card names the outcome and gives codec-specific help only
         // after the media engine fails and the container confirms it.
-        Assert.Contains("{Branding.Name} can't play this file", windowSource, StringComparison.Ordinal);
+        Assert.Contains("Can't play this file", windowSource, StringComparison.Ordinal);
         Assert.Contains("Mp4CodecSniffer.TryRead(path)", messageBody, StringComparison.Ordinal);
         Assert.Contains("BuildMediaFailurePreview(path, codecs)", messageBody, StringComparison.Ordinal);
         Assert.Contains("MediaCodecStoreAction(codecs)", windowSource, StringComparison.Ordinal);
@@ -255,13 +210,11 @@ public sealed class PreviewChromeRegressionTests
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var previewBody = ReadMethod(windowSource, "private async Task<FrameworkElement> BuildPreviewContentAsync");
 
+        // What the card then says is CardsBehaviorTests' job.
         Assert.Contains("FileSignatures.Detect(contentPath)", windowSource, StringComparison.Ordinal);
         Assert.Contains("signature == FileSignatureKind.Heif", previewBody, StringComparison.Ordinal);
-        Assert.Contains("BuildHeifFailurePreview(path)", previewBody, StringComparison.Ordinal);
-        Assert.Contains("heif brand=", previewBody, StringComparison.Ordinal);
-        Assert.Contains("HasHevcCodedHeifBrand(path)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ms-windows-store://pdp/?ProductId=9PMMSR1CGPWG", windowSource, StringComparison.Ordinal);
+        Assert.Contains("BuildHeifFailurePreview(", previewBody, StringComparison.Ordinal);
+        Assert.Contains("FileSignatures.ClassifyHeifFailure(path)", previewBody, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -20,6 +20,7 @@ internal sealed class FolderHoverThumbnail
 
     private readonly Action<bool, ShellImage?> _show;
     private readonly int _folderIconPixels;
+    private readonly int _fileIconPixels;
     private readonly DispatcherTimer _delay;
     private readonly DispatcherTimer _hideDelay;
     private readonly Dictionary<string, ShellImage?> _cache = new(StringComparer.OrdinalIgnoreCase);
@@ -34,10 +35,15 @@ internal sealed class FolderHoverThumbnail
     private string? _fetchingPath;
     private int _generation;
 
-    public FolderHoverThumbnail(Action<bool, ShellImage?> show, int folderIconPixels)
+    /// <summary>
+    /// Icon sizes are device pixels for the card's own icon slots, so a
+    /// hovered icon is never stretched past what the shell drew.
+    /// </summary>
+    public FolderHoverThumbnail(Action<bool, ShellImage?> show, int folderIconPixels, int fileIconPixels)
     {
         _show = show;
         _folderIconPixels = Math.Max(1, folderIconPixels);
+        _fileIconPixels = Math.Max(1, fileIconPixels);
 
         _delay = new DispatcherTimer(DispatcherPriority.Background) { Interval = HoverDelay };
         _delay.Tick += (_, _) =>
@@ -170,7 +176,7 @@ internal sealed class FolderHoverThumbnail
             {
                 if (!isDirectory)
                 {
-                    return ShellThumbnailProvider.TryGetThumbnail(path, ThumbPixels);
+                    return ShellThumbnailProvider.TryGetThumbnail(path, ThumbPixels, _fileIconPixels);
                 }
 
                 // Preserve real folder artwork. Only its icon fallbacks share
