@@ -353,6 +353,13 @@ public partial class PreviewWindow
             BorderBrush = Theme.Brush(Color.FromRgb(215, 145, 5)),
             BorderThickness = new Thickness(1)
         });
+        var shadow = new DropShadowEffect
+        {
+            BlurRadius = 16,
+            ShadowDepth = 4,
+            Direction = 270,
+            Color = Colors.Black
+        };
         folder.Children.Add(new Border
         {
             Width = 184,
@@ -365,15 +372,9 @@ public partial class PreviewWindow
                 90),
             BorderBrush = Theme.Brush(Color.FromRgb(218, 151, 8)),
             BorderThickness = new Thickness(1),
-            Effect = new DropShadowEffect
-            {
-                BlurRadius = 16,
-                ShadowDepth = 4,
-                Direction = 270,
-                Color = Colors.Black,
-                Opacity = Theme.Current.IsDark ? 0.3 : 0.16
-            }
+            Effect = shadow
         });
+        Theme.Follow(folder, () => shadow.Opacity = Theme.Current.IsDark ? 0.3 : 0.16);
 
         // The slot shrinks on short stages; the drawing shrinks with it.
         return new Viewbox

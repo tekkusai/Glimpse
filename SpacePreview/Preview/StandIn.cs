@@ -65,8 +65,7 @@ internal sealed class StandIn : Panel
         double railWidth,
         double toolbarHeight,
         double dpiScale,
-        BitmapSource? poster,
-        ThemePalette palette)
+        BitmapSource? poster)
     {
         _kind = kind;
         _aspect = aspect;
@@ -74,7 +73,7 @@ internal sealed class StandIn : Panel
         _railWidth = railWidth;
         _toolbarHeight = toolbarHeight;
         _dpiScale = Math.Max(1, dpiScale);
-        Background = Theme.Brush(palette.CanvasBg);
+        SetResourceReference(BackgroundProperty, "Theme.CanvasBg");
         IsHitTestVisible = false;
 
         // A page taller than the window runs off its foot, as the real one
@@ -89,16 +88,14 @@ internal sealed class StandIn : Panel
         }
         else if (kind != LandingKind.None)
         {
-            _visual.Children.Add(new Border
-            {
-                Background = Theme.Brush(palette.RaisedBg),
-                BorderBrush = Theme.Brush(palette.RaisedBorder),
-                BorderThickness = new Thickness(1)
-            });
+            _visual.Children.Add(new Border { BorderThickness = new Thickness(1) }
+                .Themed(Border.BackgroundProperty, "Theme.RaisedBg")
+                .Themed(Border.BorderBrushProperty, "Theme.RaisedBorder"));
         }
 
         // The sheen is a band in the brush, moved in brush space, so it
         // needs no size and sweeps whatever box it lands on.
+        var band = new GradientStop(Colors.Transparent, 0.5);
         _sheen = new Rectangle
         {
             Visibility = Visibility.Collapsed,
@@ -110,22 +107,22 @@ internal sealed class StandIn : Panel
                 GradientStops =
                 {
                     new GradientStop(Colors.Transparent, 0.3),
-                    new GradientStop(palette.HoverBg, 0.5),
+                    band,
                     new GradientStop(Colors.Transparent, 0.7)
                 }
             }
         };
+        Theme.Follow(_sheen, () => band.Color = Theme.Current.HoverBg);
         _visual.Children.Add(_sheen);
         Children.Add(_visual);
 
         _reason = new TextBlock
         {
             FontSize = Metrics.FontBody,
-            Foreground = Theme.Brush(palette.TextSecondary),
             TextAlignment = TextAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             Visibility = Visibility.Collapsed
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary");
         Children.Add(_reason);
     }
 
@@ -171,7 +168,7 @@ internal sealed class StandIn : Panel
         }
 
         var honest = kind != LandingKind.None && IsHonestPoster(poster, aspect);
-        return new StandIn(kind, aspect, native, railWidth, toolbarHeight, dpiScale, honest ? poster : null, Theme.Current);
+        return new StandIn(kind, aspect, native, railWidth, toolbarHeight, dpiScale, honest ? poster : null);
     }
 
     /// <summary>Whether a hint says where the content lands: pages, images and video do.</summary>

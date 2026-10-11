@@ -35,8 +35,6 @@ internal sealed class SelectionGridView
     private readonly LinkedList<int> _thumbOrder = [];
     private readonly HashSet<int> _pendingSet = [];
     private readonly LinkedList<int> _pendingQueue = [];
-    private readonly SolidColorBrush _cursorBrush;
-    private readonly SolidColorBrush _hoverBrush;
     private int _workersRunning;
     private int _cursorIndex;
 
@@ -49,9 +47,6 @@ internal sealed class SelectionGridView
     public SelectionGridView(IReadOnlyList<string> paths, int currentIndex)
     {
         _paths = paths;
-        var palette = Theme.Current;
-        _cursorBrush = Theme.Brush(palette.Accent);
-        _hoverBrush = Theme.Brush(palette.HoverBg);
 
         var tileCount = Math.Min(paths.Count, MaxTiles);
         _tiles = new Tile[tileCount];
@@ -65,7 +60,7 @@ internal sealed class SelectionGridView
 
         for (var i = 0; i < tileCount; i++)
         {
-            _panel.Children.Add(BuildTile(i, palette));
+            _panel.Children.Add(BuildTile(i));
         }
 
         var stack = new StackPanel();
@@ -77,10 +72,9 @@ internal sealed class SelectionGridView
             {
                 Text = $"Showing the first {tileCount} of {paths.Count} selected items.",
                 FontSize = Metrics.FontCaption,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 4, 0, 22)
-            });
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary"));
         }
 
         _scroll = new ScrollViewer
@@ -98,20 +92,16 @@ internal sealed class SelectionGridView
             RequestVisibleThumbnails();
         };
 
-        Root = new Border
-        {
-            Background = Theme.Brush(palette.CanvasBg),
-            Child = _scroll
-        };
+        Root = new Border { Child = _scroll }.Themed(Border.BackgroundProperty, "Theme.CanvasBg");
 
         _cursorIndex = Math.Clamp(currentIndex, 0, Math.Max(0, tileCount - 1));
         if (_tiles.Length > 0)
         {
-            _tiles[_cursorIndex].Chrome.BorderBrush = _cursorBrush;
+            _tiles[_cursorIndex].Chrome.Themed(Border.BorderBrushProperty, "Theme.Accent");
         }
     }
 
-    private Border BuildTile(int index, ThemePalette palette)
+    private Border BuildTile(int index)
     {
         var image = new Image
         {
@@ -127,23 +117,21 @@ internal sealed class SelectionGridView
         var thumbHost = new Border
         {
             Height = ThumbArea + 8,
-            Background = Theme.Brush(Color.FromArgb(palette.IsDark ? (byte)36 : (byte)80, palette.RaisedBg.R, palette.RaisedBg.G, palette.RaisedBg.B)),
             CornerRadius = new CornerRadius(6),
             Margin = new Thickness(0, 0, 0, 7),
             Child = image
-        };
+        }.Themed(Border.BackgroundProperty, "Theme.ThumbWell");
 
         var caption = new TextBlock
         {
             Text = Path.GetFileName(_paths[index].TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)),
             FontSize = Metrics.FontCaption,
-            Foreground = Theme.Brush(palette.TextSecondary),
             TextAlignment = TextAlignment.Center,
             TextWrapping = TextWrapping.Wrap,
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxHeight = 32,
             VerticalAlignment = VerticalAlignment.Top
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary");
 
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -168,7 +156,7 @@ internal sealed class SelectionGridView
         {
             if (index != _cursorIndex)
             {
-                chrome.Background = _hoverBrush;
+                chrome.Themed(Border.BackgroundProperty, "Theme.HoverBg");
             }
         };
         chrome.MouseLeave += (_, _) => chrome.Background = Brushes.Transparent;
@@ -231,7 +219,7 @@ internal sealed class SelectionGridView
 
         _cursorIndex = index;
         var tile = _tiles[index];
-        tile.Chrome.BorderBrush = _cursorBrush;
+        tile.Chrome.Themed(Border.BorderBrushProperty, "Theme.Accent");
         tile.Chrome.Background = Brushes.Transparent;
 
         if (scrollIntoView)

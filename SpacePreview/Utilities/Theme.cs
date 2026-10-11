@@ -16,12 +16,13 @@ internal enum ThemePreference
 /// <summary>
 /// Two fixed palettes that track the Windows app theme. The brushes live once,
 /// in the application's resources, so every window and popup that reads a
-/// "Theme.*" dynamic resource repaints the moment the palette changes,
-/// preview text and image canvases included. Pages Glimpse writes carry both
-/// palettes and follow the browser's color scheme, which the preview window
-/// sets on <see cref="Theme.Changed"/>. Other code-built content reads
-/// <see cref="Theme.Current"/> directly and catches up on its next build.
-/// docs/DESIGN.md names each token's job.
+/// "Theme.*" dynamic resource repaints the moment the palette changes.
+/// Content built in code points at the same resources with
+/// <see cref="Theme.Themed"/>; what a resource cannot carry (a shadow's
+/// strength, a gradient stop, a 3D material) is set again by
+/// <see cref="Theme.Follow"/>. Pages Glimpse writes carry both palettes and
+/// follow the browser's color scheme, which the preview window sets on
+/// <see cref="Theme.Changed"/>. docs/DESIGN.md names each token's job.
 /// </summary>
 internal sealed record ThemePalette(
     bool IsDark,
@@ -161,6 +162,36 @@ internal static class Theme
         resources["Theme.ScrollThumb"] = Brush(p.ScrollThumb);
         resources["Theme.HoverBg"] = Brush(p.HoverBg);
         resources["Theme.PressedBg"] = Brush(p.PressedBg);
+
+        // Mixed from the palette, one job each: the well behind a thumbnail
+        // in the selection sheet, and chrome laid as a veil over the foot of
+        // a page rail.
+        resources["Theme.ThumbWell"] = Brush(WithAlpha(p.RaisedBg, p.IsDark ? (byte)36 : (byte)80));
+        resources["Theme.ChromeVeil"] = Brush(WithAlpha(p.ChromeBg, 180));
+    }
+
+    /// <summary>Points a brush property at a "Theme.*" resource, so it repaints with the palette.</summary>
+    public static T Themed<T>(this T element, DependencyProperty property, string token) where T : FrameworkElement
+    {
+        element.SetResourceReference(property, token);
+        return element;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="apply"/> now, and again on each palette change
+    /// while <paramref name="element"/> is loaded, for what a resource
+    /// cannot reach.
+    /// </summary>
+    public static void Follow(FrameworkElement element, Action apply)
+    {
+        apply();
+        element.Loaded += (_, _) =>
+        {
+            Changed -= apply;
+            Changed += apply;
+            apply();
+        };
+        element.Unloaded += (_, _) => Changed -= apply;
     }
 
     public static SolidColorBrush Brush(Color color)
@@ -187,4 +218,6 @@ internal static class Theme
     }
 
     private static Color Rgb(byte r, byte g, byte b) => Color.FromRgb(r, g, b);
+
+    private static Color WithAlpha(Color color, byte alpha) => Color.FromArgb(alpha, color.R, color.G, color.B);
 }

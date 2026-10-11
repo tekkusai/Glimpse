@@ -31,12 +31,7 @@ public partial class PreviewWindow
 {
     private static FrameworkElement BuildMeshPreview(MeshPreview preview)
     {
-        var palette = Theme.Current;
-        var grid = new Grid
-        {
-            Background = Theme.Brush(palette.CanvasBg),
-            ClipToBounds = true
-        };
+        var grid = new Grid { ClipToBounds = true }.Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
 
         var viewport = new Viewport3D
         {
@@ -54,9 +49,10 @@ public partial class PreviewWindow
 
         // Light clay tinted a quarter toward the accent, the same in both
         // themes: shading carries the form on either canvas.
-        var body = Blend(Theme.Dark.TextSecondary, palette.Accent, 0.25);
+        var body = new DiffuseMaterial();
+        Theme.Follow(grid, () => body.Brush = Theme.Brush(Blend(Theme.Dark.TextSecondary, Theme.Current.Accent, 0.25)));
         var material = new MaterialGroup();
-        material.Children.Add(new DiffuseMaterial(Theme.Brush(body)));
+        material.Children.Add(body);
         material.Children.Add(new SpecularMaterial(Theme.Brush(Color.FromRgb(0x30, 0x30, 0x30)), 40));
 
         var yaw = new AxisAngleRotation3D(new Vector3D(0, 0, 1), -18);

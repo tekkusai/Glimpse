@@ -106,7 +106,6 @@ internal sealed class EntryList
 
     private Row AddRow(Panel host, EntryNode node, int depth)
     {
-        var palette = Theme.Current;
         var grid = new Grid { Height = RowHeight, Margin = new Thickness(8 + (Math.Min(depth, 12) * Indent), 0, 8, 0) };
         if (Expandable)
         {
@@ -130,10 +129,9 @@ internal sealed class EntryList
                 FontSize = 10,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                Foreground = Theme.Brush(palette.TextTertiary),
                 RenderTransformOrigin = new Point(0.5, 0.5),
                 RenderTransform = new RotateTransform()
-            };
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary");
             grid.Children.Add(chevron);
         }
 
@@ -145,9 +143,8 @@ internal sealed class EntryList
             Width = 16,
             TextAlignment = TextAlignment.Center,
             Margin = new Thickness(0, 0, 8, 0),
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(node.IsDirectory && !node.IsLink ? palette.Accent : palette.TextTertiary)
-        };
+            VerticalAlignment = VerticalAlignment.Center
+        }.Themed(TextBlock.ForegroundProperty, node.IsDirectory && !node.IsLink ? "Theme.Accent" : "Theme.TextTertiary");
         Grid.SetColumn(glyph, column);
         grid.Children.Add(glyph);
 
@@ -156,9 +153,8 @@ internal sealed class EntryList
             Text = node.Name,
             FontSize = Metrics.FontBody,
             VerticalAlignment = VerticalAlignment.Center,
-            Foreground = Theme.Brush(palette.TextPrimary),
             TextTrimming = TextTrimming.CharacterEllipsis
-        };
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextPrimary");
         Grid.SetColumn(name, column + 1);
         grid.Children.Add(name);
 
@@ -172,14 +168,12 @@ internal sealed class EntryList
                 Margin = new Thickness(16, 0, 0, 0),
                 CornerRadius = new CornerRadius(2),
                 VerticalAlignment = VerticalAlignment.Center,
-                Background = Theme.Brush(palette.RaisedBorder),
                 Child = new Border
                 {
                     HorizontalAlignment = HorizontalAlignment.Left,
-                    CornerRadius = new CornerRadius(2),
-                    Background = Theme.Brush(palette.Accent)
-                }
-            };
+                    CornerRadius = new CornerRadius(2)
+                }.Themed(Border.BackgroundProperty, "Theme.Accent")
+            }.Themed(Border.BackgroundProperty, "Theme.RaisedBorder");
             SetMeter(meter, node.Share);
             Grid.SetColumn(meter, column + 2);
             grid.Children.Add(meter);
@@ -191,9 +185,8 @@ internal sealed class EntryList
             FontSize = Metrics.FontCaption,
             Margin = new Thickness(16, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = TextAlignment.Right,
-            Foreground = Theme.Brush(palette.TextTertiary)
-        };
+            TextAlignment = TextAlignment.Right
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary");
         Grid.SetColumn(detail, column + 3);
         grid.Children.Add(detail);
 
@@ -285,9 +278,8 @@ internal sealed class EntryList
                 : count > 0 ? $"…and at least {count:N0} more"
                 : "…and more",
             FontSize = Metrics.FontCaption,
-            Margin = new Thickness(lead, 6, 0, 8),
-            Foreground = Theme.Brush(Theme.Current.TextTertiary)
-        };
+            Margin = new Thickness(lead, 6, 0, 8)
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary");
     }
 
     /// <summary>
@@ -296,9 +288,8 @@ internal sealed class EntryList
     /// </summary>
     internal static void WireClick(Border element, Action onClick)
     {
-        var palette = Theme.Current;
         var pressed = false;
-        element.MouseEnter += (_, _) => element.Background = Theme.Brush(palette.HoverBg);
+        element.MouseEnter += (_, _) => element.Themed(Border.BackgroundProperty, "Theme.HoverBg");
         element.MouseLeave += (_, _) =>
         {
             pressed = false;
@@ -307,7 +298,7 @@ internal sealed class EntryList
         element.MouseLeftButtonDown += (_, e) =>
         {
             pressed = true;
-            element.Background = Theme.Brush(palette.PressedBg);
+            element.Themed(Border.BackgroundProperty, "Theme.PressedBg");
             e.Handled = true;
         };
         element.MouseLeftButtonUp += (_, e) =>
@@ -318,7 +309,7 @@ internal sealed class EntryList
             }
 
             pressed = false;
-            element.Background = Theme.Brush(palette.HoverBg);
+            element.Themed(Border.BackgroundProperty, "Theme.HoverBg");
             e.Handled = true;
             onClick();
         };
