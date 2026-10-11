@@ -57,8 +57,6 @@ public partial class PreviewWindow
     private OpenTarget _openTarget = new(null, null);
     private HeaderTool _headerTool;
     private int _selectedCount = 1;
-    private bool _headerShowsBrand;
-
     // What the content learned after the header went up: a PDF's pages.
     private string? _headerFact;
 
@@ -113,27 +111,25 @@ public partial class PreviewWindow
         ShowTool(ToolFor(contentPath, isDirectory, fileDialogMode));
         SyncHeaderTools();
 
-        // Only a window on screen keeps its old icon; a fresh open, or the
-        // welcome's mark, would name the wrong item.
-        if (_headerShowsBrand || !IsVisible)
+        // Only a window on screen keeps its old icon; on a fresh open it
+        // would name the wrong item. The welcome hid it already.
+        if (!IsVisible)
         {
-            _headerShowsBrand = false;
             FileIconImage.Visibility = Visibility.Hidden;
         }
 
         _ = UpdateFileIconAsync(path, version, token);
     }
 
-    /// <summary>The welcome's header is the brand mark; its body says the rest.</summary>
+    /// <summary>The welcome's header is empty but for the window's buttons; its body says the rest.</summary>
     private void ShowWelcomeHeader()
     {
         FileNameText.Text = string.Empty;
         SubtitleText.Inlines.Clear();
+        SubtitleText.ToolTip = null;
         _openActions = [];
         _openTarget = new OpenTarget(null, null);
-        FileIconImage.Source = BrandMark.CreateImage();
-        FileIconImage.Visibility = Visibility.Visible;
-        _headerShowsBrand = true;
+        FileIconImage.Visibility = Visibility.Hidden;
         OpenControl.Visibility = Visibility.Collapsed;
         PinButton.Visibility = Visibility.Collapsed;
         SetBrowseControlsVisible(false);

@@ -319,12 +319,50 @@ public sealed class ChromeHeaderTests
             Assert.Equal(Visibility.Collapsed, window.OpenControl.Visibility);
             Assert.Equal(Visibility.Collapsed, window.BrowseControls.Visibility);
             Assert.Equal(string.Empty, window.FileNameText.Text);
-            Assert.Equal(Visibility.Visible, window.FileIconImage.Visibility);
+
+            // Empty but for the window's buttons: no mark, no stale hover.
+            Assert.NotEqual(Visibility.Visible, window.FileIconImage.Visibility);
+            Assert.Null(window.SubtitleText.ToolTip);
         }
         finally
         {
             window.Close();
         }
+    });
+
+    [Fact]
+    public Task TheWelcomeKeyIsAPlainKeyThatNeverAnimates() => WpfApp.RunAsync(() =>
+    {
+        var build = typeof(PreviewWindow).GetMethod("BuildWelcomeContent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+        var content = (UIElement)build.Invoke(null, null)!;
+
+        var elements = new List<UIElement>();
+        void Walk(object node)
+        {
+            if (node is UIElement element)
+            {
+                elements.Add(element);
+            }
+
+            if (node is DependencyObject parent)
+            {
+                foreach (var child in LogicalTreeHelper.GetChildren(parent))
+                {
+                    Walk(child);
+                }
+            }
+        }
+
+        Walk(content);
+        Assert.Contains(elements, element => element is Border { Child: TextBlock { Text: "Space" } });
+
+        // No glow, and no clock that would keep WPF rendering while it sits.
+        Assert.All(elements, element =>
+        {
+            Assert.Null(element.Effect);
+            Assert.False(element.HasAnimatedProperties);
+        });
+        return Task.CompletedTask;
     });
 
     [Fact]

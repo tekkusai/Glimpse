@@ -16,7 +16,7 @@ internal static class BrandMark
         "M 0,-50 C 4.5,-16 16,-4.5 50,0 C 16,4.5 4.5,16 0,50 C -4.5,16 -16,4.5 -50,0 C -16,-4.5 -4.5,-16 0,-50 Z";
 
     /// <summary>The spark and its small companion up and to the right, in the accent.</summary>
-    public static DrawingImage CreateImage()
+    private static DrawingImage CreateImage()
     {
         var accent = Theme.Current.Accent;
         var spark = Geometry.Parse(SparkPath);
