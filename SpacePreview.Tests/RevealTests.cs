@@ -225,7 +225,7 @@ public sealed class StandInTests
     {
         // Measured from the Chromium viewer: 5 px in from the rail, 8 px
         // under its 40 px toolbar, 20 px short of its right edge.
-        var landing = StandIn.LandingIn(LandingKind.ViewerPage, 0.75, Size.Empty, 132, 40, new Size(1000, 800));
+        var landing = StandIn.LandingIn(LandingKind.ViewerPage, 0.75, 132, 40, new Size(1000, 800));
 
         Assert.Equal(new Rect(137, 48, 843, 843 / 0.75), landing);
     }
@@ -238,7 +238,7 @@ public sealed class StandInTests
         // at 812 keeps the narrow fit, centered.
         const double a4 = 297.0 / 210;
         Rect At(double viewport, double railWidth = 0) =>
-            StandIn.LandingIn(LandingKind.ViewerPage, a4, Size.Empty, railWidth, 40, new Size(1139, viewport + 40))!.Value;
+            StandIn.LandingIn(LandingKind.ViewerPage, a4, railWidth, 40, new Size(1139, viewport + 40))!.Value;
 
         Assert.Equal(new Rect(5, 48, 1128, 1128 / a4), At(813));
         Assert.Equal(new Rect(12.5, 48, 1114, 1114 / a4), At(812));
@@ -271,19 +271,18 @@ public sealed class StandInTests
     }
 
     [Fact]
-    public void PixelsLandCenteredAndImagesNeverUpscale()
+    public void PixelsLandCenteredFillingTheirBox()
     {
         var area = new Size(1000, 800);
 
-        Assert.Equal(new Rect(100, 0, 800, 800), StandIn.LandingIn(LandingKind.Pixels, 1, Size.Empty, 0, 0, area));
-        Assert.Equal(new Rect(400, 300, 200, 200), StandIn.LandingIn(LandingKind.Pixels, 1, new Size(200, 200), 0, 0, area));
+        Assert.Equal(new Rect(100, 0, 800, 800), StandIn.LandingIn(LandingKind.Pixels, 1, 0, 0, area));
     }
 
     [Fact]
     public void ContentWithoutAShapeHasNoLanding()
     {
-        Assert.Null(StandIn.LandingIn(LandingKind.None, 1, Size.Empty, 0, 0, new Size(1000, 800)));
-        Assert.Null(StandIn.LandingIn(LandingKind.Pixels, double.NaN, Size.Empty, 0, 0, new Size(1000, 800)));
+        Assert.Null(StandIn.LandingIn(LandingKind.None, 1, 0, 0, new Size(1000, 800)));
+        Assert.Null(StandIn.LandingIn(LandingKind.Pixels, double.NaN, 0, 0, new Size(1000, 800)));
         Assert.False(StandIn.KnowsShape(null));
         Assert.False(StandIn.KnowsShape(StageFitHint.Sheet()));
         Assert.True(StandIn.KnowsShape(StageFitHint.PageAspect(0.77)));

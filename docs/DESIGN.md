@@ -219,10 +219,13 @@ transparent so they dissolve in over the canvas.
 
 One gesture set for every zoomable view:
 
-- Fit never upscales: small images show at 1:1 device pixels, centered.
+- Fit fills the view, small images included, as in 2.0. A gentle fit is
+  smoothed; at 3x or more, and whenever the user zooms in past 1:1, pixels
+  stay square, so an icon reads as an icon.
+- Zoom goes down to fit or 1:1, whichever is smaller.
 - Wheel zooms around the cursor by 1.15 per notch.
-- Double-click toggles fit and 1:1 device pixels (or 2x fit when fit is
-  already 1:1 or larger).
+- Double-click toggles fit and 1:1 device pixels (or 2x when fit is
+  exactly 1:1).
 - Ctrl+Plus, Ctrl+Minus and Ctrl+0 work whenever the view is zoomable.
 - Pan is clamped to the content's edges.
 - Images with transparency sit on a subtle two-tone checkerboard.

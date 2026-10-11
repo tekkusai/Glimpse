@@ -11,11 +11,25 @@ namespace SpacePreview.Tests;
 /// </summary>
 public sealed class ImageViewerTests
 {
+    // 3.0.0 kept small images at 1:1: Mark's 32 px favicons were specks in
+    // a 640 x 480 window, where 2.0 filled it.
     [Fact]
-    public void FitNeverUpscalesASmallImage()
+    public void FitFillsTheViewWithASmallImageAsWithALargeOne()
     {
-        Assert.Equal(1, ZoomGestures.Fit(new Size(48, 48), new Size(1200, 800)));
+        Assert.Equal(800.0 / 48, ZoomGestures.Fit(new Size(48, 48), new Size(1200, 800)), 6);
         Assert.Equal(0.25, ZoomGestures.Fit(new Size(4800, 1000), new Size(1200, 800)));
+    }
+
+    [Fact]
+    public void AGentleFitStaysSmoothAndABigOneOrAZoomShowsPixels()
+    {
+        // A small screenshot filling the window is filtered, as in 2.0.
+        Assert.False(ZoomGestures.ShowsPixels(scale: 1.98, atFit: true));
+        // A favicon blown up to fill it keeps square pixels.
+        Assert.True(ZoomGestures.ShowsPixels(scale: 13, atFit: true));
+        // Zoomed in by hand past 1:1: pixels, as before.
+        Assert.True(ZoomGestures.ShowsPixels(scale: 1.5, atFit: false));
+        Assert.False(ZoomGestures.ShowsPixels(scale: 0.5, atFit: false));
     }
 
     [Fact]
@@ -24,9 +38,12 @@ public sealed class ImageViewerTests
         // A large image fitted at a quarter: double-click shows real pixels.
         Assert.Equal(1, ZoomGestures.DoubleClickTarget(scale: 0.25, fit: 0.25));
         Assert.Equal(0.25, ZoomGestures.DoubleClickTarget(scale: 1, fit: 0.25));
-        // A small image already shows 1:1 at fit, so it doubles instead.
+        // An image that fits exactly at 1:1 doubles instead.
         Assert.Equal(2, ZoomGestures.DoubleClickTarget(scale: 1, fit: 1));
         Assert.Equal(1, ZoomGestures.DoubleClickTarget(scale: 3.7, fit: 1));
+        // A small image filling the view goes to its real size and back.
+        Assert.Equal(1, ZoomGestures.DoubleClickTarget(scale: 13, fit: 13));
+        Assert.Equal(13, ZoomGestures.DoubleClickTarget(scale: 1, fit: 13));
     }
 
     [Fact]
@@ -34,6 +51,8 @@ public sealed class ImageViewerTests
     {
         Assert.Equal(0.25, ZoomGestures.Clamp(0.1, fit: 0.25));
         Assert.Equal(ZoomGestures.MaxScale, ZoomGestures.Clamp(500, fit: 0.25));
+        // A small image filling the view can still go down to 1:1.
+        Assert.Equal(1, ZoomGestures.Clamp(0.5, fit: 13));
     }
 
     [Fact]

@@ -46,7 +46,6 @@ internal sealed class StandIn : Panel
 
     private readonly LandingKind _kind;
     private readonly double _aspect;
-    private readonly Size _nativeSize;
     private readonly double _railWidth;
     private readonly double _toolbarHeight;
     private readonly double _dpiScale;
@@ -61,7 +60,6 @@ internal sealed class StandIn : Panel
     private StandIn(
         LandingKind kind,
         double aspect,
-        Size nativeSize,
         double railWidth,
         double toolbarHeight,
         double dpiScale,
@@ -69,7 +67,6 @@ internal sealed class StandIn : Panel
     {
         _kind = kind;
         _aspect = aspect;
-        _nativeSize = nativeSize;
         _railWidth = railWidth;
         _toolbarHeight = toolbarHeight;
         _dpiScale = Math.Max(1, dpiScale);
@@ -141,7 +138,6 @@ internal sealed class StandIn : Panel
     {
         var kind = LandingKind.None;
         double aspect = 0;
-        var native = Size.Empty;
 
         // Every page-shaped preview (PDF, Illustrator, converted documents)
         // lands in the PDF viewer, and a lone page lands with no rail beside
@@ -157,18 +153,14 @@ internal sealed class StandIn : Panel
         }
         else if (hint is { Kind: StageFitHint.FitKind.Pixels or StageFitHint.FitKind.ImagePixels } pixels)
         {
+            // Images and video both fill their box, so the stand-in lands
+            // where the content will.
             kind = LandingKind.Pixels;
             aspect = pixels.Width / pixels.Height;
-
-            // Images never upscale past their device pixels; video fills its box.
-            if (pixels.Kind == StageFitHint.FitKind.ImagePixels)
-            {
-                native = new Size(pixels.Width / Math.Max(1, dpiScale), pixels.Height / Math.Max(1, dpiScale));
-            }
         }
 
         var honest = kind != LandingKind.None && IsHonestPoster(poster, aspect);
-        return new StandIn(kind, aspect, native, railWidth, toolbarHeight, dpiScale, honest ? poster : null);
+        return new StandIn(kind, aspect, railWidth, toolbarHeight, dpiScale, honest ? poster : null);
     }
 
     /// <summary>Whether a hint says where the content lands: pages, images and video do.</summary>
@@ -243,7 +235,7 @@ internal sealed class StandIn : Panel
 
     protected override Size ArrangeOverride(Size finalSize)
     {
-        var landing = LandingIn(_kind, _aspect, _nativeSize, _railWidth, _toolbarHeight, finalSize);
+        var landing = LandingIn(_kind, _aspect, _railWidth, _toolbarHeight, finalSize);
         var box = landing ?? new Rect(finalSize);
         _visual.Arrange(box);
 
@@ -284,7 +276,6 @@ internal sealed class StandIn : Panel
     internal static Rect? LandingIn(
         LandingKind kind,
         double aspect,
-        Size nativeSize,
         double railWidth,
         double toolbarHeight,
         Size area)
@@ -327,11 +318,6 @@ internal sealed class StandIn : Panel
 
             case LandingKind.Pixels:
                 var fitWidth = Math.Min(area.Width, area.Height * aspect);
-                if (!nativeSize.IsEmpty && nativeSize.Width > 0)
-                {
-                    fitWidth = Math.Min(fitWidth, nativeSize.Width);
-                }
-
                 var fitHeight = fitWidth / aspect;
                 return new Rect((area.Width - fitWidth) / 2, (area.Height - fitHeight) / 2, fitWidth, fitHeight);
 

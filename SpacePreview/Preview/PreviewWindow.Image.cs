@@ -154,7 +154,7 @@ public partial class PreviewWindow
         ImageFileStamp? fileStamp = hasStamp ? stamp : null;
         var needed = header is null
             ? 0
-            : (int)Math.Ceiling(header.LongSide * ZoomGestures.Fit(new Size(header.Width, header.Height), stagePixels));
+            : (int)Math.Ceiling(header.LongSide * Math.Min(1, ZoomGestures.Fit(new Size(header.Width, header.Height), stagePixels)));
         if (header is not null && header.LongSide > MaxImageDecodePixels && needed < MaxImageDecodePixels)
         {
             if (ShellThumbnailProvider.TryGetCachedThumbnail(path, needed) is { } thumbnail)
@@ -460,7 +460,7 @@ html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards;}
 <img id="pic" src="{{source}}"{{(checker ? " class=\"checker\"" : "")}}>
 <div id="hud"></div>
 <script>
-const STEP = {{Number(ZoomGestures.WheelStep)}}, MAX = {{Number(ZoomGestures.MaxScale)}}, EPS = {{Number(ZoomGestures.Tolerance)}};
+const STEP = {{Number(ZoomGestures.WheelStep)}}, MAX = {{Number(ZoomGestures.MaxScale)}}, EPS = {{Number(ZoomGestures.Tolerance)}}, PIXEL = {{Number(ZoomGestures.PixelScale)}};
 const VECTOR = {{(isSvg ? "true" : "false")}}, HINT_W = {{Number(svgSize.Width)}}, HINT_H = {{Number(svgSize.Height)}};
 const pic = document.getElementById('pic');
 const hud = document.getElementById('hud');
@@ -469,7 +469,7 @@ let natW = 0, natH = 0, scale = 1, fit = 1, x = 0, y = 0, atFit = true;
 // A raster pixel is one device pixel at 1:1; an SVG unit is a CSS pixel.
 const unit = () => VECTOR ? 1 : 1 / (window.devicePixelRatio || 1);
 const isAt = (a, b) => Math.abs(a - b) <= EPS * Math.max(b, EPS);
-const clampScale = s => Math.min(Math.max(s, fit), Math.max(fit, MAX));
+const clampScale = s => Math.min(Math.max(s, Math.min(fit, 1)), Math.max(fit, MAX));
 const clampOffset = (o, content, view) => content <= view ? (view - content) / 2 : Math.min(0, Math.max(view - content, o));
 
 function measure() {
@@ -487,7 +487,7 @@ function measure() {
 function layout() {
   if (!natW) return;
   const baseW = natW * unit(), baseH = natH * unit();
-  fit = Math.min(1, innerWidth / baseW, innerHeight / baseH);
+  fit = Math.min(innerWidth / baseW, innerHeight / baseH);
   scale = atFit ? fit : clampScale(scale);
   const w = baseW * scale, h = baseH * scale;
   x = clampOffset(x, w, innerWidth);
@@ -497,7 +497,7 @@ function layout() {
   pic.style.width = w + 'px';
   pic.style.height = h + 'px';
   pic.style.transform = `translate(${Math.round(x * r) / r}px, ${Math.round(y * r) / r}px)`;
-  pic.classList.toggle('pixelated', !VECTOR && scale > 1 + EPS);
+  pic.classList.toggle('pixelated', !VECTOR && scale > 1 + EPS && (!atFit || scale >= PIXEL - EPS));
   document.body.style.cursor = w > innerWidth + 0.5 || h > innerHeight + 0.5 ? 'move' : '';
 }
 
@@ -520,7 +520,7 @@ function zoomAt(cx, cy, target) {
   showHud();
 }
 
-const doubleClickTarget = () => !isAt(scale, fit) ? fit : fit >= 1 - EPS ? 2 * fit : 1;
+const doubleClickTarget = () => !isAt(scale, fit) ? fit : isAt(fit, 1) ? 2 : 1;
 window.glimpseZoom = d => {
   if (d === 0) { atFit = true; layout(); showHud(); return; }
   zoomAt(innerWidth / 2, innerHeight / 2, scale * Math.pow(STEP, Math.sign(d)));

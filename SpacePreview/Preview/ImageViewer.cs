@@ -21,21 +21,36 @@ internal static class ZoomGestures
     public static readonly TimeSpan HudHold = TimeSpan.FromMilliseconds(800);
     public static readonly TimeSpan HudFade = TimeSpan.FromMilliseconds(260);
 
-    /// <summary>Fit never upscales: an image smaller than the view stays at 1:1.</summary>
+    /// <summary>Blown up this far at fit, an image is an icon or pixel art, and its pixels stay square.</summary>
+    public const double PixelScale = 3;
+
+    /// <summary>
+    /// Fit fills the view, as 2.0 did: an icon or a small screenshot shows
+    /// big enough to read instead of as a speck in the window.
+    /// </summary>
     public static double Fit(Size image, Size view) =>
         image.Width <= 0 || image.Height <= 0
             ? 1
-            : Math.Min(1, Math.Min(view.Width / image.Width, view.Height / image.Height));
+            : Math.Min(view.Width / image.Width, view.Height / image.Height);
 
-    public static double Clamp(double scale, double fit) => Math.Clamp(scale, fit, Math.Max(fit, MaxScale));
+    /// <summary>Down to fit or 1:1, whichever is smaller, so a small image's real size stays in reach.</summary>
+    public static double Clamp(double scale, double fit) => Math.Clamp(scale, Math.Min(fit, 1), Math.Max(fit, MaxScale));
 
     public static bool IsAt(double scale, double target) => Math.Abs(scale - target) <= Tolerance * Math.Max(target, Tolerance);
 
-    /// <summary>From fit to 1:1, or to twice fit when fit is already 1:1; from anywhere else back to fit.</summary>
+    /// <summary>From fit to 1:1, or to 2x when fit is 1:1; from anywhere else back to fit.</summary>
     public static double DoubleClickTarget(double scale, double fit) =>
         !IsAt(scale, fit) ? fit
-        : fit >= 1 - Tolerance ? 2 * fit
+        : IsAt(fit, 1) ? 2
         : 1;
+
+    /// <summary>
+    /// Square pixels once the user zooms in past 1:1, or at a fit of
+    /// <see cref="PixelScale"/> or more; a gentle fit, a small screenshot
+    /// filling the window, stays smooth.
+    /// </summary>
+    public static bool ShowsPixels(double scale, bool atFit) =>
+        scale > 1 + Tolerance && (!atFit || scale >= PixelScale - Tolerance);
 
     /// <summary>Content smaller than the view sits centered; larger content keeps its edges outside the view.</summary>
     public static double ClampOffset(double offset, double content, double view) =>
@@ -221,10 +236,10 @@ internal sealed class ImageViewer : IZoomableImage
         Canvas.SetLeft(_frame, Math.Round(_x) / dpi);
         Canvas.SetTop(_frame, Math.Round(_y) / dpi);
 
-        // Past 1:1 the pixels stay square, so pixel art reads as pixels; at
-        // or below it the image is filtered, which also keeps a capped
-        // decode shown at 100% soft rather than blocky.
-        var magnified = _scale > 1 + ZoomGestures.Tolerance;
+        // Zoomed past 1:1 the pixels stay square, so pixel art reads as
+        // pixels; a gentle fit and anything at or below 1:1 is filtered,
+        // which also keeps a capped decode shown at 100% soft, not blocky.
+        var magnified = ZoomGestures.ShowsPixels(_scale, _atFit);
         RenderOptions.SetBitmapScalingMode(_image, magnified ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
         _canPan = width > view.Width + 0.5 || height > view.Height + 0.5;
         _root.Cursor = _canPan ? Cursors.SizeAll : null;
