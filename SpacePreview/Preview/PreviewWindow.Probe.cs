@@ -296,8 +296,9 @@ public partial class PreviewWindow
             var pinned = IsPinned;
 
             // The Always on top toggle only exists pinned: revealed at the
-            // user's configured default; unchecking releases Topmost and
-            // gains taskbar reachability, rechecking restores the float.
+            // user's last choice; unchecking releases Topmost and gains
+            // taskbar reachability, rechecking restores the float and
+            // becomes the next pin's default.
             var defaultOnTop = Services.Settings.Current.PinnedAlwaysOnTopDefault;
             var alwaysOnTopRevealed = pinned
                 && AlwaysOnTopButton.Visibility == Visibility.Visible
@@ -308,12 +309,13 @@ public partial class PreviewWindow
             var alwaysOnTopReleased = !Topmost && ShellPresenceApplied(true);
             AlwaysOnTopButton.IsChecked = true;
             var alwaysOnTopRestored = Topmost && ShellPresenceApplied(false);
+            var alwaysOnTopRemembered = Services.Settings.Current.PinnedAlwaysOnTopDefault;
 
             CloseButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             PinButton.RaiseEvent(new RoutedEventArgs(System.Windows.Controls.Primitives.ButtonBase.ClickEvent));
             var unpinned = !IsPinned;
             var alwaysOnTopRetired = AlwaysOnTopButton.Visibility == Visibility.Collapsed
-                && AlwaysOnTopButton.IsChecked == defaultOnTop
+                && AlwaysOnTopButton.IsChecked == true
                 && Topmost
                 && ShellPresenceApplied(false);
 
@@ -330,6 +332,7 @@ public partial class PreviewWindow
                 AlwaysOnTopRevealed = alwaysOnTopRevealed,
                 AlwaysOnTopReleased = alwaysOnTopReleased,
                 AlwaysOnTopRestored = alwaysOnTopRestored,
+                AlwaysOnTopRemembered = alwaysOnTopRemembered,
                 AlwaysOnTopRetired = alwaysOnTopRetired
             });
         }

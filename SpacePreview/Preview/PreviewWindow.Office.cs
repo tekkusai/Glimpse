@@ -472,6 +472,9 @@ public partial class PreviewWindow
         };
     }
 
+    /// <summary>Offered here and in Settings while this PC has no engine.</summary>
+    internal static readonly PreviewAction LibreOfficeFix = new("Get LibreOffice", "https://www.libreoffice.org/download/", "Opens libreoffice.org in your browser");
+
     /// <summary>
     /// The text-only preview says what it is and offers the fix: one line
     /// and one pill in their own row under the content, never over it.
@@ -479,9 +482,9 @@ public partial class PreviewWindow
     private static FrameworkElement WithLibreOfficeSuggestion(FrameworkElement content)
     {
         var palette = Theme.Current;
-        var pill = HousePill.Build("Get LibreOffice", () => OpenExternalUri("https://www.libreoffice.org/download/"));
+        var pill = HousePill.Build(LibreOfficeFix.Label, () => OpenExternalUri(LibreOfficeFix.Uri));
         pill.Margin = new Thickness(16, 0, 0, 0);
-        pill.ToolTip = "Opens libreoffice.org in your browser";
+        pill.ToolTip = LibreOfficeFix.Tooltip;
         DockPanel.SetDock(pill, Dock.Right);
 
         var bar = new Border

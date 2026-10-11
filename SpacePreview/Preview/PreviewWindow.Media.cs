@@ -284,13 +284,8 @@ public partial class PreviewWindow
         // With a Store action on the card, the subtitle states the fact and
         // lets the pill be the instruction; two competing imperatives read
         // as noise. The header's Open pill still names the app either way.
-        if (codecs?.HasHevcVideo == true)
-        {
-            return "This video uses HEVC.";
-        }
-
-        return codecs?.HasAv1Video == true
-            ? "This video uses AV1."
+        return codecs?.HasHevcVideo == true
+            ? "This video uses HEVC."
             : MediaOpenInsteadText(path);
     }
 
@@ -311,28 +306,23 @@ public partial class PreviewWindow
         HeifFailure.NeedsHevc => BuildErrorPreview(
             "Can't preview this image",
             "This image uses HEVC.",
-            new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store")),
+            HevcFix),
         HeifFailure.NeedsHeif => BuildErrorPreview(
             "Can't preview this image",
             "This image uses HEIF.",
-            new PreviewAction("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store")),
+            HeifFix),
         _ => BuildErrorPreview("Can't preview this image", "This image may be damaged.")
     };
 
-    private static PreviewAction? MediaCodecStoreAction(Mp4CodecInfo? codecs)
-    {
-        if (codecs?.HasHevcVideo == true)
-        {
-            return new PreviewAction("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
-        }
-
-        if (codecs?.HasAv1Video == true)
-        {
-            return new PreviewAction("Get AV1 support", Av1VideoExtensionStoreUri, "Opens AV1 Video Extension in Microsoft Store");
-        }
-
-        return null;
-    }
+    // One definition per fix: the failure cards offer them, and Settings
+    // does too while this PC lacks them.
+    internal static readonly PreviewAction HevcFix = new("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
+    internal static readonly PreviewAction HeifFix = new("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store");
+    // HEVC is the one video codec WebView2 borrows from Windows. It has
+    // decoded AV1 itself since Edge 121, so no Store page can fix an AV1
+    // failure and the card offers none.
+    internal static PreviewAction? MediaCodecStoreAction(Mp4CodecInfo? codecs) =>
+        codecs?.HasHevcVideo == true ? HevcFix : null;
 
     private static string MediaOpenInsteadText(string path)
     {

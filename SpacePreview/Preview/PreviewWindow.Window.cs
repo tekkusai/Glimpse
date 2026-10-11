@@ -285,7 +285,7 @@ public partial class PreviewWindow
         AutomationProperties.SetName(MaximizeButton, IsStageMaximized ? "Restore preview size" : "Fill screen");
     }
 
-    private static Rect GetWorkAreaDips(IntPtr hwnd)
+    internal static Rect GetWorkAreaDips(IntPtr hwnd)
     {
         try
         {
@@ -479,6 +479,13 @@ public partial class PreviewWindow
         if (IsPinned)
         {
             DiagnosticLog.Write($"always-on-top {(_pinnedAlwaysOnTop ? "on" : "off")} path={CurrentPath}");
+
+            // The next pin starts where the user last left this switch.
+            // SetPinned writes the saved value back, so only a change saves.
+            if (_pinnedAlwaysOnTop != Services.Settings.Current.PinnedAlwaysOnTopDefault)
+            {
+                Services.Settings.Update(settings => settings with { PinnedAlwaysOnTopDefault = _pinnedAlwaysOnTop });
+            }
         }
     }
 

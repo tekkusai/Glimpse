@@ -198,7 +198,6 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("BuildMediaFailurePreview(path, codecs)", messageBody, StringComparison.Ordinal);
         Assert.Contains("MediaCodecStoreAction(codecs)", windowSource, StringComparison.Ordinal);
         Assert.Contains("ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V", windowSource, StringComparison.Ordinal);
         Assert.Contains("UseShellExecute = true", windowSource, StringComparison.Ordinal);
     }
 

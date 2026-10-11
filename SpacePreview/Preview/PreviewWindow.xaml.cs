@@ -44,7 +44,6 @@ public partial class PreviewWindow : Window
     internal const double StageMinWidth = 640;
     internal const double StageMinHeight = 480;
     private const string HevcVideoExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7";
-    private const string Av1VideoExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9MVZQVXJBQ9V";
     private const string HeifImageExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9PMMSR1CGPWG";
     private const double PdfPageRailWidth = 132;
     private const double PdfPageRailCollapsedWidth = 32;
