@@ -105,6 +105,18 @@ public sealed class AppUpdaterTests
     }
 
     [Fact]
+    public void TheLockScreenOrAScreenSaverIsNotAFullScreenApp()
+    {
+        // Both cover the monitor without a caption, so Glimpse holds its
+        // input for them as for any full-screen window. Only the shell's
+        // word that nobody is there lets that hold pass.
+        var locked = Away with { Notifications = NativeMethods.UserNotificationState.NotPresent, FullscreenSuspended = true };
+
+        Assert.True(AppUpdater.IsAway(locked));
+        Assert.False(AppUpdater.IsAway(locked with { Notifications = NativeMethods.UserNotificationState.AcceptsNotifications }));
+    }
+
+    [Fact]
     public void TheUserMustBeAwayForThreeMinutes() =>
         Assert.False(AppUpdater.IsAway(Away with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
 

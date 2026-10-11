@@ -282,15 +282,17 @@ internal sealed class AppUpdater : IDisposable
         && !TriedRecently(settings, release, now);
 
     /// <summary>
-    /// The PC's half: nothing of Glimpse is on screen, nothing is full
-    /// screen, Windows would show a notification or the PC is locked, and
-    /// nobody has touched the keyboard or mouse for 3 minutes.
+    /// The PC's half: nothing of Glimpse is on screen, nobody has touched
+    /// the keyboard or mouse for 3 minutes, and either the shell says nobody
+    /// is at the screen (locked, a screen saver, another user's session) or
+    /// Windows would show a notification and nothing is full screen. The
+    /// lock screen and a screen saver cover the monitor themselves, so the
+    /// shell's word outranks Glimpse's own full-screen hold.
     /// </summary>
     internal static bool IsAway(InstallState pc) =>
         !pc.PreviewOpen
-        && !pc.FullscreenSuspended
-        && pc.Notifications is NativeMethods.UserNotificationState.AcceptsNotifications
-            or NativeMethods.UserNotificationState.NotPresent
+        && (pc.Notifications == NativeMethods.UserNotificationState.NotPresent
+            || pc.Notifications == NativeMethods.UserNotificationState.AcceptsNotifications && !pc.FullscreenSuspended)
         && pc.Idle >= IdleBeforeInstall;
 
     /// <summary>
