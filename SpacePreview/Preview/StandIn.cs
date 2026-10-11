@@ -31,11 +31,13 @@ internal enum LandingKind
 internal sealed class StandIn : Panel
 {
     // The Chromium viewer's FitH page, measured: 5 px from the viewer's left
-    // edge, 8 px under its 40 px toolbar, 20 px short of its right edge
-    // (scrollbar and margin).
+    // edge, 8 px under its 40 px toolbar, 20 px short of its right edge with
+    // a scrollbar beside it and 6 px short with none, 7 px of shadow under it.
     private const double ViewerPageLeft = 5;
     private const double ViewerPageTop = 8;
     private const double ViewerPageRightInset = 20;
+    private const double ViewerPageRightMargin = 6;
+    private const double ViewerPageFoot = 7;
 
     // A poster is honest when it is a picture, not an icon, and has the
     // content's shape.
@@ -261,7 +263,11 @@ internal sealed class StandIn : Panel
         return finalSize;
     }
 
-    /// <summary>Where the content will land in an area of the given size, or null without a shape.</summary>
+    /// <summary>
+    /// Where the content will land in an area of the given size, or null
+    /// without a shape. A viewer page with no rail is a lone page: the
+    /// viewer shows the rail only for more than one.
+    /// </summary>
     internal static Rect? LandingIn(
         LandingKind kind,
         double aspect,
@@ -278,10 +284,33 @@ internal sealed class StandIn : Panel
         switch (kind)
         {
             case LandingKind.ViewerPage:
-                var width = area.Width - railWidth - ViewerPageLeft - ViewerPageRightInset;
-                return width < 1
-                    ? null
-                    : new Rect(railWidth + ViewerPageLeft, toolbarHeight + ViewerPageTop, width, width / aspect);
+                var viewer = area.Width - railWidth;
+                var width = viewer - ViewerPageLeft - ViewerPageRightInset;
+                if (width < 1)
+                {
+                    return null;
+                }
+
+                // Many pages overflow, so a scrollbar takes its share. A lone
+                // page that fits needs none: it takes the full width where it
+                // still fits there, else it keeps the narrow fit, centered.
+                var left = ViewerPageLeft;
+                bool Fits(double pageWidth) =>
+                    ViewerPageTop + pageWidth / aspect + ViewerPageFoot <= area.Height - toolbarHeight;
+                if (railWidth <= 0 && Fits(width))
+                {
+                    var full = viewer - ViewerPageLeft - ViewerPageRightMargin;
+                    if (Fits(full))
+                    {
+                        width = full;
+                    }
+                    else
+                    {
+                        left = (viewer - width) / 2;
+                    }
+                }
+
+                return new Rect(railWidth + left, toolbarHeight + ViewerPageTop, width, width / aspect);
 
             case LandingKind.Pixels:
                 var fitWidth = Math.Min(area.Width, area.Height * aspect);

@@ -225,6 +225,22 @@ public sealed class StandInTests
     }
 
     [Fact]
+    public void ALonePageThatFitsHasNoScrollbarBesideIt()
+    {
+        // Measured on an A4 landscape page in an 1139 px area under the 40 px
+        // toolbar: the viewer drops its scrollbar at 813 px of viewport, and
+        // at 812 keeps the narrow fit, centered.
+        const double a4 = 297.0 / 210;
+        Rect At(double viewport, double railWidth = 0) =>
+            StandIn.LandingIn(LandingKind.ViewerPage, a4, Size.Empty, railWidth, 40, new Size(1139, viewport + 40))!.Value;
+
+        Assert.Equal(new Rect(5, 48, 1128, 1128 / a4), At(813));
+        Assert.Equal(new Rect(12.5, 48, 1114, 1114 / a4), At(812));
+        Assert.Equal(new Rect(5, 48, 1114, 1114 / a4), At(700));
+        Assert.Equal(new Rect(137, 48, 982, 982 / a4), At(813, railWidth: 132));
+    }
+
+    [Fact]
     public void PixelsLandCenteredAndImagesNeverUpscale()
     {
         var area = new Size(1000, 800);
