@@ -52,6 +52,21 @@ public sealed class AppPackagePreviewLoaderTests
         Assert.Contains("rareDeviceAccess", info!.Capabilities);
     }
 
+    // Reading an element's text recurses once per level; a manifest nested
+    // past the limit is refused before that, and ordinary nesting reads.
+    [Fact]
+    public void AManifestNestedPastTheLimitIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var deep = Path.Combine(temp.Path, "deep.msix");
+        var ordinary = Path.Combine(temp.Path, "ordinary.msix");
+        CreateMinimalPackage(deep, publisherDisplayName: Nested(XmlNesting.MaxDepth + 50, "Deep Publisher"));
+        CreateMinimalPackage(ordinary, publisherDisplayName: Nested(20, "Deep Publisher"));
+
+        Assert.Null(AppPackagePreviewLoader.TryLoad(deep));
+        Assert.Equal("Deep Publisher", AppPackagePreviewLoader.TryLoad(ordinary)?.Publisher);
+    }
+
     [Fact]
     public void PublisherIdentityFallsBackToCommonNameWithoutDnNoise()
     {
@@ -130,4 +145,7 @@ public sealed class AppPackagePreviewLoaderTests
         using var writer = new StreamWriter(entry.Open());
         writer.Write(text);
     }
+
+    private static string Nested(int depth, string text) =>
+        string.Concat(Enumerable.Repeat("<Span>", depth)) + text + string.Concat(Enumerable.Repeat("</Span>", depth));
 }

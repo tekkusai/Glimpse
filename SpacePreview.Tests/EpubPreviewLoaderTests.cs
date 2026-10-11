@@ -66,6 +66,21 @@ public sealed class EpubPreviewLoaderTests
         Assert.Contains("<code class=\"long\">SpacePreview/Preview/EpubPreviewLoader.cs</code>", body, StringComparison.Ordinal);
     }
 
+    // A chapter nested past the limit is refused before the sanitizer, or a
+    // value read from it, can recurse that deep; ordinary nesting reads.
+    [Fact]
+    public void AChapterNestedPastTheLimitIsRefused()
+    {
+        using var temp = new TempDirectory();
+        var deep = Path.Combine(temp.Path, "deep.epub");
+        var ordinary = Path.Combine(temp.Path, "ordinary.epub");
+        CreateMinimalEpub(deep, chapter2Text: Nested(XmlNesting.MaxDepth + 50, "Deep text"));
+        CreateMinimalEpub(ordinary, chapter2Text: Nested(40, "Deep text"));
+
+        Assert.Null(EpubPreviewLoader.TryBuildBody(deep));
+        Assert.Contains("Deep text", EpubPreviewLoader.TryBuildBody(ordinary), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void TryBuildBodyShowsHonestTruncationForLongBooks()
     {
@@ -343,4 +358,7 @@ public sealed class EpubPreviewLoaderTests
         using var writer = new StreamWriter(entry.Open());
         writer.Write(text);
     }
+
+    private static string Nested(int depth, string text) =>
+        string.Concat(Enumerable.Repeat("<div>", depth)) + text + string.Concat(Enumerable.Repeat("</div>", depth));
 }
