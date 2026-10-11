@@ -37,6 +37,10 @@ internal static class PdfFillSignWriter
     private const int MaxObjects = 200000;
     private const int MaxImagePixels = 24_000_000;
     private const long MaxPdfBytes = 256L * 1024 * 1024;
+
+    // Arrays and dictionaries nest this deep at most. Deeper is refused,
+    // never walked.
+    private const int MaxNesting = 64;
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(750);
 
     private static readonly Regex ObjectRegex = new(
@@ -44,13 +48,13 @@ internal static class PdfFillSignWriter
         RegexOptions.Compiled | RegexOptions.CultureInvariant,
         RegexTimeout);
 
-    private static readonly Regex TypeRegex = new(
-        @"/Type\s*/(?<type>Catalog|Pages|Page)(?![A-Za-z0-9])",
+    private static readonly Regex ObjectHeaderRegex = new(
+        @"\G\d{1,10}\s+\d{1,5}\s+obj\b",
         RegexOptions.Compiled | RegexOptions.CultureInvariant,
         RegexTimeout);
 
     private static readonly Regex NumberRegex = new(
-        @"[-+]?(?:\d+(?:\.\d*)?|\.\d+)",
+        @"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant,
         RegexTimeout);
 
@@ -71,7 +75,7 @@ internal static class PdfFillSignWriter
             var document = PdfDocumentModel.Read(path);
             foreach (var page in document.Pages)
             {
-                ReadExistingAnnotationEntries(document, Header(page.Body));
+                ReadExistingAnnotationEntries(document, page.Body);
             }
 
             return new PdfSignCheck(document.Pages.Count, null);
@@ -230,13 +234,13 @@ internal static class PdfFillSignWriter
         PdfRef open,
         PdfRef close)
     {
-        if (!TryReadNamedValue(Header(pageBody), "Contents", out var value, out _))
+        if (!TryReadNamedValue(pageBody, 0, "Contents", out var value, out _))
         {
             return $"[{open} R {close} R]";
         }
 
-        var existing = value.Trim();
-        if (TryParseReference(existing, out var reference))
+        var existing = value;
+        if (TryParseReference(value, out var reference))
         {
             if (!document.Objects.TryGetValue(reference, out var target))
             {
@@ -246,13 +250,12 @@ internal static class PdfFillSignWriter
             var body = target.Body.Trim();
             if (body.StartsWith('['))
             {
-                var end = FindMatching(body, 0, '[', ']');
-                if (end < 0)
+                if (ArrayItems(ObjectValue(body)) is not { } items)
                 {
                     return null;
                 }
 
-                existing = body[1..end];
+                existing = string.Join(" ", items);
             }
             else if (!body.Contains("stream", StringComparison.Ordinal))
             {
@@ -260,15 +263,9 @@ internal static class PdfFillSignWriter
                 return null;
             }
         }
-        else if (existing.StartsWith('['))
+        else if (ArrayItems(value) is { } items)
         {
-            var end = FindMatching(existing, 0, '[', ']');
-            if (end < 0)
-            {
-                return null;
-            }
-
-            existing = existing[1..end];
+            existing = string.Join(" ", items);
         }
         else
         {
@@ -299,7 +296,15 @@ internal static class PdfFillSignWriter
         return ReplaceOrAddDictionaryValue(body, name, scaled);
     }
 
-    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes)
+    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes) =>
+        FindName(bytes, "PatternType", "ShadingType", "Annots", "ObjStm", "UserUnit", "ByteRange");
+
+    /// <summary>
+    /// The first of <paramref name="names"/> spelled anywhere in the file,
+    /// read as a viewer reads names: any character may be written as #xx,
+    /// so a raw substring is not a gate.
+    /// </summary>
+    private static string? FindName(ReadOnlySpan<byte> bytes, params string[] names)
     {
         Span<byte> decoded = stackalloc byte[16];
         for (var index = 0; index < bytes.Length; index++)
@@ -331,37 +336,17 @@ internal static class PdfFillSignWriter
                 length++;
             }
 
-            if (length <= decoded.Length)
+            foreach (var name in names)
             {
-                var name = decoded[..length];
-                if (name.SequenceEqual("PatternType"u8))
+                var same = name.Length == length && length <= decoded.Length;
+                for (var at = 0; same && at < length; at++)
                 {
-                    return "PatternType";
+                    same = decoded[at] == name[at];
                 }
 
-                if (name.SequenceEqual("ShadingType"u8))
+                if (same)
                 {
-                    return "ShadingType";
-                }
-
-                if (name.SequenceEqual("Annots"u8))
-                {
-                    return "Annots";
-                }
-
-                if (name.SequenceEqual("ObjStm"u8))
-                {
-                    return "ObjStm";
-                }
-
-                if (name.SequenceEqual("UserUnit"u8))
-                {
-                    return "UserUnit";
-                }
-
-                if (name.SequenceEqual("ByteRange"u8))
-                {
-                    return "ByteRange";
+                    return name;
                 }
             }
 
@@ -607,124 +592,308 @@ internal static class PdfFillSignWriter
 
     private static string UpdatePageAnnotations(PdfDocumentModel document, PdfPageInfo page, IReadOnlyList<PdfRef> newAnnotations)
     {
-        var header = Header(page.Body);
-        var oldEntries = ReadExistingAnnotationEntries(document, header);
+        var oldEntries = ReadExistingAnnotationEntries(document, page.Body);
         var added = string.Join(" ", newAnnotations.Select(item => $"{item} R"));
         var combined = string.IsNullOrWhiteSpace(oldEntries)
             ? added
-            : $"{oldEntries.Trim()} {added}";
+            : $"{oldEntries} {added}";
         return ReplaceOrAddDictionaryValue(page.Body, "Annots", $"[{combined}]");
     }
 
-    private static string ReadExistingAnnotationEntries(PdfDocumentModel document, string header)
+    private static string ReadExistingAnnotationEntries(PdfDocumentModel document, string pageBody)
     {
-        if (!TryReadNamedValue(header, "Annots", out var value, out _))
+        if (!TryReadNamedValue(pageBody, 0, "Annots", out var value, out _))
         {
             return string.Empty;
         }
 
-        var trimmed = value.Trim();
-        if (trimmed.StartsWith("[", StringComparison.Ordinal) && trimmed.EndsWith("]", StringComparison.Ordinal))
-        {
-            return trimmed[1..^1].Trim();
-        }
-
-        if (TryParseReference(trimmed, out var reference)
-            && document.Objects.TryGetValue(reference, out var obj))
-        {
-            var body = Header(obj.Body).Trim();
-            if (body.StartsWith("[", StringComparison.Ordinal) && body.EndsWith("]", StringComparison.Ordinal))
-            {
-                return body[1..^1].Trim();
-            }
-        }
-
-        throw new InvalidOperationException(UnsupportedStructure);
+        return ArrayItems(Resolve(document.Objects, value)) is { } items
+            ? string.Join(" ", items)
+            : throw new InvalidOperationException(UnsupportedStructure);
     }
 
     private static string ReplaceOrAddDictionaryValue(string body, string name, string replacementValue)
     {
-        var header = Header(body);
-        if (TryReadNamedValue(header, name, out _, out var range))
+        if (TryReadNamedValue(body, 0, name, out _, out var range))
         {
             return body[..range.Start] + $"/{name} {replacementValue}" + body[range.End..];
         }
 
-        var close = FindOuterDictionaryClose(header);
-        if (close < 0)
+        // A new key goes just before the outer dictionary's own '>>'.
+        var start = SkipSpace(body, 0);
+        var end = At(body, start, "<<") ? SkipObject(body, start) : -1;
+        if (end < 0)
         {
-            throw new InvalidOperationException("This PDF page dictionary could not be updated safely.");
+            throw new InvalidOperationException(UnsupportedStructure);
         }
 
-        return body[..close] + $" /{name} {replacementValue} " + body[close..];
+        return body[..(end - 2)] + $" /{name} {replacementValue} " + body[(end - 2)..];
     }
 
-    private static bool TryReadNamedValue(string text, string name, out string value, out PdfTextRange range)
+    /// <summary>
+    /// Reads /<paramref name="name"/> from the dictionary's own keys; a key
+    /// inside a nested value never answers for it. False when the text is no
+    /// dictionary or lacks the key. A dictionary that can't be walked, or
+    /// names the key twice, is refused: the viewer reads the last of two.
+    /// </summary>
+    private static bool TryReadNamedValue(string text, int start, string name, out string value, out PdfTextRange range)
     {
         value = string.Empty;
         range = default;
-        var token = "/" + name;
-        var index = text.IndexOf(token, StringComparison.Ordinal);
-        while (index >= 0)
+        var found = false;
+        var index = SkipSpace(text, start);
+        if (!At(text, index, "<<"))
         {
-            var afterName = index + token.Length;
-            if (afterName < text.Length && IsNameChar(text[afterName]))
+            return false;
+        }
+
+        index += 2;
+        while (true)
+        {
+            index = SkipSpace(text, index);
+            if (At(text, index, ">>"))
             {
-                index = text.IndexOf(token, afterName, StringComparison.Ordinal);
+                return found;
+            }
+
+            var keyEnd = At(text, index, "/") ? SkipObject(text, index) : -1;
+            var valueEnd = keyEnd < 0 ? -1 : SkipObject(text, keyEnd);
+            if (valueEnd < 0)
+            {
+                throw new InvalidOperationException(UnsupportedStructure);
+            }
+
+            if (DecodeName(text, index + 1, keyEnd) == name)
+            {
+                if (found)
+                {
+                    throw new InvalidOperationException(UnsupportedStructure);
+                }
+
+                found = true;
+                value = text[SkipSpace(text, keyEnd)..valueEnd];
+                range = new PdfTextRange(index, valueEnd);
+            }
+
+            index = valueEnd;
+        }
+    }
+
+    private static string? ValueOf(string? dictionary, string name) =>
+        dictionary is not null && TryReadNamedValue(dictionary, 0, name, out var value, out _) ? value : null;
+
+    /// <summary>The value itself, or the object it refers to. Null when that object is out of reach.</summary>
+    private static string? Resolve(Dictionary<PdfRef, PdfObject> objects, string? value) =>
+        value is null || !TryParseReference(value, out var reference) ? value
+            : objects.TryGetValue(reference, out var target) ? ObjectValue(target.Body) : null;
+
+    /// <summary>An object's own value, without the stream data that may follow it.</summary>
+    private static string? ObjectValue(string body)
+    {
+        var start = SkipSpace(body, 0);
+        var end = SkipObject(body, start);
+        return end < 0 ? null : body[start..end];
+    }
+
+    /// <summary>The items of an array value, a reference counting as one. Null when it is no array.</summary>
+    private static List<string>? ArrayItems(string? value)
+    {
+        if (value is null || !At(value, 0, "[") || SkipObject(value, 0) != value.Length)
+        {
+            return null;
+        }
+
+        var items = new List<string>();
+        var index = 1;
+        while (true)
+        {
+            index = SkipSpace(value, index);
+            if (At(value, index, "]"))
+            {
+                return items;
+            }
+
+            var end = SkipObject(value, index);
+            if (end < 0)
+            {
+                return null;
+            }
+
+            items.Add(value[index..end]);
+            index = end;
+        }
+    }
+
+    /// <summary>The name a value holds, decoded, or null when it holds something else.</summary>
+    private static string? NameValue(string? value) =>
+        value is not null && At(value, 0, "/") && SkipObject(value, 0) == value.Length
+            ? DecodeName(value, 1, value.Length)
+            : null;
+
+    /// <summary>A name as a viewer reads it: each #xx is the character it spells.</summary>
+    private static string DecodeName(string text, int start, int end)
+    {
+        var name = new StringBuilder(end - start);
+        for (var index = start; index < end; index++)
+        {
+            if (text[index] == '#'
+                && index + 2 < end
+                && TryHex((byte)text[index + 1], out var high)
+                && TryHex((byte)text[index + 2], out var low))
+            {
+                name.Append((char)((high << 4) | low));
+                index += 2;
                 continue;
             }
 
-            var valueStart = SkipWhite(text, afterName);
-            if (valueStart >= text.Length)
-            {
-                return false;
-            }
-
-            var valueEnd = ReadValueEnd(text, valueStart);
-            if (valueEnd <= valueStart)
-            {
-                return false;
-            }
-
-            value = text[valueStart..valueEnd];
-            range = new PdfTextRange(index, valueEnd);
-            return true;
+            name.Append(text[index]);
         }
 
-        return false;
+        return name.ToString();
     }
 
-    private static int ReadValueEnd(string text, int start)
+    /// <summary>
+    /// The index just past the object at <paramref name="start"/>, or -1
+    /// when it is not well formed. Strings and nested containers are
+    /// stepped over whole, and a reference counts as one object.
+    /// </summary>
+    private static int SkipObject(string text, int start)
     {
-        return text[start] switch
+        var closers = new Stack<char>();
+        var first = SkipSpace(text, start);
+        var index = first;
+        do
         {
-            '[' => FindMatching(text, start, '[', ']') + 1,
-            '<' when start + 1 < text.Length && text[start + 1] == '<' => FindMatchingDictionary(text, start) + 2,
-            '(' => FindLiteralEnd(text, start),
-            _ => ReadScalarValueEnd(text, start)
-        };
+            index = SkipSpace(text, index);
+            if (index >= text.Length)
+            {
+                return -1;
+            }
+
+            var ch = text[index];
+            if (ch == '[' || At(text, index, "<<"))
+            {
+                if (closers.Count == MaxNesting)
+                {
+                    return -1;
+                }
+
+                closers.Push(ch == '[' ? ']' : '>');
+                index += ch == '[' ? 1 : 2;
+            }
+            else if (ch == ']' || At(text, index, ">>"))
+            {
+                if (closers.Count == 0 || closers.Pop() != ch)
+                {
+                    return -1;
+                }
+
+                index += ch == ']' ? 1 : 2;
+            }
+            else
+            {
+                index = SkipToken(text, index);
+                if (index < 0)
+                {
+                    return -1;
+                }
+            }
+        }
+        while (closers.Count > 0);
+
+        return ReferenceEnd(text, first, index);
     }
 
-    private static int ReadScalarValueEnd(string text, int start)
+    /// <summary>The index just past one string, name, number or keyword, or -1 for a stray delimiter.</summary>
+    private static int SkipToken(string text, int start)
     {
-        var reference = Regex.Match(
-            text[start..Math.Min(text.Length, start + 64)],
-            @"^\s*\d{1,10}\s+\d{1,5}\s+R(?![A-Za-z0-9])",
-            RegexOptions.CultureInvariant,
-            RegexTimeout);
-        if (reference.Success)
+        switch (text[start])
         {
-            return start + reference.Length;
+            case '(':
+                return FindLiteralEnd(text, start);
+            case '<':
+                var close = text.IndexOf('>', start + 1);
+                return close < 0 ? -1 : close + 1;
+            case ')' or '>' or '{' or '}':
+                return -1;
         }
 
-        var index = start;
-        while (index < text.Length && !char.IsWhiteSpace(text[index]) && text[index] != '/' && text[index] != '>' && text[index] != ']')
+        var index = start + 1;
+        while (index < text.Length && !IsPdfDelimiter((byte)text[index]))
         {
             index++;
         }
 
         return index;
     }
+
+    /// <summary>
+    /// Extends an object number at [<paramref name="start"/>, <paramref name="end"/>)
+    /// over the generation and R that make it a reference, when they follow.
+    /// </summary>
+    private static int ReferenceEnd(string text, int start, int end)
+    {
+        if (!IsDigits(text, start, end))
+        {
+            return end;
+        }
+
+        var generation = SkipSpace(text, end);
+        var generationEnd = generation;
+        while (generationEnd < text.Length && char.IsAsciiDigit(text[generationEnd]))
+        {
+            generationEnd++;
+        }
+
+        var r = SkipSpace(text, generationEnd);
+        var isReference = generation > end
+            && generationEnd > generation
+            && r > generationEnd
+            && At(text, r, "R")
+            && (r + 1 == text.Length || IsPdfDelimiter((byte)text[r + 1]));
+        return isReference ? r + 1 : end;
+    }
+
+    private static bool IsDigits(string text, int start, int end)
+    {
+        for (var index = start; index < end; index++)
+        {
+            if (!char.IsAsciiDigit(text[index]))
+            {
+                return false;
+            }
+        }
+
+        return end > start;
+    }
+
+    /// <summary>Steps over PDF white space and comments.</summary>
+    private static int SkipSpace(string text, int index)
+    {
+        while (index < text.Length)
+        {
+            if (text[index] is '\0' or '\t' or '\n' or '\f' or '\r' or ' ')
+            {
+                index++;
+            }
+            else if (text[index] == '%')
+            {
+                while (index < text.Length && text[index] is not ('\r' or '\n'))
+                {
+                    index++;
+                }
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        return index;
+    }
+
+    private static bool At(string text, int index, string token) =>
+        index >= 0 && index <= text.Length && text.AsSpan(index).StartsWith(token, StringComparison.Ordinal);
 
     private static bool TryParseReference(string value, out PdfRef reference)
     {
@@ -965,25 +1134,6 @@ internal static class PdfFillSignWriter
         stream.Write(bytes);
     }
 
-    private static string Header(string body)
-    {
-        var streamIndex = body.IndexOf("stream", StringComparison.Ordinal);
-        return streamIndex >= 0 ? body[..streamIndex] : body;
-    }
-
-    private static bool IsNameChar(char ch) =>
-        char.IsLetterOrDigit(ch) || ch is '-' or '_' or '.';
-
-    private static int SkipWhite(string text, int start)
-    {
-        while (start < text.Length && char.IsWhiteSpace(text[start]))
-        {
-            start++;
-        }
-
-        return start;
-    }
-
     private static int FindLiteralEnd(string text, int start)
     {
         var depth = 0;
@@ -1011,71 +1161,6 @@ internal static class PdfFillSignWriter
         }
 
         return -1;
-    }
-
-    private static int FindMatching(string text, int start, char open, char close)
-    {
-        var depth = 0;
-        for (var i = start; i < text.Length; i++)
-        {
-            if (text[i] == '(')
-            {
-                i = Math.Max(i, FindLiteralEnd(text, i) - 1);
-                continue;
-            }
-
-            if (text[i] == open)
-            {
-                depth++;
-            }
-            else if (text[i] == close)
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return i;
-                }
-            }
-        }
-
-        return -1;
-    }
-
-    private static int FindMatchingDictionary(string text, int start)
-    {
-        var depth = 0;
-        for (var i = start; i + 1 < text.Length; i++)
-        {
-            if (text[i] == '(')
-            {
-                i = Math.Max(i, FindLiteralEnd(text, i) - 1);
-                continue;
-            }
-
-            if (text[i] == '<' && text[i + 1] == '<')
-            {
-                depth++;
-                i++;
-            }
-            else if (text[i] == '>' && text[i + 1] == '>')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return i;
-                }
-
-                i++;
-            }
-        }
-
-        return -1;
-    }
-
-    private static int FindOuterDictionaryClose(string text)
-    {
-        var open = text.IndexOf("<<", StringComparison.Ordinal);
-        return open < 0 ? -1 : FindMatchingDictionary(text, open);
     }
 
     private static void TryDelete(string path)
@@ -1207,24 +1292,40 @@ internal static class PdfFillSignWriter
                 throw new InvalidOperationException("This file isn't a PDF that can be signed here.");
             }
 
-            var text = Encoding.Latin1.GetString(bytes);
-            if (text.Contains("/Encrypt", StringComparison.Ordinal))
+            if (FindName(bytes, "Encrypt") is not null)
             {
                 throw new InvalidOperationException("This PDF is encrypted, so it can't be signed here.");
             }
 
+            var text = Encoding.Latin1.GetString(bytes);
             var previousXref = ReadPreviousXrefOffset(text);
-            var objects = ReadObjects(text);
-            if (!TryReadLastReference(text, "Root", out var root))
+            var trailer = ReadTrailerStart(text, previousXref);
+            if (!TryReadNamedValue(text, trailer, "Root", out var rootText, out _)
+                || !TryParseReference(rootText, out var root))
             {
                 throw new InvalidOperationException(UnsupportedStructure);
             }
 
-            TryReadLastReference(text, "Info", out var info);
-            var idText = TryReadLastId(text, out var foundId) ? foundId : null;
+            PdfRef? info = TryReadNamedValue(text, trailer, "Info", out var infoText, out _)
+                && TryParseReference(infoText, out var infoRef)
+                    ? infoRef
+                    : null;
+            var idText = TryReadNamedValue(text, trailer, "ID", out var id, out _) ? id : null;
+            var trailerSize = TryReadNamedValue(text, trailer, "Size", out var sizeText, out _)
+                && int.TryParse(sizeText, NumberStyles.None, CultureInfo.InvariantCulture, out var size)
+                    ? size
+                    : 0;
+            var objects = ReadObjects(text);
+
+            // Ink is a change a no-changes certification forbids: the saved
+            // copy would carry a broken certificate.
+            if (FindName(bytes, "DocMDP") is not null && ReadCertificationPermission(objects, root) is not 3)
+            {
+                throw new InvalidOperationException("This PDF is certified against changes, so it can't be signed here.");
+            }
+
             var objectMax = objects.Keys.Select(item => item.Number).DefaultIfEmpty(0).Max();
-            var trailerMax = TryReadLastSize(text, out var trailerSize) ? Math.Max(0, trailerSize - 1) : 0;
-            var maxObjectNumber = Math.Max(objectMax, trailerMax);
+            var maxObjectNumber = Math.Max(objectMax, trailerSize - 1);
             var pages = ReadPages(objects, root);
             if (pages.Count == 0)
             {
@@ -1235,11 +1336,74 @@ internal static class PdfFillSignWriter
                 bytes,
                 objects,
                 root,
-                info.Equals(default(PdfRef)) ? null : info,
+                info,
                 idText,
                 previousXref,
                 maxObjectNumber,
                 pages);
+        }
+
+        /// <summary>
+        /// Where the newest xref section's dictionary starts: the trailer
+        /// after an xref table, or the xref stream's own. Root and Size are
+        /// read there alone, as the viewer reads them.
+        /// </summary>
+        private static int ReadTrailerStart(string text, long xrefOffset)
+        {
+            var at = xrefOffset > 0 && xrefOffset < text.Length ? SkipSpace(text, (int)xrefOffset) : -1;
+            if (At(text, at, "xref"))
+            {
+                var trailer = text.IndexOf("trailer", at, StringComparison.Ordinal);
+                if (trailer >= 0)
+                {
+                    return trailer + "trailer".Length;
+                }
+            }
+            else if (at >= 0 && ObjectHeaderRegex.Match(text, at) is { Success: true } header)
+            {
+                var dictionary = header.Index + header.Length;
+                if (TryReadNamedValue(text, dictionary, "Type", out var type, out _) && NameValue(type) == "XRef")
+                {
+                    return dictionary;
+                }
+            }
+
+            // A startxref off its mark (a damaged file, or bytes before the
+            // header) is one every viewer repairs from the last trailer, so
+            // the writer reads that one, as it always has.
+            var last = text.LastIndexOf("trailer", StringComparison.Ordinal);
+            if (last >= 0 && At(text, SkipSpace(text, last + "trailer".Length), "<<"))
+            {
+                return last + "trailer".Length;
+            }
+
+            throw new InvalidOperationException(UnsupportedStructure);
+        }
+
+        /// <summary>
+        /// The certification's /P, found as a viewer finds it: catalog
+        /// /Perms /DocMDP, then the signature's DocMDP reference. Unset is 2.
+        /// Null when a step is out of reach; only a /P read as 3 allows ink.
+        /// </summary>
+        private static int? ReadCertificationPermission(Dictionary<PdfRef, PdfObject> objects, PdfRef root)
+        {
+            var catalog = objects.TryGetValue(root, out var rootObject) ? rootObject.Body : null;
+            var signature = Resolve(objects, ValueOf(Resolve(objects, ValueOf(catalog, "Perms")), "DocMDP"));
+            foreach (var item in ArrayItems(Resolve(objects, ValueOf(signature, "Reference"))) ?? [])
+            {
+                var reference = Resolve(objects, item);
+                if (NameValue(ValueOf(reference, "TransformMethod")) != "DocMDP")
+                {
+                    continue;
+                }
+
+                var permission = Resolve(objects, ValueOf(Resolve(objects, ValueOf(reference, "TransformParams")), "P"));
+                return permission is null ? 2
+                    : int.TryParse(permission, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value
+                    : null;
+            }
+
+            return null;
         }
 
         private static Dictionary<PdfRef, PdfObject> ReadObjects(string text)
@@ -1290,101 +1454,51 @@ internal static class PdfFillSignWriter
             return offset;
         }
 
-        private static bool TryReadLastReference(string text, string name, out PdfRef reference)
-        {
-            reference = default;
-            var matches = Regex.Matches(
-                text,
-                $@"/{Regex.Escape(name)}\s+(?<number>\d{{1,10}})\s+(?<generation>\d{{1,5}})\s+R(?![A-Za-z0-9])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (matches.Count == 0)
-            {
-                return false;
-            }
-
-            var match = matches[^1];
-            if (!int.TryParse(match.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-                || !int.TryParse(match.Groups["generation"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var generation))
-            {
-                return false;
-            }
-
-            reference = new PdfRef(number, generation);
-            return true;
-        }
-
-        private static bool TryReadLastId(string text, out string idText)
-        {
-            idText = string.Empty;
-            var matches = Regex.Matches(
-                text,
-                @"/ID\s*(?<id>\[(?:\s*<[^>]{1,256}>\s*){1,2}\])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (matches.Count == 0)
-            {
-                return false;
-            }
-
-            idText = matches[^1].Groups["id"].Value;
-            return true;
-        }
-
-        private static bool TryReadLastSize(string text, out int size)
-        {
-            size = 0;
-            var matches = Regex.Matches(
-                text,
-                @"/Size\s+(?<size>\d{1,10})(?![.\d])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            return matches.Count > 0
-                && int.TryParse(matches[^1].Groups["size"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out size)
-                && size > 0;
-        }
-
         private static List<PdfPageInfo> ReadPages(Dictionary<PdfRef, PdfObject> objects, PdfRef root)
         {
-            if (!objects.TryGetValue(root, out var rootObject)
-                || !TryReadReference(rootObject.Body, "Pages", out var pagesRoot))
+            if (objects.TryGetValue(root, out var rootObject)
+                && TryReadReference(rootObject.Body, "Pages", out var pagesRoot)
+                && objects.ContainsKey(pagesRoot))
             {
-                return ReadPagesByObjectOrder(objects);
+                var pages = new List<PdfPageInfo>();
+                TraversePageTree(objects, pagesRoot, default, null, 0, [], pages);
+                return pages;
             }
 
-            var pages = new List<PdfPageInfo>();
-            TraversePageTree(objects, pagesRoot, default, null, 0, [], pages);
-            return pages.Count > 0 ? pages : ReadPagesByObjectOrder(objects);
+            return ReadOnlyPage(objects);
         }
 
-        private static List<PdfPageInfo> ReadPagesByObjectOrder(Dictionary<PdfRef, PdfObject> objects)
+        /// <summary>
+        /// The page of a file whose page tree is packed out of reach. Without
+        /// the tree there is no page order, and only a lone page can't land
+        /// on the wrong one.
+        /// </summary>
+        private static List<PdfPageInfo> ReadOnlyPage(Dictionary<PdfRef, PdfObject> objects)
         {
-            var pages = new List<PdfPageInfo>();
-            foreach (var obj in objects.Values.OrderBy(item => item.Position))
+            var found = objects.Values
+                .Where(item => TryReadType(item.Body, out var type) && type == "Page")
+                .Take(2)
+                .ToList();
+            if (found.Count != 1)
             {
-                if (pages.Count >= MaxPages)
-                {
-                    break;
-                }
-
-                if (!TryReadType(obj.Body, out var type) || type != "Page")
-                {
-                    continue;
-                }
-
-                var boxes = ReadPageBoxes(objects, obj.Body, default, inheritPageTreeBoxes: false);
-                if (boxes.EffectiveBox is not { IsValid: true })
-                {
-                    continue;
-                }
-
-                var rotate = TryReadRotate(objects, obj.Body, out var ownRotate) ? ownRotate : 0;
-                pages.Add(new PdfPageInfo(obj.Ref, obj.Body, boxes, rotate));
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
-            return pages;
+            var page = found[0];
+            var boxes = ReadPageBoxes(objects, page.Body, default, inheritPageTreeBoxes: false);
+            if (boxes.EffectiveBox is not { IsValid: true })
+            {
+                throw new InvalidOperationException(UnsupportedStructure);
+            }
+
+            var rotate = TryReadRotate(objects, page.Body, out var ownRotate) ? ownRotate : 0;
+            return [new PdfPageInfo(page.Ref, page.Body, boxes, rotate)];
         }
 
+        /// <summary>
+        /// Every node is read or the file is refused: a node skipped is a
+        /// page the viewer counts, and every mark after it lands a page early.
+        /// </summary>
         private static void TraversePageTree(
             Dictionary<PdfRef, PdfObject> objects,
             PdfRef reference,
@@ -1394,32 +1508,27 @@ internal static class PdfFillSignWriter
             HashSet<PdfRef> seen,
             List<PdfPageInfo> pages)
         {
-            if (depth > 64 || pages.Count >= MaxPages || !seen.Add(reference) || !objects.TryGetValue(reference, out var obj))
+            if (depth > 64
+                || pages.Count >= MaxPages
+                || !seen.Add(reference)
+                || !objects.TryGetValue(reference, out var obj)
+                || !TryReadType(obj.Body, out var type))
             {
-                return;
-            }
-
-            if (!TryReadType(obj.Body, out var type))
-            {
-                return;
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             var boxes = ReadPageBoxes(objects, obj.Body, inheritedBoxes, inheritPageTreeBoxes: type == "Pages");
             var rotate = TryReadRotate(objects, obj.Body, out var ownRotate) ? ownRotate : inheritedRotate;
 
-            if (type == "Page")
+            if (type == "Page" && boxes.EffectiveBox is { IsValid: true })
             {
-                if (boxes.EffectiveBox is { IsValid: true })
-                {
-                    pages.Add(new PdfPageInfo(reference, obj.Body, boxes, rotate ?? 0));
-                }
-
+                pages.Add(new PdfPageInfo(reference, obj.Body, boxes, rotate ?? 0));
                 return;
             }
 
-            if (type != "Pages" || !TryReadKids(obj.Body, out var kids))
+            if (type != "Pages" || !TryReadKids(objects, obj.Body, out var kids))
             {
-                return;
+                throw new InvalidOperationException(UnsupportedStructure);
             }
 
             foreach (var kid in kids)
@@ -1450,147 +1559,90 @@ internal static class PdfFillSignWriter
 
         private static bool TryReadType(string body, out string type)
         {
-            type = string.Empty;
-            var match = TypeRegex.Match(Header(body));
-            if (!match.Success)
-            {
-                return false;
-            }
-
-            type = match.Groups["type"].Value;
-            return true;
+            type = NameValue(ValueOf(body, "Type")) ?? string.Empty;
+            return type.Length > 0;
         }
 
+        /// <summary>
+        /// A box of four numbers, or false when the dictionary names none
+        /// usable. Anything else is refused, not guessed at: a misread box
+        /// moves every mark.
+        /// </summary>
         private static bool TryReadBox(Dictionary<PdfRef, PdfObject> objects, string body, string name, out PdfPageBox box)
         {
             box = default;
-            var header = Header(body);
-            var direct = Regex.Match(
-                header,
-                $@"/{Regex.Escape(name)}\s*\[(?<values>[^\]]{{1,512}})\]",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (direct.Success)
-            {
-                return TryParseBox(direct.Groups["values"].Value, out box);
-            }
-
-            if (TryReadReference(header, name, out var boxRef)
-                && objects.TryGetValue(boxRef, out var boxObject))
-            {
-                var bracket = Regex.Match(
-                    Header(boxObject.Body),
-                    @"\[(?<values>[^\]]{1,512})\]",
-                    RegexOptions.CultureInvariant,
-                    RegexTimeout);
-                return bracket.Success && TryParseBox(bracket.Groups["values"].Value, out box);
-            }
-
-            return false;
-        }
-
-        private static bool TryReadRotate(Dictionary<PdfRef, PdfObject> objects, string body, out int rotate)
-        {
-            rotate = 0;
-            var header = Header(body);
-            var direct = Regex.Match(
-                header,
-                @"/Rotate\s+(?<value>[-+]?\d{1,5})(?![.\d])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (direct.Success
-                && int.TryParse(direct.Groups["value"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out rotate))
-            {
-                return true;
-            }
-
-            if (TryReadReference(header, "Rotate", out var rotateRef)
-                && objects.TryGetValue(rotateRef, out var rotateObject))
-            {
-                var value = Regex.Match(
-                    Header(rotateObject.Body),
-                    @"[-+]?\d{1,5}",
-                    RegexOptions.CultureInvariant,
-                    RegexTimeout);
-                return value.Success
-                    && int.TryParse(value.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out rotate);
-            }
-
-            return false;
-        }
-
-        private static bool TryReadKids(string body, out IReadOnlyList<PdfRef> kids)
-        {
-            kids = [];
-            var match = Regex.Match(
-                Header(body),
-                @"/Kids\s*\[(?<kids>[^\]]{1,65536})\]",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (!match.Success)
+            if (ValueOf(body, name) is not { } value)
             {
                 return false;
             }
 
-            var matches = Regex.Matches(
-                match.Groups["kids"].Value,
-                @"(?<number>\d{1,10})\s+(?<generation>\d{1,5})\s+R(?![A-Za-z0-9])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            var refs = new List<PdfRef>(matches.Count);
-            foreach (Match item in matches)
+            var items = ArrayItems(Resolve(objects, value));
+            if (items is not { Count: 4 })
             {
-                if (int.TryParse(item.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-                    && int.TryParse(item.Groups["generation"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var generation))
+                throw new InvalidOperationException(UnsupportedStructure);
+            }
+
+            var numbers = new double[4];
+            for (var i = 0; i < 4; i++)
+            {
+                if (!NumberRegex.IsMatch(items[i])
+                    || !double.TryParse(items[i], NumberStyles.Float, CultureInfo.InvariantCulture, out numbers[i])
+                    || !double.IsFinite(numbers[i]))
                 {
-                    refs.Add(new PdfRef(number, generation));
+                    throw new InvalidOperationException(UnsupportedStructure);
                 }
             }
 
-            kids = refs;
-            return refs.Count > 0;
+            box = new PdfPageBox(numbers[0], numbers[1], numbers[2], numbers[3]);
+            return box.IsValid;
+        }
+
+        /// <summary>
+        /// The page's turn. The viewer turns by whole quarters, so a value
+        /// between them is a turn the writer could only guess.
+        /// </summary>
+        private static bool TryReadRotate(Dictionary<PdfRef, PdfObject> objects, string body, out int rotate)
+        {
+            rotate = 0;
+            if (ValueOf(body, "Rotate") is not { } value)
+            {
+                return false;
+            }
+
+            if (!int.TryParse(Resolve(objects, value), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out rotate)
+                || rotate % 90 != 0)
+            {
+                throw new InvalidOperationException(UnsupportedStructure);
+            }
+
+            return true;
+        }
+
+        private static bool TryReadKids(Dictionary<PdfRef, PdfObject> objects, string body, out List<PdfRef> kids)
+        {
+            kids = [];
+            if (ArrayItems(Resolve(objects, ValueOf(body, "Kids"))) is not { } items)
+            {
+                return false;
+            }
+
+            foreach (var item in items)
+            {
+                if (!TryParseReference(item, out var kid))
+                {
+                    return false;
+                }
+
+                kids.Add(kid);
+            }
+
+            return true;
         }
 
         private static bool TryReadReference(string body, string name, out PdfRef reference)
         {
             reference = default;
-            var match = Regex.Match(
-                body,
-                $@"/{Regex.Escape(name)}\s+(?<number>\d{{1,10}})\s+(?<generation>\d{{1,5}})\s+R(?![A-Za-z0-9])",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (!match.Success
-                || !int.TryParse(match.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-                || !int.TryParse(match.Groups["generation"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var generation))
-            {
-                return false;
-            }
-
-            reference = new PdfRef(number, generation);
-            return true;
-        }
-
-        private static bool TryParseBox(string text, out PdfPageBox box)
-        {
-            box = default;
-            var numbers = NumberRegex.Matches(text);
-            if (numbers.Count < 4)
-            {
-                return false;
-            }
-
-            var values = new double[4];
-            for (var i = 0; i < 4; i++)
-            {
-                if (!double.TryParse(numbers[i].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out values[i])
-                    || !double.IsFinite(values[i]))
-                {
-                    return false;
-                }
-            }
-
-            box = new PdfPageBox(values[0], values[1], values[2], values[3]);
-            return box.IsValid;
+            return ValueOf(body, name) is { } value && TryParseReference(value, out reference);
         }
     }
 }
