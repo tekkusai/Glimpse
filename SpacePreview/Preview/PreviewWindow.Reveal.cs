@@ -234,12 +234,12 @@ public partial class PreviewWindow
 
     /// <summary>
     /// Where a stand-in's poster may come from, in order of honesty; the
-    /// first that answers wins. The Office file's embedded thumbnail belongs
-    /// between the rail cache and Explorer (docs/DESIGN.md, Waiting).
+    /// first that answers wins (docs/DESIGN.md, Waiting).
     /// </summary>
     private static readonly Func<string, BitmapSource?>[] PosterSources =
     [
         PdfRailFirstPage,
+        OfficeEmbeddedThumbnail,
         ExplorerCachedThumbnail
     ];
 
@@ -273,6 +273,9 @@ public partial class PreviewWindow
                 ? rail.Pages[0].Bitmap
                 : null;
     }
+
+    private static BitmapSource? OfficeEmbeddedThumbnail(string path) =>
+        FileKinds.IsOffice(path) ? OfficeThumbnail.TryRead(path) : null;
 
     private static BitmapSource? ExplorerCachedThumbnail(string path) =>
         ShellThumbnailProvider.TryGetCachedThumbnail(path, 1024)?.Bitmap;

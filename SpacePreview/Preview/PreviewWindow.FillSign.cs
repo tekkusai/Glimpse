@@ -58,8 +58,16 @@ public partial class PreviewWindow
         }
 
         var version = _loadVersion;
-        var viewerPages = _activePdfRail?.Document?.TotalPages;
-        var pageIndex = Math.Max(0, (_activePdfRail?.CurrentPage ?? 1) - 1);
+        // Asked of the viewer now: a document scrolled by wheel alone has a
+        // stale rail page.
+        var (currentPage, totalPages) = await ReadPdfPositionAsync();
+        if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null)
+        {
+            return;
+        }
+
+        int? viewerPages = totalPages > 0 ? totalPages : null;
+        var pageIndex = Math.Max(0, currentPage - 1);
         var page = await Task.Run(() => PdfPreviewRenderer.TryRenderPage(path, pageIndex, CancellationToken.None));
         if (page is null)
         {

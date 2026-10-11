@@ -141,7 +141,7 @@ internal static partial class SheetHtml
             + $":root{{color-scheme:light;{Palette(light)}}}"
             + $"@media (prefers-color-scheme:dark){{:root{{color-scheme:dark;{Palette(dark)}}}}}"
             // The one reveal: the page dissolves over the canvas, every tab too.
-            + "html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) both}"
+            + "html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards}"
             + "@keyframes glimpse-in{from{opacity:0}}"
             + "@media (prefers-reduced-motion:reduce){html{animation:none}}"
             + "html,body{height:100%;margin:0;overflow:hidden;background:var(--canvas)}"

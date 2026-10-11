@@ -223,7 +223,7 @@ internal static class OfficeDocumentPdfConverter
 
     // The pipeline version is the cache's invalidation: bump it whenever
     // conversion or sheet styling changes, or old output keeps being served.
-    private const string PipelineVersion = "v13";
+    private const string PipelineVersion = "v14";
 
     private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
 

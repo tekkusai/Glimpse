@@ -427,7 +427,7 @@ public partial class PreviewWindow
             Number(svgSize.Width),
             Number(svgSize.Height),
             checker,
-            "v8");
+            "v9");
         // The key carries the full recipe, so an existing file is already
         // correct, and skipping the rewrite avoids racing another window's
         // navigation read of the same file.
@@ -445,8 +445,9 @@ public partial class PreviewWindow
 <meta charset="utf-8">
 <style>
 html,body{margin:0;width:100%;height:100%;background:{{Hex(palette.CanvasBg)}};overflow:hidden;}
-html{animation:sp-reveal 160ms ease-out;}
-@keyframes sp-reveal{from{opacity:0} }
+html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards;}
+@keyframes glimpse-in{from{opacity:0} }
+@media (prefers-reduced-motion:reduce){html{animation:none} }
 #pic{position:absolute;left:0;top:0;user-select:none;-webkit-user-drag:none;}
 #pic.checker{background:repeating-conic-gradient({{Hex(palette.RaisedBg)}} 0 25%,{{Hex(palette.RaisedBorder)}} 0 50%) 0 0/16px 16px;}
 #pic.pixelated{image-rendering:pixelated;}

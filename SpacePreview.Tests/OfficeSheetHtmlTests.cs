@@ -43,7 +43,7 @@ public sealed class OfficeSheetHtmlTests
     [Fact]
     public void TheSheetDissolvesInLikeEveryOtherPageAndStillsForReducedMotion()
     {
-        Assert.Contains("html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) both}", SheetHtml.Style, StringComparison.Ordinal);
+        Assert.Contains("html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards}", SheetHtml.Style, StringComparison.Ordinal);
         Assert.Contains("@keyframes glimpse-in{from{opacity:0}}", SheetHtml.Style, StringComparison.Ordinal);
         Assert.Contains("@media (prefers-reduced-motion:reduce){html{animation:none}}", SheetHtml.Style, StringComparison.Ordinal);
     }

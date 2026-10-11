@@ -71,7 +71,7 @@ public partial class PreviewAccessWarningWindow : Window
         var displayName = FriendlyDisplayName(warning.DisplayName);
         return warning.Kind == PreviewAccessWarningKind.ConfirmedElevationMismatch
             ? $"Glimpse and {displayName} are running at different permission levels. Restart {displayName} without administrator access to use previews."
-            : $"Glimpse can't access this file picker. If {displayName} is running as administrator, restart it without administrator access to use previews.";
+            : $"{Branding.Name} can't access this file picker. If {displayName} is running as administrator, restart it without administrator access to use previews.";
     }
 
     internal static string BuildReminderMessage(bool finalReminder) =>
