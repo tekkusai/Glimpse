@@ -6,12 +6,35 @@ using SpacePreview.Preview;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// One mark everywhere: the hand hinting never strays from the shape, and
-/// the welcome shows the app tile.
+/// One mark everywhere: the app icon is the tile BrandMark draws, the hand
+/// hinting never strays from the shape, and the welcome shows the tile.
 /// </summary>
 [Collection(WpfCollection.Name)]
 public sealed class BrandMarkTests
 {
+    [Fact]
+    public Task TheAppIconIsTheTileBrandMarkDraws() => WpfApp.RunAsync(() =>
+    {
+        var icon = File.ReadAllBytes(TestSource.FilePath(@"SpacePreview\Assets\Glimpse.ico"));
+        var sizes = new List<int>();
+        for (var i = 0; i < BitConverter.ToUInt16(icon, 4); i++)
+        {
+            var entry = 6 + (16 * i);
+            var size = icon[entry] == 0 ? 256 : icon[entry];
+            var frame = BitmapFrame.Create(
+                new MemoryStream(icon, BitConverter.ToInt32(icon, entry + 12), BitConverter.ToInt32(icon, entry + 8)),
+                BitmapCreateOptions.PreservePixelFormat,
+                BitmapCacheOption.OnLoad);
+
+            Assert.True(Bgra(BrandMark.RenderTile(size)).SequenceEqual(Bgra(frame)), $"frame {size} is not the mark; run scripts/render-icon.ps1");
+            sizes.Add(size);
+        }
+
+        // Every size Windows asks for from 100 to 300 percent, then 64 and 256.
+        Assert.Equal([16, 20, 24, 30, 32, 36, 40, 48, 64, 256], sizes.Order());
+        return Task.CompletedTask;
+    });
+
     [Fact]
     public void HandHintingStaysWithinAPixelOfTheShape()
     {
