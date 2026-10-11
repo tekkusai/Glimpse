@@ -11,7 +11,8 @@ internal enum DeferredFileDialogPreviewDecision
 internal sealed record DeferredFileDialogPreviewIntent(
     IntPtr DialogRoot,
     int RequestGeneration,
-    long ArmedAtTick)
+    long ArmedAtTick,
+    long InputStamp = 0)
 {
     public bool IsCurrent(
         IntPtr completedDialog,
@@ -44,12 +45,14 @@ internal sealed class DeferredFileDialogPreviewIntentSlot
     public DeferredFileDialogPreviewIntent Arm(
         IntPtr dialogRoot,
         int requestGeneration,
-        long armedAtTick)
+        long armedAtTick,
+        long inputStamp = 0)
     {
         var intent = new DeferredFileDialogPreviewIntent(
             dialogRoot,
             requestGeneration,
-            armedAtTick);
+            armedAtTick,
+            inputStamp);
         Interlocked.Exchange(ref _current, intent);
         return intent;
     }

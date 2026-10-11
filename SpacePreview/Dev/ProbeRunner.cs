@@ -33,7 +33,7 @@ internal static class ProbeRunner
 
         if (args.Length >= 2 && IsSwitch(args[0], "--browse-test"))
         {
-            _ = BrowseTestAsync(app, args[1], args.Length >= 3 ? args[2] : null);
+            _ = BrowseTestAsync(app, args[1]);
             return true;
         }
 
@@ -267,7 +267,7 @@ internal static class ProbeRunner
         encoder.Save(stream);
     }
 
-    private static async Task BrowseTestAsync(Application app, string folder, string? outputPath)
+    private static async Task BrowseTestAsync(Application app, string folder)
     {
         try
         {
@@ -304,19 +304,6 @@ internal static class ProbeRunner
             DiagnosticLog.Write(read is null
                 ? "browse-test initial read -> NULL"
                 : $"browse-test initial read -> {Path.GetFileName(read.Path)} index={read.ViewIndex} count={read.ViewCount}");
-            if (read is not null)
-            {
-                var neighbors = await StaTask.Run(() => ExplorerSelectionService.TryGetNeighborPaths(hwnd, false, read.ViewIndex, 4));
-                var neighborLine = neighbors is null
-                    ? "browse-test neighbors -> NULL"
-                    : $"browse-test neighbors -> {string.Join(" | ", neighbors)}";
-                DiagnosticLog.Write(neighborLine);
-                if (!string.IsNullOrWhiteSpace(outputPath))
-                {
-                    File.AppendAllText(outputPath, neighborLine + Environment.NewLine);
-                }
-            }
-
             foreach (var delta in new[] { 1, 1, -1, -9, 2 })
             {
                 var result = await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, false, delta));

@@ -65,6 +65,8 @@ internal static class NativeMethods
     public const int VK_SHIFT = 0x10;
     public const int VK_CONTROL = 0x11;
     public const int VK_F = 0x46;
+    public const int VK_R = 0x52;
+    public const int VK_F11 = 0x7A;
     public const int VK_MENU = 0x12;
     public const int VK_LWIN = 0x5B;
     public const int VK_RWIN = 0x5C;
@@ -319,6 +321,20 @@ internal static class NativeMethods
         var hit = WindowFromPoint(new POINT { X = x, Y = y });
         return hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, (uint)GA_ROOT);
     }
+
+    /// <summary>The top-level window that holds <paramref name="hwnd"/>, or Zero.</summary>
+    public static IntPtr GetRoot(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            return IntPtr.Zero;
+        }
+
+        var root = GetAncestor(hwnd, (uint)GA_ROOT);
+        return root == IntPtr.Zero ? hwnd : root;
+    }
+
+    public static IntPtr GetForegroundRoot() => GetRoot(GetForegroundWindow());
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);

@@ -39,6 +39,16 @@ public partial class PreviewWindow
 
     internal void RequestFillSignEscape() => _fillSignSurface?.HandleEscape();
 
+    /// <summary>
+    /// Every way out of sign mode asks first. With placed work the save
+    /// choice comes up and the exit waits for the user's answer; an empty
+    /// session lets it go ahead.
+    /// </summary>
+    internal bool TryLeaveFillSign()
+    {
+        return _fillSignSurface?.TryLeave() != false;
+    }
+
     private void UpdateFillSignPill()
     {
         // Built once per palette: a theme change between files repaints it.

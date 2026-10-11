@@ -15,18 +15,33 @@ public sealed class HookPathArchitectureTests
         ".Result",
         "GetAwaiter().GetResult",
         "WaitOne(",
-        "Task.Delay("
+        "Task.Delay(",
+        "Task.Run(",
+        "ProcessIntegrityService",
+        "Process.GetProcess",
+        // The picker is read only by its bounded monitor, never on the hook.
+        "CommonFileDialogSelectionService.TryGetSelection",
+        "StaTask.Run"
     ];
 
+    // Windows silently removes a low-level hook whose callback overruns its
+    // timeout. The scan is shallow (it does not follow callees), so every
+    // method the keyboard callback runs is listed.
     [Theory]
     [InlineData(@"SpacePreview\Services\KeyboardHook.cs", "HookCallback")]
     [InlineData(@"SpacePreview\Services\MouseHook.cs", "HookCallback")]
     [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "CaptureKeyFacts")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "Perform")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "FollowExplorer")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "QueueOpen")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "QueuePickerOpen")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "DeferPickerOpen")]
     [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyUp")]
+    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "TargetOf")]
     [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnMouseDown")]
-    [InlineData(@"SpacePreview\Services\FullscreenInputSuspension.cs", "ShouldPassThroughInput")]
-    [InlineData(@"SpacePreview\Services\FullscreenInputSuspension.cs", "Recompute")]
-    [InlineData(@"SpacePreview\Services\FullscreenInputSuspension.cs", "SetState")]
+    [InlineData(@"SpacePreview\Services\PreviewKeyMap.cs", "Route")]
+    [InlineData(@"SpacePreview\Services\SpaceKeyLatch.cs", "Press")]
     public void HookPathMethodsDoNotContainBlockingWork(string relativePath, string methodName)
     {
         var body = TestSource.CodeMethod(relativePath, methodName);
@@ -67,26 +82,21 @@ public sealed class HookPathArchitectureTests
         Assert.DoesNotContain("LargeObjectHeapCompactionMode", body, StringComparison.Ordinal);
     }
 
+    // Typing a page number into the PDF viewer's own box and pressing Enter
+    // must jump, not open. The yield holds only after a click in that band,
+    // only for the PDF viewer, and only once.
     [Fact]
-    public void SpaceAndEnterStayHostOwnedWhenContentHoldsTheKeyboard()
+    public void EnterYieldsOnlyAfterAClickInThePdfToolbar()
     {
-        var body = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown");
+        var window = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var yieldStart = window.IndexOf("internal bool EnterYieldsToContent =>", StringComparison.Ordinal);
+        Assert.True(yieldStart >= 0);
+        var yieldBody = window[yieldStart..window.IndexOf(';', yieldStart)];
+        var consumeBody = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ConsumeEnterYieldToContent");
 
-        // Enter opens the file even when the embedded browser has focus;
-        // Space still dismisses. The armed find bar is the only yield for
-        // both, so find-box typing and next-match keep working.
-        Assert.Contains("IsEscapeYieldArmed", body, StringComparison.Ordinal);
-        Assert.Contains("OpenCurrent", body, StringComparison.Ordinal);
-        Assert.Contains("HidePreview", body, StringComparison.Ordinal);
-        Assert.Contains("TryToggleMediaPlayback", body, StringComparison.Ordinal);
-
-        // The PDF viewer's toolbar (page box) is the only other Enter yield,
-        // and only when the user's last click actually landed in that band.
-        // A click in the document body must never revive dead-Enter.
-        var yieldBody = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ConsumeEnterYieldToContent");
         Assert.Contains("_lastContentClickInViewerChrome", yieldBody, StringComparison.Ordinal);
         Assert.Contains("IsPdfViewerSource", yieldBody, StringComparison.Ordinal);
-        Assert.Contains("_lastContentClickInViewerChrome = false", yieldBody, StringComparison.Ordinal);
+        Assert.Contains("_lastContentClickInViewerChrome = false", consumeBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -144,49 +154,6 @@ public sealed class HookPathArchitectureTests
         Assert.Contains("Task.Delay(FolderSizeScanStartDelay, token)", scanRunner, StringComparison.Ordinal);
         Assert.Contains("_folderSizeScanGate.WaitAsync(token)", scanRunner, StringComparison.Ordinal);
         Assert.Contains("DispatcherPriority.Render", revealScheduler, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void NavigationReleaseVerifiesOnlyWhenKeyDownDidNotAlreadyMoveSelection()
-    {
-        var keyDown = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown");
-        var keyUp = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyUp");
-        var verification = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "RequestKeyUpSelectionVerification");
-        var coalescer = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "NewestRefreshRequest");
-        var modifierIntent = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "IntentionalMultiSelectionNavigation");
-        var hidePreview = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "HidePreview");
-        var preconvert = TestSource.CodeMethod(@"SpacePreview\Services\SpacePreviewController.cs", "PreconvertOfficeNeighborsAsync");
-
-        Assert.Contains("IntentionalMultiSelectionNavigation(vk)", keyDown, StringComparison.Ordinal);
-        Assert.Contains("_navigationKeyRefreshTokens[vk]", keyDown, StringComparison.Ordinal);
-        Assert.Contains("Interlocked.Exchange(ref _navigationKeyRefreshTokens[vk], 0)", keyUp, StringComparison.Ordinal);
-        Assert.Contains("RequestKeyUpSelectionVerification", keyUp, StringComparison.Ordinal);
-        Assert.DoesNotContain("RefreshSelectionAsync", keyUp, StringComparison.Ordinal);
-        Assert.Contains("PreviewInputPolicy.ShouldVerifyNavigationRelease", verification, StringComparison.Ordinal);
-        Assert.Contains("_pendingKeyUpVerification", verification, StringComparison.Ordinal);
-        Assert.Contains(
-            "StartedGenerationAtRelease: Interlocked.Read(ref _lastStartedRefreshGeneration)",
-            keyUp,
-            StringComparison.Ordinal);
-        Assert.Contains("incoming.Generation > current.Generation", coalescer, StringComparison.Ordinal);
-        Assert.Contains("IncludeMultiSelectionPaths = true", coalescer, StringComparison.Ordinal);
-        Assert.Contains("NativeMethods.VK_SHIFT", modifierIntent, StringComparison.Ordinal);
-        Assert.DoesNotContain("NativeMethods.VK_CONTROL", modifierIntent, StringComparison.Ordinal);
-        var nativeRefreshGeneration = keyDown.IndexOf(
-            "var generation = Interlocked.Increment(ref _navigationRefreshGeneration);",
-            StringComparison.Ordinal);
-        var previewContentGuard = keyDown.LastIndexOf(
-            "if (IsForegroundActivePreview())",
-            nativeRefreshGeneration,
-            StringComparison.Ordinal);
-        Assert.True(previewContentGuard >= 0 && previewContentGuard < nativeRefreshGeneration);
-        Assert.Contains("Interlocked.Read(ref _navigationRefreshGeneration)", verification, StringComparison.Ordinal);
-        Assert.Contains("verification.StartedGenerationAtRelease", verification, StringComparison.Ordinal);
-        Assert.Contains("ClearNavigationRefreshTokens();", hidePreview, StringComparison.Ordinal);
-        Assert.Contains("OfficeNeighborPreconvertDelay", preconvert, StringComparison.Ordinal);
-        Assert.True(
-            preconvert.IndexOf("Task.Delay", StringComparison.Ordinal)
-            < preconvert.IndexOf("StaTask.Run", StringComparison.Ordinal));
     }
 
     [Fact]

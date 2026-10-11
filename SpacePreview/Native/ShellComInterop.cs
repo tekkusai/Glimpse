@@ -1,13 +1,26 @@
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace SpacePreview.Native;
 
 /// <summary>
-/// Minimal shell COM plumbing to resolve which Explorer tab a ShellWindows
-/// entry maps to. Each tab hosts its own IShellBrowser whose window is the
-/// per-tab ShellTabWindowClass pane. Handles are identity where tab names can
-/// collide; the active pane is found by z-order, not visibility.
+/// The shell's window list. Declared only up to the slots Glimpse calls:
+/// later slots register and revoke windows, so they stay out of reach.
 /// </summary>
+[ComImport]
+[Guid("85CB6900-4D95-11CF-960C-0080C7F4EE85")]
+[InterfaceType(ComInterfaceType.InterfaceIsDual)]
+internal interface IShellWindows
+{
+    [PreserveSig]
+    int get_Count(out int count);
+
+    [PreserveSig]
+    int Item(
+        [MarshalAs(UnmanagedType.Struct)] object index,
+        [MarshalAs(UnmanagedType.IDispatch)] out object? folder);
+}
+
 [ComImport]
 [Guid("6D5140C1-7436-11CE-8034-00AA006009FA")]
 [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -63,18 +76,11 @@ internal interface IShellBrowser
 
     [PreserveSig]
     int QueryActiveShellView(out IntPtr ppshv);
-
-    [PreserveSig]
-    int OnViewWindowActive(IntPtr pshv);
-
-    [PreserveSig]
-    int SetToolbarItems(IntPtr lpButtons, uint nButtons, uint uFlags);
 }
 
 /// <summary>
 /// The view behind a shell window: items addressed by their position in the
-/// view's display order, which is
-/// what "previous" and "next" mean while browsing.
+/// view's display order, which is what "previous" and "next" mean.
 /// </summary>
 [ComImport]
 [Guid("CDE725B0-CCC9-4519-917E-325D72FAB4CE")]
@@ -119,24 +125,6 @@ internal interface IFolderView
 
     [PreserveSig]
     int SelectItem(int iItem, uint dwFlags);
-
-    [PreserveSig]
-    int SelectAndPositionItems(uint cidl, IntPtr apidl, IntPtr apt, uint dwFlags);
-}
-
-[ComImport]
-[Guid("1AC3D9F0-175C-11D1-95BE-00609797EA4F")]
-[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-internal interface IPersistFolder2
-{
-    [PreserveSig]
-    int GetClassID(out Guid pClassID);
-
-    [PreserveSig]
-    int Initialize(IntPtr pidl);
-
-    [PreserveSig]
-    int GetCurFolder(out IntPtr ppidl);
 }
 
 [ComImport]
@@ -160,10 +148,7 @@ internal interface IShellItemArray
     int GetCount(out uint pdwNumItems);
 
     [PreserveSig]
-    int GetItemAt(uint dwIndex, out IShellItem ppsi);
-
-    [PreserveSig]
-    int EnumItems(out IntPtr ppenumShellItems);
+    int GetItemAt(uint dwIndex, out IntPtr ppsi);
 }
 
 [ComImport]
@@ -179,87 +164,37 @@ internal interface IShellItem
 
     [PreserveSig]
     int GetDisplayName(uint sigdnName, out IntPtr ppszName);
-
-    [PreserveSig]
-    int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
-
-    [PreserveSig]
-    int Compare(IntPtr psi, uint hint, out int piOrder);
 }
 
-internal static class ShellBrowserIdentity
-{
-    private static readonly Guid TopLevelBrowserService = new("4C96BE40-915C-11CF-99D3-00AA004AE837");
-    private static readonly Guid ShellBrowserIid = new("000214E2-0000-0000-C000-000000000046");
-
-    /// <summary>The tab pane hwnd for a ShellWindows entry, or Zero.</summary>
-    public static IntPtr TryGetTabHwnd(object window)
-    {
-        var browserPtr = IntPtr.Zero;
-        try
-        {
-            if (window is not IShellServiceProvider provider)
-            {
-                return IntPtr.Zero;
-            }
-
-            var service = TopLevelBrowserService;
-            var iid = ShellBrowserIid;
-            if (provider.QueryService(ref service, ref iid, out browserPtr) != 0 || browserPtr == IntPtr.Zero)
-            {
-                return IntPtr.Zero;
-            }
-
-            if (Marshal.GetObjectForIUnknown(browserPtr) is not IShellBrowser browser)
-            {
-                return IntPtr.Zero;
-            }
-
-            try
-            {
-                return browser.GetWindow(out var hwnd) == 0 ? hwnd : IntPtr.Zero;
-            }
-            finally
-            {
-                Marshal.FinalReleaseComObject(browser);
-            }
-        }
-        catch
-        {
-            return IntPtr.Zero;
-        }
-        finally
-        {
-            if (browserPtr != IntPtr.Zero)
-            {
-                Marshal.Release(browserPtr);
-            }
-        }
-    }
-}
-
-/// <summary>Native selection count plus its filesystem-backed members.</summary>
-internal sealed record FolderViewSelectionSnapshot(
-    int SelectedCount,
-    IReadOnlyList<string> FileSystemPaths);
+/// <summary>What a folder view says is selected.</summary>
+/// <param name="Count">Every selected item, files or not.</param>
+/// <param name="AnchorPath">The anchor's filesystem path; null when the anchor is not a file or folder on disk.</param>
+/// <param name="OrderedPaths">The selected filesystem paths in view order, when asked for.</param>
+internal readonly record struct FolderViewSelection(
+    int Count,
+    string? AnchorPath,
+    IReadOnlyList<string>? OrderedPaths);
 
 /// <summary>
-/// Stepping through a folder the way the user reads it. The shell's own view
-/// is the reference for order and position; selecting through it is a
-/// direct call into Explorer, so it works regardless of which window holds
-/// the keyboard - unlike synthetic key presses, which Explorer's list
-/// ignores. STA only, like everything touching the shell browser.
+/// Native reads of Explorer's views. Every call here crosses into Explorer
+/// and must run on the shell STA: the per-tab browser answers QueryService
+/// only there. HRESULTs come back as values so a dead Explorer reads as
+/// <see cref="IsDisconnected"/> instead of as an empty selection.
 /// </summary>
-internal static class FolderViewNavigator
+internal static class ShellViews
 {
+    private static readonly Guid ShellWindowsClass = new("9BA05972-F6A8-11CF-A442-00A0C90A8F39");
     private static readonly Guid TopLevelBrowserService = new("4C96BE40-915C-11CF-99D3-00AA004AE837");
     private static readonly Guid ShellBrowserIid = new("000214E2-0000-0000-C000-000000000046");
     private static readonly Guid FolderViewIid = new("CDE725B0-CCC9-4519-917E-325D72FAB4CE");
-
-    private const uint SvgioAllView = 0x2;
-    private const uint SvgioSelection = 0x1;
-    private const uint SigdnFilesysPath = 0x80058000;
     private static readonly Guid ShellItemArrayIid = new("B63EA76D-1F85-456F-A19C-48159EFA858B");
+
+    private const uint SvgioSelection = 0x1;
+    private const uint SvgioAllView = 0x2;
+    private const uint SvgioFlagViewOrder = 0x80000000;
+    private const uint SigdnFilesysPath = 0x80058000;
+    private const int SwcDesktop = 8;
+    private const int SwfoNeedDispatch = 1;
 
     // SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED
     private const uint SelectExclusive = 0x1 | 0x4 | 0x8 | 0x10;
@@ -267,581 +202,248 @@ internal static class FolderViewNavigator
     // SVSI_SELECT | SVSI_ENSUREVISIBLE: grows the selection.
     private const uint SelectAdditional = 0x1 | 0x8;
 
-    /// <summary>Focused-item index and item count in view order, or null.</summary>
-    public static (int Index, int Count)? TryGetPosition(object window)
-    {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null || view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
-            {
-                return null;
-            }
+    private const int RpcEDisconnected = unchecked((int)0x80010108);
+    private const int RpcEServerDied = unchecked((int)0x80010007);
+    private const int RpcEServerDiedDne = unchecked((int)0x80010012);
+    private const int RpcSServerUnavailable = unchecked((int)0x800706BA);
 
-            return (GetAnchorIndex(view), count);
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
+    /// <summary>Explorer went away under the proxy: rebuild, do not report "nothing selected".</summary>
+    public static bool IsDisconnected(int hr) =>
+        hr is RpcEDisconnected or RpcEServerDied or RpcEServerDiedDne or RpcSServerUnavailable;
+
+    public static IShellWindows CreateShellWindows()
+    {
+        var type = Type.GetTypeFromCLSID(ShellWindowsClass, throwOnError: true)!;
+        return (IShellWindows)Activator.CreateInstance(type)!;
     }
 
     /// <summary>
-    /// Moves the selection by <paramref name="delta"/> view positions,
-    /// clamped at the folder's ends. Returns the resulting position, or null
-    /// when the view offers no anchor to move from.
+    /// The desktop's browser. Found by name through IDispatch so no vtable
+    /// slot past <see cref="IShellWindows.Item"/> is ever called.
     /// </summary>
-    public static (int Index, int Count)? TrySelectRelative(object window, int delta)
+    public static object? FindDesktop(IShellWindows windows, out IntPtr hwnd)
     {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null || view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
-            {
-                return null;
-            }
-
-            var current = GetAnchorIndex(view);
-            if (current < 0)
-            {
-                return null;
-            }
-
-            var next = Math.Clamp(current + delta, 0, count - 1);
-            if (next != current && view.SelectItem(next, SelectExclusive) != 0)
-            {
-                return null;
-            }
-
-            return (next, count);
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    public static bool TrySelectIndex(object window, int index)
-    {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null || view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
-            {
-                return false;
-            }
-
-            if (index < 0 || index >= count)
-            {
-                return false;
-            }
-
-            return view.SelectItem(index, SelectExclusive) == 0;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    /// <summary>Dev benchmark cleanup: remove one known selection.</summary>
-    public static bool TryDeselectIndex(object window, int index)
-    {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null || index < 0)
-            {
-                return false;
-            }
-
-            // SVSI_DESELECT is zero by definition.
-            return view.SelectItem(index, 0) == 0;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    public static IReadOnlyList<string>? TryGetNeighborPaths(object window, int currentIndex, int maxNeighbors)
-    {
-        IFolderView? view = null;
-        IntPtr folderPidl = IntPtr.Zero;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null
-                || view.ItemCount(SvgioAllView, out var count) != 0
-                || count <= 0
-                || currentIndex < 0
-                || currentIndex >= count
-                || maxNeighbors <= 0)
-            {
-                return null;
-            }
-
-            var paths = new List<string>(Math.Min(maxNeighbors, count - 1));
-            var buffer = new System.Text.StringBuilder(1024);
-            folderPidl = TryGetFolderPidl(view);
-            if (folderPidl == IntPtr.Zero)
-            {
-                return null;
-            }
-
-            for (var radius = 1; paths.Count < maxNeighbors && (currentIndex + radius < count || currentIndex - radius >= 0); radius++)
-            {
-                TryAddPath(currentIndex + radius);
-                TryAddPath(currentIndex - radius);
-            }
-
-            return paths;
-
-            void TryAddPath(int index)
-            {
-                if (paths.Count >= maxNeighbors || index < 0 || index >= count)
-                {
-                    return;
-                }
-
-                var path = TryReadPathAt(view, index, folderPidl, buffer);
-                if (!string.IsNullOrWhiteSpace(path))
-                {
-                    paths.Add(path);
-                }
-            }
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            if (folderPidl != IntPtr.Zero)
-            {
-                Marshal.FreeCoTaskMem(folderPidl);
-            }
-
-            ReleaseView(view);
-        }
+        var args = new object?[] { null, null, SwcDesktop, 0, SwfoNeedDispatch };
+        var byRef = new ParameterModifier(args.Length);
+        byRef[0] = true;
+        byRef[1] = true;
+        byRef[3] = true;
+        var desktop = windows.GetType().InvokeMember(
+            "FindWindowSW",
+            BindingFlags.InvokeMethod,
+            binder: null,
+            windows,
+            args,
+            [byRef],
+            culture: null,
+            namedParameters: null);
+        hwnd = args[3] is { } raw ? new IntPtr(Convert.ToInt64(raw)) : IntPtr.Zero;
+        return desktop;
     }
 
     /// <summary>
-    /// First filesystem path from the current selection. This deliberately
-    /// does not walk the full view: it is the last-resort path discovery used
-    /// by latency-critical navigation when ShellFolderView.SelectedItems is
-    /// temporarily unavailable.
+    /// The top-level window behind a ShellWindows entry, through IDispatch.
+    /// Used only when the entry's tab pane is gone, the case the stale-census
+    /// rescue exists for.
     /// </summary>
-    public static string? TryGetFirstSelectedPath(object window)
+    public static IntPtr GetTopLevelHwnd(object browser)
     {
-        IFolderView? view = null;
         try
         {
-            view = GetFolderView(window);
-            if (view is null)
-            {
-                return null;
-            }
-
-            var selected = ReadItemPaths(view, SvgioSelection, maxItems: 1);
-            return selected is { Count: > 0 } ? selected[0] : null;
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    /// <summary>
-    /// A selection snapshot straight from IFolderView. Unlike the ordered
-    /// multi-selection helper, this never walks the full view; it is the
-    /// low-round-trip candidate measured against ShellFolderView automation.
-    /// </summary>
-    public static FolderViewSelectionSnapshot? TryGetSelectionSnapshot(
-        object window,
-        int maxItems = 256)
-    {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null)
-            {
-                return null;
-            }
-
-            // Desktop IFolderView can return no item-array object for an empty
-            // selection. ItemCount is authoritative and lets both A/B readers
-            // represent that valid state as an explicit zero-item snapshot.
-            if (view.ItemCount(SvgioSelection, out var selectionCount) != 0)
-            {
-                return null;
-            }
-
-            if (selectionCount == 0)
-            {
-                return new FolderViewSelectionSnapshot(0, []);
-            }
-
-            var paths = ReadItemPaths(
-                view,
-                SvgioSelection,
-                maxItems,
-                out var selectedCount);
-            return paths is null
-                ? null
-                : new FolderViewSelectionSnapshot((int)selectedCount, paths);
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    /// <summary>
-    /// Filesystem paths of the current selection, in the view's own display
-    /// order: what "previous" and "next" mean when browsing WITHIN a
-    /// explicit multi-selection. The selection array itself arrives in the
-    /// shell's internal order (anchor first, then selection history), so the
-    /// members are re-sorted by walking the full view order.
-    /// </summary>
-    public static IReadOnlyList<string>? TryGetSelectedPaths(object window, int maxItems = 256)
-    {
-        IFolderView? view = null;
-        try
-        {
-            view = GetFolderView(window);
-            if (view is null)
-            {
-                return null;
-            }
-
-            var selected = ReadItemPaths(view, SvgioSelection, maxItems);
-            if (selected is null || selected.Count == 0)
-            {
-                return null;
-            }
-
-            if (selected.Count == 1)
-            {
-                return selected;
-            }
-
-            // Match by FILE NAME: Item() hands back child pidls (their
-            // resolved paths re-root at the desktop), but the name component
-            // is authoritative and unique within one folder.
-            var remaining = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var path in selected)
-            {
-                remaining[System.IO.Path.GetFileName(path)] = path;
-            }
-
-            var viewOrder = ReadViewOrderPaths(view, 4096);
-            if (viewOrder is null)
-            {
-                return selected;
-            }
-
-            var ordered = new List<string>(selected.Count);
-            foreach (var viewPath in viewOrder)
-            {
-                if (remaining.Remove(System.IO.Path.GetFileName(viewPath), out var fullPath))
-                {
-                    ordered.Add(fullPath);
-                    if (remaining.Count == 0)
-                    {
-                        break;
-                    }
-                }
-            }
-
-            // Members past the enumeration cap keep their shell order at the
-            // end rather than silently vanishing.
-            foreach (var path in selected)
-            {
-                if (remaining.ContainsKey(System.IO.Path.GetFileName(path)))
-                {
-                    ordered.Add(path);
-                }
-            }
-
-            return ordered;
-        }
-        catch
-        {
-            return null;
-        }
-        finally
-        {
-            ReleaseView(view);
-        }
-    }
-
-    /// <summary>
-    /// Paths by explicit view index. The
-    /// Items() enumerations are rotated to start at the focused item, so
-    /// they cannot be trusted for ordering.
-    /// </summary>
-    private static List<string>? ReadViewOrderPaths(IFolderView view, int maxItems)
-    {
-        if (view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
-        {
-            return null;
-        }
-
-        var limit = Math.Min(count, maxItems);
-        var paths = new List<string>(limit);
-        var buffer = new System.Text.StringBuilder(1024);
-        var folderPidl = TryGetFolderPidl(view);
-        if (folderPidl == IntPtr.Zero)
-        {
-            return null;
-        }
-
-        try
-        {
-            for (var i = 0; i < limit; i++)
-            {
-                var path = TryReadPathAt(view, i, folderPidl, buffer);
-                if (!string.IsNullOrWhiteSpace(path))
-                {
-                    paths.Add(path);
-                }
-            }
-
-            return paths;
-        }
-        finally
-        {
-            Marshal.FreeCoTaskMem(folderPidl);
-        }
-    }
-
-    private static IntPtr TryGetFolderPidl(IFolderView view)
-    {
-        IntPtr folderPtr = IntPtr.Zero;
-        IPersistFolder2? folder = null;
-        try
-        {
-            var iid = typeof(IPersistFolder2).GUID;
-            if (view.GetFolder(ref iid, out folderPtr) != 0 || folderPtr == IntPtr.Zero)
-            {
-                return IntPtr.Zero;
-            }
-
-            folder = (IPersistFolder2)Marshal.GetObjectForIUnknown(folderPtr);
-            return folder.GetCurFolder(out var folderPidl) == 0 ? folderPidl : IntPtr.Zero;
+            var value = browser.GetType().InvokeMember("HWND", BindingFlags.GetProperty, null, browser, null);
+            return value is null ? IntPtr.Zero : new IntPtr(Convert.ToInt64(value));
         }
         catch
         {
             return IntPtr.Zero;
         }
-        finally
-        {
-            if (folder is not null)
-            {
-                Marshal.FinalReleaseComObject(folder);
-            }
-
-            if (folderPtr != IntPtr.Zero)
-            {
-                Marshal.Release(folderPtr);
-            }
-        }
     }
 
-    private static string? TryReadPathAt(IFolderView view, int index, IntPtr folderPidl, System.Text.StringBuilder buffer)
+    /// <summary>The tab pane hwnd for a ShellWindows entry, or Zero.</summary>
+    public static IntPtr GetTabHwnd(object browser)
     {
-        if (view.Item(index, out var pidl) != 0 || pidl == IntPtr.Zero)
+        var shellBrowser = GetShellBrowser(browser, out _);
+        if (shellBrowser is null)
         {
-            return null;
+            return IntPtr.Zero;
         }
 
-        IntPtr absolute = IntPtr.Zero;
         try
         {
-            absolute = ILCombine(folderPidl, pidl);
-            buffer.Clear();
-            if (absolute != IntPtr.Zero && SHGetPathFromIDListEx(absolute, buffer, (uint)buffer.Capacity, 0) && buffer.Length > 0)
-            {
-                return buffer.ToString();
-            }
-
-            buffer.Clear();
-            return SHGetPathFromIDListEx(pidl, buffer, (uint)buffer.Capacity, 0) && buffer.Length > 0
-                ? buffer.ToString()
-                : null;
+            return shellBrowser.GetWindow(out var hwnd) == 0 ? hwnd : IntPtr.Zero;
         }
         finally
         {
-            if (absolute != IntPtr.Zero)
-            {
-                ILFree(absolute);
-            }
-
-            Marshal.FreeCoTaskMem(pidl);
+            Release(shellBrowser);
         }
     }
 
-    [DllImport("shell32.dll")]
-    private static extern IntPtr ILCombine(IntPtr pidl1, IntPtr pidl2);
-
-    [DllImport("shell32.dll")]
-    private static extern void ILFree(IntPtr pidl);
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SHGetPathFromIDListEx(IntPtr pidl, System.Text.StringBuilder pszPath, uint cchPath, int uOpts);
-
-    private static List<string>? ReadItemPaths(IFolderView view, uint svgioFlags, int maxItems) =>
-        ReadItemPaths(view, svgioFlags, maxItems, out _);
-
-    private static List<string>? ReadItemPaths(
-        IFolderView view,
-        uint svgioFlags,
-        int maxItems,
-        out uint itemCount)
+    /// <summary>The entry's active folder view, or null with the failing HRESULT.</summary>
+    public static IFolderView? GetFolderView(object browser, out int hr)
     {
-        itemCount = 0;
-        var iid = ShellItemArrayIid;
-        if (view.Items(svgioFlags, ref iid, out var arrayPtr) != 0 || arrayPtr == IntPtr.Zero)
+        var shellBrowser = GetShellBrowser(browser, out hr);
+        if (shellBrowser is null)
         {
             return null;
         }
 
         try
         {
-            if (Marshal.GetObjectForIUnknown(arrayPtr) is not IShellItemArray items)
+            hr = shellBrowser.QueryActiveShellView(out var viewPtr);
+            if (hr != 0 || viewPtr == IntPtr.Zero)
             {
                 return null;
             }
 
             try
             {
-                if (items.GetCount(out itemCount) != 0)
+                hr = Marshal.QueryInterface(viewPtr, in FolderViewIid, out var folderViewPtr);
+                if (hr != 0 || folderViewPtr == IntPtr.Zero)
                 {
                     return null;
                 }
 
-                if (itemCount == 0)
+                try
                 {
-                    return [];
+                    return (IFolderView)Marshal.GetUniqueObjectForIUnknown(folderViewPtr);
                 }
-
-                var paths = new List<string>((int)Math.Min(itemCount, (uint)maxItems));
-                for (uint i = 0; i < itemCount && paths.Count < maxItems; i++)
+                finally
                 {
-                    if (items.GetItemAt(i, out var item) != 0 || item is null)
-                    {
-                        continue;
-                    }
-
-                    try
-                    {
-                        // Non-filesystem entries (a library node, a device)
-                        // have no path; skip them.
-                        if (item.GetDisplayName(SigdnFilesysPath, out var namePtr) == 0 && namePtr != IntPtr.Zero)
-                        {
-                            try
-                            {
-                                var path = Marshal.PtrToStringUni(namePtr);
-                                if (!string.IsNullOrEmpty(path))
-                                {
-                                    paths.Add(path);
-                                }
-                            }
-                            finally
-                            {
-                                Marshal.FreeCoTaskMem(namePtr);
-                            }
-                        }
-                    }
-                    finally
-                    {
-                        Marshal.FinalReleaseComObject(item);
-                    }
+                    Marshal.Release(folderViewPtr);
                 }
-
-                return paths;
             }
             finally
             {
-                Marshal.FinalReleaseComObject(items);
+                Marshal.Release(viewPtr);
             }
         }
         finally
         {
-            Marshal.Release(arrayPtr);
+            Release(shellBrowser);
         }
     }
 
-    /// <summary>Dev test only: every view item's path, in display order.</summary>
-    public static IReadOnlyList<string>? TryGetViewPaths(object window, int maxItems = 64)
+    /// <summary>
+    /// The selection's size and anchor, and its members in view order when
+    /// <paramref name="ordered"/> asks and there is more than one. Without
+    /// the view-order flag the shell lists the anchor first.
+    /// </summary>
+    public static FolderViewSelection ReadSelection(IFolderView view, bool ordered, out int hr)
     {
-        IFolderView? view = null;
-        try
+        hr = view.ItemCount(SvgioSelection, out var count);
+        if (hr != 0 || count <= 0)
         {
-            view = GetFolderView(window);
-            return view is null ? null : ReadViewOrderPaths(view, maxItems);
+            return new FolderViewSelection(0, null, null);
         }
-        catch
+
+        var anchor = ReadPaths(view, SvgioSelection, maxItems: 1, out hr);
+        if (hr != 0)
+        {
+            return new FolderViewSelection(count, null, null);
+        }
+
+        var members = ordered && count > 1
+            ? ReadPaths(view, SvgioSelection | SvgioFlagViewOrder, maxItems: 256, out _)
+            : null;
+        return new FolderViewSelection(count, anchor is { Count: > 0 } ? anchor[0] : null, members);
+    }
+
+    /// <summary>Focused-item index and item count in view order, or null.</summary>
+    public static (int Index, int Count)? GetPosition(IFolderView view)
+    {
+        if (view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
         {
             return null;
         }
-        finally
-        {
-            ReleaseView(view);
-        }
+
+        return (AnchorIndex(view), count);
     }
 
-    /// <summary>Dev test only: grows the selection by one view index.</summary>
-    public static bool TryAddToSelection(object window, int index)
+    /// <summary>
+    /// Moves the selection by <paramref name="delta"/> view positions,
+    /// clamped at the folder's ends. Null when there is no anchor to move from.
+    /// </summary>
+    public static (int Index, int Count)? SelectRelative(IFolderView view, int delta)
     {
-        IFolderView? view = null;
+        if (view.ItemCount(SvgioAllView, out var count) != 0 || count <= 0)
+        {
+            return null;
+        }
+
+        var current = AnchorIndex(view);
+        if (current < 0)
+        {
+            return null;
+        }
+
+        var next = Math.Clamp(current + delta, 0, count - 1);
+        if (next != current && view.SelectItem(next, SelectExclusive) != 0)
+        {
+            return null;
+        }
+
+        return (next, count);
+    }
+
+    public static bool SelectIndex(IFolderView view, int index) =>
+        view.ItemCount(SvgioAllView, out var count) == 0
+        && index >= 0
+        && index < count
+        && view.SelectItem(index, SelectExclusive) == 0;
+
+    /// <summary>Dev test only: grows the selection by one view index.</summary>
+    public static bool AddToSelection(IFolderView view, int index) =>
+        view.SelectItem(index, SelectAdditional) == 0;
+
+    /// <summary>
+    /// Releases an object this class handed out. Each one is a private
+    /// wrapper (or a single counted reference), so releasing it can never
+    /// pull the rug from a wrapper someone else still holds.
+    /// </summary>
+    public static void Release(object? instance)
+    {
+        if (instance is null || !Marshal.IsComObject(instance))
+        {
+            return;
+        }
+
         try
         {
-            view = GetFolderView(window);
-            return view is not null && view.SelectItem(index, SelectAdditional) == 0;
+            Marshal.ReleaseComObject(instance);
         }
         catch
         {
-            return false;
-        }
-        finally
-        {
-            ReleaseView(view);
+            // Best-effort cleanup only.
         }
     }
 
-    private static int GetAnchorIndex(IFolderView view)
+    private static IShellBrowser? GetShellBrowser(object browser, out int hr)
+    {
+        hr = 0;
+        if (browser is not IShellServiceProvider provider)
+        {
+            return null;
+        }
+
+        var service = TopLevelBrowserService;
+        var iid = ShellBrowserIid;
+        hr = provider.QueryService(ref service, ref iid, out var browserPtr);
+        if (hr != 0 || browserPtr == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            return (IShellBrowser)Marshal.GetUniqueObjectForIUnknown(browserPtr);
+        }
+        finally
+        {
+            Marshal.Release(browserPtr);
+        }
+    }
+
+    private static int AnchorIndex(IFolderView view)
     {
         if (view.GetFocusedItem(out var focused) == 0 && focused >= 0)
         {
@@ -851,82 +453,79 @@ internal static class FolderViewNavigator
         return view.GetSelectionMarkedItem(out var marked) == 0 && marked >= 0 ? marked : -1;
     }
 
-    private static IFolderView? GetFolderView(object window)
+    /// <summary>
+    /// Filesystem paths of a view's items. A member with no path on disk (a
+    /// zip entry, a phone, a library node) takes no slot; for the anchor that
+    /// means "not a file".
+    /// </summary>
+    private static List<string>? ReadPaths(IFolderView view, uint flags, int maxItems, out int hr)
     {
-        if (window is not IShellServiceProvider provider)
+        var iid = ShellItemArrayIid;
+        hr = view.Items(flags, ref iid, out var arrayPtr);
+        if (hr != 0 || arrayPtr == IntPtr.Zero)
         {
             return null;
         }
 
-        var service = TopLevelBrowserService;
-        var iid = ShellBrowserIid;
-        if (provider.QueryService(ref service, ref iid, out var browserPtr) != 0 || browserPtr == IntPtr.Zero)
-        {
-            return null;
-        }
-
+        IShellItemArray? items = null;
         try
         {
-            if (Marshal.GetObjectForIUnknown(browserPtr) is not IShellBrowser browser)
+            items = (IShellItemArray)Marshal.GetUniqueObjectForIUnknown(arrayPtr);
+            hr = items.GetCount(out var count);
+            if (hr != 0)
+            {
+                return null;
+            }
+
+            var paths = new List<string>((int)Math.Min(count, (uint)maxItems));
+            var take = maxItems == 1 ? Math.Min(count, 1u) : count;
+            for (uint i = 0; i < take && paths.Count < maxItems; i++)
+            {
+                if (TryReadPath(items, i) is { } path)
+                {
+                    paths.Add(path);
+                }
+            }
+
+            return paths;
+        }
+        finally
+        {
+            Release(items);
+            Marshal.Release(arrayPtr);
+        }
+    }
+
+    private static string? TryReadPath(IShellItemArray items, uint index)
+    {
+        if (items.GetItemAt(index, out var itemPtr) != 0 || itemPtr == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        IShellItem? item = null;
+        try
+        {
+            item = (IShellItem)Marshal.GetUniqueObjectForIUnknown(itemPtr);
+            if (item.GetDisplayName(SigdnFilesysPath, out var namePtr) != 0 || namePtr == IntPtr.Zero)
             {
                 return null;
             }
 
             try
             {
-                if (browser.QueryActiveShellView(out var viewPtr) != 0 || viewPtr == IntPtr.Zero)
-                {
-                    return null;
-                }
-
-                try
-                {
-                    if (Marshal.QueryInterface(viewPtr, in FolderViewIid, out var folderViewPtr) != 0
-                        || folderViewPtr == IntPtr.Zero)
-                    {
-                        return null;
-                    }
-
-                    try
-                    {
-                        // GetObjectForIUnknown takes its own reference.
-                        return Marshal.GetObjectForIUnknown(folderViewPtr) as IFolderView;
-                    }
-                    finally
-                    {
-                        Marshal.Release(folderViewPtr);
-                    }
-                }
-                finally
-                {
-                    Marshal.Release(viewPtr);
-                }
+                var path = Marshal.PtrToStringUni(namePtr);
+                return string.IsNullOrEmpty(path) ? null : path;
             }
             finally
             {
-                Marshal.FinalReleaseComObject(browser);
+                Marshal.FreeCoTaskMem(namePtr);
             }
         }
         finally
         {
-            Marshal.Release(browserPtr);
-        }
-    }
-
-    private static void ReleaseView(IFolderView? view)
-    {
-        if (view is null)
-        {
-            return;
-        }
-
-        try
-        {
-            Marshal.FinalReleaseComObject(view);
-        }
-        catch
-        {
-            // Best-effort cleanup only.
+            Release(item);
+            Marshal.Release(itemPtr);
         }
     }
 }

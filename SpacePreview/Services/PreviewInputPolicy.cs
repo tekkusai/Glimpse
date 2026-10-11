@@ -27,6 +27,17 @@ internal static class PreviewInputPolicy
     internal static bool IsDesktopWindowClass(string? className) =>
         !string.IsNullOrWhiteSpace(className) && DesktopWindowClasses.Contains(className);
 
+    /// <summary>
+    /// The roots the keyboard hook serves: Explorer, the desktop and dialogs
+    /// that may be file pickers. Glimpse's own windows count by process.
+    /// Everywhere else the hook is removed and Glimpse is out of the input path.
+    /// </summary>
+    internal static bool IsServedSurfaceClass(string? className) =>
+        !string.IsNullOrWhiteSpace(className)
+        && (DesktopWindowClasses.Contains(className)
+            || ExplorerWindowClasses.Contains(className)
+            || className.Equals(CommonFileDialogSelectionService.DialogWindowClass, StringComparison.OrdinalIgnoreCase));
+
     // "Edit" is exact and RichEdit is a prefix. XAML islands expose several
     // TextBox-flavored class names, so that one is intentionally broader.
     public static bool IsTextEditingClass(string? focusClass)
@@ -80,29 +91,6 @@ internal static class PreviewInputPolicy
 
         return new ForegroundSelectionContext(root, SelectionSource.Explorer, className);
     }
-
-    public static bool IsPreviewShortcutForeground(IntPtr foregroundRoot, IntPtr previewHwnd, IntPtr ownerRootHwnd)
-    {
-        if (foregroundRoot == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        if (previewHwnd != IntPtr.Zero && foregroundRoot == previewHwnd)
-        {
-            return true;
-        }
-
-        return ownerRootHwnd != IntPtr.Zero && foregroundRoot == ownerRootHwnd;
-    }
-
-    public static bool ShouldYieldSpaceToOwnerTextEditing(
-        IntPtr foregroundRoot,
-        IntPtr ownerRootHwnd,
-        bool ownerIsTextEditing) =>
-        ownerRootHwnd != IntPtr.Zero
-        && foregroundRoot == ownerRootHwnd
-        && ownerIsTextEditing;
 
     public static RefreshSelectionDecision DecideRefresh(ExplorerSelection? selection, string? currentPath)
     {

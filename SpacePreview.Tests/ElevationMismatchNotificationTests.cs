@@ -237,20 +237,6 @@ public sealed class ElevationMismatchNotificationTests
     }
 
     [Fact]
-    public void IntegrityLookupStaysOffTheKeyboardHookLane()
-    {
-        var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
-        var hookStart = controller.IndexOf("private bool OnKeyDown", StringComparison.Ordinal);
-        var hookEnd = controller.IndexOf("private void OnKeyUp", hookStart, StringComparison.Ordinal);
-        var hook = controller[hookStart..hookEnd];
-
-        Assert.Contains("QueueElevationMismatchCheck", hook, StringComparison.Ordinal);
-        Assert.DoesNotContain("ProcessIntegrityService", hook, StringComparison.Ordinal);
-        Assert.DoesNotContain("Process.GetProcess", hook, StringComparison.Ordinal);
-        Assert.Contains("Task.Run", controller, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void ForegroundObservationProbesOnlyVerifiedFileDialogsWithinTheGlobalBudget()
     {
         var monitor = TestSource.Read(@"SpacePreview\Services\CommonFileDialogSelectionMonitor.cs");

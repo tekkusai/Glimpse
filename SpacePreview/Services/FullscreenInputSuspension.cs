@@ -3,7 +3,7 @@ using SpacePreview.Native;
 
 namespace SpacePreview.Services;
 
-internal sealed class FullscreenInputSuspension : IDisposable
+internal sealed class FullscreenInputSuspension
 {
     private const int MonitorTolerance = 2;
 
@@ -18,106 +18,19 @@ internal sealed class FullscreenInputSuspension : IDisposable
         "Shell_SecondaryTrayWnd"
     };
 
-    private readonly NativeMethods.WinEventProc _foregroundChanged;
     private readonly int _currentProcessId = Environment.ProcessId;
-    private IntPtr _hook;
     private volatile bool _suspended;
     private IntPtr _suspendedHwnd;
-    private IntPtr _observedForegroundHwnd;
     private string _suspendedDescription = string.Empty;
 
+    /// <summary>Raised on the thread that calls <see cref="Observe"/>.</summary>
     public event Action<bool>? SuspensionChanged;
 
     public bool IsSuspended => _suspended;
 
-    public FullscreenInputSuspension()
+    /// <summary>Re-decides suspension for a new foreground root.</summary>
+    public void Observe(IntPtr root)
     {
-        _foregroundChanged = OnForegroundChanged;
-    }
-
-    public void Start()
-    {
-        if (_hook != IntPtr.Zero)
-        {
-            return;
-        }
-
-        _hook = NativeMethods.SetWinEventHook(
-            NativeMethods.EVENT_SYSTEM_FOREGROUND,
-            NativeMethods.EVENT_SYSTEM_FOREGROUND,
-            IntPtr.Zero,
-            _foregroundChanged,
-            0,
-            0,
-            NativeMethods.WINEVENT_OUTOFCONTEXT);
-
-        if (_hook == IntPtr.Zero)
-        {
-            DiagnosticLog.Write("fullscreen input suspension unavailable");
-            return;
-        }
-
-        Recompute(NativeMethods.GetForegroundWindow());
-    }
-
-    public bool ShouldPassThroughInput()
-    {
-        // Hook-path guard. Keep this to cached state plus cheap foreground
-        // repair only; any expensive diagnostics must go to another lane.
-        var foreground = GetRoot(NativeMethods.GetForegroundWindow());
-
-        if (foreground != _observedForegroundHwnd)
-        {
-            Recompute(foreground);
-        }
-
-        if (!_suspended)
-        {
-            return false;
-        }
-
-        if (foreground != IntPtr.Zero && foreground == _suspendedHwnd)
-        {
-            return true;
-        }
-
-        Recompute(foreground);
-        return _suspended && foreground != IntPtr.Zero && foreground == _suspendedHwnd;
-    }
-
-    public void Dispose()
-    {
-        if (_hook == IntPtr.Zero)
-        {
-            return;
-        }
-
-        NativeMethods.UnhookWinEvent(_hook);
-        _hook = IntPtr.Zero;
-    }
-
-    private void OnForegroundChanged(
-        IntPtr hWinEventHook,
-        uint eventType,
-        IntPtr hwnd,
-        int idObject,
-        int idChild,
-        uint dwEventThread,
-        uint dwmsEventTime)
-    {
-        if (eventType != NativeMethods.EVENT_SYSTEM_FOREGROUND)
-        {
-            return;
-        }
-
-        Recompute(hwnd == IntPtr.Zero ? NativeMethods.GetForegroundWindow() : hwnd);
-    }
-
-    private void Recompute(IntPtr hwnd)
-    {
-        var root = GetRoot(hwnd);
-        _observedForegroundHwnd = root;
-
         if (root == IntPtr.Zero)
         {
             SetState(false, IntPtr.Zero, string.Empty);
@@ -152,17 +65,6 @@ internal sealed class FullscreenInputSuspension : IDisposable
                 : $"input resumed from {previousDescription}");
         SuspensionChanged?.Invoke(suspended);
         return true;
-    }
-
-    private static IntPtr GetRoot(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero)
-        {
-            return IntPtr.Zero;
-        }
-
-        var root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
-        return root == IntPtr.Zero ? hwnd : root;
     }
 
     private static WindowSnapshot CreateSnapshot(IntPtr hwnd, int currentProcessId)

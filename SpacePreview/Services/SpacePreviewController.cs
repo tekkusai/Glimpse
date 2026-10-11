@@ -1,11 +1,11 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Collections.Concurrent;
 using System.Windows;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
-using SpacePreview.Utilities;
 
 namespace SpacePreview.Services;
 
@@ -13,47 +13,39 @@ internal sealed class SpacePreviewController : IDisposable
 {
     private readonly record struct SelectionRefreshRequest(
         long Generation,
-        bool IncludeMultiSelectionPaths);
+        bool IncludeMultiSelectionPaths,
+        long InputStamp);
 
     private readonly record struct SelectionReleaseVerification(
         SelectionRefreshRequest Request,
         long StartedGenerationAtRelease);
 
-    private static readonly HashSet<int> NavigationKeys =
-    [
-        NativeMethods.VK_LEFT,
-        NativeMethods.VK_UP,
-        NativeMethods.VK_RIGHT,
-        NativeMethods.VK_DOWN,
-        NativeMethods.VK_NEXT,
-        NativeMethods.VK_PRIOR,
-        NativeMethods.VK_HOME,
-        NativeMethods.VK_END,
-        NativeMethods.VK_DELETE
-    ];
-
     private const int MaxPinnedPreviews = 6;
     private const int MaxObservedAccessDialogs = 64;
-    private const int OfficeNeighborPreconvertLimit = 4;
     private const int DeferredFileDialogPreviewLifetimeMilliseconds = 1200;
-    private static readonly TimeSpan OfficeNeighborPreconvertDelay = TimeSpan.FromMilliseconds(900);
     private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromSeconds(45);
+
+    // A foreground flicker (a toast, a menu opening) must not end a glance.
+    private static readonly TimeSpan OwnerLossDebounce = TimeSpan.FromMilliseconds(100);
 
     private readonly Dispatcher _dispatcher;
     private readonly KeyboardHook _keyboardHook;
     private readonly MouseHook _mouseHook;
     private readonly FullscreenInputSuspension _fullscreenInputSuspension;
     private readonly CommonFileDialogSelectionMonitor _commonFileDialogMonitor;
+    private readonly NativeMethods.WinEventProc _foregroundChanged;
     private readonly DispatcherTimer _idleTrimTimer;
-    private readonly DispatcherTimer _dialogOwnerTimer;
+    private readonly DispatcherTimer _ownerLossTimer;
+    private readonly uint _processId = (uint)Environment.ProcessId;
     private readonly List<PreviewWindow> _pinnedWindows = [];
+    private IntPtr _foregroundHook;
     private IntPtr[] _mouseActivationWindows = [];
     private PreviewWindow? _previewWindow;
     private IntPtr _lastExplorerHwnd;
     private IntPtr _previewOwnerRootHwnd;
     private SelectionSource _lastSelectionSource = SelectionSource.Explorer;
     private volatile bool _previewVisible;
-    private readonly SpaceKeyLatch _spaceKey = new();
+    private readonly SpaceKeyLatch _spaceKey = new(SpaceKeyLatch.RepeatWindowFor(SystemParameters.KeyboardDelay));
     private bool _refreshInFlight;
     private SelectionRefreshRequest? _queuedRefreshRequest;
     private readonly long[] _navigationKeyRefreshTokens = new long[256];
@@ -63,17 +55,16 @@ internal sealed class SpacePreviewController : IDisposable
     private SelectionReleaseVerification? _pendingKeyUpVerification;
     private bool _browseInFlight;
     private int _browsePendingDelta;
+    private long _browseInputStamp;
     private IReadOnlyList<string>? _multiSelection;
     private int _multiSelectionSelectedCount;
     private int _multiIndex;
     private int _openRequestGeneration;
+    private bool _openPending;
     private readonly DeferredFileDialogPreviewIntentSlot _pendingFileDialogPreview = new();
     private readonly ConcurrentDictionary<long, byte> _elevationChecksInFlight = new();
     private readonly HashSet<(long Hwnd, uint ProcessId)> _observedAccessDialogs = [];
     private int _idleTrimInFlight;
-    private bool _inputHooksActive;
-    private ExplorerSelection? _pendingOfficePreconvertSelection;
-    private CancellationTokenSource? _officeNeighborPreconvertCts;
     private bool _disposed;
 
     public event Action<PreviewAccessWarningInfo>? PreviewAccessWarningDetected;
@@ -95,60 +86,192 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor.SelectionChanged += OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted += OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved += OnCommonFileDialogObserved;
+        _foregroundChanged = OnForegroundChanged;
         _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
         {
             Interval = IdleTrimDelay
         };
         _idleTrimTimer.Tick += (_, _) => RunIdleTrim();
-        _dialogOwnerTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
+        _ownerLossTimer = new DispatcherTimer(DispatcherPriority.Input, dispatcher)
         {
-            Interval = TimeSpan.FromMilliseconds(250)
+            Interval = OwnerLossDebounce
         };
-        _dialogOwnerTimer.Tick += (_, _) => VerifyCommonFileDialogOwner();
+        _ownerLossTimer.Tick += (_, _) => OnOwnerLossTimer();
     }
 
     public void Start()
     {
-        _commonFileDialogMonitor.Start();
-        _fullscreenInputSuspension.Start();
-        SetInputHooksActive(!_fullscreenInputSuspension.IsSuspended);
-    }
-
-    private void OnFullscreenSuspensionChanged(bool suspended)
-    {
-        _dispatcher.BeginInvoke(() =>
+        // One foreground watch drives everything that depends on the window
+        // in front: the keyboard hook's presence, fullscreen suspension, the
+        // picker monitor and the glance's owner rule. WinEvents arrive on
+        // this thread.
+        _foregroundHook = NativeMethods.SetWinEventHook(
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero,
+            _foregroundChanged,
+            0,
+            0,
+            NativeMethods.WINEVENT_OUTOFCONTEXT);
+        if (_foregroundHook == IntPtr.Zero)
         {
-            if (_disposed)
-            {
-                return;
-            }
+            DiagnosticLog.Write("foreground watch unavailable; keyboard hook stays installed");
+        }
 
-            SetInputHooksActive(!suspended);
-            SetFullscreenPreviewSuppressed(suspended);
-        });
+        OnForeground(NativeMethods.GetForegroundRoot());
     }
 
-    private void SetInputHooksActive(bool active)
+    private void OnForegroundChanged(
+        IntPtr hWinEventHook,
+        uint eventType,
+        IntPtr hwnd,
+        int idObject,
+        int idChild,
+        uint dwEventThread,
+        uint dwmsEventTime)
     {
-        if (_inputHooksActive == active)
+        if (eventType == NativeMethods.EVENT_SYSTEM_FOREGROUND)
+        {
+            OnForeground(NativeMethods.GetRoot(hwnd == IntPtr.Zero ? NativeMethods.GetForegroundWindow() : hwnd));
+        }
+    }
+
+    private void OnForeground(IntPtr root)
+    {
+        if (_disposed)
         {
             return;
         }
 
-        if (active)
+        var processId = NativeMethods.GetWindowProcessId(root);
+        _fullscreenInputSuspension.Observe(root);
+        if (processId != _processId)
+        {
+            _commonFileDialogMonitor.ObserveForeground(root);
+        }
+
+        SyncKeyboardHook(root, processId);
+        ApplyOwnerRule(root);
+    }
+
+    /// <summary>
+    /// The hook stays installed only while a surface Glimpse serves is in
+    /// front, so every other app's keys never wait on this process.
+    /// </summary>
+    private void SyncKeyboardHook(IntPtr root, uint processId)
+    {
+        var wanted = _foregroundHook == IntPtr.Zero
+            || (root != IntPtr.Zero
+                && (processId == _processId
+                    || PreviewInputPolicy.IsServedSurfaceClass(NativeMethods.GetClassNameString(root))));
+        if (wanted == _keyboardHook.IsInstalled)
+        {
+            return;
+        }
+
+        // Keys went unseen while the hook was out: no latch or key-up
+        // verification carries across.
+        _spaceKey.Reset();
+        if (wanted)
         {
             _keyboardHook.Start();
+            return;
         }
-        else
+
+        _keyboardHook.Stop();
+        ClearNavigationRefreshTokens();
+        ClearPendingFileDialogPreview();
+    }
+
+    private void OnFullscreenSuspensionChanged(bool suspended)
+    {
+        if (suspended)
         {
-            _keyboardHook.Stop();
             _spaceKey.Reset();
             ClearNavigationRefreshTokens();
             ClearPendingFileDialogPreview();
         }
 
-        _inputHooksActive = active;
+        foreach (var pinned in _pinnedWindows)
+        {
+            pinned.SetTopmostSuppressed(suspended);
+        }
+
+        if (suspended && _previewVisible)
+        {
+            DiagnosticLog.Write("fullscreen -> hide");
+            RequestHide();
+        }
+
         SyncMouseHook();
+    }
+
+    // A glance belongs to the window it came from. When the foreground goes
+    // anywhere else (Alt+Tab, Win+D, the owner closing) the glance ends.
+    private void ApplyOwnerRule(IntPtr root)
+    {
+        if (BelongsToGlance(root))
+        {
+            _ownerLossTimer.Stop();
+            return;
+        }
+
+        if (!_ownerLossTimer.IsEnabled)
+        {
+            _ownerLossTimer.Start();
+        }
+    }
+
+    private void OnOwnerLossTimer()
+    {
+        _ownerLossTimer.Stop();
+        var root = NativeMethods.GetForegroundRoot();
+        if (root == IntPtr.Zero
+            || BelongsToGlance(root)
+            || _previewWindow?.IsOutsideDismissSuppressed == true)
+        {
+            return;
+        }
+
+        DiagnosticLog.Write($"foreground left the glance -> hide class={NativeMethods.GetClassNameString(root)}");
+        RequestHide();
+    }
+
+    /// <summary>
+    /// True when nothing needs ending: no glance (the welcome counts as
+    /// none), or the foreground is any Glimpse window, the glance's owner,
+    /// or a window the preview opened in another process (the browser's
+    /// print dialog or file chooser). Glimpse's own windows count whoever
+    /// owns them: a file dialog shown without an owner still belongs. The
+    /// share sheet is covered by the outside-dismiss grace the window sets
+    /// when it opens it.
+    /// </summary>
+    private bool BelongsToGlance(IntPtr root)
+    {
+        if (!_previewVisible || _previewWindow is not { CurrentPath: not null } window)
+        {
+            return true;
+        }
+
+        return NativeMethods.GetWindowProcessId(root) == _processId
+            || TargetOf(root, pinnedForeground: false) != KeyTarget.Other
+            || window.OwnsForegroundRoot(root)
+            || window.IsWebViewWindow(root);
+    }
+
+    private KeyTarget TargetOf(IntPtr root, bool pinnedForeground)
+    {
+        var ownerIsDesktop = _lastSelectionSource == SelectionSource.Desktop;
+        return PreviewKeyMap.Classify(
+            root,
+            pinnedForeground,
+            _previewVisible,
+            _previewWindow?.Hwnd ?? IntPtr.Zero,
+            _previewOwnerRootHwnd,
+            ownerIsDesktop,
+            ownerIsDesktop
+                && root != _previewOwnerRootHwnd
+                && PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)));
     }
 
     private void SyncMouseHook()
@@ -167,9 +290,8 @@ internal sealed class SpacePreviewController : IDisposable
             }
         }
 
-        var activationWindows = windows.ToArray();
-        Volatile.Write(ref _mouseActivationWindows, activationWindows);
-        if (MouseHook.ShouldRun(_inputHooksActive, _previewVisible, _pinnedWindows.Count))
+        Volatile.Write(ref _mouseActivationWindows, windows.ToArray());
+        if (MouseHook.ShouldRun(_fullscreenInputSuspension.IsSuspended, _previewVisible, _pinnedWindows.Count))
         {
             _mouseHook.Start();
         }
@@ -179,6 +301,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
     }
 
+    // Read on the mouse observer thread.
     private bool IsMouseActivationWindow(IntPtr hwnd)
     {
         foreach (var candidate in Volatile.Read(ref _mouseActivationWindows))
@@ -192,456 +315,283 @@ internal sealed class SpacePreviewController : IDisposable
         return false;
     }
 
-    private void SetFullscreenPreviewSuppressed(bool suppressed)
-    {
-        foreach (var pinned in _pinnedWindows)
-        {
-            pinned.SetTopmostSuppressed(suppressed);
-        }
-
-        if (!suppressed || !_previewVisible || _previewWindow is null)
-        {
-            return;
-        }
-
-        HidePreview();
-    }
-
-    // Called synchronously from the global hook callbacks. This lane must
-    // stay non-blocking: no disk I/O, sleeps, waits, blocking GC, process
-    // lookup, or slow cleanup here. Queue/BeginInvoke/Task.Run instead.
-    private bool OnKeyDown(int vk)
+    // Called synchronously from the keyboard hook: every key on the PC waits
+    // here. No disk I/O, sleeps, waits, blocking GC, process lookup or slow
+    // cleanup; post anything non-trivial to the dispatcher.
+    private bool OnKeyDown(int vk, uint time, long stamp)
     {
         if (vk != NativeMethods.VK_SPACE)
         {
             ClearPendingFileDialogPreview();
         }
 
-        // A handled repeat or a mode change supersedes any earlier native
-        // refresh for this physical key. Only key-downs which actually reach
-        // Explorer install a fresh token for key-up verification below.
+        // A new key-down supersedes any earlier native refresh for this
+        // physical key; only a down that reaches Explorer installs a fresh
+        // token for key-up verification.
         if ((uint)vk < (uint)_navigationKeyRefreshTokens.Length)
         {
-            Interlocked.Exchange(ref _navigationKeyRefreshTokens[vk], 0);
+            _navigationKeyRefreshTokens[vk] = 0;
         }
 
-        if (_fullscreenInputSuspension.ShouldPassThroughInput())
+        if (!PreviewKeyMap.IsMapped(vk))
         {
             return false;
         }
 
-        // Keys typed into a pinned preview belong to that window: its own
-        // handlers decide (and Space may be its content's play/pause).
-        // Except Esc - the universal escape hatch closes the pinned window
-        // the user is focused on.
-        if (FindForegroundPinnedWindow() is { } focusedPinned)
+        var (facts, window) = CaptureKeyFacts(vk, time);
+        var decision = PreviewKeyMap.Route(facts);
+        if (vk == NativeMethods.VK_SPACE)
         {
-            if (vk == NativeMethods.VK_ESCAPE)
-            {
-                // A find bar the user opened gets its Esc first; the next
-                // one closes the window.
-                if (focusedPinned.ConsumeEscapeYield())
-                {
-                    DiagnosticLog.Write("escape -> pinned content find UI");
-                    return false;
-                }
-
-                DiagnosticLog.Write("escape -> close focused pinned preview");
-                _dispatcher.BeginInvoke(() => OnPinnedCloseRequested(focusedPinned));
-                return true;
-            }
-
-            if (vk == NativeMethods.VK_F && NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL))
-            {
-                focusedPinned.NoteFindShortcut();
-            }
-
-            // A pinned player keeps Space = play/pause; the host toggles it
-            // so the player's own controls keep their keyboard focus.
-            if (vk == NativeMethods.VK_SPACE && NoModifierKeysDown() && focusedPinned.IsMediaPreview)
-            {
-                if (_spaceKey.TryPress())
-                {
-                    focusedPinned.TryToggleMediaPlayback();
-                }
-
-                return true;
-            }
-
-            // Arrows over a pinned player: host-side seek/volume too.
-            if (NoModifierKeysDown() && focusedPinned.TryNudgeMediaFromArrow(vk))
-            {
-                return true;
-            }
-
-            return false;
+            _spaceKey.Press(time, acted: decision.Swallow || decision.Action != KeyAction.None);
         }
 
-        // Sign mode owns the keyboard: the user is placing ink on a
-        // document, and Space or an arrow must never dismiss the preview or
-        // browse away their unsaved work. Esc walks the mode's own layers
-        // (save choice first when work exists); everything else passes
-        // through so the date editor stays fully typable.
-        if (_previewVisible && _previewWindow?.IsFillSignModeActive == true)
-        {
-            if (vk == NativeMethods.VK_ESCAPE && IsForegroundActivePreview())
-            {
-                DiagnosticLog.Write("escape -> fill-sign layer");
-                _dispatcher.BeginInvoke(() => _previewWindow?.RequestFillSignEscape());
-                return true;
-            }
+        Perform(decision.Action, facts, window, stamp);
+        return decision.Swallow;
+    }
 
-            if (vk is NativeMethods.VK_SPACE or NativeMethods.VK_RETURN
-                or NativeMethods.VK_LEFT or NativeMethods.VK_RIGHT
-                or NativeMethods.VK_UP or NativeMethods.VK_DOWN)
+    private (KeyFacts Facts, PreviewWindow? Window) CaptureKeyFacts(int vk, uint time)
+    {
+        var root = NativeMethods.GetForegroundRoot();
+        var pinned = FindPinnedWindow(root);
+        var target = TargetOf(root, pinned is not null);
+        var window = pinned ?? (_previewVisible ? _previewWindow : null);
+        var space = vk == NativeMethods.VK_SPACE;
+        var arrow = PreviewKeyMap.IsArrow(vk);
+        var facts = new KeyFacts
+        {
+            Vk = vk,
+            Shift = NativeMethods.IsKeyDown(NativeMethods.VK_SHIFT),
+            Ctrl = NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL),
+            Alt = NativeMethods.IsKeyDown(NativeMethods.VK_MENU),
+            Win = NativeMethods.IsKeyDown(NativeMethods.VK_LWIN) || NativeMethods.IsKeyDown(NativeMethods.VK_RWIN),
+            SpaceRepeat = space && _spaceKey.IsRepeat(time),
+            Target = target,
+            PreviewVisible = _previewVisible,
+            OpenPending = _openPending,
+            Source = _lastSelectionSource,
+            MultiSelection = _multiSelection is { Count: > 1 }
+        };
+
+        if (window is not null)
+        {
+            facts = facts with
             {
-                return false;
-            }
+                Browsable = window.CurrentPath is not null,
+                FillSign = window.IsFillSignModeActive,
+                TextFocus = window.HasTextFocus,
+                FindBarArmed = window.IsEscapeYieldArmed,
+                GridOpen = window.IsGridViewOpen,
+                EscapeLayer = window.IsGridViewOpen || window.IsSlideshowActive,
+                HeaderZoom = window.HasHeaderZoom,
+                CanRotate = window.CanRotateFromKeyboard,
+                ContentEngaged = window.UserEngagedContent,
+                Media = (space || arrow) && window.IsMediaPlayable,
+                EnterYield = vk == NativeMethods.VK_RETURN
+                    && target == KeyTarget.Preview
+                    && window.EnterYieldsToContent,
+                ContentOwnsKeyboard = arrow && target == KeyTarget.Preview && window.ContentOwnsKeyboard()
+            };
         }
 
-        // Ctrl+F into a focused preview opens the PDF viewer's find bar;
-        // remember it so Esc closes that bar before it closes the preview.
-        if (vk == NativeMethods.VK_F
-            && _previewVisible
-            && NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL)
-            && IsForegroundActivePreview())
+        if (target == KeyTarget.Owner && (space || arrow))
         {
-            _previewWindow?.NoteFindShortcut();
-            return false;
+            facts = facts with { OwnerTextEditing = ExplorerSelectionService.IsWindowTextEditing(root) };
         }
 
-        if (_previewVisible
-            && _previewWindow?.HasHeaderZoom == true
-            && IsForegroundActivePreview()
-            && NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL)
-            && !NativeMethods.IsKeyDown(NativeMethods.VK_MENU)
-            && (PreviewWindow.IsZoomInKey(vk) || PreviewWindow.IsZoomOutKey(vk) || PreviewWindow.IsZoomResetKey(vk)))
+        if (target == KeyTarget.Owner
+            && _lastSelectionSource == SelectionSource.CommonFileDialog
+            && (space || PreviewKeyMap.IsNavigation(vk)))
         {
-            var window = _previewWindow;
-            _dispatcher.BeginInvoke(() => window.TryAdjustZoomFromShortcut(vk));
-            return true;
+            facts = facts with { PickerListFocus = CommonFileDialogSelectionService.HasFileListFocus(_previewOwnerRootHwnd) };
         }
 
-        if (vk == NativeMethods.VK_ESCAPE && _previewVisible)
+        // Only a fresh Space that could open something asks what is in front.
+        if (space
+            && !facts.SpaceRepeat
+            && (!_previewVisible || target == KeyTarget.Other)
+            && !facts.Shift && !facts.Ctrl && !facts.Alt && !facts.Win)
         {
-            if (!CanHandleActivePreviewShortcutFromForeground())
-            {
-                return false;
-            }
-
-            if (IsForegroundActivePreview() && _previewWindow?.ConsumeEscapeYield() == true)
-            {
-                DiagnosticLog.Write("escape -> content find UI");
-                return false;
-            }
-
-            // The index sheet and a running slideshow absorb Esc before it
-            // can mean dismiss: nearest surface first.
-            if (_previewWindow?.TryConsumeEscapeLayer() == true)
-            {
-                DiagnosticLog.Write("escape -> selection surface");
-                return true;
-            }
-
-            DiagnosticLog.Write("escape -> hide");
-            _dispatcher.BeginInvoke(HidePreview);
-            return true;
-        }
-
-        if (vk == NativeMethods.VK_RETURN && _previewVisible)
-        {
-            if (!CanHandleActivePreviewShortcutFromForeground())
-            {
-                return false;
-            }
-
-            // The picker owns commit. When it still has focus, dismiss the
-            // glance and let the original Enter reach its Open button. If the
-            // user clicked into the preview first, return focus to the picker
-            // without launching a second application behind the modal dialog.
-            if (_lastSelectionSource == SelectionSource.CommonFileDialog)
-            {
-                if (GetForegroundRoot() == _previewOwnerRootHwnd)
-                {
-                    DiagnosticLog.Write("enter -> hide, file dialog confirms");
-                    _dispatcher.BeginInvoke(HidePreview);
-                    return false;
-                }
-
-                if (IsForegroundActivePreview())
-                {
-                    var owner = _previewOwnerRootHwnd;
-                    DiagnosticLog.Write("enter -> return to file dialog");
-                    _dispatcher.BeginInvoke(() => HidePreviewAndRestoreOwner(owner));
-                    return true;
-                }
-
-                return false;
-            }
-
-            // Ctrl+Enter toggles the index sheet for a multi-selection
-            // (Quick Look's Cmd-Return). Explorer must never see it: it
-            // would open every selected file.
-            if (NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL))
-            {
-                if (_multiSelection is { Count: > 1 })
-                {
-                    _dispatcher.BeginInvoke(() => _previewWindow?.ToggleGridView());
-                    return true;
-                }
-
-                return false;
-            }
-
-            // With the sheet up, Enter commits its cursor to the preview
-            // instead of opening the selection.
-            if (_previewWindow?.IsGridViewOpen == true)
-            {
-                _dispatcher.BeginInvoke(() => _previewWindow?.CommitGridCursor());
-                return true;
-            }
-
-            // Enter keeps one promise everywhere: open the file in its
-            // default app. The host claims it even when the embedded browser
-            // holds the keyboard - otherwise a click into a document silently
-            // killed the key. The armed find bar is the exception: Enter
-            // there means "next match".
-            var previewHwnd = _previewWindow?.Hwnd ?? IntPtr.Zero;
-            if (previewHwnd != IntPtr.Zero && NativeMethods.GetForegroundWindow() == previewHwnd)
-            {
-                if (!NoModifierKeysDown() || _previewWindow?.IsEscapeYieldArmed == true)
-                {
-                    return false;
-                }
-
-                if (_previewWindow?.ConsumeEnterYieldToContent() == true)
-                {
-                    return false;
-                }
-
-                DiagnosticLog.Write("enter -> open current");
-                _dispatcher.BeginInvoke(() => _previewWindow?.OpenCurrent());
-                return true;
-            }
-
-            // Quick Look behavior: opening the file dismisses the preview.
-            // Explorer still receives Enter and launches the selection itself.
-            DiagnosticLog.Write("enter -> hide, explorer opens");
-            _dispatcher.BeginInvoke(HidePreview);
-            return false;
-        }
-
-        if (NavigationKeys.Contains(vk) && _previewVisible)
-        {
-            if (!CanHandleActivePreviewShortcutFromForeground())
-            {
-                return false;
-            }
-
-            // Arrow, Home/End, Page, and Delete semantics belong entirely to
-            // the modal picker. Its WinEvent selection notification refreshes
-            // the preview after the native move; this request is a quiet
-            // fallback for providers that coalesce that notification.
-            if (_lastSelectionSource == SelectionSource.CommonFileDialog)
-            {
-                if (!IsForegroundActivePreview()
-                    && CommonFileDialogSelectionService.HasFileListFocus(_previewOwnerRootHwnd))
-                {
-                    _commonFileDialogMonitor.RequestRefresh(_previewOwnerRootHwnd, settleMilliseconds: 55);
-                }
-
-                return false;
-            }
-
-            if (TryBrowseFromArrow(vk))
-            {
-                return true;
-            }
-
-            // Engaged media handles the arrows through the host: seek and
-            // volume land on the player itself instead of walking keyboard
-            // focus across its buttons.
-            if (IsForegroundActivePreview() && NoModifierKeysDown()
-                && _previewWindow?.TryNudgeMediaFromArrow(vk) == true)
-            {
-                return true;
-            }
-
-            // A key the active preview declined still belongs to its content
-            // (scrolling, text selection, Delete, and so on). Explorer never
-            // receives it, so there is no selection change to verify.
-            if (IsForegroundActivePreview())
-            {
-                return false;
-            }
-
-            // Refresh on key DOWN so holding an arrow key scrubs live instead
-            // of waiting for release. Explorer still handles the key.
-            var generation = Interlocked.Increment(ref _navigationRefreshGeneration);
-            var includeMultiSelectionPaths = IntentionalMultiSelectionNavigation(vk);
-            Interlocked.Exchange(
-                ref _navigationKeyRefreshTokens[vk],
-                includeMultiSelectionPaths ? -generation : generation);
-            var request = new SelectionRefreshRequest(generation, includeMultiSelectionPaths);
-            _dispatcher.BeginInvoke(
-                () => RequestSelectionRefresh(request),
-                DispatcherPriority.Input);
-            return false;
-        }
-
-        if (vk == NativeMethods.VK_SPACE && NoModifierKeysDown())
-        {
-            if (_previewVisible)
-            {
-                var foregroundRoot = GetForegroundRoot();
-                var ownerIsTextEditing = foregroundRoot == _previewOwnerRootHwnd
-                    && ExplorerSelectionService.IsWindowTextEditing(_previewOwnerRootHwnd);
-                if (PreviewInputPolicy.ShouldYieldSpaceToOwnerTextEditing(
-                        foregroundRoot,
-                        _previewOwnerRootHwnd,
-                        ownerIsTextEditing))
-                {
-                    DiagnosticLog.Write("space -> owner text editor");
-                    return false;
-                }
-            }
-
-            if (!_spaceKey.TryPress())
-            {
-                _spaceKey.RepairIfReleased();
-                if (!_spaceKey.TryPress())
-                {
-                    if (!_previewVisible || !CanHandleActivePreviewShortcutFromForeground())
-                    {
-                        DiagnosticLog.Write("space repeat ignored");
-                        return false;
-                    }
-
-                    // Holding Space must not machine-gun a media toggle. The only
-                    // repeats that still flow to content are find-box spaces: the
-                    // first press already hid the preview in every other case.
-                    return !IsForegroundActivePreview() || _previewWindow?.IsMediaPreview == true;
-                }
-
-                DiagnosticLog.Write("space latch repaired before handling");
-            }
-
-            if (_previewVisible)
-            {
-                if (!CanHandleActivePreviewShortcutFromForeground())
-                {
-                    return false;
-                }
-
-                // A picker filename field or button may gain focus while the
-                // preview remains visible. Space must type/click there, not
-                // dismiss a glance the user is no longer steering.
-                if (_lastSelectionSource == SelectionSource.CommonFileDialog
-                    && GetForegroundRoot() == _previewOwnerRootHwnd
-                    && !CommonFileDialogSelectionService.HasFileListFocus(_previewOwnerRootHwnd))
-                {
-                    return false;
-                }
-
-                // Space keeps the core promise even after a click into the
-                // content: the glance is over. Media stays the exception
-                // (play/pause, toggled by the host so the player's controls
-                // keep their own focus), and an armed find bar keeps its
-                // literal space. Without this, the embedded viewers turned
-                // Space into a page-scroll and the preview stopped feeling
-                // like Quick Look.
-                var previewHwnd = _previewWindow?.Hwnd ?? IntPtr.Zero;
-                if (previewHwnd != IntPtr.Zero && NativeMethods.GetForegroundWindow() == previewHwnd)
-                {
-                    if (_previewWindow?.TryToggleMediaPlayback() == true)
-                    {
-                        return true;
-                    }
-
-                    if (_previewWindow?.IsEscapeYieldArmed == true)
-                    {
-                        return false;
-                    }
-
-                    DiagnosticLog.Write("space -> hide (content engaged)");
-                    _dispatcher.BeginInvoke(HidePreview);
-                    return true;
-                }
-
-                DiagnosticLog.Write("space -> hide");
-                _dispatcher.BeginInvoke(HidePreview);
-                return true;
-            }
-
             var context = ExplorerSelectionService.TryGetForegroundContext(ignoreTextEditing: true);
-            if (context is null)
+            facts = facts with
             {
-                QueueForegroundElevationMismatchCheck();
-                return false;
-            }
-
-            DiagnosticLog.Write($"space -> queued selection lookup class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
-            var requestGeneration = Interlocked.Increment(ref _openRequestGeneration);
-            if (context.IsFileDialog)
-            {
-                QueueElevationMismatchCheck(context.Hwnd);
-                if (!_commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var cachedSelection)
-                    || cachedSelection is null)
-                {
-                    // Fail open. The hook never waits for UI Automation and
-                    // never swallows Space on an unverified dialog selection.
-                    // Remember this one physical press briefly; a completed,
-                    // still-owned refresh may fulfill it off the hook lane.
-                    ArmPendingFileDialogPreview(context.Hwnd, requestGeneration);
-                    _commonFileDialogMonitor.RequestRefresh(context.Hwnd, settleMilliseconds: 0);
-                    DiagnosticLog.Write("space -> file dialog selection not ready, deferred and passed through");
-                    return false;
-                }
-
-                ClearPendingFileDialogPreview();
-                _dispatcher.BeginInvoke(() =>
-                    ShowCommonFileDialogPreview(context, cachedSelection, requestGeneration));
-                return true;
-            }
-
-            _dispatcher.BeginInvoke(() => ShowPreviewFromContext(context, requestGeneration));
-            return true;
+                Context = context,
+                PickerCacheReady = context is { IsFileDialog: true }
+                    && _commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var cached)
+                    && cached is not null
+            };
         }
 
-        return false;
+        return (facts, window);
+    }
+
+    private void Perform(KeyAction action, in KeyFacts facts, PreviewWindow? window, long stamp)
+    {
+        var vk = facts.Vk;
+        switch (action)
+        {
+            case KeyAction.None:
+                return;
+            case KeyAction.Open:
+                QueueOpen(facts.Context!, stamp);
+                return;
+            case KeyAction.OpenPicker:
+                QueuePickerOpen(facts.Context!, stamp);
+                return;
+            case KeyAction.DeferPickerOpen:
+                DeferPickerOpen(facts.Context!, stamp);
+                return;
+            case KeyAction.CancelOpen:
+                _openRequestGeneration++;
+                _openPending = false;
+                DiagnosticLog.Write("escape -> open cancelled");
+                return;
+            case KeyAction.CheckElevation:
+                QueueForegroundElevationMismatchCheck();
+                return;
+            case KeyAction.Hide:
+                DiagnosticLog.Write(vk switch
+                {
+                    NativeMethods.VK_ESCAPE => "escape -> hide",
+                    NativeMethods.VK_RETURN => "enter -> hide, explorer opens",
+                    _ => "space -> hide"
+                });
+                _dispatcher.BeginInvoke(RequestHide);
+                return;
+            case KeyAction.HideForPickerCommit:
+                DiagnosticLog.Write("enter -> hide, file dialog confirms");
+                _dispatcher.BeginInvoke(RequestHide);
+                return;
+            case KeyAction.ReturnToPicker:
+                var owner = _previewOwnerRootHwnd;
+                DiagnosticLog.Write("enter -> return to file dialog");
+                _dispatcher.BeginInvoke(() => HidePreviewAndRestoreOwner(owner));
+                return;
+            case KeyAction.OpenCurrent:
+                window?.ConsumeEnterYieldToContent();
+                DiagnosticLog.Write("enter -> open current");
+                _dispatcher.BeginInvoke(() => window?.OpenCurrent());
+                return;
+            case KeyAction.YieldEnter:
+                window?.ConsumeEnterYieldToContent();
+                return;
+            case KeyAction.YieldEscape:
+                window?.ConsumeEscapeYield();
+                DiagnosticLog.Write("escape -> content find UI");
+                return;
+            case KeyAction.NoteFind:
+                window?.NoteFindShortcut();
+                return;
+            case KeyAction.ToggleMedia:
+                _dispatcher.BeginInvoke(() => window?.TryToggleMediaPlayback());
+                return;
+            case KeyAction.NudgeMedia:
+                _dispatcher.BeginInvoke(() => window?.TryNudgeMediaFromArrow(vk));
+                return;
+            case KeyAction.Browse:
+                var delta = vk is NativeMethods.VK_LEFT or NativeMethods.VK_UP ? -1 : 1;
+                _dispatcher.BeginInvoke(() => BrowseRelativeAsync(delta, stamp));
+                return;
+            case KeyAction.GridMove:
+                var columns = vk switch { NativeMethods.VK_LEFT => -1, NativeMethods.VK_RIGHT => 1, _ => 0 };
+                var rows = vk switch { NativeMethods.VK_UP => -1, NativeMethods.VK_DOWN => 1, _ => 0 };
+                _dispatcher.BeginInvoke(() => window?.MoveGridCursor(columns, rows));
+                return;
+            case KeyAction.GridToggle:
+                _dispatcher.BeginInvoke(() => window?.ToggleGridView());
+                return;
+            case KeyAction.GridCommit:
+                _dispatcher.BeginInvoke(() => window?.CommitGridCursor());
+                return;
+            case KeyAction.EscapeLayer:
+                DiagnosticLog.Write("escape -> selection surface");
+                _dispatcher.BeginInvoke(() =>
+                {
+                    // A second Esc can arrive before the first one's layer
+                    // closed; with no layer left it means dismiss.
+                    if (window?.TryConsumeEscapeLayer() != true)
+                    {
+                        RequestHide();
+                    }
+                });
+                return;
+            case KeyAction.FillSignEscape:
+                DiagnosticLog.Write("escape -> fill-sign layer");
+                _dispatcher.BeginInvoke(() => window?.RequestFillSignEscape());
+                return;
+            case KeyAction.ClosePinned:
+                DiagnosticLog.Write("escape -> close focused pinned preview");
+                if (window is not null)
+                {
+                    _dispatcher.BeginInvoke(() => OnPinnedCloseRequested(window));
+                }
+
+                return;
+            case KeyAction.Zoom:
+                _dispatcher.BeginInvoke(() => window?.TryAdjustZoomFromShortcut(vk));
+                return;
+            case KeyAction.FillScreen:
+                _dispatcher.BeginInvoke(() => window?.ToggleFillScreen());
+                return;
+            case KeyAction.Rotate:
+                var direction = facts.Shift ? -1 : 1;
+                _dispatcher.BeginInvoke(() => window?.RotateFromKeyboard(direction));
+                return;
+            case KeyAction.FollowExplorer:
+                FollowExplorer(vk, PreviewKeyMap.EditsSelection(facts), stamp);
+                return;
+            case KeyAction.FollowPicker:
+                _commonFileDialogMonitor.RequestRefresh(_previewOwnerRootHwnd, settleMilliseconds: 55);
+                return;
+        }
+    }
+
+    // Explorer handles the key; the glance follows on key-down so holding an
+    // arrow scrubs live instead of waiting for release.
+    private void FollowExplorer(int vk, bool editsSelection, long stamp)
+    {
+        var generation = ++_navigationRefreshGeneration;
+        _navigationKeyRefreshTokens[vk] = editsSelection ? -generation : generation;
+        var request = new SelectionRefreshRequest(generation, editsSelection, stamp);
+        _dispatcher.BeginInvoke(
+            () => RequestSelectionRefresh(request),
+            DispatcherPriority.Input);
     }
 
     private void OnKeyUp(int vk)
     {
-        _spaceKey.Release(vk);
-        var refreshToken = (uint)vk < (uint)_navigationKeyRefreshTokens.Length
-            ? Interlocked.Exchange(ref _navigationKeyRefreshTokens[vk], 0)
-            : 0;
+        if (vk == NativeMethods.VK_SPACE)
+        {
+            _spaceKey.Release();
+        }
 
-        if (_fullscreenInputSuspension.ShouldPassThroughInput())
+        if ((uint)vk >= (uint)_navigationKeyRefreshTokens.Length)
         {
             return;
         }
 
-        if (!_previewVisible
-            || refreshToken == 0
-            || IsPinnedWindowForeground()
-            || !CanHandleActivePreviewShortcutFromForeground())
+        var refreshToken = _navigationKeyRefreshTokens[vk];
+        _navigationKeyRefreshTokens[vk] = 0;
+        if (!_previewVisible || refreshToken == 0)
         {
             return;
         }
 
-        // Most Explorer views commit on key-down. A second COM read on every
-        // key-up used to duplicate every successful lookup. Keep the release
+        var root = NativeMethods.GetForegroundRoot();
+        if (TargetOf(root, FindPinnedWindow(root) is not null) is not (KeyTarget.Preview or KeyTarget.Owner))
+        {
+            return;
+        }
+
+        // Most Explorer views commit on key-down. Keep the release
         // verification only for the views that really did not move until the
         // key came up.
-        var generation = Math.Abs(refreshToken);
         var request = new SelectionRefreshRequest(
-            generation,
-            IncludeMultiSelectionPaths: refreshToken < 0);
+            Math.Abs(refreshToken),
+            IncludeMultiSelectionPaths: refreshToken < 0,
+            InputStamp: 0);
         var verification = new SelectionReleaseVerification(
             request,
-            StartedGenerationAtRelease: Interlocked.Read(ref _lastStartedRefreshGeneration));
+            StartedGenerationAtRelease: _lastStartedRefreshGeneration);
         _dispatcher.BeginInvoke(
             () => RequestKeyUpSelectionVerification(verification),
             DispatcherPriority.Input);
@@ -658,7 +608,7 @@ internal sealed class SpacePreviewController : IDisposable
     {
         ClearPendingFileDialogPreview();
 
-        if (_fullscreenInputSuspension.ShouldPassThroughInput())
+        if (_fullscreenInputSuspension.IsSuspended)
         {
             return;
         }
@@ -711,7 +661,7 @@ internal sealed class SpacePreviewController : IDisposable
             outsideDismissSuppressed: outsideDismissSuppressed))
         {
             DiagnosticLog.Write($"outside click -> hide x={screenX} y={screenY}");
-            _dispatcher.BeginInvoke(HidePreview);
+            RequestHide();
         }
     }
 
@@ -730,15 +680,7 @@ internal sealed class SpacePreviewController : IDisposable
                 return _previewWindow;
             }
 
-            foreach (var pinned in _pinnedWindows)
-            {
-                if (pinned.Hwnd == hit)
-                {
-                    return pinned;
-                }
-            }
-
-            return null;
+            return FindPinnedWindow(hit);
         }
 
         if (_previewVisible && _previewWindow is not null && _previewWindow.ContainsScreenPoint(x, y))
@@ -777,19 +719,16 @@ internal sealed class SpacePreviewController : IDisposable
         return null;
     }
 
-    private bool IsPinnedWindowForeground() => FindForegroundPinnedWindow() is not null;
-
-    private PreviewWindow? FindForegroundPinnedWindow()
+    private PreviewWindow? FindPinnedWindow(IntPtr hwnd)
     {
-        if (_pinnedWindows.Count == 0)
+        if (hwnd == IntPtr.Zero)
         {
             return null;
         }
 
-        var foreground = NativeMethods.GetForegroundWindow();
         foreach (var pinned in _pinnedWindows)
         {
-            if (pinned.Hwnd == foreground)
+            if (pinned.Hwnd == hwnd)
             {
                 return pinned;
             }
@@ -807,11 +746,8 @@ internal sealed class SpacePreviewController : IDisposable
 
         _previewWindow ??= CreatePreviewWindow();
         CancelIdleTrim();
-        _pendingOfficePreconvertSelection = null;
-        CancelOfficeNeighborPreconversion();
-        _lastSelectionSource = SelectionSource.Explorer;
-        _dialogOwnerTimer.Stop();
-        _previewOwnerRootHwnd = GetForegroundRoot();
+        ResetSession();
+        _previewOwnerRootHwnd = NativeMethods.GetForegroundRoot();
         DiagnosticLog.Write("welcome shown");
         var presented = _previewWindow.ShowWelcome();
         if (!presented)
@@ -835,7 +771,6 @@ internal sealed class SpacePreviewController : IDisposable
         window.BrowseRequested += (sender, direction) => OnBrowseRequested((PreviewWindow)sender!, direction);
         window.SelectionItemRequested += (sender, index) => OnSelectionItemRequested((PreviewWindow)sender!, index);
         window.SlideshowAdvanceRequested += (sender, _) => OnSlideshowAdvanceRequested((PreviewWindow)sender!);
-        window.ContentReady += (sender, _) => OnPreviewContentReady((PreviewWindow)sender!);
         window.PresentationFailed += OnPreviewPresentationFailed;
         window.SetPinLimitReached(_pinnedWindows.Count >= MaxPinnedPreviews);
         return window;
@@ -860,25 +795,11 @@ internal sealed class SpacePreviewController : IDisposable
         HidePreview();
     }
 
-    private void OnPreviewContentReady(PreviewWindow window)
-    {
-        if (window != _previewWindow
-            || !_previewVisible
-            || _pendingOfficePreconvertSelection is not { } selection
-            || !string.Equals(selection.Path, window.CurrentPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        _pendingOfficePreconvertSelection = null;
-        StartOfficeNeighborPreconversion(selection);
-    }
-
     private void OnSelectionItemRequested(PreviewWindow window, int index)
     {
         if (window == _previewWindow)
         {
-            ShowMultiSelectionItem(index);
+            ShowMultiSelectionItem(index, Stopwatch.GetTimestamp());
         }
     }
 
@@ -890,7 +811,7 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        ShowMultiSelectionItem((_multiIndex + 1) % set.Count);
+        ShowMultiSelectionItem((_multiIndex + 1) % set.Count, inputStamp: 0);
     }
 
     private void OnDismissRequested(PreviewWindow window)
@@ -902,14 +823,12 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        if (window == _previewWindow)
-        {
-            HidePreview();
-            return;
-        }
-
         // A window that is neither active nor pinned is already retiring; a
         // second retire would stack duplicate close handlers.
+        if (window == _previewWindow)
+        {
+            RequestHide();
+        }
     }
 
     private void OnPinToggleRequested(PreviewWindow window)
@@ -926,36 +845,27 @@ internal sealed class SpacePreviewController : IDisposable
             _pinnedWindows.Add(window);
             if (window == _previewWindow)
             {
-                // The pinned window leaves the dismissal lifecycle; the next
-                // Space press gets a fresh window.
+                // The pinned window leaves the glance; the next Space press
+                // gets a fresh window.
                 _previewWindow = null;
                 _previewVisible = false;
-                _previewOwnerRootHwnd = IntPtr.Zero;
-                _lastExplorerHwnd = IntPtr.Zero;
-                _lastSelectionSource = SelectionSource.Explorer;
-                _dialogOwnerTimer.Stop();
-                _multiSelection = null;
-                _multiSelectionSelectedCount = 0;
-                _multiIndex = 0;
-                ClearNavigationRefreshTokens();
-                _queuedRefreshRequest = null;
-                _pendingKeyUpVerification = null;
+                ResetSession();
             }
 
             DiagnosticLog.Write($"pinned preview ({_pinnedWindows.Count} of {MaxPinnedPreviews}) {window.CurrentPath}");
         }
         else
         {
+            // Unpinning retires the live glance, so it asks first too.
+            if (_previewWindow is { } live && live != window && !CanLeavePreview(live))
+            {
+                return;
+            }
+
             _pinnedWindows.Remove(window);
             window.SetPinned(false);
             window.DetachBrowseContext();
-            _previewOwnerRootHwnd = IntPtr.Zero;
-            _lastExplorerHwnd = IntPtr.Zero;
-            _lastSelectionSource = SelectionSource.Explorer;
-            _dialogOwnerTimer.Stop();
-            _multiSelection = null;
-            _multiSelectionSelectedCount = 0;
-            _multiIndex = 0;
+            ResetSession();
 
             // The window the user just unpinned becomes THE preview again;
             // a previous live preview retires in its favor.
@@ -979,13 +889,13 @@ internal sealed class SpacePreviewController : IDisposable
     {
         // Esc auto-repeat, a double-tap, or Esc racing the X button can queue
         // this twice for one window; the second pass must not stack another
-        // retire (duplicate close handlers, double Close). Remove doubles as
-        // the idempotence gate.
-        if (!_pinnedWindows.Remove(window))
+        // retire (duplicate close handlers, double Close).
+        if (!_pinnedWindows.Contains(window) || !CanLeavePreview(window))
         {
             return;
         }
 
+        _pinnedWindows.Remove(window);
         RetireWindow(window);
         UpdatePinCapacity();
         SyncMouseHook();
@@ -999,7 +909,7 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        BrowseRelativeAsync((int)direction);
+        BrowseRelativeAsync((int)direction, Stopwatch.GetTimestamp());
     }
 
     private void UpdatePinCapacity()
@@ -1034,7 +944,7 @@ internal sealed class SpacePreviewController : IDisposable
         window.HidePreview();
     }
 
-    private void ShowPreview(ExplorerSelection selection)
+    private void ShowPreview(ExplorerSelection selection, long inputStamp)
     {
         if (_disposed)
         {
@@ -1043,7 +953,6 @@ internal sealed class SpacePreviewController : IDisposable
 
         _previewWindow ??= CreatePreviewWindow();
         CancelIdleTrim();
-        CancelOfficeNeighborPreconversion();
         _lastExplorerHwnd = selection.ExplorerHwnd;
         if (_previewOwnerRootHwnd == IntPtr.Zero)
         {
@@ -1053,6 +962,7 @@ internal sealed class SpacePreviewController : IDisposable
         var fileDialogMode = _lastSelectionSource == SelectionSource.CommonFileDialog;
         DiagnosticLog.Write(
             $"preview requested {selection.Path} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
+        _previewWindow.InputStamp = inputStamp;
         var presented = _previewWindow.ShowPreview(
             selection.Path,
             selection.ExplorerHwnd,
@@ -1074,14 +984,10 @@ internal sealed class SpacePreviewController : IDisposable
         if (fileDialogMode)
         {
             ApplyCommonFileDialogContext(selection);
-            _pendingOfficePreconvertSelection = null;
-            _dialogOwnerTimer.Start();
         }
         else
         {
             ApplySelectionBrowseContext(selection);
-            _pendingOfficePreconvertSelection = selection;
-            _dialogOwnerTimer.Stop();
         }
 
         _previewVisible = true;
@@ -1132,20 +1038,26 @@ internal sealed class SpacePreviewController : IDisposable
     /// Steps within the captured multi-selection. Explorer's own selection
     /// stays untouched: walking through the set must not destroy it.
     /// </summary>
-    private void ShowMultiSelectionItem(int index)
+    private void ShowMultiSelectionItem(int index, long inputStamp)
     {
         if (_multiSelection is not { Count: > 1 } set || _previewWindow is null || !_previewVisible)
         {
             return;
         }
 
-        _multiIndex = Math.Clamp(index, 0, set.Count - 1);
-        var path = set[_multiIndex];
-        DiagnosticLog.Write($"browse within selection -> {path} ({_multiIndex + 1} of {set.Count})");
-        if (!string.Equals(path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
+        var target = Math.Clamp(index, 0, set.Count - 1);
+        var path = set[target];
+        var changes = !string.Equals(path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase);
+        if (changes && !CanLeavePreview(_previewWindow))
         {
-            _pendingOfficePreconvertSelection = null;
-            CancelOfficeNeighborPreconversion();
+            return;
+        }
+
+        _multiIndex = target;
+        DiagnosticLog.Write($"browse within selection -> {path} ({_multiIndex + 1} of {set.Count})");
+        if (changes)
+        {
+            _previewWindow.InputStamp = inputStamp;
             _previewWindow.ShowPreview(path, _lastExplorerHwnd, set.Count);
         }
 
@@ -1205,29 +1117,26 @@ internal sealed class SpacePreviewController : IDisposable
             try
             {
                 // The selected path drives the preview; folder position only
-                // trims browse chrome at the ends. Explorer can block that
-                // optional IFolderView query for hundreds of milliseconds,
-                // so leave position unknown until an explicit browse resolves
-                // it without delaying selection changes.
-                return source switch
+                // trims browse chrome at the ends, so it stays off this path.
+                if (source == SelectionSource.Desktop)
                 {
-                    SelectionSource.Desktop => ExplorerSelectionService.TryGetDesktopSelection(
+                    return ExplorerSelectionService.TryGetDesktopSelection(
                         diagnostics,
                         includeViewPosition: false,
-                        includeMultiSelectionPaths: includeMultiSelectionPaths),
-                    SelectionSource.CommonFileDialog => null,
-                    _ when hwnd != IntPtr.Zero || !useForegroundWhenHwndMissing =>
-                        ExplorerSelectionService.TryGetSelectionFromExplorerWindow(
+                        includeMultiSelectionPaths: includeMultiSelectionPaths);
+                }
+
+                return hwnd != IntPtr.Zero || !useForegroundWhenHwndMissing
+                    ? ExplorerSelectionService.TryGetSelectionFromExplorerWindow(
                         hwnd,
                         diagnostics,
                         includeViewPosition: false,
-                        includeMultiSelectionPaths: includeMultiSelectionPaths),
-                    _ => ExplorerSelectionService.TryGetForegroundSelection(
+                        includeMultiSelectionPaths: includeMultiSelectionPaths)
+                    : ExplorerSelectionService.TryGetForegroundSelection(
                         ignoreTextEditing: false,
                         diagnostics: diagnostics,
                         includeViewPosition: false,
-                        includeMultiSelectionPaths: includeMultiSelectionPaths)
-                };
+                        includeMultiSelectionPaths: includeMultiSelectionPaths);
             }
             finally
             {
@@ -1239,10 +1148,44 @@ internal sealed class SpacePreviewController : IDisposable
         return selection;
     }
 
-    private async void ShowPreviewFromContext(ForegroundSelectionContext context, int requestGeneration)
+    private void QueueOpen(ForegroundSelectionContext context, long inputStamp)
     {
-        if (_disposed)
+        var generation = ++_openRequestGeneration;
+        _openPending = true;
+        DiagnosticLog.Write($"space -> queued selection lookup class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
+        _dispatcher.BeginInvoke(() => ShowPreviewFromContext(context, generation, inputStamp));
+    }
+
+    /// <summary>
+    /// Space in another window that offers a selection moves the glance:
+    /// the old preview leaves first, unless it holds unsaved signing work.
+    /// </summary>
+    private bool LeaveForNewContext()
+    {
+        if (!_previewVisible)
         {
+            return true;
+        }
+
+        if (!CanLeavePreview(_previewWindow))
+        {
+            return false;
+        }
+
+        HidePreview();
+        return true;
+    }
+
+    private async void ShowPreviewFromContext(ForegroundSelectionContext context, int generation, long inputStamp)
+    {
+        if (_disposed || generation != _openRequestGeneration)
+        {
+            return;
+        }
+
+        if (!LeaveForNewContext())
+        {
+            _openPending = false;
             return;
         }
 
@@ -1254,10 +1197,12 @@ internal sealed class SpacePreviewController : IDisposable
             context.Hwnd,
             includeMultiSelectionPaths: true);
 
-        if (_disposed || requestGeneration != _openRequestGeneration)
+        if (_disposed || generation != _openRequestGeneration)
         {
             return;
         }
+
+        _openPending = false;
 
         // If the user moved on while the lookup ran (Alt-Tab, click), popping
         // a topmost preview over the new foreground app is unexpected.
@@ -1267,78 +1212,77 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        var usedRetry = false;
         if (selection is null)
         {
-            await Task.Delay(60);
-            if (_disposed || requestGeneration != _openRequestGeneration)
-            {
-                return;
-            }
-
-            if (NativeMethods.GetForegroundWindow() != context.Hwnd)
-            {
-                DiagnosticLog.Write("queued lookup retry -> foreground changed, dropping");
-                return;
-            }
-
-            selection = await RunSelectionLookupAsync(
-                "open-retry",
-                context.Source,
-                context.Hwnd,
-                includeMultiSelectionPaths: true);
-            if (selection is null)
-            {
-                DiagnosticLog.Write($"queued lookup -> no selection class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
-                return;
-            }
-
-            usedRetry = true;
+            DiagnosticLog.Write($"queued lookup -> no selection class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
+            return;
         }
 
-        DiagnosticLog.Write(usedRetry
-            ? $"queued lookup retry -> preview {selection.Path}"
-            : $"queued lookup -> preview {selection.Path}");
+        DiagnosticLog.Write($"queued lookup -> preview {selection.Path}");
         _lastSelectionSource = context.Source;
         _previewOwnerRootHwnd = context.Hwnd;
-        ShowPreview(selection);
+        ShowPreview(selection, inputStamp);
+    }
+
+    private void QueuePickerOpen(ForegroundSelectionContext context, long inputStamp)
+    {
+        var generation = ++_openRequestGeneration;
+        DiagnosticLog.Write($"space -> queued selection lookup class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
+        QueueElevationMismatchCheck(context.Hwnd);
+        ClearPendingFileDialogPreview();
+        _dispatcher.BeginInvoke(() => ShowCommonFileDialogPreview(context, generation, inputStamp));
+    }
+
+    // Fail open. The hook never waits for UI Automation and never swallows
+    // Space on an unverified dialog selection. It remembers this one press
+    // briefly; a completed, still-owned refresh may fulfill it off the hook.
+    private void DeferPickerOpen(ForegroundSelectionContext context, long inputStamp)
+    {
+        var generation = ++_openRequestGeneration;
+        QueueElevationMismatchCheck(context.Hwnd);
+        ArmPendingFileDialogPreview(context.Hwnd, generation, inputStamp);
+        _commonFileDialogMonitor.RequestRefresh(context.Hwnd, settleMilliseconds: 0);
+        DiagnosticLog.Write("space -> file dialog selection not ready, deferred and passed through");
     }
 
     private void ShowCommonFileDialogPreview(
         ForegroundSelectionContext context,
-        ExplorerSelection selection,
-        int requestGeneration)
+        int requestGeneration,
+        long inputStamp)
     {
         if (_disposed
             || requestGeneration != _openRequestGeneration
-            || GetForegroundRoot() != context.Hwnd
+            || NativeMethods.GetForegroundRoot() != context.Hwnd
             || !CommonFileDialogSelectionService.HasFileListFocus(context.Hwnd))
         {
             DiagnosticLog.Write("queued file dialog preview -> focus changed, dropping");
             return;
         }
 
-        if (!_commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var latestSelection)
-            || latestSelection is null)
+        if (!_commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var selection)
+            || selection is null)
         {
             DiagnosticLog.Write("queued file dialog preview -> selection changed, dropping");
             return;
         }
 
-        selection = latestSelection;
+        if (!LeaveForNewContext())
+        {
+            return;
+        }
 
         _lastSelectionSource = SelectionSource.CommonFileDialog;
         _previewOwnerRootHwnd = context.Hwnd;
-        ShowPreview(selection);
+        ShowPreview(selection, inputStamp);
     }
 
-    private void ArmPendingFileDialogPreview(IntPtr dialogRoot, int requestGeneration)
+    private void ArmPendingFileDialogPreview(IntPtr dialogRoot, int requestGeneration, long inputStamp)
     {
-        var armedAt = Environment.TickCount64;
         var intent = _pendingFileDialogPreview.Arm(
             dialogRoot,
             requestGeneration,
-            armedAt);
+            Environment.TickCount64,
+            inputStamp);
 
         _dispatcher.BeginInvoke(async () =>
         {
@@ -1354,13 +1298,6 @@ internal sealed class SpacePreviewController : IDisposable
         IntPtr dialogRoot,
         ExplorerSelection? selection)
     {
-        if (!_dispatcher.CheckAccess())
-        {
-            _dispatcher.BeginInvoke(() =>
-                OnCommonFileDialogRefreshCompleted(dialogRoot, selection));
-            return;
-        }
-
         var intent = _pendingFileDialogPreview.Current;
         if (intent is null)
         {
@@ -1369,9 +1306,9 @@ internal sealed class SpacePreviewController : IDisposable
 
         var now = Environment.TickCount64;
         var ownershipValid = !_disposed
-            && _inputHooksActive
-            && !_fullscreenInputSuspension.ShouldPassThroughInput()
-            && GetForegroundRoot() == dialogRoot
+            && _keyboardHook.IsInstalled
+            && !_fullscreenInputSuspension.IsSuspended
+            && NativeMethods.GetForegroundRoot() == dialogRoot
             && CommonFileDialogSelectionService.HasFileListFocus(dialogRoot);
 
         // A newer WinEvent may have started another refresh between this
@@ -1387,7 +1324,7 @@ internal sealed class SpacePreviewController : IDisposable
         var decision = _pendingFileDialogPreview.EvaluateRefresh(
             intent,
             dialogRoot,
-            Volatile.Read(ref _openRequestGeneration),
+            _openRequestGeneration,
             now,
             DeferredFileDialogPreviewLifetimeMilliseconds,
             ownershipValid,
@@ -1416,22 +1353,14 @@ internal sealed class SpacePreviewController : IDisposable
             dialogRoot,
             SelectionSource.CommonFileDialog,
             CommonFileDialogSelectionService.DialogWindowClass);
-        ShowCommonFileDialogPreview(context, latestSelection, intent.RequestGeneration);
+        ShowCommonFileDialogPreview(context, intent.RequestGeneration, intent.InputStamp);
     }
 
     private void ClearPendingFileDialogPreview() => _pendingFileDialogPreview.Cancel();
 
     private void QueueForegroundElevationMismatchCheck()
     {
-        var foreground = NativeMethods.GetForegroundWindow();
-        var root = foreground == IntPtr.Zero
-            ? IntPtr.Zero
-            : NativeMethods.GetAncestor(foreground, NativeMethods.GA_ROOT);
-        if (root == IntPtr.Zero)
-        {
-            root = foreground;
-        }
-
+        var root = NativeMethods.GetForegroundRoot();
         if (CommonFileDialogSelectionService.HasDialogWindowClass(root))
         {
             QueueElevationMismatchCheck(root);
@@ -1458,12 +1387,6 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void OnCommonFileDialogObserved(IntPtr dialogRoot)
     {
-        if (!_dispatcher.CheckAccess())
-        {
-            _dispatcher.BeginInvoke(() => OnCommonFileDialogObserved(dialogRoot));
-            return;
-        }
-
         if (_disposed
             || !PreviewAccessWarningPolicy.CanShowLifetime(
                 PreviewAccessWarningPolicy.FromSettings(Settings.Current),
@@ -1555,12 +1478,6 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void OnCommonFileDialogSelectionChanged(IntPtr dialogRoot, ExplorerSelection? selection)
     {
-        if (!_dispatcher.CheckAccess())
-        {
-            _dispatcher.BeginInvoke(() => OnCommonFileDialogSelectionChanged(dialogRoot, selection));
-            return;
-        }
-
         if (_disposed
             || !_previewVisible
             || _previewWindow is null
@@ -1585,36 +1502,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         DiagnosticLog.Write($"file dialog selection changed -> {selection.Path}");
-        ShowPreview(selection);
-    }
-
-    private void VerifyCommonFileDialogOwner()
-    {
-        if (_disposed
-            || !_previewVisible
-            || _lastSelectionSource != SelectionSource.CommonFileDialog)
-        {
-            _dialogOwnerTimer.Stop();
-            return;
-        }
-
-        var owner = _previewOwnerRootHwnd;
-        if (owner == IntPtr.Zero || !NativeMethods.IsWindow(owner))
-        {
-            DiagnosticLog.Write("file dialog closed -> hide");
-            HidePreview();
-            return;
-        }
-
-        var foregroundRoot = GetForegroundRoot();
-        if (foregroundRoot == owner
-            || _previewWindow?.OwnsForegroundRoot(foregroundRoot) == true)
-        {
-            return;
-        }
-
-        DiagnosticLog.Write("file dialog lost foreground -> hide");
-        HidePreview();
+        ShowPreview(selection, Stopwatch.GetTimestamp());
     }
 
     private void HidePreviewAndRestoreOwner(IntPtr owner)
@@ -1626,33 +1514,62 @@ internal sealed class SpacePreviewController : IDisposable
         }
     }
 
+    // Unsaved signing work is the one thing a glance never drops: every way
+    // out asks first.
+    private static bool CanLeavePreview(PreviewWindow? window)
+    {
+        if (window?.TryLeaveFillSign() != false)
+        {
+            return true;
+        }
+
+        DiagnosticLog.Write("exit held for unsaved signing work");
+        return false;
+    }
+
+    /// <summary>Every user-driven end of a glance comes through here.</summary>
+    private void RequestHide()
+    {
+        if (!_previewVisible || !CanLeavePreview(_previewWindow))
+        {
+            return;
+        }
+
+        HidePreview();
+    }
+
     private void HidePreview()
     {
-        ClearPendingFileDialogPreview();
         _previewVisible = false;
-        _dialogOwnerTimer.Stop();
-        ClearNavigationRefreshTokens();
-        _queuedRefreshRequest = null;
-        _pendingKeyUpVerification = null;
-        _previewOwnerRootHwnd = IntPtr.Zero;
-        _lastSelectionSource = SelectionSource.Explorer;
-        _multiSelection = null;
-        _multiSelectionSelectedCount = 0;
-        _pendingOfficePreconvertSelection = null;
-        CancelOfficeNeighborPreconversion();
+        ResetSession();
         DiagnosticLog.Write("hide preview");
         _previewWindow?.HidePreview();
         SyncMouseHook();
         ScheduleIdleTrim();
     }
 
-    private void ClearNavigationRefreshTokens()
+    /// <summary>
+    /// The one reset of a glance's state. Hide, pin, unpin, the welcome and
+    /// idle trim all end a session the same way, so nothing from one glance
+    /// leaks into the next (a queued arrow step once did).
+    /// </summary>
+    private void ResetSession()
     {
-        for (var i = 0; i < _navigationKeyRefreshTokens.Length; i++)
-        {
-            Interlocked.Exchange(ref _navigationKeyRefreshTokens[i], 0);
-        }
+        _ownerLossTimer.Stop();
+        ClearPendingFileDialogPreview();
+        ClearNavigationRefreshTokens();
+        _queuedRefreshRequest = null;
+        _pendingKeyUpVerification = null;
+        _browsePendingDelta = 0;
+        _previewOwnerRootHwnd = IntPtr.Zero;
+        _lastExplorerHwnd = IntPtr.Zero;
+        _lastSelectionSource = SelectionSource.Explorer;
+        _multiSelection = null;
+        _multiSelectionSelectedCount = 0;
+        _multiIndex = 0;
     }
+
+    private void ClearNavigationRefreshTokens() => Array.Clear(_navigationKeyRefreshTokens);
 
     private static SelectionRefreshRequest NewestRefreshRequest(
         SelectionRefreshRequest? pending,
@@ -1709,7 +1626,7 @@ internal sealed class SpacePreviewController : IDisposable
         var request = verification.Request;
         if (!PreviewInputPolicy.ShouldVerifyNavigationRelease(
                 request.Generation,
-                Interlocked.Read(ref _navigationRefreshGeneration),
+                _navigationRefreshGeneration,
                 verification.StartedGenerationAtRelease,
                 _lastChangedRefreshGeneration))
         {
@@ -1750,9 +1667,7 @@ internal sealed class SpacePreviewController : IDisposable
                 var source = _lastSelectionSource;
                 var hwnd = _lastExplorerHwnd;
                 var ownerRoot = _previewOwnerRootHwnd;
-                Interlocked.Exchange(
-                    ref _lastStartedRefreshGeneration,
-                    activeRequest.Generation);
+                _lastStartedRefreshGeneration = activeRequest.Generation;
                 var selection = await RunSelectionLookupAsync(
                     "refresh",
                     source,
@@ -1806,36 +1721,30 @@ internal sealed class SpacePreviewController : IDisposable
                 }
 
                 var decision = PreviewInputPolicy.DecideRefresh(selection, _previewWindow.CurrentPath);
-                if (decision.Action == RefreshSelectionAction.HidePreview)
-                {
-                    DiagnosticLog.Write("selection cleared -> hide");
-                    HidePreview();
-                    return;
-                }
-
                 if (decision.Action == RefreshSelectionAction.KeepCurrent)
                 {
                     continue;
                 }
 
-                selection = decision.Selection;
-                if (selection is null)
+                if (decision.Action == RefreshSelectionAction.HidePreview)
+                {
+                    DiagnosticLog.Write("selection cleared -> hide");
+                    RequestHide();
+                    return;
+                }
+
+                // The glance follows Explorer, but never over unsaved work.
+                if (decision.Selection is not { } changed || !CanLeavePreview(_previewWindow))
                 {
                     return;
                 }
 
-                _lastExplorerHwnd = selection.ExplorerHwnd;
-                if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    _lastChangedRefreshGeneration = Math.Max(
-                        _lastChangedRefreshGeneration,
-                        activeRequest.Generation);
-                    DiagnosticLog.Write($"selection changed -> {selection.Path}");
-                    ShowPreview(selection);
-                    continue;
-                }
-
-                ApplySelectionBrowseContext(selection);
+                _lastExplorerHwnd = changed.ExplorerHwnd;
+                _lastChangedRefreshGeneration = Math.Max(
+                    _lastChangedRefreshGeneration,
+                    activeRequest.Generation);
+                DiagnosticLog.Write($"selection changed -> {changed.Path}");
+                ShowPreview(changed, activeRequest.InputStamp);
             } while (_queuedRefreshRequest is not null);
         }
         finally
@@ -1847,7 +1756,7 @@ internal sealed class SpacePreviewController : IDisposable
             if (pendingVerification is { } verification
                 && PreviewInputPolicy.ShouldVerifyNavigationRelease(
                     verification.Request.Generation,
-                    Interlocked.Read(ref _navigationRefreshGeneration),
+                    _navigationRefreshGeneration,
                     verification.StartedGenerationAtRelease,
                     _lastChangedRefreshGeneration)
                 && !_disposed
@@ -1895,104 +1804,26 @@ internal sealed class SpacePreviewController : IDisposable
         return true;
     }
 
-    private bool CanHandleActivePreviewShortcutFromForeground()
-    {
-        if (!_previewVisible)
-        {
-            return false;
-        }
-
-        return PreviewInputPolicy.IsPreviewShortcutForeground(
-            GetForegroundRoot(),
-            _previewWindow?.Hwnd ?? IntPtr.Zero,
-            _previewOwnerRootHwnd);
-    }
-
-    private bool IsForegroundActivePreview()
-    {
-        var previewHwnd = _previewWindow?.Hwnd ?? IntPtr.Zero;
-        return previewHwnd != IntPtr.Zero && GetForegroundRoot() == previewHwnd;
-    }
-
-    /// <summary>
-    /// Left and right browse the previous or next item while a preview is
-    /// open. Explorer left/right behavior depends on view mode, so the hook
-    /// moves selection through Explorer's view object. Up/down stay native
-    /// while Explorer has focus; when the preview has focus, they browse unless
-    /// the active content needs them for scrolling, media, text, or rename.
-    /// </summary>
-    private bool TryBrowseFromArrow(int vk)
-    {
-        if (_lastSelectionSource == SelectionSource.CommonFileDialog)
-        {
-            return false;
-        }
-
-        var vertical = vk is NativeMethods.VK_UP or NativeMethods.VK_DOWN;
-        var horizontal = vk is NativeMethods.VK_LEFT or NativeMethods.VK_RIGHT;
-        if ((!vertical && !horizontal) || !NoModifierKeysDown())
-        {
-            return false;
-        }
-
-        // The index sheet captures all four arrows while it is up; the
-        // preview behind it and Explorer's selection both hold still.
-        if (_previewWindow?.IsGridViewOpen == true)
-        {
-            var deltaColumns = vk switch
-            {
-                NativeMethods.VK_LEFT => -1,
-                NativeMethods.VK_RIGHT => 1,
-                _ => 0
-            };
-            var deltaRows = vk switch
-            {
-                NativeMethods.VK_UP => -1,
-                NativeMethods.VK_DOWN => 1,
-                _ => 0
-            };
-            _dispatcher.BeginInvoke(() => _previewWindow?.MoveGridCursor(deltaColumns, deltaRows));
-            return true;
-        }
-
-        var previewForeground = IsForegroundActivePreview();
-        if (vertical && !previewForeground)
-        {
-            return false;
-        }
-
-        if (previewForeground)
-        {
-            if (_previewWindow?.ShouldBrowseWithPreviewArrowKeys(vertical) != true)
-            {
-                return false;
-            }
-        }
-        else if (ExplorerSelectionService.IsWindowTextEditing(_previewOwnerRootHwnd))
-        {
-            // Renaming in Explorer: the caret handles the arrows.
-            return false;
-        }
-
-        var delta = vk is NativeMethods.VK_LEFT or NativeMethods.VK_UP ? -1 : 1;
-        _dispatcher.BeginInvoke(() => BrowseRelativeAsync(delta));
-        return true;
-    }
-
     /// <summary>
     /// Steps the Explorer selection by <paramref name="delta"/> view
     /// positions and previews what lands. Coalesced like selection refresh:
     /// holding the key accumulates steps instead of queueing a COM call per
-    /// key repeat.
+    /// key repeat. Steps left over when a browse ends early are dropped.
     /// </summary>
-    private async void BrowseRelativeAsync(int delta)
+    private async void BrowseRelativeAsync(int delta, long inputStamp)
     {
         if (_disposed
             || !_previewVisible
             || _previewWindow is null
-            || _lastSelectionSource == SelectionSource.CommonFileDialog)
+            || _lastSelectionSource == SelectionSource.CommonFileDialog
+            || !CanLeavePreview(_previewWindow))
         {
             return;
+        }
+
+        if (_browsePendingDelta == 0)
+        {
+            _browseInputStamp = inputStamp;
         }
 
         _browsePendingDelta += delta;
@@ -2007,13 +1838,14 @@ internal sealed class SpacePreviewController : IDisposable
             while (_browsePendingDelta != 0)
             {
                 var step = _browsePendingDelta;
+                var stepStamp = _browseInputStamp;
                 _browsePendingDelta = 0;
 
                 // Within a multi-selection, stepping is instant
                 // and local: no shell round-trip, no selection change.
                 if (_multiSelection is { Count: > 1 })
                 {
-                    ShowMultiSelectionItem(_multiIndex + step);
+                    ShowMultiSelectionItem(_multiIndex + step, stepStamp);
                     continue;
                 }
 
@@ -2044,7 +1876,7 @@ internal sealed class SpacePreviewController : IDisposable
                 DiagnosticLog.Write($"browse {step:+0;-0} -> {selection.Path} ({selection.ViewIndex + 1} of {selection.ViewCount})");
                 if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    ShowPreview(selection);
+                    ShowPreview(selection, stepStamp);
                 }
                 else
                 {
@@ -2056,44 +1888,8 @@ internal sealed class SpacePreviewController : IDisposable
         finally
         {
             _browseInFlight = false;
+            _browsePendingDelta = 0;
         }
-    }
-
-    private static IntPtr GetForegroundRoot()
-    {
-        var foreground = NativeMethods.GetForegroundWindow();
-        if (foreground == IntPtr.Zero)
-        {
-            return IntPtr.Zero;
-        }
-
-        var root = NativeMethods.GetAncestor(foreground, NativeMethods.GA_ROOT);
-        return root == IntPtr.Zero ? foreground : root;
-    }
-
-    private static bool NoModifierKeysDown()
-    {
-        return !NativeMethods.IsKeyDown(NativeMethods.VK_SHIFT)
-            && !NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL)
-            && !NativeMethods.IsKeyDown(NativeMethods.VK_MENU)
-            && !NativeMethods.IsKeyDown(NativeMethods.VK_LWIN)
-            && !NativeMethods.IsKeyDown(NativeMethods.VK_RWIN);
-    }
-
-    private static bool IntentionalMultiSelectionNavigation(int vk)
-    {
-        if (vk == NativeMethods.VK_DELETE
-            || NativeMethods.IsKeyDown(NativeMethods.VK_MENU)
-            || NativeMethods.IsKeyDown(NativeMethods.VK_LWIN)
-            || NativeMethods.IsKeyDown(NativeMethods.VK_RWIN))
-        {
-            return false;
-        }
-
-        // Ctrl+navigation moves Explorer's focus without changing its selected
-        // set. Shift is the modifier which actually grows or shrinks a range;
-        // Ctrl+Shift remains covered because Shift is down.
-        return NativeMethods.IsKeyDown(NativeMethods.VK_SHIFT);
     }
 
     public void Dispose()
@@ -2105,15 +1901,19 @@ internal sealed class SpacePreviewController : IDisposable
 
         _disposed = true;
         _idleTrimTimer.Stop();
-        _dialogOwnerTimer.Stop();
-        CancelOfficeNeighborPreconversion();
+        _ownerLossTimer.Stop();
+        if (_foregroundHook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWinEvent(_foregroundHook);
+            _foregroundHook = IntPtr.Zero;
+        }
+
         _commonFileDialogMonitor.SelectionChanged -= OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted -= OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved -= OnCommonFileDialogObserved;
         ClearPendingFileDialogPreview();
         _commonFileDialogMonitor.Dispose();
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;
-        _fullscreenInputSuspension.Dispose();
         _keyboardHook.Dispose();
         _mouseHook.Dispose();
         if (_previewWindow is not null)
@@ -2188,16 +1988,7 @@ internal sealed class SpacePreviewController : IDisposable
             _previewWindow = null;
         }
 
-        _previewOwnerRootHwnd = IntPtr.Zero;
-        _lastExplorerHwnd = IntPtr.Zero;
-        _lastSelectionSource = SelectionSource.Explorer;
-        _multiSelection = null;
-        _multiSelectionSelectedCount = 0;
-        _browsePendingDelta = 0;
-        _queuedRefreshRequest = null;
-        _pendingKeyUpVerification = null;
-        _pendingOfficePreconvertSelection = null;
-        CancelOfficeNeighborPreconversion();
+        ResetSession();
 
         if (Interlocked.Exchange(ref _idleTrimInFlight, 1) == 1)
         {
@@ -2218,83 +2009,5 @@ internal sealed class SpacePreviewController : IDisposable
                 Volatile.Write(ref _idleTrimInFlight, 0);
             }
         });
-    }
-
-    private void StartOfficeNeighborPreconversion(ExplorerSelection selection)
-    {
-        if (_disposed
-            || _lastSelectionSource == SelectionSource.CommonFileDialog
-            || _multiSelection is not null
-            || selection.ViewIndex < 0
-            || selection.ViewCount <= 1
-            || selection.ExplorerHwnd == IntPtr.Zero)
-        {
-            return;
-        }
-
-        var cts = new CancellationTokenSource();
-        _officeNeighborPreconvertCts = cts;
-        _ = PreconvertOfficeNeighborsAsync(
-            selection.ExplorerHwnd,
-            _lastSelectionSource == SelectionSource.Desktop,
-            selection.ViewIndex,
-            cts.Token);
-    }
-
-    private async Task PreconvertOfficeNeighborsAsync(IntPtr explorerHwnd, bool wasDesktop, int viewIndex, CancellationToken token)
-    {
-        try
-        {
-            await Task.Delay(OfficeNeighborPreconvertDelay, token);
-            token.ThrowIfCancellationRequested();
-            DiagnosticLog.Write("office neighbor scan");
-            var neighbors = await StaTask.Run(() =>
-                ExplorerSelectionService.TryGetNeighborPaths(explorerHwnd, wasDesktop, viewIndex, OfficeNeighborPreconvertLimit));
-            if (neighbors is null)
-            {
-                return;
-            }
-
-            foreach (var path in neighbors)
-            {
-                token.ThrowIfCancellationRequested();
-                if (!FileKinds.IsOffice(path))
-                {
-                    continue;
-                }
-
-                DiagnosticLog.Write($"office neighbor preconvert {path}");
-                var converted = await Task.Run(() => OfficeDocumentPdfConverter.TryConvert(path, token, background: true), token);
-                DiagnosticLog.Write(converted is null
-                    ? $"office neighbor preconvert skipped {path}"
-                    : $"office neighbor preconvert ready {path}");
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            // A newer preview or dismissal owns the lane now.
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"office neighbor preconvert failed: {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    private void CancelOfficeNeighborPreconversion()
-    {
-        var cts = Interlocked.Exchange(ref _officeNeighborPreconvertCts, null);
-        if (cts is null)
-        {
-            return;
-        }
-
-        try
-        {
-            cts.Cancel();
-        }
-        finally
-        {
-            cts.Dispose();
-        }
     }
 }

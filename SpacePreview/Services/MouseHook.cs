@@ -3,18 +3,21 @@ using SpacePreview.Native;
 
 namespace SpacePreview.Services;
 
+/// <summary>
+/// Watches button presses while a preview is on screen. The hook lives on one
+/// observer thread for the app's lifetime. Start and Stop only post to it, so
+/// showing a preview never waits for a hook to install.
+/// </summary>
 internal sealed class MouseHook : IDisposable
 {
-    private static readonly TimeSpan StartupTimeout = TimeSpan.FromSeconds(2);
+    private const uint WmSync = NativeMethods.WM_APP + 0x40;
 
     private readonly Action<int, int, int> _onMouseDown;
     private readonly Func<IntPtr, bool> _shouldActivateWindow;
     private readonly NativeMethods.LowLevelMouseProc _proc;
-    private readonly object _lifecycleGate = new();
-    private Thread? _thread;
     private uint _threadId;
+    private volatile bool _wanted;
     private IntPtr _hook;
-    private Exception? _startupFailure;
     private bool _disposed;
 
     public MouseHook(Action<int, int, int> onMouseDown, Func<IntPtr, bool> shouldActivateWindow)
@@ -22,118 +25,89 @@ internal sealed class MouseHook : IDisposable
         _onMouseDown = onMouseDown;
         _shouldActivateWindow = shouldActivateWindow;
         _proc = HookCallback;
+
+        // Once, at startup: the observer's queue must exist before the first
+        // post can reach it.
+        using var ready = new ManualResetEventSlim();
+        var thread = new Thread(() => Run(ready))
+        {
+            IsBackground = true,
+            Name = "Glimpse mouse observer"
+        };
+        thread.Start();
+        ready.Wait();
     }
 
-    public void Start()
+    internal static bool ShouldRun(bool suspended, bool previewVisible, int pinnedWindowCount) =>
+        !suspended && (previewVisible || pinnedWindowCount > 0);
+
+    public void Start() => Request(true);
+
+    public void Stop() => Request(false);
+
+    private void Request(bool wanted)
     {
-        Thread thread;
-        ManualResetEventSlim ready;
-        lock (_lifecycleGate)
+        if (_disposed || _wanted == wanted)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_thread is { IsAlive: true })
-            {
-                return;
-            }
-
-            ready = new ManualResetEventSlim(initialState: false);
-            _startupFailure = null;
-            thread = new Thread(() => RunHookThread(ready))
-            {
-                IsBackground = true,
-                Name = "Glimpse mouse observer"
-            };
-            _thread = thread;
-            thread.Start();
+            return;
         }
 
-        if (!ready.Wait(StartupTimeout))
+        _wanted = wanted;
+        if (!NativeMethods.PostThreadMessage(_threadId, WmSync, UIntPtr.Zero, IntPtr.Zero))
         {
-            Stop();
-            throw new TimeoutException("Timed out while starting the mouse observer.");
-        }
-
-        Exception? failure;
-        lock (_lifecycleGate)
-        {
-            failure = _startupFailure;
-        }
-
-        if (failure is not null)
-        {
-            throw new InvalidOperationException("Unable to install mouse hook.", failure);
+            DiagnosticLog.Write($"mouse observer signal failed error={Marshal.GetLastWin32Error()}");
         }
     }
 
-    internal static bool ShouldRun(bool inputHooksActive, bool previewVisible, int pinnedWindowCount) =>
-        inputHooksActive && (previewVisible || pinnedWindowCount > 0);
-
-    private void RunHookThread(ManualResetEventSlim ready)
+    private void Run(ManualResetEventSlim ready)
     {
-        IntPtr hook = IntPtr.Zero;
+        _threadId = NativeMethods.GetCurrentThreadId();
+        NativeMethods.PeekMessage(
+            out _,
+            IntPtr.Zero,
+            NativeMethods.WM_QUIT,
+            NativeMethods.WM_QUIT,
+            NativeMethods.PM_NOREMOVE);
+        ready.Set();
+
         try
         {
-            var threadId = NativeMethods.GetCurrentThreadId();
-            NativeMethods.PeekMessage(
-                out _,
-                IntPtr.Zero,
-                NativeMethods.WM_QUIT,
-                NativeMethods.WM_QUIT,
-                NativeMethods.PM_NOREMOVE);
-
-            var module = NativeMethods.GetModuleHandle(null);
-            hook = NativeMethods.SetWindowsHookEx(NativeMethods.WH_MOUSE_LL, _proc, module, 0);
-            if (hook == IntPtr.Zero)
+            // Low-level hooks are delivered while this thread pumps. It owns
+            // no windows; its only messages are sync requests and quit.
+            while (NativeMethods.GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
             {
-                throw new InvalidOperationException(
-                    $"Win32 error {Marshal.GetLastWin32Error()} while installing the mouse observer.");
-            }
-
-            lock (_lifecycleGate)
-            {
-                if (!ReferenceEquals(_thread, Thread.CurrentThread))
+                if (message.message == WmSync)
                 {
-                    NativeMethods.UnhookWindowsHookEx(hook);
-                    hook = IntPtr.Zero;
-                    return;
+                    Sync();
                 }
-
-                _threadId = threadId;
-                _hook = hook;
-            }
-
-            ready.Set();
-
-            while (NativeMethods.GetMessage(out _, IntPtr.Zero, 0, 0) > 0)
-            {
-                // Low-level hooks are delivered while this thread pumps its
-                // queue. Glimpse owns no windows on this observer thread.
-            }
-        }
-        catch (Exception ex)
-        {
-            lock (_lifecycleGate)
-            {
-                _startupFailure = ex;
             }
         }
         finally
         {
-            ready.Set();
-            if (hook != IntPtr.Zero)
-            {
-                NativeMethods.UnhookWindowsHookEx(hook);
-            }
+            _wanted = false;
+            Sync();
+        }
+    }
 
-            lock (_lifecycleGate)
+    // Observer thread only.
+    private void Sync()
+    {
+        if (_wanted && _hook == IntPtr.Zero)
+        {
+            _hook = NativeMethods.SetWindowsHookEx(
+                NativeMethods.WH_MOUSE_LL,
+                _proc,
+                NativeMethods.GetModuleHandle(null),
+                0);
+            if (_hook == IntPtr.Zero)
             {
-                if (ReferenceEquals(_thread, Thread.CurrentThread))
-                {
-                    _hook = IntPtr.Zero;
-                    _threadId = 0;
-                    _thread = null;
-                }
+                DiagnosticLog.Write($"mouse hook install failed error={Marshal.GetLastWin32Error()}");
             }
+        }
+        else if (!_wanted && _hook != IntPtr.Zero)
+        {
+            NativeMethods.UnhookWindowsHookEx(_hook);
+            _hook = IntPtr.Zero;
         }
     }
 
@@ -155,6 +129,9 @@ internal sealed class MouseHook : IDisposable
                 or NativeMethods.WM_MBUTTONDOWN
                 or NativeMethods.WM_XBUTTONDOWN)
             {
+                // Windows grants foreground rights only while the click is
+                // being processed, and a click on web content lands in the
+                // browser process. Take the foreground here or never.
                 var data = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
                 var hit = NativeMethods.GetRootWindowAt(data.pt.X, data.pt.Y);
                 if (hit != IntPtr.Zero
@@ -175,45 +152,6 @@ internal sealed class MouseHook : IDisposable
         return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
     }
 
-    /// <summary>Removes the hook without disposing, so <see cref="Start"/> can reinstall it.</summary>
-    public void Stop()
-    {
-        Thread? thread;
-        uint threadId;
-        IntPtr hook;
-        lock (_lifecycleGate)
-        {
-            thread = _thread;
-            threadId = _threadId;
-            hook = _hook;
-            _thread = null;
-            _threadId = 0;
-            _hook = IntPtr.Zero;
-        }
-
-        if (thread is null)
-        {
-            return;
-        }
-
-        if (hook != IntPtr.Zero)
-        {
-            NativeMethods.UnhookWindowsHookEx(hook);
-        }
-
-        if (threadId != 0
-            && !NativeMethods.PostThreadMessage(
-                threadId,
-                NativeMethods.WM_QUIT,
-                UIntPtr.Zero,
-                IntPtr.Zero))
-        {
-            DiagnosticLog.Write(
-                $"mouse observer stop signal failed error={Marshal.GetLastWin32Error()}");
-        }
-
-    }
-
     public void Dispose()
     {
         if (_disposed)
@@ -222,6 +160,7 @@ internal sealed class MouseHook : IDisposable
         }
 
         _disposed = true;
-        Stop();
+        _wanted = false;
+        NativeMethods.PostThreadMessage(_threadId, NativeMethods.WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
     }
 }

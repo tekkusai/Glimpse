@@ -444,37 +444,6 @@ public sealed class PreviewChromeRegressionTests
     }
 
     [Fact]
-    public void BrowsingSkipsShellItemsThatDoNotResolveToFiles()
-    {
-        var source = ReadSource(@"SpacePreview\Services\ExplorerSelectionService.cs");
-        var body = ReadMethod(source, "public static ExplorerSelection? TryBrowseRelative");
-        var shellInterop = ReadSource(@"SpacePreview\Native\ShellComInterop.cs");
-
-        Assert.Contains("var direction = Math.Sign(delta);", body, StringComparison.Ordinal);
-        Assert.Contains("while (direction != 0)", body, StringComparison.Ordinal);
-        Assert.Contains("FolderViewNavigator.TrySelectRelative(entry, direction)", body, StringComparison.Ordinal);
-        Assert.Contains("selection = TryReadSelection(entry, targetHwnd);", body, StringComparison.Ordinal);
-        Assert.Contains("skipped non-previewable shell item", body, StringComparison.Ordinal);
-        Assert.Contains("TryReadSelectionFromView", source, StringComparison.Ordinal);
-        Assert.Contains("FolderViewNavigator.TryGetSelectedPaths", source, StringComparison.Ordinal);
-        Assert.Contains("RestoreStart();", body, StringComparison.Ordinal);
-        Assert.Contains("public static bool TrySelectIndex", shellInterop, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void PinnedWindowsDetachExplorerBrowseState()
-    {
-        var controllerSource = ReadSource(@"SpacePreview\Services\SpacePreviewController.cs");
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var pinBody = ReadMethod(controllerSource, "private void OnPinToggleRequested");
-
-        Assert.Contains("internal void DetachBrowseContext(bool restoreSlideshowSize = true)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("window.DetachBrowseContext();", pinBody, StringComparison.Ordinal);
-        Assert.Contains("_lastExplorerHwnd = IntPtr.Zero;", pinBody, StringComparison.Ordinal);
-        Assert.Contains("_multiSelection = null;", pinBody, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void PdfThumbnailRailsDoNotDecodeCacheManifestsOnTheUiThread()
     {
         var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
@@ -503,34 +472,6 @@ public sealed class PreviewChromeRegressionTests
         var parsed = PreviewWindow.TryReadPdfAutomationPageValue(value, totalPages, out var page);
         Assert.Equal(expected > 0, parsed);
         Assert.Equal(expected, page);
-    }
-
-    [Fact]
-    public void EnterYieldsOnceToNativePdfInputs()
-    {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var controllerSource = ReadSource(@"SpacePreview\Services\SpacePreviewController.cs");
-        var enterBody = ReadMethod(controllerSource, "private bool OnKeyDown");
-
-        Assert.Contains("public bool ConsumeEnterYieldToContent()", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ContentOwnsKeyboard()", windowSource, StringComparison.Ordinal);
-        Assert.Contains("IsPdfViewerSource(source)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("_lastContentClickInViewerChrome = false;", windowSource, StringComparison.Ordinal);
-        Assert.Contains("ConsumeEnterYieldToContent()", enterBody, StringComparison.Ordinal);
-        Assert.Contains("return false;", enterBody, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void OfficeNeighborPreconversionUsesTheExistingConversionLane()
-    {
-        var controllerSource = ReadSource(@"SpacePreview\Services\SpacePreviewController.cs");
-        var shellSource = ReadSource(@"SpacePreview\Native\ShellComInterop.cs");
-
-        Assert.Contains("CancelOfficeNeighborPreconversion();", controllerSource, StringComparison.Ordinal);
-        Assert.Contains("ContentReady +=", controllerSource, StringComparison.Ordinal);
-        Assert.Contains("ExplorerSelectionService.TryGetNeighborPaths", controllerSource, StringComparison.Ordinal);
-        Assert.Contains("OfficeDocumentPdfConverter.TryConvert(path, token, background: true)", controllerSource, StringComparison.Ordinal);
-        Assert.Contains("TryGetNeighborPaths(object window, int currentIndex, int maxNeighbors)", shellSource, StringComparison.Ordinal);
     }
 
     private static string ReadSource(string relativePath) => TestSource.Read(relativePath);

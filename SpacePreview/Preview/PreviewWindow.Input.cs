@@ -1,25 +1,8 @@
-using System.Buffers.Binary;
-using System.Collections.Specialized;
-using System.Diagnostics;
-using System.IO;
-using System.Net;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Animation;
-using System.Windows.Media.Effects;
-using System.Windows.Media.Imaging;
-using System.Windows.Media.Media3D;
-using System.Windows.Threading;
-using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 using SpacePreview.Native;
 using SpacePreview.Services;
@@ -29,6 +12,13 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
+    /// <summary>
+    /// Stopwatch stamp of the key press that started the open or browse now
+    /// being shown; 0 when no key started it. The controller sets it before
+    /// each ShowPreview so the reveal clock can start at the input.
+    /// </summary>
+    internal long InputStamp { get; set; }
+
     /// <summary>
     /// Ctrl+F reached the browser while it owned the keyboard. Only the PDF
     /// viewer actually opens a find bar for it (plain pages have no find UI
@@ -59,8 +49,7 @@ public partial class PreviewWindow
 
     /// <summary>
     /// While the content's find bar is open, typed keys are the user's words:
-    /// Space is a literal space and Enter is "next match". The hook checks
-    /// this before claiming either key for its preview meaning.
+    /// Space is a literal space and Enter is "next match".
     /// </summary>
     public bool IsEscapeYieldArmed => _escapeYieldsToContent;
 
@@ -71,21 +60,16 @@ public partial class PreviewWindow
     /// not "open". A click anywhere in the document body keeps the promise;
     /// only a click in the viewer's chrome band yields the key.
     /// </summary>
+    internal bool EnterYieldsToContent =>
+        _lastContentClickInViewerChrome
+        && ContentOwnsKeyboard()
+        && FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2.Source: { } source }
+        && IsPdfViewerSource(source);
+
+    /// <summary>Spends the toolbar click: the yield holds for one Enter.</summary>
     public bool ConsumeEnterYieldToContent()
     {
-        if (!_lastContentClickInViewerChrome)
-        {
-            return false;
-        }
-
-        if (!ContentOwnsKeyboard())
-        {
-            _lastContentClickInViewerChrome = false;
-            return false;
-        }
-
-        var yield = FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2.Source: { } source }
-            && IsPdfViewerSource(source);
+        var yield = EnterYieldsToContent;
         _lastContentClickInViewerChrome = false;
         return yield;
     }
@@ -99,6 +83,10 @@ public partial class PreviewWindow
     /// <summary>Media by what is actually playing: a shortcut to a video counts.</summary>
     public bool IsMediaPreview =>
         CurrentPath is not null && FileKinds.IsMedia(_shortcutTarget ?? CurrentPath);
+
+    /// <summary>A player whose page is up, so Space and the arrows can reach it.</summary>
+    internal bool IsMediaPlayable =>
+        IsMediaPreview && FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2: not null };
 
     private bool IsCurrentContentPath(string path) =>
         string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase)
@@ -145,38 +133,25 @@ public partial class PreviewWindow
         return false;
     }
 
-    public bool ShouldBrowseWithPreviewArrowKeys(bool vertical)
-    {
-        if (IsPinned || CurrentPath is null)
-        {
-            return false;
-        }
+    /// <summary>The user clicked into the content, so up and down may be its keys.</summary>
+    internal bool UserEngagedContent => _userEngagedContent;
 
-        if (Keyboard.FocusedElement is System.Windows.Controls.Primitives.TextBoxBase)
-        {
-            return false;
-        }
+    /// <summary>A WPF text box in this window holds the keyboard.</summary>
+    internal bool HasTextFocus =>
+        Keyboard.FocusedElement is TextBoxBase box && GetWindow(box) == this;
 
-        // Left/right always browse - the main browsing rule. Media
-        // seeking is handled by the scrubber; keys that mean previous/next
-        // everywhere must not change meaning on a video. Only up/down yield
-        // to content the user clicked into (document scroll, player volume),
-        // and engagement means the user clicked the content area - a
-        // browser view that grabbed focus on its own does not count.
-        if (vertical && _userEngagedContent && ContentOwnsKeyboard())
-        {
-            return false;
-        }
+    internal bool CanRotateFromKeyboard => !_isFileDialogMode && _rotationSession is not null;
 
-        return true;
-    }
+    internal void RotateFromKeyboard(int direction) => RotateCurrentImage(direction);
+
+    internal void ToggleFillScreen() => ToggleMaximize();
 
     /// <summary>
     /// True when keyboard focus sits in a child hwnd of this window (the
     /// browser view) rather than in the WPF chrome. WPF cannot answer this
     /// reliably for a windowed WebView2, so ask Win32 directly.
     /// </summary>
-    private bool ContentOwnsKeyboard()
+    internal bool ContentOwnsKeyboard()
     {
         var info = new NativeMethods.GUITHREADINFO
         {
@@ -191,6 +166,24 @@ public partial class PreviewWindow
         }
 
         return NativeMethods.GetAncestor(info.hwndFocus, NativeMethods.GA_ROOT) == Hwnd;
+    }
+
+    /// <summary>
+    /// A window from this preview's browser processes: a print dialog, a file
+    /// chooser or a prompt the page opened. It belongs to the glance.
+    /// </summary>
+    internal bool IsWebViewWindow(IntPtr root)
+    {
+        if (root == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var processId = NativeMethods.GetWindowProcessId(root);
+        lock (_popupSync)
+        {
+            return _webViewProcessIds.Contains(processId);
+        }
     }
 
     public bool IsOutsideDismissSuppressed =>
@@ -220,9 +213,32 @@ public partial class PreviewWindow
         return false;
     }
 
+    /// <summary>
+    /// The window's own keys. The keyboard hook claims Space, Esc, Enter, the
+    /// arrows and the header shortcuts for a transient preview before they
+    /// arrive here; this handles what the hook leaves to the window (copy, a
+    /// pinned window's keys) and keeps sign mode's keys with the page.
+    /// </summary>
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
-        if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control && e.Key == Key.C)
+        // Sign mode: Space, Enter and the arrows belong to the page and its
+        // date editor. Esc walks the mode's layers unless a text box takes it.
+        if (_fillSignSurface is not null
+            && e.Key is Key.Space or Key.Enter or Key.Escape or Key.Left or Key.Right or Key.Up or Key.Down)
+        {
+            if (e.Key == Key.Escape && Keyboard.FocusedElement is not TextBoxBase)
+            {
+                RequestFillSignEscape();
+                e.Handled = true;
+                return;
+            }
+
+            base.OnPreviewKeyDown(e);
+            return;
+        }
+
+        var ctrl = (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control;
+        if (ctrl && e.Key == Key.C)
         {
             // Selected text copies as text; otherwise Ctrl+C copies the file
             // itself.
@@ -248,7 +264,7 @@ public partial class PreviewWindow
             return;
         }
 
-        if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control
+        if (ctrl
             && (Keyboard.Modifiers & ModifierKeys.Alt) != ModifierKeys.Alt
             && TryAdjustZoomFromShortcut(KeyInterop.VirtualKeyFromKey(e.Key == Key.System ? e.SystemKey : e.Key)))
         {
@@ -256,40 +272,9 @@ public partial class PreviewWindow
             return;
         }
 
-        if (e.Key == Key.Enter)
-        {
-            if ((Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
-            {
-                ToggleGridView();
-            }
-            else if (IsGridViewOpen)
-            {
-                CommitGridCursor();
-            }
-            else
-            {
-                OpenCurrent();
-            }
-
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Key == Key.R && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
+        if (ctrl && e.Key == Key.R)
         {
             RotateCurrentImage((Keyboard.Modifiers & ModifierKeys.Shift) == ModifierKeys.Shift ? -1 : 1);
-            e.Handled = true;
-            return;
-        }
-
-        // While the sheet is up the arrows walk its cursor, whatever the
-        // content underneath would normally do with them.
-        if (IsGridViewOpen && Keyboard.Modifiers == ModifierKeys.None
-            && e.Key is Key.Left or Key.Right or Key.Up or Key.Down)
-        {
-            MoveGridCursor(
-                e.Key switch { Key.Left => -1, Key.Right => 1, _ => 0 },
-                e.Key switch { Key.Up => -1, Key.Down => 1, _ => 0 });
             e.Handled = true;
             return;
         }
@@ -301,36 +286,17 @@ public partial class PreviewWindow
             return;
         }
 
-        // Left and right browse the folder even when the preview holds the
-        // keyboard - same as the chevrons, under the same one policy the
-        // hook consults (media keeps its seek, text keeps its caret).
-        if (e.Key is Key.Left or Key.Right
-            && Keyboard.Modifiers == ModifierKeys.None
-            && ShouldBrowseWithPreviewArrowKeys(vertical: false))
+        // A pinned window keeps its own Enter and Esc: open the file, close
+        // the window.
+        if (IsPinned && Keyboard.Modifiers == ModifierKeys.None)
         {
-            BrowseRequested?.Invoke(this, e.Key == Key.Left ? PreviewBrowseDirection.Previous : PreviewBrowseDirection.Next);
-            e.Handled = true;
-            return;
-        }
-
-        if (e.Key is Key.Escape or Key.Space)
-        {
-            if (e.Key == Key.Escape && TryConsumeEscapeLayer())
+            if (e.Key == Key.Enter)
             {
+                OpenCurrent();
                 e.Handled = true;
                 return;
             }
 
-            if (!IsPinned)
-            {
-                DismissRequested?.Invoke(this, EventArgs.Empty);
-                e.Handled = true;
-                return;
-            }
-
-            // Pinned: Space stays with the content (play/pause, page down),
-            // but Esc is the universal escape hatch - it closes this window
-            // the same way as the close button.
             if (e.Key == Key.Escape)
             {
                 CloseRequested?.Invoke(this, EventArgs.Empty);

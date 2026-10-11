@@ -1,104 +1,45 @@
-using SpacePreview.Native;
-
 namespace SpacePreview.Services;
 
+/// <summary>
+/// Tells a held Space from a new press, from the hook's own events alone.
+/// A press the keymap acted on latches until its key-up; its auto-repeats
+/// then carry no new meaning. A lost key-up expires on its own once the
+/// repeats stop arriving.
+/// </summary>
 internal sealed class SpaceKeyLatch
 {
-    private static readonly TimeSpan DefaultRepairDelay = TimeSpan.FromMilliseconds(250);
+    private readonly uint _repeatWindowMilliseconds;
+    private bool _held;
+    private uint _lastDownTime;
 
-    private readonly object _gate = new();
-    private readonly Func<int, bool> _isKeyDown;
-    private readonly TimeSpan _repairDelay;
-    private bool _isDown;
-    private CancellationTokenSource? _repair;
-
-    public SpaceKeyLatch(Func<int, bool>? isKeyDown = null, TimeSpan? repairDelay = null)
+    /// <param name="repeatWindowMilliseconds">
+    /// Longest gap between two downs of one hold: the keyboard repeat delay
+    /// plus slack. Windows' slowest delay is 1 s, its slowest rate 400 ms.
+    /// </param>
+    public SpaceKeyLatch(uint repeatWindowMilliseconds)
     {
-        _isKeyDown = isKeyDown ?? NativeMethods.IsKeyDown;
-        _repairDelay = repairDelay ?? DefaultRepairDelay;
+        _repeatWindowMilliseconds = repeatWindowMilliseconds;
     }
 
-    public bool TryPress()
-    {
-        lock (_gate)
-        {
-            if (_isDown)
-            {
-                return false;
-            }
+    /// <summary>The window for this machine's keyboard repeat delay (0 to 3, 250 ms steps).</summary>
+    public static uint RepeatWindowFor(int keyboardDelaySetting) =>
+        (uint)(Math.Clamp(keyboardDelaySetting, 0, 3) + 1) * 250 + 200;
 
-            _isDown = true;
-            ScheduleRepair();
-            return true;
-        }
-    }
+    public bool IsRepeat(uint time) =>
+        _held && unchecked(time - _lastDownTime) <= _repeatWindowMilliseconds;
 
-    public void Release(int vk)
+    /// <summary>Records a Space down. A fresh press latches only when the keymap acted on it.</summary>
+    public void Press(uint time, bool acted)
     {
-        if (vk != NativeMethods.VK_SPACE)
+        if (!IsRepeat(time))
         {
-            return;
+            _held = acted;
         }
 
-        lock (_gate)
-        {
-            Clear();
-        }
+        _lastDownTime = time;
     }
 
-    public void Reset()
-    {
-        lock (_gate)
-        {
-            Clear();
-        }
-    }
+    public void Release() => _held = false;
 
-    internal void RepairIfReleased()
-    {
-        lock (_gate)
-        {
-            RepairIfReleasedCore();
-        }
-    }
-
-    private void ScheduleRepair()
-    {
-        _repair?.Cancel();
-        var repair = new CancellationTokenSource();
-        _repair = repair;
-
-        _ = Task.Run(async () =>
-        {
-            try
-            {
-                await Task.Delay(_repairDelay, repair.Token);
-                lock (_gate)
-                {
-                    if (!repair.IsCancellationRequested)
-                    {
-                        RepairIfReleasedCore();
-                    }
-                }
-            }
-            catch (OperationCanceledException)
-            {
-            }
-        });
-    }
-
-    private void RepairIfReleasedCore()
-    {
-        if (_isDown && !_isKeyDown(NativeMethods.VK_SPACE))
-        {
-            Clear();
-        }
-    }
-
-    private void Clear()
-    {
-        _isDown = false;
-        _repair?.Cancel();
-        _repair = null;
-    }
+    public void Reset() => _held = false;
 }
