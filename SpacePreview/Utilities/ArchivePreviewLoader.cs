@@ -103,9 +103,15 @@ internal static class ArchivePreviewLoader
         return listing.Truncated ? $"{summary} · Partial list" : summary;
     }
 
+    /// <summary>
+    /// Out of time is a floor, never a reason to try the archive again
+    /// another way: the fallback below has no clock.
+    /// </summary>
     private static ArchiveListing? TryWalkCompressedTar(string path, TimeSpan budget, CancellationToken token)
     {
-        using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var stream = new DeadlineStream(file, budget, token);
+        var tree = new TreeBuilder();
         IReader reader;
         try
         {
@@ -113,8 +119,9 @@ internal static class ArchivePreviewLoader
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            token.ThrowIfCancellationRequested();
             DiagnosticLog.Write($"compressed tar probe failed {path}: {ex.GetType().Name}");
-            return null;
+            return stream.Expired ? tree.Build(stopped: true) : null;
         }
 
         using (reader)
@@ -122,18 +129,17 @@ internal static class ArchivePreviewLoader
             if (reader.Type != ArchiveType.Tar)
             {
                 // A single compressed file (notes.txt.gz) lists as an archive below.
-                return null;
+                return stream.Expired ? tree.Build(stopped: true) : null;
             }
 
-            var tree = new TreeBuilder();
-            var clock = Stopwatch.StartNew();
             var stopped = false;
             while (true)
             {
                 token.ThrowIfCancellationRequested();
                 try
                 {
-                    // Moving on decompresses the previous entry's data.
+                    // Moving on decompresses the previous entry's data, which
+                    // the stream stops when the clock or the user says so.
                     if (!reader.MoveToNextEntry())
                     {
                         break;
@@ -141,9 +147,11 @@ internal static class ArchivePreviewLoader
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
+                    token.ThrowIfCancellationRequested();
+
                     // A cut-off download still lists what it holds, as a floor.
                     DiagnosticLog.Write($"compressed tar walk stopped {path}: {ex.GetType().Name}");
-                    if (tree.IsEmpty)
+                    if (tree.IsEmpty && !stream.Expired)
                     {
                         return null;
                     }
@@ -154,14 +162,15 @@ internal static class ArchivePreviewLoader
 
                 var entry = reader.Entry;
                 tree.Add(entry.Key, entry.IsDirectory, entry.Size, token);
-                if (clock.Elapsed >= budget)
+                if (stream.Expired)
                 {
                     stopped = true;
                     break;
                 }
             }
 
-            return tree.Build(stopped);
+            token.ThrowIfCancellationRequested();
+            return tree.Build(stopped || stream.Expired);
         }
     }
 
@@ -318,6 +327,63 @@ internal static class ArchivePreviewLoader
         {
             _totalSize ??= Size + Children.Values.Sum(c => c.TotalSize());
             return _totalSize.Value;
+        }
+    }
+
+    /// <summary>
+    /// The compressed bytes under a tar walk. Every step of decompression,
+    /// format detection included, reads through here, so a read past the
+    /// clock or after the user has left is refused mid-entry.
+    /// </summary>
+    private sealed class DeadlineStream(Stream inner, TimeSpan budget, CancellationToken token) : Stream
+    {
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+
+        public bool Expired => _clock.Elapsed >= budget;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => inner.CanSeek;
+
+        public override bool CanWrite => false;
+
+        public override long Length => inner.Length;
+
+        public override long Position
+        {
+            get => inner.Position;
+            set => inner.Position = value;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            Check();
+            return inner.Read(buffer, offset, count);
+        }
+
+        public override int Read(Span<byte> buffer)
+        {
+            Check();
+            return inner.Read(buffer);
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) => inner.Seek(offset, origin);
+
+        public override void Flush()
+        {
+        }
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        private void Check()
+        {
+            token.ThrowIfCancellationRequested();
+            if (Expired)
+            {
+                throw new TimeoutException("The archive walk ran out of time.");
+            }
         }
     }
 }
