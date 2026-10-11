@@ -6,7 +6,7 @@
 
 **One look.** The header, menus, Settings and every page Glimpse draws share one set of colors, type and scrollbars, in dark and light. In light theme the PDF toolbar is light too. The Open button shows your default app's icon, keeps the same width for every file, and its menu starts with Open with. F11 and the zoom shortcuts work without clicking into the preview first.
 
-**Fill & Sign you can trust.** Signatures, dates and stamps save exactly where the screen showed them, including on A4 and rotated pages. A PDF that can't be signed says so before you start. Leaving with unsaved work always asks first, whether you press Esc, Space or an arrow, close the preview, unpin it or quit Glimpse. Pages render in a separate process, so a difficult PDF can no longer take Glimpse down.
+**Fill & Sign you can trust.** Signatures, dates and stamps save exactly where the screen showed them, including on A4 and rotated pages. A PDF that can't be signed says so before you start. Leaving with unsaved work always asks first, whether you press Esc, Space or an arrow, close the preview, unpin it or quit Glimpse. Work you haven't saved also keeps itself: if Glimpse closes for an update, a restart, a sign-out or a crash, the Sign button reads Resume the next time you open that PDF and brings the work back on the page you left. Pages render in a separate process, so a difficult PDF can no longer take Glimpse down.
 
 **Documents.** The page rail no longer stops at the first ten pages of a long PDF. Large PowerPoint decks open on their first slides while the rest converts, then switch to the whole deck at the slide you're on. Templates, slide shows, macro-enabled and OpenDocument files all convert now, links in Office documents still work, and spreadsheets follow the app theme. A one-page document fits its window whole.
 
@@ -21,6 +21,7 @@
 - Audio shows the track's cover and tags; heading links in Markdown work
 - Space in a second Explorer window moves the preview there
 - Launching Glimpse while it is already running opens Settings, which replaces the Hide tray icon option
+- Settings lists anything this PC is missing for full previews, with one button to get each, and the signatures you've saved, which you can delete there
 - Copy diagnostics in Settings copies the version and recent log lines for a bug report
 - Settings are saved safely, and a damaged settings file is set aside instead of lost
 
