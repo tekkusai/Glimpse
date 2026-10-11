@@ -208,6 +208,31 @@ public sealed class OfficeDocumentPdfConverterTests
     }
 
     [Fact]
+    public void ACountNestedPastTheLimitIsNotRead()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "deep.pptx");
+
+        // Read with no depth bound, a value this deep can overflow the
+        // stack; refused, the deck simply has no count.
+        var depth = XmlNesting.MaxDepth + 50;
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
+        {
+            WriteEntry(
+                archive,
+                "docProps/app.xml",
+                "<Properties>" + string.Concat(Enumerable.Repeat("<a>", depth)) + "<Slides>51</Slides>"
+                    + string.Concat(Enumerable.Repeat("</a>", depth)) + "</Properties>");
+        }
+
+        Assert.Null(OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Presentation));
+
+        path = Path.Combine(temp.Path, "shallow.pptx");
+        WriteOfficeAppProperties(path, "Slides", 51);
+        Assert.Equal(51, OfficeDocumentPdfConverter.TryCreateProgressivePlan(path, OfficeKind.Presentation)?.ExpectedPageCount);
+    }
+
+    [Fact]
     public void ProgressivePlanAvoidsShortImageHeavyDocuments()
     {
         using var temp = new TempDirectory();

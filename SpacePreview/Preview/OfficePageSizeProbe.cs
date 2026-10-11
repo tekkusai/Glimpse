@@ -91,9 +91,7 @@ internal static class OfficePageSizeProbe
             XmlResolver = null
         };
 
-        using var stream = entry.Open();
-        using var reader = XmlReader.Create(stream, settings);
-        return XDocument.Load(reader, LoadOptions.None);
+        return XmlNesting.Load(entry.Open, settings, LoadOptions.None);
     }
 
     private static bool TryReadDoubleAttribute(XElement element, string localName, out double value) =>

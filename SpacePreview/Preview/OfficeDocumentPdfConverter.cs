@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Linq;
 using Microsoft.Win32;
 using SpacePreview.Services;
@@ -1116,8 +1117,10 @@ internal static class OfficeDocumentPdfConverter
                 return null;
             }
 
-            using var stream = entry.Open();
-            var document = XDocument.Load(stream, LoadOptions.None);
+            var document = XmlNesting.Load(
+                entry.Open,
+                new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null },
+                LoadOptions.None);
             var text = app is not null
                 ? document.Descendants().FirstOrDefault(element => element.Name.LocalName.Equals(ooxmlElement, StringComparison.OrdinalIgnoreCase))?.Value
                 : document.Descendants().FirstOrDefault(element => element.Name.LocalName == "document-statistic")

@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Windows.Media.Imaging;
 using System.Xml;
 using System.Xml.Linq;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
@@ -107,14 +108,13 @@ internal static class OfficeThumbnail
             return null;
         }
 
-        using var stream = rels.Open();
-        using var reader = XmlReader.Create(stream, new XmlReaderSettings
+        var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
             XmlResolver = null,
             MaxCharactersInDocument = MaxRelationshipsBytes
-        });
-        var relationship = XDocument.Load(reader)
+        };
+        var relationship = XmlNesting.Load(rels.Open, settings, LoadOptions.None)
             .Descendants(PackageRelationships + "Relationship")
             .FirstOrDefault(element =>
                 ((string?)element.Attribute("Type"))?.EndsWith(ThumbnailRelationshipSuffix, StringComparison.OrdinalIgnoreCase) == true

@@ -2,6 +2,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Xml;
 using System.Xml.Linq;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
@@ -167,14 +168,13 @@ internal static class OfficePreviewSourceSanitizer
             throw new InvalidDataException("Office relationships exceeded the preview safety limit.");
         }
 
-        using var input = entry.Open();
-        using var reader = XmlReader.Create(input, new XmlReaderSettings
+        var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Prohibit,
             XmlResolver = null,
             MaxCharactersInDocument = MaxRelationshipsBytes
-        });
-        var document = XDocument.Load(reader, LoadOptions.PreserveWhitespace);
+        };
+        var document = XmlNesting.Load(entry.Open, settings, LoadOptions.PreserveWhitespace);
         cancellationToken.ThrowIfCancellationRequested();
         return document;
     }
