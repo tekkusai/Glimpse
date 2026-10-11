@@ -215,6 +215,7 @@ public sealed class OfficeConversionJobTests
         // Another preview queues behind the deck's first pages, so the rest
         // of the deck waits its turn, and the user leaves meanwhile.
         var otherJob = OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
+        await WaitingInLaneAsync(1);
         firstPages.Finish(pages: 6);
         await job.FirstContent.WaitAsync(Patience);
         var otherRun = await engine.RunAsync(1);
