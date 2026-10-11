@@ -72,12 +72,21 @@ public partial class PreviewWindow
                     continue;
                 }
 
+                // A view released mid-capture never answers; the shot goes on
+                // without it at once, so the frame keeps its moment.
+                var gone = new TaskCompletionSource();
+                DependencyPropertyChangedEventHandler hidden = (_, _) => gone.TrySetResult();
+                webView.IsVisibleChanged += hidden;
                 try
                 {
-                    // A view disposed mid-capture never answers; the shot goes on without it.
-                    var json = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}")
-                        .WaitAsync(TimeSpan.FromSeconds(2));
-                    using var document = JsonDocument.Parse(json);
+                    var capture = core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}");
+                    if (await Task.WhenAny(capture, gone.Task, Task.Delay(TimeSpan.FromSeconds(2))) != capture)
+                    {
+                        DiagnosticLog.Write("probe composite webview skipped: it left mid-capture");
+                        continue;
+                    }
+
+                    using var document = JsonDocument.Parse(await capture);
                     var bytes = Convert.FromBase64String(document.RootElement.GetProperty("data").GetString() ?? string.Empty);
                     var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
                     var origin = webView.TransformToAncestor(this).Transform(new Point(0, 0));
@@ -88,6 +97,10 @@ public partial class PreviewWindow
                 catch (Exception ex)
                 {
                     DiagnosticLog.Write($"probe composite webview skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    webView.IsVisibleChanged -= hidden;
                 }
             }
         }
