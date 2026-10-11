@@ -333,8 +333,8 @@ internal sealed class FillSignSurface : Grid
 
     /// <summary>
     /// The writer's verdict on this file. A readable file gets its true page
-    /// count; one the writer cannot update says why where Save would be,
-    /// before any work is placed on it.
+    /// count and live tools; one the writer cannot update says why where
+    /// Save would be, and no work is ever placed on it.
     /// </summary>
     public void ApplyCheck(PdfSignCheck check)
     {
@@ -342,6 +342,7 @@ internal sealed class FillSignSurface : Grid
         {
             _totalPages = Math.Max(check.PageCount, _pageIndex + 1);
             UpdatePageChrome();
+            _tools.IsEnabled = true;
             return;
         }
 
@@ -371,11 +372,14 @@ internal sealed class FillSignSurface : Grid
         _signaturePill = BuildToolPill("Signature", SignPlacementKind.Signature);
         _newStampPill = HousePill.Build("New stamp", ReplaceStamp, PillRole.Ghost);
         _newStampPill.Visibility = Visibility.Collapsed;
+        // Off until the writer's verdict: work goes on a file only once a
+        // draft can keep it. A quick check never shows them off at all.
         _tools = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(12, 0, 0, 0),
+            IsEnabled = false,
             Children =
             {
                 _signaturePill,

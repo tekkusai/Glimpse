@@ -117,13 +117,9 @@ public partial class PreviewWindow
             return;
         }
 
+        // The page shows now; its tools wait for the check below.
         var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
-        // Kept only once the check passes: a draft of work this file cannot
-        // save would offer to resume it forever.
-        SignDraftKeeper? keeper = null;
-        surface.WorkChanged += () => keeper?.Update(surface.PageIndex, surface.Placements);
         surface.ExitRequested += ExitFillSignMode;
-        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
         surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, pages, target);
 
         _fillSignParkedContent = current;
@@ -148,7 +144,13 @@ public partial class PreviewWindow
             check = new PdfSignCheck(check.PageCount, PdfFillSignWriter.UnsupportedStructure);
         }
 
-        if (check.Problem is not null)
+        if (check.Problem is null && file is null)
+        {
+            // A draft is pinned to the file's stamp: no stamp, no draft, no work.
+            check = new PdfSignCheck(check.PageCount, "This PDF can't be read right now.");
+        }
+
+        if (check.Problem is not null || file is not { } stamp)
         {
             // A problem never ends a draft: drafts exist only for files that
             // passed this check, and one waits for its file to read again.
@@ -163,20 +165,15 @@ public partial class PreviewWindow
             DiagnosticLog.Write($"fill-sign restored placements={draft.Placements.Count}");
         }
 
-        if (file is { } stamp)
-        {
-            keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
-            _signDraft = keeper;
-            // Work placed while the check ran had no keeper to hear it.
-            if (surface.Placements.Count != (draft?.Placements.Count ?? 0) || surface.PageIndex != pageIndex)
-            {
-                keeper.Update(surface.PageIndex, surface.Placements);
-            }
-        }
-
+        // The keeper listens before the tools come alive: no mark is ever
+        // made that a draft does not keep.
+        var keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
+        _signDraft = keeper;
+        surface.WorkChanged += () => keeper.Update(surface.PageIndex, surface.Placements);
+        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
         surface.ApplyCheck(check);
         pages.PageCount = check.PageCount;
-        pages.KeepNeighbors(pageIndex);
+        pages.KeepNeighbors(surface.PageIndex);
     }
 
     private async Task ShowFillSignPageAsync(FillSignSurface surface, SignPageCache pages, int pageIndex)
@@ -286,7 +283,7 @@ public partial class PreviewWindow
         deferredFailure?.Invoke();
     }
 
-    private async Task SaveFillSignAsync(FillSignSurface surface, SignDraftKeeper? keeper, IReadOnlyList<SignPlacement> placements, bool overwrite)
+    private async Task SaveFillSignAsync(FillSignSurface surface, SignDraftKeeper keeper, IReadOnlyList<SignPlacement> placements, bool overwrite)
     {
         if (_fillSignPath is not { } path
             || !ReferenceEquals(_fillSignSurface, surface)
@@ -348,7 +345,7 @@ public partial class PreviewWindow
         }
 
         DiagnosticLog.Write($"fill-sign saved {(overwrite ? "in place" : "as copy")} placements={placements.Count}");
-        keeper?.Discard();
+        keeper.Discard();
         if (!StillOwnsSurface())
         {
             // Saving is file work and still completes; navigation is UI

@@ -548,7 +548,7 @@ public sealed class SignDraftTests
     });
 
     [Fact]
-    public Task WorkPlacedWhileTheFileIsCheckedReachesTheDraft() => InWindow(async (root, window) =>
+    public Task TheToolsWaitForTheFileCheckSoEveryMarkHasADraft() => InWindow(async (root, window) =>
     {
         var pdf = SignablePdf(root);
         using var checking = new ManualResetEventSlim();
@@ -561,12 +561,36 @@ public sealed class SignDraftTests
         var entering = EnterAsync(window, pdf);
         Assert.True(await EventuallyAsync(() => Fields.Get<object?>(window, "_fillSignSurface") is not null));
         var surface = Fields.Get<FillSignSurface>(window, "_fillSignSurface");
-        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        // The page is up, but nothing goes on it before a draft can keep it.
+        Assert.False(Button(surface, "Signature").IsEnabled);
+        Assert.False(Button(surface, "Date").IsEnabled);
+        Assert.False(Button(surface, "Stamp").IsEnabled);
+        Assert.False(Button(surface, "Save").IsEnabled);
+        Assert.True(Button(surface, "Cancel").IsEnabled);
+
         checking.Set();
         await entering;
+        Assert.True(Button(surface, "Date").IsEnabled);
 
-        // No later change, no close, no app end: the pause alone writes it.
-        Assert.True(await EventuallyAsync(() => File.Exists(SignDrafts.PathFor(pdf))), "work placed during the check never reached its draft");
+        // The very first mark is kept, even if the app ends at once.
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        Assert.True(SignDraftKeeper.FlushAll());
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+    });
+
+    [Fact]
+    public Task AFileWithNoStampToPinADraftToOffersNoTools() => InWindow(async (root, window) =>
+    {
+        // Gone when the draft looked, back by the time the writer read it.
+        var pdf = Path.Combine(root, "docs", "contract.pdf");
+        window.CheckSignable = _ => new PdfSignCheck(1, null);
+
+        var surface = await EnterAsync(window, pdf);
+
+        Assert.Contains("can't be read right now", Fields.Get<TextBlock>(surface, "_centerText").Text, StringComparison.Ordinal);
+        Assert.Equal(Visibility.Collapsed, Fields.Get<StackPanel>(surface, "_tools").Visibility);
+        Assert.Null(Fields.Get<SignDraftKeeper?>(window, "_signDraft"));
     });
 
     [Fact]
@@ -662,8 +686,10 @@ public sealed class SignDraftTests
     }
 
     private static void Press(DependencyObject root, string label) =>
-        Descendants(root).OfType<ButtonBase>().First(button => button.Content as string == label)
-            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        Button(root, label).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static ButtonBase Button(DependencyObject root, string label) =>
+        Descendants(root).OfType<ButtonBase>().First(button => button.Content as string == label);
 
     private static async Task<bool> EventuallyAsync(Func<bool> condition)
     {
