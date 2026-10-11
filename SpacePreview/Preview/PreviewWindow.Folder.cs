@@ -15,9 +15,9 @@ namespace SpacePreview.Preview;
 public partial class PreviewWindow
 {
     private const double FolderArtSide = 184;
-    private const double FolderListWidth = 480;
+    private const double ListingWidth = 480;
     // Three rows: at the smallest stage the list fits without lifting the card.
-    private const double FolderListMinHeight = 84;
+    private const double ListingMinHeight = 84;
     private const int FolderBreakdownRowsCap = 300;
     private const int FolderSizeScanEntryBudget = 25000;
     private static readonly TimeSpan FolderSizeScanStartDelay = TimeSpan.FromMilliseconds(220);
@@ -45,21 +45,8 @@ public partial class PreviewWindow
             activate: (node, _) => OpenFolderChild(Path.Combine(path, node.Name), node.IsDirectory),
             enter: (node, row) => _folderHover?.OnRowEnter(row, Path.Combine(path, node.Name), node.IsDirectory),
             leave: (_, row) => _folderHover?.OnRowLeave(row));
-        var listScroll = new ScrollViewer
-        {
-            Width = FolderListWidth,
-            MinHeight = FolderListMinHeight,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Top,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
-            CanContentScroll = false,
-            Content = list.Element
-        };
-        StyleScrollViewer(listScroll);
-
         var sizeLine = FactLine("Calculating size…", 0);
-        var card = BuildFileCard(visualHost, FolderTitle(path), [sizeLine], listScroll);
+        var card = BuildListingCard(visualHost, FolderTitle(path), sizeLine, list);
 
         BitmapSource? restingFolder = null;
         ShellImage? hovered = null;
@@ -95,6 +82,28 @@ public partial class PreviewWindow
         return card;
     }
 
+    /// <summary>
+    /// A folder and an archive are both lists of files, so they share one
+    /// card: the picture, the name, one fact line, and the rows with their
+    /// size bars as the footer.
+    /// </summary>
+    private static FrameworkElement BuildListingCard(FrameworkElement visual, string title, TextBlock facts, EntryList list)
+    {
+        var listScroll = new ScrollViewer
+        {
+            Width = ListingWidth,
+            MinHeight = ListingMinHeight,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Top,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            CanContentScroll = false,
+            Content = list.Element
+        };
+        StyleScrollViewer(listScroll);
+        return BuildFileCard(visual, title, [facts], listScroll);
+    }
+
     private static string FolderTitle(string path)
     {
         var title = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -103,23 +112,27 @@ public partial class PreviewWindow
 
     private void StartFolderSizeScan(string path, TextBlock sizeLine, EntryList list, CancellationToken token)
     {
+        // The pulse's clock is held so it can be stopped: a forever clock
+        // that is only detached keeps WPF rendering frames for nobody.
+        AnimationClock? pulse = null;
         if (Motion.Enabled)
         {
-            sizeLine.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.45, TimeSpan.FromMilliseconds(700))
+            pulse = new DoubleAnimation(1, 0.45, TimeSpan.FromMilliseconds(700))
             {
                 AutoReverse = true,
                 RepeatBehavior = RepeatBehavior.Forever
-            });
+            }.CreateClock();
+            sizeLine.ApplyAnimationClock(OpacityProperty, pulse);
         }
 
-        _ = RunFolderSizeScanAsync(path, sizeLine, list, token);
+        _ = RunFolderSizeScanAsync(path, sizeLine, list, pulse, token);
     }
 
     /// <summary>
     /// One walker owns the disk at a time. Superseded folders cancel while
     /// they wait, so rapid browsing leaves only the newest one queued.
     /// </summary>
-    private async Task RunFolderSizeScanAsync(string path, TextBlock sizeLine, EntryList list, CancellationToken token)
+    private async Task RunFolderSizeScanAsync(string path, TextBlock sizeLine, EntryList list, AnimationClock? pulse, CancellationToken token)
     {
         var entered = false;
         try
@@ -185,7 +198,8 @@ public partial class PreviewWindow
         finally
         {
             // Done, failed or cancelled: the pulse never outlives the walk.
-            sizeLine.BeginAnimation(OpacityProperty, null);
+            pulse?.Controller?.Stop();
+            sizeLine.ApplyAnimationClock(OpacityProperty, null);
             sizeLine.Opacity = 1;
             if (entered)
             {

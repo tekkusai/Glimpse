@@ -8,9 +8,9 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Preview;
 
 /// <summary>
-/// One row of a listing. <see cref="Share"/> (0 to 1) fills a folder
-/// breakdown's size meter; <see cref="Children"/> makes an archive folder
-/// expandable and is only called when the user opens it.
+/// One row of a listing. <see cref="Share"/> (0 to 1) fills the row's size
+/// meter; <see cref="Children"/> makes an archive folder expandable and is
+/// only called when the user opens it.
 /// </summary>
 internal sealed record EntryNode(
     string Name,

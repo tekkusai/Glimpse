@@ -1,5 +1,6 @@
+using System.IO;
+using System.Threading;
 using System.Windows;
-using System.Windows.Controls;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
@@ -10,36 +11,47 @@ public partial class PreviewWindow
     private const int ArchiveChildrenCap = 200;
 
     /// <summary>
-    /// An archive is its listing: a summary line over the same rows a folder
-    /// breakdown uses. Folders expand on demand, so a huge archive costs
-    /// nothing until it is explored.
+    /// An archive lists like a folder: the same card with the archive's own
+    /// picture, its name, what it holds, and a size bar on every row.
+    /// Folders inside expand on demand, so a huge archive costs nothing
+    /// until it is explored. Null when it cannot be read.
     /// </summary>
-    private static FrameworkElement BuildArchivePreview(ArchiveListing listing)
+    private async Task<FrameworkElement?> TryBuildArchiveCardAsync(string path, CancellationToken token)
     {
-        var palette = Theme.Current;
-        var stack = new StackPanel { Margin = new Thickness(24, 20, 24, 24) };
-        stack.Children.Add(new TextBlock
+        var dpi = PixelsPerDip();
+        var iconPixels = DevicePixels(CardIconSide, dpi);
+        var (listing, image) = await Task.Run(
+            () =>
+            {
+                var read = ArchivePreviewLoader.TryLoad(path, token);
+                return (read, read is null ? null : ShellThumbnailProvider.TryGetThumbnail(path, iconSize: iconPixels));
+            },
+            token);
+        if (listing is null)
         {
-            Text = ArchivePreviewLoader.Describe(listing),
-            Margin = new Thickness(8, 0, 0, 12),
-            FontSize = Metrics.FontBody,
-            Foreground = Theme.Brush(palette.TextSecondary),
-            TextTrimming = TextTrimming.CharacterEllipsis
-        });
+            return null;
+        }
 
-        var list = new EntryList(ArchiveRootCap, ArchiveChildrenCap);
-        list.Show(listing.Roots.Select(ArchiveEntry).ToList());
-        stack.Children.Add(list.Element);
-        return BuildScrollSurface(stack, new Thickness(0), horizontal: false, palette.CanvasBg);
+        var list = new EntryList(ArchiveRootCap, ArchiveChildrenCap, meters: true);
+        list.Show(ArchiveRows(listing.Roots, listing.Roots.Count == 0 ? 0 : listing.Roots.Max(node => node.Size)));
+        return BuildListingCard(BuildCardVisual(image, dpi), Path.GetFileName(path), FactLine(ArchivePreviewLoader.Describe(listing), 0), list);
     }
 
-    private static EntryNode ArchiveEntry(ArchiveNode node) => new(
-        node.Name,
-        node.IsDirectory,
-        node.IsDirectory
-            ? $"{FolderScanner.Count(node.FileCount, "file", "files")} · {FileKinds.FormatSize(node.Size)}"
-            : FileKinds.FormatSize(node.Size),
-        Children: node.IsDirectory && node.Children.Count > 0
-            ? () => node.Children.Select(ArchiveEntry).ToList()
-            : null);
+    /// <summary>
+    /// One level of rows. Every bar in the tree is measured against the
+    /// largest top-level row, so a folder's insides read as parts of it.
+    /// </summary>
+    private static IReadOnlyList<EntryNode> ArchiveRows(IReadOnlyList<ArchiveNode> nodes, long largest)
+    {
+        return nodes
+            .Select(node => new EntryNode(
+                node.Name,
+                node.IsDirectory,
+                FileKinds.FormatSize(node.Size),
+                largest > 0 ? (double)node.Size / largest : 0,
+                Children: node.IsDirectory && node.Children.Count > 0
+                    ? () => ArchiveRows(node.Children, largest)
+                    : null))
+            .ToList();
+    }
 }

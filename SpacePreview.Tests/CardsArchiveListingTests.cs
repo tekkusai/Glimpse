@@ -27,8 +27,9 @@ public sealed class CardsArchiveListingTests
         Assert.False(listing.Stopped);
         var src = Assert.Single(listing.Roots);
         Assert.Equal("src", src.Name);
-        Assert.Equal(["sub", "a.txt", "b.md"], src.Children.Select(child => child.Name));
-        Assert.Equal("TAR.GZ archive · 3 files · 26 B uncompressed", ArchivePreviewLoader.Describe(listing));
+        // Largest first, folders and files alike, as a folder ranks its rows.
+        Assert.Equal(["b.md", "sub", "a.txt"], src.Children.Select(child => child.Name));
+        Assert.Equal("3 files · 26 B uncompressed", ArchivePreviewLoader.Describe(listing));
     }
 
     [Fact]
@@ -43,7 +44,7 @@ public sealed class CardsArchiveListingTests
         Assert.NotNull(listing);
         Assert.True(listing!.Stopped);
         Assert.True(listing.Truncated);
-        Assert.StartsWith("TAR.GZ archive · At least ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
+        Assert.StartsWith("At least ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
         Assert.DoesNotContain("Partial list", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
     }
 
@@ -61,7 +62,7 @@ public sealed class CardsArchiveListingTests
 
         Assert.NotNull(listing);
         Assert.Equal(1, listing!.TotalEntries);
-        Assert.StartsWith("GZ archive · 1 file · ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
+        Assert.StartsWith("1 file · ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -77,15 +78,15 @@ public sealed class CardsArchiveListingTests
 
         var listing = ArchivePreviewLoader.TryLoad(path);
 
-        Assert.Equal("ZIP archive · 1 file · 4 B uncompressed", ArchivePreviewLoader.Describe(listing!));
+        Assert.Equal("1 file · 4 B uncompressed", ArchivePreviewLoader.Describe(listing!));
     }
 
     [Fact]
     public void AnEmptyArchiveSaysEmpty()
     {
-        var listing = new ArchiveListing("ZIP archive", 0, 0, [], Truncated: false);
+        var listing = new ArchiveListing(0, 0, [], Truncated: false);
 
-        Assert.Equal("ZIP archive · Empty", ArchivePreviewLoader.Describe(listing));
+        Assert.Equal("Empty archive", ArchivePreviewLoader.Describe(listing));
     }
 
     [Theory]

@@ -593,13 +593,10 @@ public partial class PreviewWindow : Window
             return await LoadOfficePreviewAsync(path, officeKind, version, token);
         }
 
-        if (FileKinds.IsArchive(path) || (useSignatureRouting && FileSignatures.IsArchive(signature)))
+        if ((FileKinds.IsArchive(path) || (useSignatureRouting && FileSignatures.IsArchive(signature)))
+            && await TryBuildArchiveCardAsync(path, token) is { } archive)
         {
-            var listing = await Task.Run(() => ArchivePreviewLoader.TryLoad(path, token), token);
-            if (listing is not null)
-            {
-                return BuildArchivePreview(listing);
-            }
+            return archive;
         }
 
         if (FileKinds.IsMesh(path))
