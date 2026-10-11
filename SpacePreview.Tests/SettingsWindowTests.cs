@@ -195,6 +195,24 @@ public sealed class SettingsWindowTests
     });
 
     [Fact]
+    public Task CopyDiagnosticsNamesTheVersionTheFooterShows() => WpfApp.RunAsync(async () =>
+    {
+        using var release = new ReleaseFixture { Offline = true };
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path, currentVersion: "2.9.4"));
+        var settings = Open(updates);
+        try
+        {
+            Assert.Equal($"{Branding.Name} 2.9.4", settings.VersionText.Text);
+            Assert.Contains($"Version: 2.9.4{Environment.NewLine}", await settings.DiagnosticsAsync(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            settings.Close();
+        }
+    });
+
+    [Fact]
     public Task TheAutomaticInstallToggleStartsOnAndSavesTheChoice() => WpfApp.RunAsync(() =>
     {
         using var scope = new UpdateSettingsScope();

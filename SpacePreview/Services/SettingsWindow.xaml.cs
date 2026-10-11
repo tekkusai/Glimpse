@@ -184,8 +184,6 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private static string CurrentVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
-
     private async Task FindMissingPiecesAsync()
     {
         if (_findingMissingPieces)
@@ -455,9 +453,7 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            var lines = await Task.Run(() => ReadLogTail(DiagnosticLog.Pathname, DiagnosticLogLines));
-            var engine = OfficeDocumentPdfConverter.EngineName ?? "Basic previews";
-            Clipboard.SetText(BuildDiagnostics(CurrentVersion(), engine, lines));
+            Clipboard.SetText(await DiagnosticsAsync());
         }
         catch (Exception ex)
         {
@@ -474,6 +470,14 @@ public partial class SettingsWindow : Window
     {
         _copiedTimer.Stop();
         CopyDiagnosticsButton.Content = "Copy diagnostics";
+    }
+
+    /// <summary>What Copy diagnostics copies, with the version the footer shows.</summary>
+    internal async Task<string> DiagnosticsAsync()
+    {
+        var lines = await Task.Run(() => ReadLogTail(DiagnosticLog.Pathname, DiagnosticLogLines));
+        var engine = OfficeDocumentPdfConverter.EngineName ?? "Basic previews";
+        return BuildDiagnostics(_updates.CurrentVersion.ToString(3), engine, lines);
     }
 
     /// <summary>
