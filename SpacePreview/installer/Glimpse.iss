@@ -7,7 +7,7 @@
 ; entry, and deletes the app's data folder.
 
 #ifndef MyAppVersion
-  #define MyAppVersion "2.0.0"
+  #define MyAppVersion "3.0.0"
 #endif
 #define MyAppName "Glimpse"
 #define MyAppExeName "Glimpse.exe"
