@@ -75,6 +75,13 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
+    public void WithoutAnAnswerFromGitHubItIsOnlyReady() =>
+        // Every launch asks GitHub first, so the promise waits for an answer.
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
+            Describe(new UpdateState { Pending = Release, Installer = Installer, Unanswered = true }, Checked));
+
+    [Fact]
     public void WithAutomaticInstallsOffItWaitsForTheUser() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
@@ -88,7 +95,22 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
         Assert.Equal(
             new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds."),
-            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer }, Checked));
+            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer, SetupStarted = true }, Checked));
+    }
+
+    [Fact]
+    public void InstallNowSaysInstallingOnlyOnceSetupStarts()
+    {
+        var installNow = new UpdateState { Pending = Release, Installing = true, Installer = Installer };
+
+        // Asking GitHub once more before the launch.
+        Assert.Equal(
+            new UpdateFooter("Checking for updates", FooterLink.None, "3.1.0 is ready to install."),
+            Describe(installNow with { Checking = true }, Checked));
+
+        // Between steps the link is gone and the update is only ready, though
+        // it would install on its own: Install now is installing it now.
+        Assert.Equal(new UpdateFooter(null, FooterLink.None, "3.1.0 is ready to install."), Describe(installNow with { InstallNowPressed = true }, Checked));
     }
 
     [Fact]
@@ -97,8 +119,16 @@ public sealed class UpdateFooterTests
         var failed = new UpdateState { Pending = Release, InstallFailed = true };
 
         Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."), Describe(failed, Checked));
-        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer }, Checked).Caption);
+
+        // The installer is on disk, but GitHub gave no answer before the launch.
+        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer, Unanswered = true }, Checked).Caption);
     }
+
+    [Fact]
+    public void AFailedInstallNowGivesWayOnceTheUpdateWillInstallOnItsOwn() =>
+        Assert.Equal(
+            "3.1.0 installs the next time you step away.",
+            Describe(new UpdateState { Pending = Release, Installer = Installer, InstallNowPressed = true, InstallFailed = true }, Checked).Caption);
 
     [Fact]
     public void ACheckThatGotNoAnswerSaysSoUntilOneDoes()
@@ -190,7 +220,7 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked).Caption,
-            Describe(new UpdateState { Pending = Release, Installing = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installing = true, SetupStarted = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, InstallFailed = true }, Checked).Caption,
             Describe(new UpdateState { CheckFailed = true }, Checked).Caption,

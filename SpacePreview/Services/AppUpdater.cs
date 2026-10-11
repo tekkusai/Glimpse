@@ -46,8 +46,14 @@ internal sealed record UpdateState
     /// <summary>The last Check for updates got no answer, and no check has since.</summary>
     public bool CheckFailed { get; init; }
 
-    /// <summary>Install now is downloading, or setup is on its way and Glimpse closes for a few seconds.</summary>
+    /// <summary>The most recent check, scheduled or asked, got no answer. Nothing installs on its own until one does.</summary>
+    public bool Unanswered { get; init; }
+
+    /// <summary>Install now is under way, or setup is.</summary>
     public bool Installing { get; init; }
+
+    /// <summary>Setup is on its way, and Glimpse closes for a few seconds.</summary>
+    public bool SetupStarted { get; init; }
 }
 
 /// <summary>
@@ -64,6 +70,7 @@ internal sealed class AppUpdater : IDisposable
     internal static readonly TimeSpan ReleaseAgeBeforeInstall = TimeSpan.FromHours(48);
     internal static readonly TimeSpan IdleBeforeInstall = TimeSpan.FromMinutes(3);
     internal static readonly TimeSpan RetryInstallAfter = TimeSpan.FromHours(24);
+    private static readonly TimeSpan CheckIsFreshFor = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan FirstCheckDelay = TimeSpan.FromSeconds(4);
     private static readonly TimeSpan GateInterval = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan SetupQuitsWithin = TimeSpan.FromMinutes(2);
@@ -80,8 +87,8 @@ internal sealed class AppUpdater : IDisposable
     private DispatcherTimer? _gateTimer;
     private CancellationTokenSource? _downloadCancel;
     private Task<string?>? _download;
+    private Task<bool>? _check;
     private DateTimeOffset _downloadRetryAt;
-    private DateTimeOffset _checkRetryAt;
     private bool _disposed;
 
     /// <param name="observe">The PC's half, <see cref="InstallState"/>: what is open, full screen, the shell's notification state and idle.</param>
@@ -126,7 +133,8 @@ internal sealed class AppUpdater : IDisposable
 
     private async Task CheckThenTickAsync(bool asked)
     {
-        if (await CheckAsync(asked) && State.Pending is not null)
+        // Install now asks GitHub itself, and setup ends this run.
+        if (!State.Installing && await CheckAsync(asked) && State.Pending is not null)
         {
             await TickAsync();
         }
@@ -135,11 +143,15 @@ internal sealed class AppUpdater : IDisposable
     /// <summary>
     /// Asks GitHub for the latest release and verifies its signature, every
     /// time: a release pulled, replaced or unsigned since the last check
-    /// stops being pending. True when GitHub answered.
+    /// stops being pending. True when GitHub answered. One at a time: a
+    /// caller while one runs gets its answer.
     /// </summary>
-    private async Task<bool> CheckAsync(bool asked)
+    private Task<bool> CheckAsync(bool asked) =>
+        _check is { IsCompleted: false } running ? running : _check = RunCheckAsync(asked);
+
+    private async Task<bool> RunCheckAsync(bool asked)
     {
-        if (_disposed || State.Checking || State.Installing)
+        if (_disposed)
         {
             return false;
         }
@@ -151,8 +163,7 @@ internal sealed class AppUpdater : IDisposable
             var latest = await _service.CheckForUpdateAsync(_lifetime.Token);
             var pending = latest is null ? null : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
-            _checkRetryAt = default;
-            Set(State with { Checking = false, CheckFailed = false, UpToDate = latest is null, Pending = pending });
+            Set(State with { Checking = false, CheckFailed = false, Unanswered = false, UpToDate = latest is null, Pending = pending });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
                 : $"update available current={_service.CurrentVersionText} latest={pending.VersionText}");
@@ -166,16 +177,16 @@ internal sealed class AppUpdater : IDisposable
         catch (Exception ex)
         {
             DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
-            _checkRetryAt = DateTimeOffset.UtcNow + RetryAfterFailure;
-            Set(State with { Checking = false, CheckFailed = State.CheckFailed || asked });
+            Set(State with { Checking = false, CheckFailed = State.CheckFailed || asked, Unanswered = true });
             _retryTimer?.Start();
             return false;
         }
     }
 
     /// <summary>
-    /// Settings' Install now: downloads if needed and installs at once,
-    /// in either mode. Unsaved signing work comes forward and nothing installs.
+    /// Settings' Install now: downloads if needed, makes the same test as
+    /// an automatic install and installs at once, in either mode. Unsaved
+    /// signing work comes forward and nothing installs.
     /// </summary>
     public async Task InstallNowAsync()
     {
@@ -193,11 +204,13 @@ internal sealed class AppUpdater : IDisposable
         Set(State with { Installing = true });
         var installer = State.Installer ?? await DownloadAsync(release, download: true);
 
-        // Signing may have started while it downloaded. A release that
-        // failed verification meanwhile is skipped, and says so.
-        if (installer is null || State.Pending != release || !_canQuit())
+        // A release pulled or unsigned since the last check does not
+        // install, and the footer says what is true now. Signing may have
+        // started meanwhile. Only a failed download or no answer from
+        // GitHub is a failed install.
+        if (installer is null || !await ConfirmAsync(release) || !_canQuit())
         {
-            Set(State with { Installing = false, InstallFailed = installer is null && State.Pending == release });
+            Set(State with { Installing = false, InstallFailed = State.Pending == release && (installer is null || State.Unanswered) });
             return;
         }
 
@@ -254,43 +267,57 @@ internal sealed class AppUpdater : IDisposable
             && InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow)
             && IsAway(_observe());
 
-        if (!InstallsNow() || DateTimeOffset.UtcNow < _checkRetryAt)
-        {
-            return;
-        }
-
-        // A release pulled late in its two days must not install: GitHub
-        // still offers this one, signed, or it is no longer pending.
-        if (await CheckAsync(asked: false) && State.Pending == release && State.Installer is { } installer && InstallsNow())
+        // A release pulled late in its two days must not install.
+        if (InstallsNow() && await ConfirmAsync(release) && State.Installer is { } installer && InstallsNow())
         {
             await LaunchAsync(release, installer, asked: false);
         }
     }
 
     /// <summary>
+    /// The test before any launch, automatic or Install now: GitHub still
+    /// offers this release, signed, or it is no longer pending. A check
+    /// that found it within the last minute is that answer, so a scheduled
+    /// check that opens the gate does not ask twice. A clock set back is
+    /// no answer.
+    /// </summary>
+    private async Task<bool> ConfirmAsync(AppUpdateRelease release) =>
+        State.Pending == release
+        && (!State.Unanswered
+            && DateTimeOffset.UtcNow - Settings.Current.LastUpdateCheckUtc is { } age
+            && age >= TimeSpan.Zero
+            && age < CheckIsFreshFor
+            || await CheckAsync(asked: false) && State.Pending == release);
+
+    /// <summary>
     /// The release's half of an automatic install, and what Settings says
     /// about it: the switch is on, the verified installer is on disk, the
+    /// most recent check reached GitHub (the launch asks it again), the
     /// release has been public for 48 hours or the user pressed Install
     /// now, and no setup of this version ran in the last day. When this
-    /// holds, the update installs the next time the user is away.
+    /// holds, the update installs the next time the user is away. A check
+    /// with no answer closes it until one answers; the next is 30 minutes on.
     /// </summary>
     internal static bool InstallsWhenAway(UpdateState state, Settings settings, DateTimeOffset now) =>
         state.Pending is { } release
         && state.Installer is not null
+        && !state.Unanswered
         && settings.InstallUpdatesAutomatically
         && (state.InstallNowPressed || release.PublishedAt is { } published && now - published >= ReleaseAgeBeforeInstall)
         && !TriedRecently(settings, release, now);
 
     /// <summary>
-    /// The PC's half: nothing of Glimpse is on screen, nothing is full
-    /// screen, Windows would show a notification or the PC is locked, and
-    /// nobody has touched the keyboard or mouse for 3 minutes.
+    /// The PC's half: nothing of Glimpse is on screen, nobody has touched
+    /// the keyboard or mouse for 3 minutes, and either the shell says nobody
+    /// is at the screen (locked, a screen saver, another user's session) or
+    /// Windows would show a notification and nothing is full screen. The
+    /// lock screen and a screen saver cover the monitor themselves, so the
+    /// shell's word outranks Glimpse's own full-screen hold.
     /// </summary>
     internal static bool IsAway(InstallState pc) =>
         !pc.PreviewOpen
-        && !pc.FullscreenSuspended
-        && pc.Notifications is NativeMethods.UserNotificationState.AcceptsNotifications
-            or NativeMethods.UserNotificationState.NotPresent
+        && (pc.Notifications == NativeMethods.UserNotificationState.NotPresent
+            || pc.Notifications == NativeMethods.UserNotificationState.AcceptsNotifications && !pc.FullscreenSuspended)
         && pc.Idle >= IdleBeforeInstall;
 
     /// <summary>
@@ -417,17 +444,23 @@ internal sealed class AppUpdater : IDisposable
     {
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
         _downloadCancel = cancel;
-        Set(State with { Downloading = true });
         try
         {
-            var installer = await _service.DownloadAndVerifyAsync(release, download, cancel.Token);
+            // Downloading only once the installer itself is on its way: the
+            // sidecar, the .sig and a look at one already on disk are not.
+            var installer = await _service.DownloadAndVerifyAsync(
+                release,
+                download,
+                () => Set(State with { Downloading = true }),
+                cancel.Token);
             if (installer is null || State.Pending != release)
             {
                 return null;
             }
 
             DiagnosticLog.Write($"update {(download ? "downloaded" : "found on disk")} version={release.VersionText}");
-            Set(State with { Installer = installer });
+            // A failed Install now ends here: the installer verified again.
+            Set(State with { Installer = installer, InstallFailed = false });
             return installer;
         }
         catch (UpdateRejectedException ex)
@@ -447,11 +480,16 @@ internal sealed class AppUpdater : IDisposable
         }
         finally
         {
-            // A newer download may already own the state.
+            // A newer download may already own the state. One the switch
+            // stopped while Install now waits on it hands over still
+            // Downloading: the footer never says Installing in between.
             if (_downloadCancel == cancel)
             {
                 _downloadCancel = null;
-                Set(State with { Downloading = false });
+                if (!cancel.IsCancellationRequested || !State.Installing)
+                {
+                    Set(State with { Downloading = false });
+                }
             }
         }
     }
@@ -466,7 +504,7 @@ internal sealed class AppUpdater : IDisposable
             UpdateAttemptVersion = release.VersionText,
             UpdateAttemptUtc = DateTimeOffset.UtcNow
         });
-        Set(State with { Installing = true });
+        Set(State with { Installing = true, SetupStarted = true });
         try
         {
             await _launch(release, installer, _lifetime.Token);
@@ -474,14 +512,14 @@ internal sealed class AppUpdater : IDisposable
         }
         catch (UpdateRejectedException ex)
         {
-            Set(State with { Installing = false });
+            Set(State with { Installing = false, SetupStarted = false });
             Skip(release, ex);
         }
         catch (Exception ex)
         {
             // The file vanished or changed on disk: fetch it again.
             DiagnosticLog.Write($"update install failed version={release.VersionText}: {ex.GetType().Name}: {ex.Message}");
-            Set(State with { Installer = null, Installing = false, InstallFailed = asked });
+            Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
         }
     }
 
@@ -498,7 +536,7 @@ internal sealed class AppUpdater : IDisposable
         }
 
         DiagnosticLog.Write($"update setup did not finish version={release.VersionText}");
-        Set(State with { Installer = null, Installing = false, InstallFailed = asked });
+        Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
     }
 
     private void Skip(AppUpdateRelease release, Exception reason)

@@ -105,6 +105,18 @@ public sealed class AppUpdaterTests
     }
 
     [Fact]
+    public void TheLockScreenOrAScreenSaverIsNotAFullScreenApp()
+    {
+        // Both cover the monitor without a caption, so Glimpse holds its
+        // input for them as for any full-screen window. Only the shell's
+        // word that nobody is there lets that hold pass.
+        var locked = Away with { Notifications = NativeMethods.UserNotificationState.NotPresent, FullscreenSuspended = true };
+
+        Assert.True(AppUpdater.IsAway(locked));
+        Assert.False(AppUpdater.IsAway(locked with { Notifications = NativeMethods.UserNotificationState.AcceptsNotifications }));
+    }
+
+    [Fact]
     public void TheUserMustBeAwayForThreeMinutes() =>
         Assert.False(AppUpdater.IsAway(Away with { Idle = TimeSpan.FromMinutes(3) - TimeSpan.FromSeconds(1) }));
 
@@ -275,7 +287,8 @@ public sealed class AppUpdaterTests
         await updates.TickAsync();
         Assert.Empty(launches);
 
-        // Away: GitHub still offers it, signed, and then it installs.
+        // Away an hour later: GitHub still offers it, signed, and then it installs.
+        AgeTheLastCheck();
         pc = Away;
         await updates.TickAsync();
         Assert.Equal(("3.1.0", installer), Assert.Single(launches));
@@ -286,6 +299,59 @@ public sealed class AppUpdaterTests
 
         await updates.TickAsync();
         Assert.Single(launches);
+    });
+
+    [Fact]
+    public Task ACheckThatOpensTheGateIsTheAnswerItsLaunchNeeds() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => pc,
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        // Downloaded while the user was here.
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // Hours later, away: the check finds the gate open and launches without asking again.
+        AgeTheLastCheck();
+        pc = Away;
+        await updates.CheckNowAsync();
+        Assert.Equal(1, launches);
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+    });
+
+    [Fact]
+    public Task AClockSetBackIsNoAnswerFromGitHub() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // The last check now reads as an hour from now, and the release is gone.
+        Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow.AddHours(1) });
+        release.NoRelease = true;
+        pc = Away;
+        await updates.TickAsync();
+
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.Null(updates.State.Pending);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
     });
 
     [Fact]
@@ -480,6 +546,34 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task AnInstallerAlreadyOnDiskIsNeverCalledADownload() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        await File.WriteAllBytesAsync(Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe"), release.Installer);
+
+        // Metered, and then unmetered: either way the look fetches the
+        // sidecar and .sig and hashes the file, and no installer bytes.
+        foreach (var metered in new[] { true, false })
+        {
+            using var updates = new AppUpdater(
+                release.Service(root.Path),
+                () => Away with { PreviewOpen = true },
+                isMetered: () => metered,
+                launch: NeverLaunch);
+            var downloading = false;
+            updates.Changed += () => downloading |= updates.State.Downloading;
+
+            await updates.CheckNowAsync();
+            Assert.NotNull(updates.State.Installer);
+            Assert.False(downloading, metered ? "metered" : "unmetered");
+        }
+
+        Assert.Equal(0, release.RequestsFor(".exe"));
+    });
+
+    [Fact]
     public Task WithTheSwitchOffNothingDownloadsOrInstallsUntilInstallNow() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope(settings => settings with { InstallUpdatesAutomatically = false });
@@ -546,6 +640,8 @@ public sealed class AppUpdaterTests
         // Off while the background download is held, then Install now at once.
         var check = updates.CheckNowAsync();
         await WaitUntilAsync(() => updates.State.Downloading);
+        var footers = new List<UpdateFooter>();
+        updates.Changed += () => footers.Add(UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now));
         updates.SetInstallAutomatically(false);
         var install = updates.InstallNowAsync();
         await check;
@@ -556,6 +652,17 @@ public sealed class AppUpdaterTests
         await install;
         Assert.Equal(1, launches);
         Assert.False(updates.State.InstallFailed);
+
+        // The stopped download hands over to Install now's own without a
+        // word of Installing before setup starts.
+        Assert.Equal(
+            [
+                new(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
+                new(null, FooterLink.None, "Downloading 3.1.0."),
+                new(null, FooterLink.None, "3.1.0 is ready to install."),
+                new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds.")
+            ],
+            footers.Where((footer, i) => i == 0 || footer != footers[i - 1]));
     });
 
     [Fact]
@@ -588,6 +695,161 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task CouldNotInstallEndsWhenTheInstallerVerifiesAgain() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) => throw new InvalidOperationException("Windows did not start the installer."));
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        await updates.CheckNowAsync();
+        await updates.InstallNowAsync();
+        Assert.Equal("Couldn't install 3.1.0.", Caption());
+
+        // The next minute verifies the installer again. Setup ran within the
+        // day, so it waits for the user, and says only that.
+        await updates.TickAsync();
+        Assert.NotNull(updates.State.Installer);
+        Assert.Equal("3.1.0 is ready to install.", Caption());
+    });
+
+    [Fact]
+    public Task CouldNotInstallEndsWhenTheUpdateWillInstallOnItsOwn() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture(publishedAt: DateTimeOffset.UtcNow.AddHours(-1));
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        // Install now on a fresh release, and GitHub gives no answer before the launch.
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+        release.Offline = true;
+        await updates.InstallNowAsync();
+        Assert.Equal("Couldn't install 3.1.0.", Caption());
+
+        // GitHub answers again; the press waived the two days.
+        release.Offline = false;
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+    });
+
+    [Fact]
+    public Task InstallNowAsksGitHubOnceMoreBeforeItLaunches() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // Hours later: one call to GitHub for the press, then setup.
+        AgeTheLastCheck();
+        await updates.InstallNowAsync();
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.Equal(1, launches);
+    });
+
+    [Fact]
+    public Task InstallNowDuringACheckTakesThatChecksAnswer() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+
+        // A scheduled check is waiting on GitHub when the user presses Install now.
+        release.HoldCheck = new();
+        var check = updates.CheckNowAsync();
+        Assert.True(updates.State.Checking);
+        var install = updates.InstallNowAsync();
+        release.HoldCheck.SetResult();
+        await Task.WhenAll(check, install);
+
+        Assert.Equal(1, launches);
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+    });
+
+    [Fact]
+    public Task InstallNowInstallsNothingPulledOrUnsignedSinceTheLastCheck() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        UpdateFooter Footer() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now);
+
+        // Pulled: nothing installs, and the footer says Glimpse is current.
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+        release.NoRelease = true;
+        await updates.InstallNowAsync();
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Footer());
+
+        // Back, then unsigned: it is skipped, and says so.
+        release.NoRelease = false;
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Pending);
+        AgeTheLastCheck();
+        release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
+        await updates.InstallNowAsync();
+        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification and was skipped."), Footer());
+
+        Assert.Equal(4, release.RequestsFor("/releases/latest"));
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+        Assert.False(updates.State.Installing);
+    });
+
+    [Fact]
+    public Task InstallNowWithoutAnAnswerFromGitHubSaysItCouldNotInstall() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+        AgeTheLastCheck();
+        release.Offline = true;
+        await updates.InstallNowAsync();
+
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."),
+            UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now));
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+    });
+
+    [Fact]
     public Task APulledReleaseIsDropped() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
@@ -617,6 +879,7 @@ public sealed class AppUpdaterTests
         Assert.NotNull(updates.State.Installer);
 
         // Pulled late in its two days, while the user was at the keyboard.
+        AgeTheLastCheck();
         release.NoRelease = true;
         pc = Away;
         await updates.TickAsync();
@@ -639,6 +902,7 @@ public sealed class AppUpdaterTests
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
 
+        AgeTheLastCheck();
         release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
         pc = Away;
         await updates.TickAsync();
@@ -658,6 +922,7 @@ public sealed class AppUpdaterTests
         using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
 
         await updates.CheckNowAsync();
+        AgeTheLastCheck();
         release.Offline = true;
         pc = Away;
         await updates.TickAsync();
@@ -671,6 +936,37 @@ public sealed class AppUpdaterTests
         // The next minute does not ask again.
         await updates.TickAsync();
         Assert.Equal(2, release.RequestsFor("/releases/latest"));
+    });
+
+    [Fact]
+    public Task WhileGitHubGivesNoAnswerTheUpdateIsOnlyReady() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { PreviewOpen = true };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+
+        // Away, the check before the launch gets no answer: every launch needs one.
+        AgeTheLastCheck();
+        release.Offline = true;
+        pc = Away;
+        await updates.TickAsync();
+        Assert.Equal("3.1.0 is ready to install.", Caption());
+
+        release.Offline = false;
+        pc = Away with { PreviewOpen = true };
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+
+        // Check for updates with no answer says the same.
+        release.Offline = true;
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 is ready to install.", Caption());
     });
 
     [Fact]
@@ -748,6 +1044,10 @@ public sealed class AppUpdaterTests
             TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowMajorUpdateNoticeOnReturn"),
             StringComparison.Ordinal);
     }
+
+    // A minute on, a launch asks GitHub again.
+    private static void AgeTheLastCheck() =>
+        Settings.Update(settings => settings with { LastUpdateCheckUtc = settings.LastUpdateCheckUtc - TimeSpan.FromMinutes(1) });
 
     private static AppUpdateRelease Release(string version) => new(
         new Version(version),

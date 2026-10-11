@@ -549,16 +549,21 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         if (state.Pending is { } pending)
         {
             var version = pending.VersionText;
+            // Install now says each step as it happens, and Installing only
+            // once setup starts. Between steps, and while it asks GitHub,
+            // the update is ready: the caption stays, so the window keeps its height.
             if (state.Installing)
             {
-                return new(null, FooterLink.None, state.Downloading
-                    ? $"Downloading {version}."
-                    : $"Installing {version}. Back in a few seconds.");
+                return state.SetupStarted ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
+                    : state.Downloading ? new(null, FooterLink.None, $"Downloading {version}.")
+                    : new(state.Checking ? "Checking for updates" : null, FooterLink.None, $"{version} is ready to install.");
             }
 
-            return new(null, FooterLink.InstallNow, state.InstallFailed ? $"Couldn't install {version}."
+            // A failed Install now gives way once the update installs on its own.
+            return new(null, FooterLink.InstallNow, AppUpdater.InstallsWhenAway(state, settings, now)
+                ? $"{version} installs the next time you step away."
+                : state.InstallFailed ? $"Couldn't install {version}."
                 : state.Downloading && settings.InstallUpdatesAutomatically ? $"Downloading {version} in the background."
-                : AppUpdater.InstallsWhenAway(state, settings, now) ? $"{version} installs the next time you step away."
                 : $"{version} is ready to install.");
         }
 
