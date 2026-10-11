@@ -2126,10 +2126,16 @@ internal sealed class SpacePreviewController : IDisposable
         {
             try
             {
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized, blocking: false, compacting: false);
+                // Blocking and compacting, or the GC may decline: an idle
+                // tray allocates too little for it to come by on its own,
+                // and a stranded animation clock keeps WPF rendering at
+                // 64 Hz until one does. Once, 45 s after the last hide.
+                var started = Stopwatch.GetTimestamp();
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                var collected = Stopwatch.GetElapsedTime(started);
                 var trimmed = NativeMethods.TrimCurrentProcessWorkingSet();
                 var after = GC.GetTotalMemory(forceFullCollection: false);
-                DiagnosticLog.Write($"idle trim complete managed {before / 1024 / 1024:0}MB -> {after / 1024 / 1024:0}MB workingSetTrim={trimmed}");
+                DiagnosticLog.Write($"idle trim complete managed {before / 1024 / 1024:0}MB -> {after / 1024 / 1024:0}MB gc={collected.TotalMilliseconds:0.0}ms workingSetTrim={trimmed}");
             }
             finally
             {

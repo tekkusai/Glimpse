@@ -49,6 +49,37 @@ public sealed class IdleTrimTests
         });
     }
 
+    [Fact]
+    public void TheTrimsCollectionIsAFullBlockingCompaction()
+    {
+        Sta.Run(() =>
+        {
+            var controller = new SpacePreviewController(Dispatcher.CurrentDispatcher);
+            try
+            {
+                var before = GC.GetGCMemoryInfo(GCKind.FullBlocking).Index;
+
+                Fields.Call(controller, "RunIdleTrim");
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+                while (Fields.Get<int>(controller, "_idleTrimInFlight") != 0)
+                {
+                    Assert.True(DateTime.UtcNow < deadline, "Timed out waiting for the trim.");
+                    Thread.Sleep(10);
+                }
+
+                // A collection the GC may decline mostly does nothing in an
+                // idle tray; this one always runs, whole and compacting.
+                var last = GC.GetGCMemoryInfo(GCKind.FullBlocking);
+                Assert.True(last.Index > before);
+                Assert.True(last.Compacted);
+            }
+            finally
+            {
+                controller.Dispose();
+            }
+        });
+    }
+
     private static bool TrimScheduled(SpacePreviewController controller) =>
         Fields.Get<DispatcherTimer>(controller, "_idleTrimTimer").IsEnabled;
 

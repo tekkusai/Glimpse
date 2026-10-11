@@ -53,6 +53,7 @@ internal sealed class StandIn : Panel
     private readonly Grid _visual = new() { ClipToBounds = true };
     private readonly Rectangle _sheen;
     private readonly TranslateTransform _sheenShift = new(-1, 0);
+    private AnimationClock? _sheenClock;
     private readonly BlurEffect? _posterBlur;
     private readonly int _posterWidth;
     private readonly TextBlock _reason;
@@ -203,7 +204,12 @@ internal sealed class StandIn : Panel
             KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(1700)),
             new SineEase { EasingMode = EasingMode.EaseInOut }));
         sweep.KeyFrames.Add(new DiscreteDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(2600))));
-        _sheenShift.BeginAnimation(TranslateTransform.XProperty, sweep);
+
+        // Held so Stop can end it: a forever clock merely detached keeps
+        // WPF rendering at 64 Hz until a GC happens to find it, which in an
+        // idle tray can take many minutes.
+        _sheenClock = sweep.CreateClock();
+        _sheenShift.ApplyAnimationClock(TranslateTransform.XProperty, _sheenClock);
     }
 
     public void ShowReason(string reason)
@@ -219,7 +225,12 @@ internal sealed class StandIn : Panel
         Motion.Fade(_reason, 1, Motion.Reveal);
     }
 
-    public void Stop() => _sheenShift.BeginAnimation(TranslateTransform.XProperty, null);
+    public void Stop()
+    {
+        _sheenClock?.Controller.Stop();
+        _sheenClock = null;
+        _sheenShift.ApplyAnimationClock(TranslateTransform.XProperty, null);
+    }
 
     protected override Size MeasureOverride(Size availableSize)
     {
