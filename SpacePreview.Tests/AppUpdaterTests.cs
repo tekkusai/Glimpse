@@ -274,9 +274,12 @@ public sealed class AppUpdaterTests
         await updates.TickAsync();
         Assert.Empty(launches);
 
+        // Away: GitHub still offers it, signed, and then it installs.
         pc = Away;
         await updates.TickAsync();
         Assert.Equal(("3.1.0", installer), Assert.Single(launches));
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.Equal(3, release.RequestsFor(".sha256.sig"));
         Assert.Equal("3.1.0", Settings.Current.UpdateAttemptVersion);
         Assert.True(updates.State.Installing);
 
@@ -513,6 +516,72 @@ public sealed class AppUpdaterTests
         await updates.CheckNowAsync();
         Assert.Null(updates.State.Pending);
         Assert.True(updates.State.UpToDate);
+    });
+
+    [Fact]
+    public Task AReleasePulledBetweenDownloadAndLaunchNeverInstalls() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { Idle = TimeSpan.Zero };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // Pulled late in its two days, while the user was at the keyboard.
+        release.NoRelease = true;
+        pc = Away;
+        await updates.TickAsync();
+
+        Assert.Null(updates.State.Pending);
+        Assert.True(updates.State.UpToDate);
+        Assert.False(updates.State.Installing);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+    });
+
+    [Fact]
+    public Task AReleaseThatLostItsSignatureBeforeLaunchIsSkipped() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { Idle = TimeSpan.Zero };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
+        pc = Away;
+        await updates.TickAsync();
+
+        Assert.Null(updates.State.Pending);
+        Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+    });
+
+    [Fact]
+    public Task WithoutAnAnswerFromGitHubNothingInstallsAndItAsksAgainInHalfAnHour() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var pc = Away with { Idle = TimeSpan.Zero };
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        release.Offline = true;
+        pc = Away;
+        await updates.TickAsync();
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.NotNull(updates.State.Pending);
+        Assert.False(updates.State.Installing);
+
+        // The next minute does not ask again.
+        await updates.TickAsync();
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
     });
 
     [Fact]

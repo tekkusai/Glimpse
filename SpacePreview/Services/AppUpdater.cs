@@ -74,6 +74,7 @@ internal sealed class AppUpdater : IDisposable
     private CancellationTokenSource? _downloadCancel;
     private Task<string?>? _download;
     private DateTimeOffset _downloadRetryAt;
+    private DateTimeOffset _checkRetryAt;
     private bool _disposed;
 
     /// <param name="observe">The PC's side of <see cref="InstallState"/>: what is open, full screen, quiet time and idle.</param>
@@ -116,9 +117,22 @@ internal sealed class AppUpdater : IDisposable
     /// <summary>The Check for updates link, and every scheduled check.</summary>
     public async Task CheckNowAsync()
     {
+        if (await CheckAsync() && State.Pending is not null)
+        {
+            await TickAsync();
+        }
+    }
+
+    /// <summary>
+    /// Asks GitHub for the latest release and verifies its signature, every
+    /// time: a release pulled, replaced or unsigned since the last check
+    /// stops being pending. True when GitHub answered.
+    /// </summary>
+    private async Task<bool> CheckAsync()
+    {
         if (_disposed || State.Checking || State.Installing)
         {
-            return;
+            return false;
         }
 
         _retryTimer?.Stop();
@@ -126,28 +140,27 @@ internal sealed class AppUpdater : IDisposable
         try
         {
             var latest = await _service.CheckForUpdateAsync(_lifetime.Token);
-            var pending = latest is null ? null
-                : latest.Version == State.Pending?.Version ? State.Pending
-                : await VerifyAsync(latest);
+            var pending = latest is null ? null : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
+            _checkRetryAt = default;
             Set(State with { Checking = false, UpToDate = latest is null, Pending = pending });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
                 : $"update available current={_service.CurrentVersionText} latest={pending.VersionText}");
-            if (pending is not null)
-            {
-                await TickAsync();
-            }
+            return true;
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
             // App shutdown owns the cancellation.
+            return false;
         }
         catch (Exception ex)
         {
             DiagnosticLog.Write($"update check unavailable: {ex.GetType().Name}: {ex.Message}");
+            _checkRetryAt = DateTimeOffset.UtcNow + RetryAfterFailure;
             Set(State with { Checking = false });
             _retryTimer?.Start();
+            return false;
         }
     }
 
@@ -211,7 +224,7 @@ internal sealed class AppUpdater : IDisposable
             return;
         }
 
-        if (State.Installer is not { } installer)
+        if (State.Installer is null)
         {
             // Metered, only an installer already on disk will do: checking
             // it costs the sidecar and .sig, not the download.
@@ -226,7 +239,19 @@ internal sealed class AppUpdater : IDisposable
             return;
         }
 
-        if (InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow) && IsAway(_observe()))
+        bool InstallsNow() =>
+            !State.Installing
+            && InstallsWhenAway(State, Settings.Current, DateTimeOffset.UtcNow)
+            && IsAway(_observe());
+
+        if (!InstallsNow() || DateTimeOffset.UtcNow < _checkRetryAt)
+        {
+            return;
+        }
+
+        // A release pulled late in its two days must not install: GitHub
+        // still offers this one, signed, or it is no longer pending.
+        if (await CheckAsync() && State.Pending == release && State.Installer is { } installer && InstallsNow())
         {
             await LaunchAsync(release, installer, asked: false);
         }
