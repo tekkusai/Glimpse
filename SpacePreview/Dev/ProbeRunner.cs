@@ -55,7 +55,7 @@ internal static class ProbeRunner
         }
         finally
         {
-            app.Shutdown();
+            app.Shutdown(Environment.ExitCode);
         }
     }
 
