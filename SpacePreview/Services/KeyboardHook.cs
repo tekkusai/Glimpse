@@ -31,8 +31,6 @@ internal sealed class KeyboardHook : IDisposable
         {
             throw new InvalidOperationException($"Unable to install keyboard hook. Win32 error: {Marshal.GetLastWin32Error()}");
         }
-
-        DiagnosticLog.Write($"keyboard hook installed hhook=0x{_hook.ToInt64():X}");
     }
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -81,7 +79,6 @@ internal sealed class KeyboardHook : IDisposable
 
         NativeMethods.UnhookWindowsHookEx(_hook);
         _hook = IntPtr.Zero;
-        DiagnosticLog.Write("keyboard hook removed");
     }
 
     public void Dispose()

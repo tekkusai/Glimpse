@@ -29,12 +29,25 @@ internal static class DiagnosticLog
 
     public static string Pathname { get; } = AppPaths.InDataRoot(Branding.LogFileName);
 
+    // Helpers, the probe and the resident append to one file; the mutex
+    // keeps two processes from writing at the same end offset.
+    private static readonly Mutex FileLock = new(false, $@"Local\{Branding.Name}.DiagnosticLog");
+
+    private static string _source = string.Empty;
+
     private static readonly Thread WriterThread = StartWriter();
 
     static DiagnosticLog()
     {
         AppDomain.CurrentDomain.ProcessExit += (_, _) => StopWriter();
     }
+
+    /// <summary>
+    /// Names a process that is not the resident app, so its lines in the
+    /// shared log say whose they are: "[prove-pdf-scale 4120] ...".
+    /// </summary>
+    public static void TagProcess(string? name) =>
+        _source = string.IsNullOrWhiteSpace(name) ? string.Empty : $"[{name} {Environment.ProcessId}] ";
 
     public static void Write(string message)
     {
@@ -43,7 +56,7 @@ internal static class DiagnosticLog
         // and file I/O.
         try
         {
-            Queue.TryAdd($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
+            Queue.TryAdd($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {_source}{message}{Environment.NewLine}");
         }
         catch
         {
@@ -107,9 +120,7 @@ internal static class DiagnosticLog
                     Directory.CreateDirectory(directory);
                 }
 
-                var batch = string.Concat(pending.Select(Redact));
-                RotateIfNeeded(Encoding.UTF8.GetByteCount(batch));
-                File.AppendAllText(Pathname, batch, Encoding.UTF8);
+                AppendShared(Encoding.UTF8.GetBytes(string.Concat(pending.Select(Redact))));
             }
             catch (InvalidOperationException) when (Queue.IsCompleted)
             {
@@ -118,6 +129,43 @@ internal static class DiagnosticLog
             catch
             {
                 // Diagnostics must not affect preview behavior.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Appends under the cross-process lock with every share mode open, so
+    /// a helper writing while the resident does no longer loses its batch
+    /// to a sharing violation.
+    /// </summary>
+    private static void AppendShared(byte[] batch)
+    {
+        bool owned;
+        try
+        {
+            owned = FileLock.WaitOne(TimeSpan.FromSeconds(1));
+        }
+        catch (AbandonedMutexException)
+        {
+            // A helper died holding it; the lock is ours now.
+            owned = true;
+        }
+
+        try
+        {
+            RotateIfNeeded(batch.Length);
+            using var stream = new FileStream(
+                Pathname,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Write(batch);
+        }
+        finally
+        {
+            if (owned)
+            {
+                FileLock.ReleaseMutex();
             }
         }
     }

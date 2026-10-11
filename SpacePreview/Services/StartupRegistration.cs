@@ -7,7 +7,6 @@ namespace SpacePreview.Services;
 internal static class StartupRegistration
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    private const string LegacyAppName = "SpacePreview";
 
     public static string CurrentExecutablePath => Environment.ProcessPath
         ?? Process.GetCurrentProcess().MainModule?.FileName
@@ -16,7 +15,6 @@ internal static class StartupRegistration
     public static void Install()
     {
         using var key = Registry.CurrentUser.CreateSubKey(RunKey, writable: true);
-        key?.DeleteValue(LegacyAppName, throwOnMissingValue: false);
         key?.SetValue(Branding.Name, Quote(CurrentExecutablePath), RegistryValueKind.String);
     }
 
@@ -24,7 +22,6 @@ internal static class StartupRegistration
     {
         using var key = Registry.CurrentUser.OpenSubKey(RunKey, writable: true);
         key?.DeleteValue(Branding.Name, throwOnMissingValue: false);
-        key?.DeleteValue(LegacyAppName, throwOnMissingValue: false);
     }
 
     public static bool IsInstalled()

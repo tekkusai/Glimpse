@@ -20,11 +20,7 @@ public sealed class PdfFillSignWriterTests
             source,
             output,
             [
-                new PdfFillSignPlacement(
-                    1,
-                    PdfFillSignPlacementKind.Date,
-                    new PdfNormalizedRect(0.1, 0.2, 0.3, 0.4),
-                    Text: "7/7/2026")
+                new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.2, 0.3, 0.4, "7/7/2026")
             ]);
 
         Assert.Equal(original, File.ReadAllBytes(source));
@@ -48,11 +44,7 @@ public sealed class PdfFillSignWriterTests
             source,
             output,
             [
-                new PdfFillSignPlacement(
-                    1,
-                    PdfFillSignPlacementKind.Stamp,
-                    new PdfNormalizedRect(0.25, 0.25, 0.25, 0.25),
-                    PngBytes: TransparentRedPng())
+                new SignPlacement(SignPlacementKind.Stamp, 0, 0.25, 0.25, 0.25, 0.25, null, TransparentRedPng())
             ]);
 
         var written = File.ReadAllText(output, Encoding.Latin1);
@@ -70,7 +62,10 @@ public sealed class PdfFillSignWriterTests
     public void DisplayCoordinatesMapThroughPageRotation(int rotate, double left, double bottom, double right, double top)
     {
         var rect = PdfFillSignWriter.MapDisplayRectToPageRectForTest(
-            new PdfNormalizedRect(0.1, 0.2, 0.3, 0.4),
+            0.1,
+            0.2,
+            0.3,
+            0.4,
             0,
             0,
             200,
@@ -87,7 +82,10 @@ public sealed class PdfFillSignWriterTests
     public void DisplayCoordinatesHonorCropBoxOffset()
     {
         var rect = PdfFillSignWriter.MapDisplayRectToPageRectForTest(
-            new PdfNormalizedRect(0.1, 0.25, 0.5, 0.5),
+            0.1,
+            0.25,
+            0.5,
+            0.5,
             10,
             20,
             110,
@@ -117,11 +115,7 @@ public sealed class PdfFillSignWriterTests
                 source,
                 output,
                 [
-                    new PdfFillSignPlacement(
-                        1,
-                        PdfFillSignPlacementKind.Text,
-                        new PdfNormalizedRect(0.1, 0.1, 0.2, 0.1),
-                        Text: "Name")
+                    new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.2, 0.1, "Name")
                 ]));
 
         Assert.Equal(original, File.ReadAllBytes(source));
@@ -143,11 +137,7 @@ public sealed class PdfFillSignWriterTests
             source,
             output,
             [
-                new PdfFillSignPlacement(
-                    1,
-                    PdfFillSignPlacementKind.Text,
-                    new PdfNormalizedRect(0.1, 0.1, 0.2, 0.1),
-                    Text: "Name")
+                new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.2, 0.1, "Name")
             ]);
 
         var written = File.ReadAllText(output, Encoding.Latin1);

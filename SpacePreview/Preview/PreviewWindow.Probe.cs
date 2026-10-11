@@ -61,10 +61,17 @@ public partial class PreviewWindow
         UpdateLayout();
         var width = (int)Math.Ceiling(ActualWidth);
         var height = (int)Math.Ceiling(ActualHeight);
+
+        // The window renders 1:1 at its own origin. A VisualBrush would fit
+        // the visual's content bounds to the frame instead, and anything
+        // laid out past the window edge (a stale overlay after a resize)
+        // squashed the whole capture into a corner.
+        var chrome = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        chrome.Render(this);
         var visual = new DrawingVisual();
         using (var context = visual.RenderOpen())
         {
-            context.DrawRectangle(new VisualBrush(this), null, new Rect(0, 0, width, height));
+            context.DrawImage(chrome, new Rect(0, 0, width, height));
             foreach (var webView in FindVisualChildren<WebView2>(this))
             {
                 if (!webView.IsVisible || webView.CoreWebView2 is not { } core || webView.ActualWidth < 1)
@@ -328,6 +335,60 @@ public partial class PreviewWindow
         DiagnosticLog.Write($"probe overlay-race -> visible={LoadingOverlay.Visibility} opacity={LoadingOverlay.Opacity:0.00} pass={newOverlayStillOwnsTheStage}");
         HideLoadingOverlay();
         return newOverlayStillOwnsTheStage;
+    }
+
+    /// <summary>
+    /// Dev probe only: "sign" enters sign mode on the current PDF the way the
+    /// Sign pill does, "signdate" places today's date near the top of the
+    /// page, and "signpress:Label" presses the sign-mode pill with that label
+    /// (Signature, Save, Discard, Save a signed copy...).
+    /// </summary>
+    internal async Task<string> ProbeFillSignAsync(string verb, string label)
+    {
+        if (verb == "sign")
+        {
+            await EnterFillSignModeAsync();
+        }
+
+        if (_fillSignSurface is not { } surface)
+        {
+            return "not in sign mode";
+        }
+
+        surface.UpdateLayout();
+        if (verb == "signdate" && !surface.Place(SignPlacementKind.Date, 0.5, 0.18))
+        {
+            return "date not placed";
+        }
+
+        if (verb == "signpress")
+        {
+            PressPill(surface, label);
+        }
+
+        await Task.Delay(200);
+        return $"placements={surface.Placements.Count}";
+    }
+
+    private static void PressPill(DependencyObject root, string label) =>
+        FindLogicalChildren<Border>(root)
+            .First(item => item.Child is TextBlock { Text: var text } && text == label)
+            .RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = MouseLeftButtonUpEvent });
+
+    private static IEnumerable<T> FindLogicalChildren<T>(DependencyObject root) where T : DependencyObject
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(root).OfType<DependencyObject>())
+        {
+            if (child is T match)
+            {
+                yield return match;
+            }
+
+            foreach (var nested in FindLogicalChildren<T>(child))
+            {
+                yield return nested;
+            }
+        }
     }
 
     /// <summary>Dev probe only: parked probe windows must never re-place themselves.</summary>

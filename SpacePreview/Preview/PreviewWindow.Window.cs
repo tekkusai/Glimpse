@@ -413,12 +413,6 @@ public partial class PreviewWindow
         limits.ptMaxSize.Y = info.rcWork.Height;
         System.Runtime.InteropServices.Marshal.StructureToPtr(limits, minMaxInfo, fDeleteOld: false);
         handled = true;
-
-        // Only worth a line when the taskbar actually takes space.
-        if (info.rcWork.Width != info.rcMonitor.Width || info.rcWork.Height != info.rcMonitor.Height)
-        {
-            DiagnosticLog.Write($"maximize capped to work area {info.rcWork.Width}x{info.rcWork.Height}");
-        }
     }
 
     private void ApplyThemeToDwm()

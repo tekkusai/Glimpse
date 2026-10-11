@@ -3,9 +3,11 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
@@ -16,41 +18,62 @@ namespace SpacePreview.Preview;
 /// <summary>
 /// Sign mode's whole world: the current page rendered on our own WPF
 /// surface, so placement happens in coordinates we own instead of inside
-/// the closed embedded viewer. Everything here is display-space; the PDF
-/// writer receives normalized top-left rectangles and owns the rest.
+/// the closed embedded viewer. Placements live in page pixels under a
+/// Viewbox that fits the page's width, like the viewer the user just left.
+/// The controls that act on a placement (outline, delete chip, resize
+/// handle) live in a screen-space layer above it, so they keep their size
+/// however small the page is drawn.
 /// </summary>
 internal sealed class FillSignSurface : Grid
 {
-    private readonly string _documentPath;
-    private readonly SignSession _session = new();
+    private const string Hint = "Pick Signature, Date or Stamp, then click the page.";
+    private const double BarHeight = 48;
+    private const double ChipSize = 22;
+    private const double HandleSize = 12;
+    private const double DateHeight = 0.028;
+
+    private readonly List<SignPlacement> _placements = [];
     private readonly Grid _pageHost;
     private readonly Image _pageImage;
     private readonly Canvas _placementLayer;
+    private readonly ScrollViewer _scroller;
+    private readonly Grid _pageArea;
+    private readonly Canvas _chromeLayer;
+    private readonly Rectangle _hoverOutline;
+    private readonly Rectangle _selectionOutline;
+    private readonly Border _deleteChip;
+    private readonly Border _resizeHandle;
     private readonly Grid _toolBar;
     private readonly Grid _saveBar;
     private readonly Grid _inkOverlay;
     private readonly Canvas _inkCanvas;
     private readonly List<List<Point>> _inkStrokes = [];
     private readonly List<Polyline> _inkVisuals = [];
-    private readonly int _totalPages;
+    private readonly List<Action> _toolRefreshers = [];
+    private StackPanel _tools = null!;
+    private Border _signaturePill = null!;
+    private Border _newStampPill = null!;
+    private TextBlock _centerText = null!;
+    private TextBlock _pageLabel = null!;
+    private Border _previousPageChip = null!;
+    private Border _nextPageChip = null!;
+    private Border _cancelPill = null!;
+    private Border _savePill = null!;
+    private TextBlock _saveStatus = null!;
+    private TextBlock _inkTitle = null!;
+    private int _pageIndex;
+    private int _totalPages;
     private double _pageWidth;
     private double _pageHeight;
-    private readonly List<Action> _pillRefreshers = [];
+    private string? _problem;
+    private bool _hintRetired;
     private SignPlacementKind? _armedTool;
     private Grid? _selectedFrame;
-    private readonly Dictionary<Grid, Action<bool>> _frameChrome = [];
-    private Polyline? _activeInkVisual;
-    private TextBlock? _pageLabel;
-    private Border? _previousPageChip;
-    private Border? _nextPageChip;
-    private Border? _signaturePill;
-    private Border? _newStampPill;
-    private TextBlock? _inkTitle;
-    private StackPanel? _saveChoiceRow;
-    private TextBlock? _saveStatusLabel;
-    private Grid? _flyoutHost;
+    private Grid? _hoveredFrame;
+    private Action? _commitDateEdit;
     private Border? _signatureFlyout;
     private string? _selectedSignaturePath;
+    private Polyline? _activeInkVisual;
     private BitmapSource? _inkBaseImage;
     private Rect _inkBaseRect = Rect.Empty;
     private Image? _inkBaseVisual;
@@ -58,16 +81,15 @@ internal sealed class FillSignSurface : Grid
 
     public event Action? ExitRequested;
 
-    /// <summary>True asks the writer to replace the original file.</summary>
-    public event Action<SignSession, bool>? SaveRequested;
+    /// <summary>True asks the host to replace the original file.</summary>
+    public event Action<IReadOnlyList<SignPlacement>, bool>? SaveRequested;
 
     /// <summary>Asks the host to render another page into this surface.</summary>
     public event Action<int>? PageChangeRequested;
 
-    public FillSignSurface(string documentPath, int pageIndex, int totalPages, PdfPreviewPage page)
+    public FillSignSurface(int pageIndex, int totalPages, PdfPreviewPage page)
     {
-        _documentPath = documentPath;
-        _session.PageIndex = pageIndex;
+        _pageIndex = pageIndex;
         _totalPages = Math.Max(totalPages, pageIndex + 1);
         _pageWidth = page.Width;
         _pageHeight = page.Height;
@@ -78,133 +100,162 @@ internal sealed class FillSignSurface : Grid
         FocusVisualStyle = null;
         KeyDown += (_, e) =>
         {
-            if (e.Key is Key.Delete or Key.Back && _selectedFrame is { } selected)
+            if (e.Key is Key.Delete or Key.Back && e.OriginalSource is not TextBox && _selectedFrame is { } selected)
             {
                 RemovePlacementFrame(selected);
                 e.Handled = true;
             }
         };
-        RowDefinitions.Add(new RowDefinition { Height = new GridLength(46) });
+        RowDefinitions.Add(new RowDefinition { Height = new GridLength(BarHeight) });
         RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-        // The page, in its own pixel coordinates; the Viewbox scales the
-        // image and the placement layer together so normalized math never
+        // The page, in its own pixel coordinates: the Viewbox scales the
+        // image and the placement layer together, so normalized math never
         // needs the display size.
-        _placementLayer = new Canvas
-        {
-            Width = page.Width,
-            Height = page.Height,
-            Background = Brushes.Transparent
-        };
+        _placementLayer = new Canvas { Width = page.Width, Height = page.Height, Background = Brushes.Transparent };
         _placementLayer.MouseLeftButtonDown += OnPageClick;
+        _pageImage = new Image { Source = page.Bitmap, Width = page.Width, Height = page.Height, SnapsToDevicePixels = true };
+        _pageHost = new Grid { Width = page.Width, Height = page.Height, Children = { _pageImage, _placementLayer } };
 
-        _inkCanvas = new Canvas { Background = Brushes.White, ClipToBounds = true };
+        // Fit to width and scroll, as the viewer does. The bitmap is two
+        // pixels per point, so its own width is as large as it stays sharp.
+        // The hairline sits outside the scaling, so it stays one pixel and
+        // a white page keeps its edge on the light canvas.
+        _scroller = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            Focusable = false,
+            Content = new Border
+            {
+                Margin = new Thickness(24),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                BorderBrush = Theme.Brush(palette.RaisedBorder),
+                BorderThickness = new Thickness(1),
+                Child = new Viewbox
+                {
+                    Stretch = Stretch.Uniform,
+                    StretchDirection = StretchDirection.DownOnly,
+                    Child = _pageHost
+                }
+            }
+        };
+        _scroller.ScrollChanged += (_, _) => UpdateChrome();
+
+        _hoverOutline = BuildOutline(palette);
+        _selectionOutline = BuildOutline(palette);
+        _deleteChip = BuildDeleteChip(palette);
+        _resizeHandle = BuildResizeHandle(palette);
+        _chromeLayer = new Canvas
+        {
+            ClipToBounds = true,
+            Children = { _hoverOutline, _selectionOutline, _deleteChip, _resizeHandle }
+        };
+
+        // The pad's white comes from its rounded frame; the canvas only
+        // needs a fill to be hit-testable.
+        _inkCanvas = new Canvas { Background = Brushes.Transparent, ClipToBounds = true };
         _inkOverlay = BuildInkOverlay(palette);
 
-        _pageHost = new Grid { Width = page.Width, Height = page.Height };
-        _pageImage = new Image
-        {
-            Source = page.Bitmap,
-            Width = page.Width,
-            Height = page.Height,
-            SnapsToDevicePixels = true
-        };
-        _pageHost.Children.Add(_pageImage);
-        _pageHost.Children.Add(_placementLayer);
-
-        var viewbox = new Viewbox
-        {
-            Stretch = Stretch.Uniform,
-            Margin = new Thickness(18),
-            Child = _pageHost
-        };
-
-        _toolBar = BuildToolBar(palette, pageIndex, totalPages);
+        _toolBar = BuildToolBar(palette);
         _saveBar = BuildSaveBar(palette);
         _saveBar.Visibility = Visibility.Collapsed;
+        Children.Add(new Grid { Children = { _toolBar, _saveBar } });
 
-        var barHost = new Grid();
-        barHost.Children.Add(_toolBar);
-        barHost.Children.Add(_saveBar);
-        Children.Add(barHost);
-
-        var pageArea = new Grid();
-        pageArea.Children.Add(viewbox);
-        pageArea.Children.Add(_inkOverlay);
-        SetRow(pageArea, 1);
-        Children.Add(pageArea);
-        _flyoutHost = pageArea;
+        _pageArea = new Grid { ClipToBounds = true, Children = { _scroller, _chromeLayer, _inkOverlay } };
+        SetRow(_pageArea, 1);
+        Children.Add(_pageArea);
 
         // The picker dismisses like any flyout: a press anywhere outside it
         // (except its own pill, which toggles) puts it away.
         PreviewMouseLeftButtonDown += (_, e) =>
         {
-            if (_signatureFlyout is not { } flyout)
+            if (_signatureFlyout is { } flyout
+                && e.OriginalSource is DependencyObject source
+                && !IsWithin(source, flyout)
+                && !IsWithin(source, _signaturePill))
             {
-                return;
+                CloseSignaturePicker();
             }
-
-            if (e.OriginalSource is DependencyObject source
-                && (IsWithin(source, flyout) || (_signaturePill is { } pill && IsWithin(source, pill))))
-            {
-                return;
-            }
-
-            CloseSignaturePicker();
         };
+
+        UpdatePageChrome();
+        UpdateWorkState();
     }
 
-    private static bool IsWithin(DependencyObject node, DependencyObject root)
-    {
-        for (var current = node; current is not null;)
-        {
-            if (ReferenceEquals(current, root))
-            {
-                return true;
-            }
+    public IReadOnlyList<SignPlacement> Placements => _placements;
 
-            current = current is Visual or System.Windows.Media.Media3D.Visual3D
-                ? VisualTreeHelper.GetParent(current)
-                : LogicalTreeHelper.GetParent(current);
-        }
-
-        return false;
-    }
-
-    public bool HasWork => _session.HasWork;
+    public bool HasWork => _placements.Count > 0;
 
     /// <summary>
-    /// Escape walks back one layer at a time: save choice to editing, ink
-    /// capture to editing, then out - but never past unsaved work without
-    /// offering the save choice first.
+    /// Escape walks back one layer at a time: an open editor, picker, pad
+    /// or save choice closes, an armed tool is put down, and only then does
+    /// the mode end, never past unsaved work without the save choice first.
     /// </summary>
     public void HandleEscape()
     {
-        if (_signatureFlyout is not null)
+        if (_commitDateEdit is { } commit)
+        {
+            commit();
+        }
+        else if (_signatureFlyout is not null)
         {
             CloseSignaturePicker();
-            return;
         }
-
-        if (_saveBar.Visibility == Visibility.Visible)
-        {
-            HideSaveChoice();
-            return;
-        }
-
-        if (_inkOverlay.Visibility == Visibility.Visible)
+        else if (_inkOverlay.Visibility == Visibility.Visible)
         {
             HideInkCapture();
-            return;
         }
-
-        if (_session.HasWork)
+        else if (_saveBar.Visibility == Visibility.Visible)
         {
-            ShowSaveChoice();
+            HideSaveChoice();
+        }
+        else if (_armedTool is not null)
+        {
+            DisarmTool();
+        }
+        else
+        {
+            LeaveOrAsk();
+        }
+    }
+
+    /// <summary>
+    /// True when leaving loses nothing: no work, or work this file could
+    /// never save. Otherwise the save choice opens, Discard included, and
+    /// the caller stays. Every way out of sign mode asks this first.
+    /// </summary>
+    public bool TryLeave()
+    {
+        if (!HasWork || _problem is not null)
+        {
+            return true;
+        }
+
+        ShowSaveChoice();
+        return false;
+    }
+
+    private void LeaveOrAsk()
+    {
+        if (TryLeave())
+        {
+            ExitRequested?.Invoke();
+        }
+    }
+
+    /// <summary>Offers the save choice: a copy, the original, or discarding the work.</summary>
+    public void ShowSaveChoice()
+    {
+        if (!HasWork || _problem is not null)
+        {
             return;
         }
 
-        ExitRequested?.Invoke();
+        CloseSignaturePicker();
+        SetSaveStatus(null, failed: false);
+        _toolBar.Visibility = Visibility.Collapsed;
+        _saveBar.Visibility = Visibility.Visible;
     }
 
     /// <summary>
@@ -217,156 +268,218 @@ internal sealed class FillSignSurface : Grid
         _toolBar.IsEnabled = !saving;
         _saveBar.IsEnabled = !saving;
         _placementLayer.IsEnabled = !saving;
-        if (_saveChoiceRow is not null && _saveStatusLabel is not null)
+        SetSaveStatus(saving ? "Saving\u2026" : null, failed: false);
+    }
+
+    /// <summary>A save that failed says why, and the choices come back.</summary>
+    public void ShowSaveFailure(string reason)
+    {
+        SetSaving(false);
+        _toolBar.Visibility = Visibility.Collapsed;
+        _saveBar.Visibility = Visibility.Visible;
+        SetSaveStatus(reason, failed: true);
+    }
+
+    /// <summary>
+    /// The writer's verdict on this file. A readable file gets its true page
+    /// count; one the writer cannot update says why where Save would be,
+    /// before any work is placed on it.
+    /// </summary>
+    public void ApplyCheck(PdfSignCheck check)
+    {
+        if (check.Problem is null)
         {
-            _saveChoiceRow.Visibility = saving ? Visibility.Collapsed : Visibility.Visible;
-            _saveStatusLabel.Visibility = saving ? Visibility.Visible : Visibility.Collapsed;
+            _totalPages = Math.Max(check.PageCount, _pageIndex + 1);
+            UpdatePageChrome();
+            return;
         }
+
+        _problem = check.Problem + " Open it in another app to sign it.";
+        DisarmTool();
+        CloseSignaturePicker();
+        HideInkCapture();
+        HideSaveChoice();
+        _tools.Visibility = Visibility.Collapsed;
+        _savePill.Visibility = Visibility.Collapsed;
+        ((TextBlock)_cancelPill.Child).Text = "Close";
+        UpdateWorkState();
     }
 
     // ------------------------------------------------------------------
     // Chrome.
     // ------------------------------------------------------------------
 
-    private Grid BuildToolBar(ThemePalette palette, int pageIndex, int totalPages)
+    private Grid BuildToolBar(ThemePalette palette)
     {
         var bar = new Grid { Background = Theme.Brush(palette.ChromeBg) };
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var tools = new StackPanel
+        _signaturePill = BuildToolPill("Signature", SignPlacementKind.Signature);
+        _newStampPill = HousePill.Build("New stamp", ReplaceStamp, PillRole.Ghost);
+        _newStampPill.Visibility = Visibility.Collapsed;
+        _tools = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(12, 0, 0, 0)
+            Margin = new Thickness(12, 0, 0, 0),
+            Children =
+            {
+                _signaturePill,
+                BuildToolPill("Date", SignPlacementKind.Date),
+                BuildToolPill("Stamp", SignPlacementKind.Stamp),
+                _newStampPill
+            }
         };
-        _signaturePill = BuildPill("Signature", () => ArmTool(SignPlacementKind.Signature),
-            isSelected: () => _armedTool == SignPlacementKind.Signature);
-        tools.Children.Add(_signaturePill);
-        tools.Children.Add(BuildPill("Date", () => ArmTool(SignPlacementKind.Date),
-            isSelected: () => _armedTool == SignPlacementKind.Date));
-        tools.Children.Add(BuildPill("Stamp", () => ArmTool(SignPlacementKind.Stamp),
-            isSelected: () => _armedTool == SignPlacementKind.Stamp));
+        bar.Children.Add(_tools);
 
-        // Replacing the stored stamp is offered exactly when the user is
-        // holding that tool, and nowhere else. Signatures manage themselves
-        // in the picker instead.
-        _newStampPill = BuildPill("New stamp", ReplaceStamp, PillRole.Ghost);
-        _newStampPill.Visibility = Visibility.Collapsed;
-        tools.Children.Add(_newStampPill);
-        bar.Children.Add(tools);
+        // The center says what to do next, or why this file cannot be
+        // signed. A line that does not fit is hidden, never cut.
+        _centerText = new TextBlock
+        {
+            FontSize = Metrics.FontCaption,
+            Foreground = Theme.Brush(palette.TextTertiary),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(12, 0, 12, 0)
+        };
+        var center = new Grid { ClipToBounds = true, Children = { _centerText } };
+        center.SizeChanged += (_, _) => FitCenterText();
+        SetColumn(center, 1);
+        bar.Children.Add(center);
 
+        // Moving between pages is part of signing, so the arrows live right
+        // on the readout; single-page documents show no arrows at all.
         _pageLabel = new TextBlock
         {
-            Text = $"Page {pageIndex + 1} of {totalPages}",
+            FontSize = Metrics.FontCaption,
             Foreground = Theme.Brush(palette.TextSecondary),
-            FontSize = 12,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(6, 0, 6, 0)
+            Margin = new Thickness(4, 0, 4, 0)
         };
-
-        // Moving between pages is part of signing, so the controls live
-        // right on the readout; single-page documents show no arrows at all.
+        _previousPageChip = BuildIconChip(palette, "\uE76B", "Previous page", () => RequestPage(_pageIndex - 1));
+        _nextPageChip = BuildIconChip(palette, "\uE76C", "Next page", () => RequestPage(_pageIndex + 1));
         var pageCluster = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 0, 14, 0)
+            Margin = new Thickness(0, 0, 12, 0),
+            Children = { _previousPageChip, _pageLabel, _nextPageChip }
         };
-        _previousPageChip = BuildPageChip(palette, "", () => RequestPage(_session.PageIndex - 1));
-        _nextPageChip = BuildPageChip(palette, "", () => RequestPage(_session.PageIndex + 1));
-        pageCluster.Children.Add(_previousPageChip);
-        pageCluster.Children.Add(_pageLabel);
-        pageCluster.Children.Add(_nextPageChip);
-        SetColumn(pageCluster, 1);
+        SetColumn(pageCluster, 2);
         bar.Children.Add(pageCluster);
-        UpdatePageChrome();
 
+        _cancelPill = HousePill.Build("Cancel", LeaveOrAsk, PillRole.Ghost);
+        _savePill = HousePill.Build("Save", ShowSaveChoice, PillRole.Accent);
+        _savePill.Margin = new Thickness(0);
         var actions = new StackPanel
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 12, 0)
+            Margin = new Thickness(0, 0, 12, 0),
+            Children = { _cancelPill, _savePill }
         };
-        actions.Children.Add(BuildPill("Cancel", () => ExitRequested?.Invoke(), PillRole.Ghost));
-        actions.Children.Add(BuildPill("Save", ShowSaveChoice, PillRole.Accent));
-        SetColumn(actions, 2);
+        SetColumn(actions, 3);
         bar.Children.Add(actions);
 
-        var border = new Border
-        {
-            BorderBrush = Theme.Brush(palette.Border),
-            BorderThickness = new Thickness(0, 0, 0, 1),
-            VerticalAlignment = VerticalAlignment.Bottom
-        };
-        bar.Children.Add(border);
+        bar.Children.Add(Hairline(palette, columns: 4));
         return bar;
     }
 
     private Grid BuildSaveBar(ThemePalette palette)
     {
         var bar = new Grid { Background = Theme.Brush(palette.ChromeBg) };
-        var row = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        row.Children.Add(BuildPill("Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent));
-        row.Children.Add(BuildPill("Replace the original", () => RequestSave(overwrite: true)));
-        row.Children.Add(BuildPill("Keep editing", HideSaveChoice, PillRole.Ghost));
-        _saveChoiceRow = row;
-        bar.Children.Add(row);
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        _saveStatusLabel = new TextBlock
+        var back = HousePill.Build("Keep editing", HideSaveChoice, PillRole.Ghost);
+        back.Margin = new Thickness(12, 0, 0, 0);
+        bar.Children.Add(back);
+
+        _saveStatus = new TextBlock
         {
-            Text = "Saving…",
-            FontSize = Metrics.FontLabel,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(palette.TextSecondary),
+            FontSize = Metrics.FontCaption,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
-            Visibility = Visibility.Collapsed
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxHeight = BarHeight - 8,
+            Margin = new Thickness(12, 0, 12, 0)
         };
-        bar.Children.Add(_saveStatusLabel);
+        SetColumn(_saveStatus, 1);
+        bar.Children.Add(_saveStatus);
+
+        var copy = HousePill.Build("Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent);
+        copy.Margin = new Thickness(0);
+        var choices = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0),
+            Children =
+            {
+                HousePill.Build("Discard", () => ExitRequested?.Invoke(), PillRole.Ghost),
+                HousePill.Build("Replace the original", () => RequestSave(overwrite: true)),
+                copy
+            }
+        };
+        SetColumn(choices, 2);
+        bar.Children.Add(choices);
+
+        bar.Children.Add(Hairline(palette, columns: 3));
         return bar;
     }
 
-    /// <summary>
-    /// The house pill (see <see cref="HousePill"/>), with its refresher
-    /// enrolled so armed-tool state can repaint every pill at once.
-    /// </summary>
-    private Border BuildPill(string label, Action onClick, PillRole role = PillRole.Surface, Func<bool>? isSelected = null)
+    private static Border Hairline(ThemePalette palette, int columns)
     {
-        var pill = HousePill.Build(label, onClick, out var refresh, role, isSelected);
-        _pillRefreshers.Add(refresh);
+        var line = new Border
+        {
+            BorderBrush = Theme.Brush(palette.Border),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            VerticalAlignment = VerticalAlignment.Bottom
+        };
+        SetColumnSpan(line, columns);
+        return line;
+    }
+
+    /// <summary>A tool pill; only these three ever repaint for the armed tool.</summary>
+    private Border BuildToolPill(string label, SignPlacementKind kind)
+    {
+        var pill = HousePill.Build(label, () => ArmTool(kind), out var refresh, PillRole.Surface, () => _armedTool == kind);
+        AutomationProperties.SetName(pill, label);
+        _toolRefreshers.Add(refresh);
         return pill;
     }
 
-    /// <summary>A quiet 22px icon chip for stepping between pages.</summary>
-    private Border BuildPageChip(ThemePalette palette, string glyph, Action onClick)
+    /// <summary>A quiet icon button, the header's size and shape.</summary>
+    private static Border BuildIconChip(ThemePalette palette, string glyph, string name, Action onClick)
     {
-        var icon = new TextBlock
-        {
-            Text = glyph,
-            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-            FontSize = 10,
-            Foreground = Theme.Brush(palette.TextSecondary),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
         var chip = new Border
         {
-            Width = 22,
-            Height = 22,
+            Width = 30,
+            Height = 30,
             CornerRadius = Metrics.IconCorner,
             Background = Brushes.Transparent,
             Cursor = Cursors.Hand,
             VerticalAlignment = VerticalAlignment.Center,
-            Child = icon
+            ToolTip = name,
+            Child = new TextBlock
+            {
+                Text = glyph,
+                FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
+                FontSize = 10,
+                Foreground = Theme.Brush(palette.TextSecondary),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            }
         };
+        AutomationProperties.SetName(chip, name);
         chip.MouseEnter += (_, _) => chip.Background = Theme.Brush(palette.HoverBg);
         chip.MouseLeave += (_, _) => chip.Background = Brushes.Transparent;
         chip.MouseLeftButtonDown += (_, e) =>
@@ -376,16 +489,28 @@ internal sealed class FillSignSurface : Grid
         };
         chip.MouseLeftButtonUp += (_, e) =>
         {
-            chip.Background = Brushes.Transparent;
+            chip.Background = Theme.Brush(palette.HoverBg);
             onClick();
             e.Handled = true;
         };
         return chip;
     }
 
+    private static void SetEnabled(FrameworkElement element, bool enabled)
+    {
+        element.IsEnabled = enabled;
+        element.Opacity = enabled ? 1 : 0.35;
+    }
+
+    private void SetSaveStatus(string? text, bool failed)
+    {
+        _saveStatus.Text = text ?? string.Empty;
+        _saveStatus.Foreground = Theme.Brush(failed ? Theme.Current.Warning : Theme.Current.TextSecondary);
+    }
+
     private void RequestPage(int pageIndex)
     {
-        if (pageIndex < 0 || pageIndex >= _totalPages || pageIndex == _session.PageIndex)
+        if (pageIndex < 0 || pageIndex >= _totalPages || pageIndex == _pageIndex)
         {
             return;
         }
@@ -394,14 +519,16 @@ internal sealed class FillSignSurface : Grid
     }
 
     /// <summary>
-    /// Swaps the rendered page under the same session: placements on other
-    /// pages stay in the working set and come back when their page does, so
-    /// one save carries everything.
+    /// Swaps the rendered page under the same working set: placements on
+    /// other pages stay and come back when their page does, so one save
+    /// carries everything.
     /// </summary>
     public void ShowPage(int pageIndex, PdfPreviewPage page)
     {
-        SelectFrame(null);
-        _session.PageIndex = pageIndex;
+        _commitDateEdit?.Invoke();
+        _selectedFrame = null;
+        _hoveredFrame = null;
+        _pageIndex = pageIndex;
         _pageWidth = page.Width;
         _pageHeight = page.Height;
         _pageImage.Source = page.Bitmap;
@@ -413,50 +540,48 @@ internal sealed class FillSignSurface : Grid
         _placementLayer.Height = page.Height;
 
         _placementLayer.Children.Clear();
-        _frameChrome.Clear();
-        _selectedFrame = null;
-        foreach (var placement in _session.Placements)
+        foreach (var placement in _placements.Where(item => item.PageIndex == pageIndex))
         {
-            if (placement.PageIndex == pageIndex)
-            {
-                AddPlacementVisual(placement, select: false);
-            }
+            AddPlacementVisual(placement, select: false);
         }
 
+        _scroller.ScrollToTop();
         UpdatePageChrome();
+        UpdateChrome();
     }
 
     private void UpdatePageChrome()
     {
-        if (_pageLabel is null || _previousPageChip is null || _nextPageChip is null)
-        {
-            return;
-        }
-
-        _pageLabel.Text = $"Page {_session.PageIndex + 1} of {_totalPages}";
+        _pageLabel.Text = $"Page {_pageIndex + 1} of {_totalPages}";
         var navigable = _totalPages > 1;
         _previousPageChip.Visibility = navigable ? Visibility.Visible : Visibility.Collapsed;
         _nextPageChip.Visibility = navigable ? Visibility.Visible : Visibility.Collapsed;
-        SetChipEnabled(_previousPageChip, _session.PageIndex > 0);
-        SetChipEnabled(_nextPageChip, _session.PageIndex < _totalPages - 1);
+        SetEnabled(_previousPageChip, _pageIndex > 0);
+        SetEnabled(_nextPageChip, _pageIndex < _totalPages - 1);
     }
 
-    private static void SetChipEnabled(Border chip, bool enabled)
+    /// <summary>Save, the hint and the problem line follow the work on the page.</summary>
+    private void UpdateWorkState()
     {
-        chip.IsEnabled = enabled;
-        chip.Opacity = enabled ? 1 : 0.35;
+        SetEnabled(_savePill, HasWork);
+        _hintRetired |= HasWork;
+        _centerText.Text = _problem ?? (_hintRetired ? string.Empty : Hint);
+        _centerText.Foreground = Theme.Brush(_problem is null ? Theme.Current.TextTertiary : Theme.Current.Warning);
+        FitCenterText();
     }
 
-    private void ShowSaveChoice()
+    private void FitCenterText()
     {
-        if (!_session.HasWork)
+        if (_centerText.Parent is not FrameworkElement column || column.ActualWidth <= 0)
         {
-            ExitRequested?.Invoke();
             return;
         }
 
-        _toolBar.Visibility = Visibility.Collapsed;
-        _saveBar.Visibility = Visibility.Visible;
+        var room = column.ActualWidth - _centerText.Margin.Left - _centerText.Margin.Right;
+        _centerText.Measure(new Size(room, BarHeight));
+        _centerText.Visibility = _centerText.DesiredSize.Height <= BarHeight - 8 && room > 0
+            ? Visibility.Visible
+            : Visibility.Hidden;
     }
 
     private void HideSaveChoice()
@@ -465,7 +590,7 @@ internal sealed class FillSignSurface : Grid
         _toolBar.Visibility = Visibility.Visible;
     }
 
-    private void RequestSave(bool overwrite) => SaveRequested?.Invoke(_session, overwrite);
+    private void RequestSave(bool overwrite) => SaveRequested?.Invoke(_placements.ToArray(), overwrite);
 
     // ------------------------------------------------------------------
     // Tools and placement.
@@ -493,295 +618,55 @@ internal sealed class FillSignSurface : Grid
             return;
         }
 
-        _armedTool = kind;
-        _placementLayer.Cursor = Cursors.Cross;
-        RefreshPills();
-        UpdateContextualPills();
+        SetArmedTool(kind);
     }
 
     private void ArmSignature(string signaturePath)
     {
         _selectedSignaturePath = signaturePath;
-        _armedTool = SignPlacementKind.Signature;
-        _placementLayer.Cursor = Cursors.Cross;
-        RefreshPills();
-        UpdateContextualPills();
         CloseSignaturePicker();
+        SetArmedTool(SignPlacementKind.Signature);
     }
 
-    private void DisarmTool()
-    {
-        _armedTool = null;
-        _placementLayer.Cursor = Cursors.Arrow;
-        RefreshPills();
-        UpdateContextualPills();
-    }
+    private void DisarmTool() => SetArmedTool(null);
 
-    private void UpdateContextualPills()
+    private void SetArmedTool(SignPlacementKind? kind)
     {
-        if (_newStampPill is not null)
+        _armedTool = kind;
+        _placementLayer.Cursor = kind is null ? Cursors.Arrow : Cursors.Cross;
+        foreach (var refresh in _toolRefreshers)
         {
-            _newStampPill.Visibility = _armedTool == SignPlacementKind.Stamp && SignatureStore.HasStamp
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            refresh();
         }
+
+        // Replacing the stored stamp is offered exactly when the user is
+        // holding that tool, and nowhere else.
+        _newStampPill.Visibility = kind == SignPlacementKind.Stamp && SignatureStore.HasStamp
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private void ReplaceStamp()
     {
-        if (!TryImportStampInteractively())
+        if (TryImportStampInteractively())
         {
-            return;
-        }
-
-        _armedTool = null;
-        ArmTool(SignPlacementKind.Stamp);
-    }
-
-    // ------------------------------------------------------------------
-    // The signature picker: a small library under the Signature pill,
-    // Apple-style. Pick one to place it, hover a row to delete it, or
-    // draw a new one. An empty library skips straight to the pad. It is
-    // an in-window flyout, not a Popup: one visual tree, one hwnd.
-    // ------------------------------------------------------------------
-
-    private void ToggleSignaturePicker()
-    {
-        if (_signatureFlyout is not null)
-        {
-            CloseSignaturePicker();
-            return;
-        }
-
-        if (_flyoutHost is null)
-        {
-            return;
-        }
-
-        if (SignatureStore.ListSignatures().Count == 0)
-        {
-            ShowInkCapture();
-            return;
-        }
-
-        var palette = Theme.Current;
-        var card = new Border
-        {
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            CornerRadius = Metrics.SurfaceCorner,
-            Padding = new Thickness(8),
-            HorizontalAlignment = HorizontalAlignment.Left,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(SignaturePillLeft(), 6, 0, 0),
-            Child = BuildSignaturePickerColumn()
-        };
-
-        _signatureFlyout = card;
-        _flyoutHost.Children.Add(card);
-    }
-
-    private double SignaturePillLeft()
-    {
-        if (_signaturePill is { } pill && _flyoutHost is { } host && pill.IsLoaded)
-        {
-            try
-            {
-                return Math.Max(8, pill.TranslatePoint(new Point(0, 0), host).X);
-            }
-            catch
-            {
-                // Fall through to the default inset.
-            }
-        }
-
-        return 12;
-    }
-
-    private void CloseSignaturePicker()
-    {
-        if (_signatureFlyout is { } flyout)
-        {
-            _flyoutHost?.Children.Remove(flyout);
-            _signatureFlyout = null;
+            SetArmedTool(SignPlacementKind.Stamp);
         }
     }
 
-    private void RefreshSignaturePicker()
-    {
-        if (_signatureFlyout is not { } flyout)
-        {
-            return;
-        }
-
-        if (SignatureStore.ListSignatures().Count == 0)
-        {
-            CloseSignaturePicker();
-            return;
-        }
-
-        flyout.Child = BuildSignaturePickerColumn();
-    }
-
-    private StackPanel BuildSignaturePickerColumn()
-    {
-        var palette = Theme.Current;
-        var column = new StackPanel { Width = 216 };
-        foreach (var path in SignatureStore.ListSignatures())
-        {
-            column.Children.Add(BuildSignatureRow(palette, path));
-        }
-
-        var newPill = BuildPill("New signature", ShowInkCapture, PillRole.Ghost);
-        newPill.Margin = new Thickness(0, 6, 0, 0);
-        newPill.HorizontalAlignment = HorizontalAlignment.Center;
-        column.Children.Add(newPill);
-        return column;
-    }
-
-    private Border BuildSignatureRow(ThemePalette palette, string path)
-    {
-        var image = SignatureStore.TryLoad(path);
-        var pad = new Border
-        {
-            Background = Brushes.White,
-            CornerRadius = Metrics.RowCorner,
-            Height = 44,
-            Child = new Image
-            {
-                Source = image,
-                Stretch = Stretch.Uniform,
-                Margin = new Thickness(8, 4, 8, 4)
-            }
-        };
-
-        var row = new Grid();
-        row.Children.Add(pad);
-
-        var selected = string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase)
-            && _armedTool == SignPlacementKind.Signature;
-        var frame = new Border
-        {
-            Margin = new Thickness(0, 0, 0, 6),
-            CornerRadius = Metrics.RowCorner,
-            BorderThickness = new Thickness(1),
-            BorderBrush = selected ? Theme.Brush(palette.Accent) : Theme.Brush(palette.RaisedBorder),
-            Cursor = Cursors.Hand,
-            Child = row
-        };
-
-        var removeGlyph = new TextBlock
-        {
-            Text = "",
-            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-            FontSize = 9,
-            Foreground = Theme.Brush(palette.TextSecondary),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        var remove = new Border
-        {
-            Width = 20,
-            Height = 20,
-            CornerRadius = new CornerRadius(10),
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(0, 2, 2, 0),
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            Visibility = Visibility.Collapsed,
-            Child = removeGlyph
-        };
-        remove.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        remove.MouseLeftButtonUp += (_, e) =>
-        {
-            DeleteSignature(path);
-            e.Handled = true;
-        };
-        row.Children.Add(remove);
-
-        frame.MouseEnter += (_, _) => remove.Visibility = Visibility.Visible;
-        frame.MouseLeave += (_, _) => remove.Visibility = Visibility.Collapsed;
-        frame.MouseLeftButtonUp += (_, e) =>
-        {
-            ArmSignature(path);
-            e.Handled = true;
-        };
-        return frame;
-    }
-
-    private void DeleteSignature(string path)
-    {
-        // Already-placed ink carries its own pixels; deleting a saved
-        // signature only changes what can be placed next.
-        SignatureStore.Remove(path);
-        if (string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase))
-        {
-            _selectedSignaturePath = null;
-            if (_armedTool == SignPlacementKind.Signature)
-            {
-                DisarmTool();
-            }
-        }
-
-        RefreshSignaturePicker();
-    }
-
-    private void RefreshPills()
-    {
-        foreach (var refresh in _pillRefreshers)
-        {
-            refresh();
-        }
-    }
-
-    private void SelectFrame(Grid? frame)
-    {
-        if (ReferenceEquals(_selectedFrame, frame))
-        {
-            return;
-        }
-
-        if (_selectedFrame is { } previous && _frameChrome.TryGetValue(previous, out var previousChrome))
-        {
-            previousChrome(false);
-        }
-
-        _selectedFrame = frame;
-        if (frame is not null && _frameChrome.TryGetValue(frame, out var chrome))
-        {
-            chrome(true);
-            Focus();
-        }
-    }
-
-    private void RemovePlacementFrame(Grid frame)
-    {
-        _session.Placements.Remove((SignPlacement)frame.Tag);
-        _placementLayer.Children.Remove(frame);
-        _frameChrome.Remove(frame);
-        if (ReferenceEquals(_selectedFrame, frame))
-        {
-            _selectedFrame = null;
-        }
-    }
-
-    private static bool TryImportStampInteractively()
+    private bool TryImportStampInteractively()
     {
         var picker = new Microsoft.Win32.OpenFileDialog
         {
             Title = "Pick a stamp image",
             Filter = "Images|*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.webp"
         };
-        return picker.ShowDialog() == true && SignatureStore.TryImportStamp(picker.FileName);
+        return picker.ShowDialog(Window.GetWindow(this)) == true && SignatureStore.TryImportStamp(picker.FileName);
     }
 
     private void OnPageClick(object sender, MouseButtonEventArgs e)
     {
-        SelectFrame(null);
+        Select(null);
         if (_armedTool is not { } tool)
         {
             return;
@@ -789,83 +674,66 @@ internal sealed class FillSignSurface : Grid
 
         var at = e.GetPosition(_placementLayer);
         DisarmTool();
-
-        var placement = BuildDefaultPlacement(tool, at);
-        if (placement is null)
-        {
-            return;
-        }
-
-        _session.Placements.Add(placement);
-        AddPlacementVisual(placement);
+        Place(tool, at.X / _pageWidth, at.Y / _pageHeight);
         e.Handled = true;
     }
 
-    private SignPlacement? BuildDefaultPlacement(SignPlacementKind kind, Point at)
+    /// <summary>
+    /// Places the tool's item centered at a normalized point on the current
+    /// page and selects it. False when there is nothing to place (no saved
+    /// signature or stamp).
+    /// </summary>
+    internal bool Place(SignPlacementKind kind, double x, double y)
     {
-        double width;
-        double height;
-        string? text = null;
-        byte[]? imagePng = null;
-        switch (kind)
+        if (BuildDefaultPlacement(kind, x, y) is not { } placement)
         {
-            case SignPlacementKind.Signature:
-            case SignPlacementKind.Stamp:
-                // Snapshot the pixels now: the placement must survive the
-                // stored file being replaced or removed afterwards.
-                var assetPath = kind == SignPlacementKind.Signature
-                    ? _selectedSignaturePath ?? SignatureStore.ListSignatures().FirstOrDefault()
-                    : SignatureStore.StampPath;
-                imagePng = assetPath is null ? null : TryReadStoreBytes(assetPath);
-                var source = imagePng is null ? null : SignatureStore.TryLoad(imagePng);
-                if (source is null)
-                {
-                    return null;
-                }
-
-                width = kind == SignPlacementKind.Signature ? 0.24 : 0.18;
-                height = width * (_pageWidth / _pageHeight) * (source.PixelHeight / (double)source.PixelWidth);
-                break;
-
-            case SignPlacementKind.Date:
-                text = DateTime.Now.ToString("d", CultureInfo.CurrentCulture);
-                width = 0.13;
-                height = 0.028;
-                break;
-
-            default:
-                return null;
+            return false;
         }
 
-        return new SignPlacement(
-            kind,
-            _session.PageIndex,
-            at.X / _pageWidth - width / 2,
-            at.Y / _pageHeight - height / 2,
-            width,
-            height,
-            text,
-            imagePng).Clamped();
+        _placements.Add(placement);
+        AddPlacementVisual(placement);
+        UpdateWorkState();
+        return true;
     }
 
-    private static byte[]? TryReadStoreBytes(string path)
+    private SignPlacement? BuildDefaultPlacement(SignPlacementKind kind, double x, double y)
     {
-        try
+        if (kind == SignPlacementKind.Date)
         {
-            return System.IO.File.ReadAllBytes(path);
+            var date = new SignPlacement(kind, _pageIndex, x, y - DateHeight / 2, 0, DateHeight, TodayText());
+            return date.FittedToText(_pageHeight / _pageWidth);
         }
-        catch
+
+        // Snapshot the pixels now: the placement must survive the stored
+        // file being replaced or removed afterwards.
+        var assetPath = kind == SignPlacementKind.Signature
+            ? _selectedSignaturePath ?? SignatureStore.ListSignatures().FirstOrDefault()
+            : SignatureStore.StampPath;
+        var png = assetPath is null ? null : SignatureStore.TryReadForPlacement(assetPath);
+        if (png is null || SignatureStore.TryLoad(png) is not { } source)
         {
             return null;
         }
+
+        var width = kind == SignPlacementKind.Signature ? 0.24 : 0.18;
+        var height = width * (_pageWidth / _pageHeight) * (source.PixelHeight / (double)source.PixelWidth);
+        return new SignPlacement(kind, _pageIndex, x - width / 2, y - height / 2, width, height, null, png).Clamped();
+    }
+
+    /// <summary>Today in the user's short date form, kept to what the file can carry.</summary>
+    private static string TodayText()
+    {
+        var local = SignText.Writable(DateTime.Now.ToString("d", CultureInfo.CurrentCulture)).Trim();
+        return local.Length > 0 ? local : DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
     }
 
     private void AddPlacementVisual(SignPlacement placement, bool select = true)
     {
-        var palette = Theme.Current;
         FrameworkElement inner;
         if (placement.Kind == SignPlacementKind.Date)
         {
+            // Arial on screen, Helvetica in the file: the same widths, so the
+            // frame sized from the text fits both.
             inner = new TextBlock
             {
                 Text = placement.Text,
@@ -875,93 +743,28 @@ internal sealed class FillSignSurface : Grid
                 HorizontalAlignment = HorizontalAlignment.Center
             };
         }
-        else
+        else if (placement.ImagePng is { } png && SignatureStore.TryLoad(png) is { } source)
         {
-            // Every image placement carries its own pixels by construction.
-            var source = placement.ImagePng is { } png ? SignatureStore.TryLoad(png) : null;
-            if (source is null)
-            {
-                _session.Placements.Remove(placement);
-                return;
-            }
-
             inner = new Image { Source = source, Stretch = Stretch.Fill };
         }
-
-        var frame = new Grid { Tag = placement };
-        frame.Children.Add(inner);
-
-        var removeGlyph = new TextBlock
+        else
         {
-            Text = "",
-            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-            FontSize = 10,
-            Foreground = Theme.Brush(palette.TextSecondary),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        var remove = new Border
-        {
-            Width = 22,
-            Height = 22,
-            CornerRadius = new CornerRadius(11),
-            HorizontalAlignment = HorizontalAlignment.Right,
-            VerticalAlignment = VerticalAlignment.Top,
-            // A chip floating just above the corner: a real target that
-            // never covers the placed ink. Safe outside the frame because
-            // selection holds the chrome; no hover gap can hide it.
-            Margin = new Thickness(0, -28, -2, 0),
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            Cursor = Cursors.Hand,
-            Visibility = Visibility.Collapsed,
-            Child = removeGlyph
-        };
-        remove.MouseEnter += (_, _) =>
-        {
-            remove.Background = Theme.Brush(palette.HoverBg);
-            removeGlyph.Foreground = Theme.Brush(palette.TextPrimary);
-        };
-        remove.MouseLeave += (_, _) =>
-        {
-            remove.Background = Theme.Brush(palette.RaisedBg);
-            removeGlyph.Foreground = Theme.Brush(palette.TextSecondary);
-        };
-        remove.MouseLeftButtonDown += (_, e) => e.Handled = true;
-        remove.MouseLeftButtonUp += (_, e) =>
-        {
-            RemovePlacementFrame(frame);
-            e.Handled = true;
-        };
-        frame.Children.Add(remove);
-
-        var outline = new Rectangle
-        {
-            Stroke = Theme.Brush(palette.Accent),
-            StrokeThickness = 1,
-            StrokeDashArray = [3, 3],
-            Visibility = Visibility.Collapsed,
-            IsHitTestVisible = false
-        };
-        frame.Children.Add(outline);
-
-        void SetSelected(bool on)
-        {
-            remove.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
-            outline.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            _placements.Remove(placement);
+            return;
         }
 
-        _frameChrome[frame] = SetSelected;
-
-        // Hover only hints with the outline; the delete chip belongs to
-        // selection, which holds it until something else is clicked.
-        frame.MouseEnter += (_, _) => outline.Visibility = Visibility.Visible;
+        var frame = new Grid { Tag = placement, Background = Brushes.Transparent, Children = { inner } };
+        frame.MouseEnter += (_, _) =>
+        {
+            _hoveredFrame = frame;
+            UpdateChrome();
+        };
         frame.MouseLeave += (_, _) =>
         {
-            if (!ReferenceEquals(_selectedFrame, frame))
+            if (ReferenceEquals(_hoveredFrame, frame))
             {
-                outline.Visibility = Visibility.Collapsed;
+                _hoveredFrame = null;
+                UpdateChrome();
             }
         };
 
@@ -974,7 +777,7 @@ internal sealed class FillSignSurface : Grid
         // placing, so it selects nothing.
         if (select)
         {
-            SelectFrame(frame);
+            Select(frame);
         }
     }
 
@@ -1003,7 +806,7 @@ internal sealed class FillSignSurface : Grid
                 return;
             }
 
-            SelectFrame(frame);
+            Select(frame);
             dragging = frame.CaptureMouse();
             grabOffset = e.GetPosition(frame);
             e.Handled = true;
@@ -1016,12 +819,11 @@ internal sealed class FillSignSurface : Grid
             }
 
             var at = e.GetPosition(_placementLayer);
-            var moved = (placement with
+            ReplacePlacement(frame, (placement with
             {
                 X = (at.X - grabOffset.X) / _pageWidth,
                 Y = (at.Y - grabOffset.Y) / _pageHeight
-            }).Clamped();
-            ReplacePlacement(frame, moved);
+            }).Clamped());
         };
         frame.MouseLeftButtonUp += (_, _) =>
         {
@@ -1029,39 +831,50 @@ internal sealed class FillSignSurface : Grid
             frame.ReleaseMouseCapture();
         };
 
-        // The quiet resize: the wheel over an element scales it in place.
+        // The quick resize: the wheel over an element scales it in place.
+        // The corner handle does the same for pens and touch.
         frame.MouseWheel += (_, e) =>
         {
-            if (frame.Tag is not SignPlacement placement)
+            if (frame.Tag is SignPlacement placement)
             {
-                return;
+                var factor = e.Delta > 0 ? 1.06 : 1 / 1.06;
+                ReplacePlacement(frame, Scaled(placement, placement.Width * factor, keepCenter: true));
+                e.Handled = true;
             }
-
-            var factor = e.Delta > 0 ? 1.06 : 1 / 1.06;
-            var center = new Point(placement.X + placement.Width / 2, placement.Y + placement.Height / 2);
-            var width = Math.Clamp(placement.Width * factor, 0.03, 0.9);
-            var height = placement.Height * (width / placement.Width);
-            var scaled = (placement with
-            {
-                Width = width,
-                Height = height,
-                X = center.X - width / 2,
-                Y = center.Y - height / 2
-            }).Clamped();
-            ReplacePlacement(frame, scaled);
-            e.Handled = true;
         };
+    }
+
+    /// <summary>The placement at a new width, aspect kept, so text still fits its frame.</summary>
+    private static SignPlacement Scaled(SignPlacement placement, double width, bool keepCenter)
+    {
+        width = Math.Clamp(width, 0.03, 0.9);
+        var height = placement.Height * (width / placement.Width);
+        if (height > 1)
+        {
+            width *= 1 / height;
+            height = 1;
+        }
+
+        return (keepCenter
+            ? placement with
+            {
+                X = placement.X + (placement.Width - width) / 2,
+                Y = placement.Y + (placement.Height - height) / 2,
+                Width = width,
+                Height = height
+            }
+            : placement with { Width = width, Height = height }).Clamped();
     }
 
     private void BeginDateEdit(Grid frame, FrameworkElement inner)
     {
-        if (inner is not TextBlock label || frame.Tag is not SignPlacement placement)
+        if (inner is not TextBlock label || frame.Tag is not SignPlacement || _commitDateEdit is not null)
         {
             return;
         }
 
         // Dressed to the page, not the system: white paper, black ink, and
-        // an accent hairline standing in for the dashed selection outline.
+        // an accent hairline standing in for the selection outline.
         var editor = new TextBox
         {
             Text = label.Text,
@@ -1078,21 +891,38 @@ internal sealed class FillSignSurface : Grid
             HorizontalContentAlignment = HorizontalAlignment.Center
         };
 
+        // Only what the file can print may be typed, so screen and file
+        // always show the same text.
+        editor.TextChanged += (_, _) =>
+        {
+            var writable = SignText.Writable(editor.Text);
+            if (writable != editor.Text)
+            {
+                var caret = Math.Max(0, editor.CaretIndex - (editor.Text.Length - writable.Length));
+                editor.Text = writable;
+                editor.CaretIndex = Math.Min(caret, writable.Length);
+            }
+        };
+
         void Commit()
         {
-            var text = string.IsNullOrWhiteSpace(editor.Text) ? placement.Text : editor.Text.Trim();
-            label.Text = text;
-            ReplacePlacement(frame, ((SignPlacement)frame.Tag) with { Text = text });
+            _commitDateEdit = null;
+            var current = (SignPlacement)frame.Tag;
+            var text = editor.Text.Trim();
+            var updated = (current with { Text = text.Length > 0 ? text : current.Text }).FittedToText(_pageHeight / _pageWidth);
+            label.Text = updated.Text;
             frame.Children.Remove(editor);
             label.Visibility = Visibility.Visible;
+            ReplacePlacement(frame, updated);
         }
 
-        editor.LostFocus += (_, _) => Commit();
+        _commitDateEdit = Commit;
+        editor.LostKeyboardFocus += (_, _) => _commitDateEdit?.Invoke();
         editor.KeyDown += (_, e) =>
         {
             if (e.Key is Key.Enter or Key.Escape)
             {
-                Commit();
+                _commitDateEdit?.Invoke();
                 e.Handled = true;
             }
         };
@@ -1105,14 +935,15 @@ internal sealed class FillSignSurface : Grid
 
     private void ReplacePlacement(Grid frame, SignPlacement updated)
     {
-        var index = _session.Placements.IndexOf((SignPlacement)frame.Tag);
+        var index = _placements.IndexOf((SignPlacement)frame.Tag);
         if (index >= 0)
         {
-            _session.Placements[index] = updated;
+            _placements[index] = updated;
         }
 
         frame.Tag = updated;
         ApplyPlacementBounds(frame);
+        UpdateChrome();
     }
 
     private void ApplyPlacementBounds(Grid frame)
@@ -1126,12 +957,401 @@ internal sealed class FillSignSurface : Grid
         frame.Height = placement.Height * _pageHeight;
         Canvas.SetLeft(frame, placement.X * _pageWidth);
         Canvas.SetTop(frame, placement.Y * _pageHeight);
-        if (placement.Kind == SignPlacementKind.Date
-            && frame.Children.Count > 0
-            && frame.Children[0] is TextBlock label)
+        if (placement.Kind == SignPlacementKind.Date && frame.Children[0] is TextBlock label)
         {
-            label.FontSize = Math.Max(6, frame.Height * 0.72);
+            label.FontSize = frame.Height * SignText.FontScale;
         }
+    }
+
+    private void RemovePlacementFrame(Grid frame)
+    {
+        _placements.Remove((SignPlacement)frame.Tag);
+        _placementLayer.Children.Remove(frame);
+        if (ReferenceEquals(_selectedFrame, frame))
+        {
+            _selectedFrame = null;
+        }
+
+        if (ReferenceEquals(_hoveredFrame, frame))
+        {
+            _hoveredFrame = null;
+        }
+
+        UpdateChrome();
+        UpdateWorkState();
+    }
+
+    private void Select(Grid? frame)
+    {
+        _selectedFrame = frame;
+        UpdateChrome();
+        if (frame is not null)
+        {
+            Focus();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Screen-space chrome: drawn over the scaled page at fixed size.
+    // ------------------------------------------------------------------
+
+    private static Rectangle BuildOutline(ThemePalette palette) => new()
+    {
+        Stroke = Theme.Brush(palette.Accent),
+        StrokeThickness = 1,
+        StrokeDashArray = [4, 3],
+        IsHitTestVisible = false,
+        Visibility = Visibility.Collapsed
+    };
+
+    private Border BuildDeleteChip(ThemePalette palette) => BuildRemoveChip(palette, ChipSize, "Remove", () =>
+    {
+        if (_selectedFrame is { } selected)
+        {
+            RemovePlacementFrame(selected);
+        }
+    });
+
+    /// <summary>The round x that removes a placement or a saved signature.</summary>
+    private static Border BuildRemoveChip(ThemePalette palette, double size, string name, Action onClick)
+    {
+        var glyph = new TextBlock
+        {
+            Text = "\uE711",
+            FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
+            FontSize = 9,
+            Foreground = Theme.Brush(palette.TextSecondary),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        var chip = new Border
+        {
+            Width = size,
+            Height = size,
+            CornerRadius = new CornerRadius(size / 2),
+            Background = Theme.Brush(palette.RaisedBg),
+            BorderBrush = Theme.Brush(palette.RaisedBorder),
+            BorderThickness = new Thickness(1),
+            Cursor = Cursors.Hand,
+            ToolTip = name,
+            Visibility = Visibility.Collapsed,
+            Child = glyph
+        };
+        AutomationProperties.SetName(chip, name);
+        chip.MouseEnter += (_, _) => glyph.Foreground = Theme.Brush(palette.TextPrimary);
+        chip.MouseLeave += (_, _) => glyph.Foreground = Theme.Brush(palette.TextSecondary);
+        chip.MouseLeftButtonDown += (_, e) => e.Handled = true;
+        chip.MouseLeftButtonUp += (_, e) =>
+        {
+            onClick();
+            e.Handled = true;
+        };
+        return chip;
+    }
+
+    private Border BuildResizeHandle(ThemePalette palette)
+    {
+        var handle = new Border
+        {
+            Width = HandleSize,
+            Height = HandleSize,
+            CornerRadius = new CornerRadius(HandleSize / 2),
+            Background = Theme.Brush(palette.Accent),
+            BorderBrush = Brushes.White,
+            BorderThickness = new Thickness(2),
+            Cursor = Cursors.SizeNWSE,
+            ToolTip = "Drag to resize",
+            Visibility = Visibility.Collapsed
+        };
+        var resizing = false;
+        handle.MouseLeftButtonDown += (_, e) =>
+        {
+            resizing = handle.CaptureMouse();
+            e.Handled = true;
+        };
+        handle.MouseMove += (_, e) =>
+        {
+            if (resizing && _selectedFrame is { Tag: SignPlacement placement } frame)
+            {
+                var right = e.GetPosition(_placementLayer).X / _pageWidth;
+                ReplacePlacement(frame, Scaled(placement, right - placement.X, keepCenter: false));
+            }
+        };
+        handle.MouseLeftButtonUp += (_, e) =>
+        {
+            resizing = false;
+            handle.ReleaseMouseCapture();
+            e.Handled = true;
+        };
+        return handle;
+    }
+
+    private void UpdateChrome()
+    {
+        var hovered = ReferenceEquals(_hoveredFrame, _selectedFrame) ? null : ScreenBounds(_hoveredFrame);
+        PlaceOutline(_hoverOutline, hovered);
+
+        var selected = ScreenBounds(_selectedFrame);
+        PlaceOutline(_selectionOutline, selected);
+        var visibility = selected is null ? Visibility.Collapsed : Visibility.Visible;
+        _deleteChip.Visibility = visibility;
+        _resizeHandle.Visibility = visibility;
+        if (selected is { } bounds)
+        {
+            // The chip floats just above the corner: a real target that never
+            // covers the placed ink.
+            Canvas.SetLeft(_deleteChip, bounds.Right - ChipSize + 2);
+            Canvas.SetTop(_deleteChip, bounds.Top - ChipSize - 6);
+            Canvas.SetLeft(_resizeHandle, bounds.Right - HandleSize / 2);
+            Canvas.SetTop(_resizeHandle, bounds.Bottom - HandleSize / 2);
+        }
+    }
+
+    private static void PlaceOutline(Rectangle outline, Rect? bounds)
+    {
+        if (bounds is not { } rect)
+        {
+            outline.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        rect.Inflate(1, 1);
+        outline.Width = rect.Width;
+        outline.Height = rect.Height;
+        Canvas.SetLeft(outline, rect.X);
+        Canvas.SetTop(outline, rect.Y);
+        outline.Visibility = Visibility.Visible;
+    }
+
+    private Rect? ScreenBounds(Grid? frame)
+    {
+        if (frame?.Tag is not SignPlacement placement || !_placementLayer.Children.Contains(frame))
+        {
+            return null;
+        }
+
+        try
+        {
+            var pageRect = new Rect(
+                placement.X * _pageWidth,
+                placement.Y * _pageHeight,
+                placement.Width * _pageWidth,
+                placement.Height * _pageHeight);
+            return _pageHost.TransformToVisual(_chromeLayer).TransformBounds(pageRect);
+        }
+        catch (InvalidOperationException)
+        {
+            // Not laid out yet; the next scroll or layout pass places it.
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // The signature picker: a small library under the Signature pill. Pick
+    // one to place it, hover a row to delete it, or draw a new one. An
+    // empty library skips straight to the pad. It is an in-window flyout,
+    // not a Popup: one visual tree, one hwnd.
+    // ------------------------------------------------------------------
+
+    private void ToggleSignaturePicker()
+    {
+        if (_signatureFlyout is not null)
+        {
+            CloseSignaturePicker();
+            return;
+        }
+
+        if (SignatureStore.ListSignatures().Count == 0)
+        {
+            ShowInkCapture();
+            return;
+        }
+
+        var palette = Theme.Current;
+        _signatureFlyout = new Border
+        {
+            Background = Theme.Brush(palette.ChromeBg),
+            BorderBrush = Theme.Brush(palette.Border),
+            BorderThickness = new Thickness(1),
+            CornerRadius = Metrics.MenuCorner,
+            Padding = Metrics.MenuPadding,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(SignaturePillLeft(), Metrics.FlyoutGap, 0, 0),
+            Effect = new DropShadowEffect { BlurRadius = 14, ShadowDepth = 2, Opacity = 0.35, Color = Colors.Black },
+            Child = BuildSignaturePickerColumn()
+        };
+        _pageArea.Children.Add(_signatureFlyout);
+    }
+
+    private double SignaturePillLeft()
+    {
+        if (_signaturePill.IsLoaded)
+        {
+            try
+            {
+                return Math.Max(8, _signaturePill.TranslatePoint(new Point(0, 0), _pageArea).X);
+            }
+            catch (InvalidOperationException)
+            {
+                // Fall through to the toolbar's own inset.
+            }
+        }
+
+        return 12;
+    }
+
+    private void CloseSignaturePicker()
+    {
+        if (_signatureFlyout is { } flyout)
+        {
+            _pageArea.Children.Remove(flyout);
+            _signatureFlyout = null;
+        }
+    }
+
+    private void RefreshSignaturePicker()
+    {
+        if (_signatureFlyout is not { } flyout)
+        {
+            return;
+        }
+
+        if (SignatureStore.ListSignatures().Count == 0)
+        {
+            CloseSignaturePicker();
+            return;
+        }
+
+        flyout.Child = BuildSignaturePickerColumn();
+    }
+
+    private StackPanel BuildSignaturePickerColumn()
+    {
+        var palette = Theme.Current;
+        var column = new StackPanel { Width = 220 };
+        foreach (var path in SignatureStore.ListSignatures())
+        {
+            column.Children.Add(BuildSignatureRow(palette, path));
+        }
+
+        var newPill = HousePill.Build("New signature", ShowInkCapture, PillRole.Ghost);
+        newPill.Margin = new Thickness(0, 2, 0, 2);
+        newPill.HorizontalAlignment = HorizontalAlignment.Center;
+        column.Children.Add(newPill);
+        return column;
+    }
+
+    /// <summary>
+    /// One saved signature. Removing it takes two clicks on the row itself,
+    /// the second on a named button, because a signature is work to redraw.
+    /// </summary>
+    private Border BuildSignatureRow(ThemePalette palette, string path)
+    {
+        var row = new Grid
+        {
+            Children =
+            {
+                new Border
+                {
+                    Background = Brushes.White,
+                    CornerRadius = Metrics.RowCorner,
+                    Height = 44,
+                    Child = new Image
+                    {
+                        Source = SignatureStore.TryLoad(path),
+                        Stretch = Stretch.Uniform,
+                        Margin = new Thickness(8, 4, 8, 4)
+                    }
+                }
+            }
+        };
+
+        var selected = string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase)
+            && _armedTool == SignPlacementKind.Signature;
+        var frame = new Border
+        {
+            Margin = new Thickness(0, 0, 0, 4),
+            CornerRadius = Metrics.RowCorner,
+            BorderThickness = new Thickness(1),
+            BorderBrush = Theme.Brush(selected ? palette.Accent : palette.RaisedBorder),
+            Cursor = Cursors.Hand,
+            Child = row
+        };
+
+        var confirm = new Border
+        {
+            Background = Theme.Brush(palette.ChromeBg),
+            CornerRadius = Metrics.RowCorner,
+            Visibility = Visibility.Collapsed
+        };
+        var delete = HousePill.Build("Delete", () => DeleteSignature(path));
+        delete.Margin = new Thickness(0);
+        confirm.Child = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Children = { HousePill.Build("Keep", () => confirm.Visibility = Visibility.Collapsed, PillRole.Ghost), delete }
+        };
+
+        var remove = BuildRemoveChip(palette, 20, "Delete this signature", () => confirm.Visibility = Visibility.Visible);
+        remove.HorizontalAlignment = HorizontalAlignment.Right;
+        remove.VerticalAlignment = VerticalAlignment.Top;
+        remove.Margin = new Thickness(0, 2, 2, 0);
+        row.Children.Add(remove);
+        row.Children.Add(confirm);
+
+        frame.MouseEnter += (_, _) => remove.Visibility = Visibility.Visible;
+        frame.MouseLeave += (_, _) =>
+        {
+            remove.Visibility = Visibility.Collapsed;
+            confirm.Visibility = Visibility.Collapsed;
+        };
+        frame.MouseLeftButtonUp += (_, e) =>
+        {
+            if (confirm.Visibility != Visibility.Visible)
+            {
+                ArmSignature(path);
+            }
+
+            e.Handled = true;
+        };
+        return frame;
+    }
+
+    private void DeleteSignature(string path)
+    {
+        // Already-placed ink carries its own pixels; deleting a saved
+        // signature only changes what can be placed next.
+        SignatureStore.Remove(path);
+        if (string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase))
+        {
+            _selectedSignaturePath = null;
+            if (_armedTool == SignPlacementKind.Signature)
+            {
+                DisarmTool();
+            }
+        }
+
+        RefreshSignaturePicker();
+    }
+
+    private static bool IsWithin(DependencyObject node, DependencyObject root)
+    {
+        for (var current = node; current is not null;)
+        {
+            if (ReferenceEquals(current, root))
+            {
+                return true;
+            }
+
+            current = current is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return false;
     }
 
     // ------------------------------------------------------------------
@@ -1141,58 +1361,55 @@ internal sealed class FillSignSurface : Grid
 
     private Grid BuildInkOverlay(ThemePalette palette)
     {
-        var overlay = new Grid
-        {
-            Background = Theme.Brush(Theme.OverlayScrim),
-            Visibility = Visibility.Collapsed
-        };
-
-        var card = new Border
-        {
-            Background = Theme.Brush(palette.RaisedBg),
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
-            BorderThickness = new Thickness(1),
-            CornerRadius = Metrics.SurfaceCorner,
-            Padding = new Thickness(18),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        var column = new StackPanel { Width = 460 };
         _inkTitle = new TextBlock
         {
-            Text = "Draw your signature",
-            FontSize = 15,
+            FontSize = Metrics.FontTitle,
             FontWeight = FontWeights.SemiBold,
             Foreground = Theme.Brush(palette.TextPrimary),
-            Margin = new Thickness(0, 0, 0, 10)
+            Margin = new Thickness(0, 0, 0, 12)
         };
-        column.Children.Add(_inkTitle);
 
-        var inkFrame = new Border
+        var use = HousePill.Build("Use it", CommitInk, PillRole.Accent);
+        use.Margin = new Thickness(0);
+        var card = new Border
         {
-            Background = Brushes.White,
-            BorderBrush = Theme.Brush(palette.RaisedBorder),
+            Background = Theme.Brush(palette.ChromeBg),
+            BorderBrush = Theme.Brush(palette.Border),
             BorderThickness = new Thickness(1),
-            CornerRadius = Metrics.RowCorner,
-            Height = 170,
-            Child = _inkCanvas
+            CornerRadius = Metrics.CardCorner,
+            Padding = new Thickness(20),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new StackPanel
+            {
+                Width = 460,
+                Children =
+                {
+                    _inkTitle,
+                    new Border
+                    {
+                        Background = Brushes.White,
+                        BorderBrush = Theme.Brush(palette.RaisedBorder),
+                        BorderThickness = new Thickness(1),
+                        CornerRadius = Metrics.SurfaceCorner,
+                        Height = 172,
+                        Child = _inkCanvas
+                    },
+                    new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        HorizontalAlignment = HorizontalAlignment.Right,
+                        Margin = new Thickness(0, 12, 0, 0),
+                        Children =
+                        {
+                            HousePill.Build("Back", HideInkCapture, PillRole.Ghost),
+                            HousePill.Build("Clear", ClearInk),
+                            use
+                        }
+                    }
+                }
+            }
         };
-        column.Children.Add(inkFrame);
-
-        var buttons = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 12, 0, 0)
-        };
-        buttons.Children.Add(BuildPill("Use it", CommitInk, PillRole.Accent));
-        buttons.Children.Add(BuildPill("Clear", ClearInk));
-        buttons.Children.Add(BuildPill("Back", HideInkCapture, PillRole.Ghost));
-        column.Children.Add(buttons);
-
-        card.Child = column;
-        overlay.Children.Add(card);
 
         _inkCanvas.MouseLeftButtonDown += (_, e) =>
         {
@@ -1230,7 +1447,12 @@ internal sealed class FillSignSurface : Grid
             _inkCanvas.ReleaseMouseCapture();
         };
 
-        return overlay;
+        return new Grid
+        {
+            Background = Theme.Brush(Theme.OverlayScrim),
+            Visibility = Visibility.Collapsed,
+            Children = { card }
+        };
     }
 
     private void ShowInkCapture() => ShowInkCapture(baseImage: null, editingFrame: null);
@@ -1246,11 +1468,7 @@ internal sealed class FillSignSurface : Grid
         ClearInk();
         _inkBaseImage = baseImage;
         _inkEditingFrame = editingFrame;
-        if (_inkTitle is not null)
-        {
-            _inkTitle.Text = editingFrame is not null ? "Edit this signature" : "Draw your signature";
-        }
-
+        _inkTitle.Text = editingFrame is not null ? "Edit this signature" : "Draw your signature";
         _inkOverlay.Visibility = Visibility.Visible;
         if (baseImage is not null)
         {
@@ -1332,36 +1550,26 @@ internal sealed class FillSignSurface : Grid
         if (_inkEditingFrame is { } frame)
         {
             var edited = SignatureStore.RenderComposite(_inkBaseImage, _inkBaseRect, strokes, Colors.Black);
-            if (edited is null)
+            if (edited is not null)
             {
-                return;
+                UpdatePlacementImage(frame, edited);
+                HideInkCapture();
             }
 
-            UpdatePlacementImage(frame, edited);
-            HideInkCapture();
             return;
         }
 
-        var saved = SignatureStore.SaveSignatureFromStrokes(strokes, Colors.Black);
-        if (saved is null)
+        if (SignatureStore.SaveSignatureFromStrokes(strokes, Colors.Black) is { } saved)
         {
-            return;
+            HideInkCapture();
+            ArmSignature(saved);
         }
-
-        HideInkCapture();
-        ArmSignature(saved);
     }
 
     /// <summary>Commits edited ink back into one placed signature.</summary>
     private void UpdatePlacementImage(Grid frame, BitmapSource edited)
     {
-        if (frame.Tag is not SignPlacement placement)
-        {
-            return;
-        }
-
-        var png = EncodePng(edited);
-        if (png is null)
+        if (frame.Tag is not SignPlacement placement || SignatureStore.EncodePng(edited) is not { } png)
         {
             return;
         }
@@ -1369,35 +1577,18 @@ internal sealed class FillSignSurface : Grid
         // Keep the placement's width and center; the height follows the
         // edited ink's aspect.
         var height = placement.Width * (_pageWidth / _pageHeight) * (edited.PixelHeight / (double)edited.PixelWidth);
-        var centerY = placement.Y + placement.Height / 2;
         var updated = (placement with
         {
             ImagePng = png,
             Height = height,
-            Y = centerY - height / 2
+            Y = placement.Y + placement.Height / 2 - height / 2
         }).Clamped();
 
-        if (frame.Children.Count > 0 && frame.Children[0] is Image image)
+        if (frame.Children[0] is Image image)
         {
             image.Source = SignatureStore.TryLoad(png);
         }
 
         ReplacePlacement(frame, updated);
-    }
-
-    private static byte[]? EncodePng(BitmapSource image)
-    {
-        try
-        {
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(image));
-            using var stream = new System.IO.MemoryStream();
-            encoder.Save(stream);
-            return stream.ToArray();
-        }
-        catch
-        {
-            return null;
-        }
     }
 }
