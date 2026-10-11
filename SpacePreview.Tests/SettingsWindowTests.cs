@@ -45,6 +45,8 @@ public sealed class SettingsWindowTests
 
             await offline.CheckNowAsync();
             Assert.Equal(Visibility.Collapsed, neverChecked.UpdateStatusText.Visibility);
+            Assert.Equal("Couldn't check for updates.", neverChecked.UpdateCaption.Text);
+            Assert.Equal(Visibility.Visible, neverChecked.CheckLink.Visibility);
 
             await current.CheckNowAsync();
             Assert.Equal(Visibility.Visible, checkedOk.UpdateStatusText.Visibility);
@@ -89,10 +91,11 @@ public sealed class SettingsWindowTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
+        var metered = true;
         var launched = 0;
         using var updates = new AppUpdater(
             release.Service(root.Path),
-            isMetered: () => true,
+            isMetered: () => metered,
             launch: (_, _, _) =>
             {
                 launched++;
@@ -106,6 +109,12 @@ public sealed class SettingsWindowTests
             Assert.Equal(Visibility.Collapsed, settings.UpdateStatusText.Visibility);
             Assert.Equal("Install now", settings.UpdateLink.Content);
             Assert.Equal("Install update now", AutomationProperties.GetName(settings.UpdateLink));
+
+            // Metered, nothing is on disk yet: it installs only when asked.
+            Assert.Equal("3.1.0 is ready to install.", settings.UpdateCaption.Text);
+
+            metered = false;
+            await updates.TickAsync();
             Assert.Equal("3.1.0 installs the next time you step away.", settings.UpdateCaption.Text);
 
             // Off, it waits for the user; the open window follows at once.
@@ -118,6 +127,46 @@ public sealed class SettingsWindowTests
             Assert.Equal(1, launched);
             Assert.Equal("Installing 3.1.0. Back in a few seconds.", settings.UpdateCaption.Text);
             Assert.Equal(Visibility.Collapsed, settings.UpdateLink.Visibility);
+        }
+        finally
+        {
+            settings.Close();
+        }
+    });
+
+    [Fact]
+    public Task InstallNowSaysWhatItIsDoingAndWhenItFailed() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope(settings => settings with { InstallUpdatesAutomatically = false });
+        using var release = new ReleaseFixture { HoldInstaller = new() };
+        using var root = new TempDirectory();
+        var launched = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                // Windows refuses setup the first time.
+                return ++launched == 1
+                    ? throw new InvalidOperationException("Windows did not start the installer.")
+                    : Task.CompletedTask;
+            });
+        await updates.CheckNowAsync();
+        var settings = Open(updates);
+        try
+        {
+            Click(settings.UpdateLink);
+            Assert.Equal("Downloading 3.1.0.", settings.UpdateCaption.Text);
+            Assert.Equal(Visibility.Collapsed, settings.UpdateLink.Visibility);
+            release.HoldInstaller.SetResult();
+            await WaitUntilAsync(() => launched == 1 && !updates.State.Installing);
+            Assert.Equal("Couldn't install 3.1.0.", settings.UpdateCaption.Text);
+            Assert.Equal("Install now", settings.UpdateLink.Content);
+            Assert.Equal(Visibility.Visible, settings.UpdateLink.Visibility);
+
+            Click(settings.UpdateLink);
+            await WaitUntilAsync(() => launched == 2);
+            Assert.Equal("Installing 3.1.0. Back in a few seconds.", settings.UpdateCaption.Text);
         }
         finally
         {
@@ -143,6 +192,24 @@ public sealed class SettingsWindowTests
         }
 
         return Task.CompletedTask;
+    });
+
+    [Fact]
+    public Task CopyDiagnosticsNamesTheVersionTheFooterShows() => WpfApp.RunAsync(async () =>
+    {
+        using var release = new ReleaseFixture { Offline = true };
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path, currentVersion: "2.9.4"));
+        var settings = Open(updates);
+        try
+        {
+            Assert.Equal($"{Branding.Name} 2.9.4", settings.VersionText.Text);
+            Assert.Contains($"Version: 2.9.4{Environment.NewLine}", await settings.DiagnosticsAsync(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            settings.Close();
+        }
     });
 
     [Fact]

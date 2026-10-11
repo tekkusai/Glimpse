@@ -327,7 +327,7 @@ begin
   Result := '';
 end;
 
-// From here the [Run] section starts Glimpse --updated.
+// The install finished: [Run] starts Glimpse --updated, not the code below.
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssPostInstall then
@@ -335,11 +335,16 @@ begin
 end;
 
 // A silent update that does not finish must not leave the user without
-// Glimpse, which PrepareToInstall already quit. Inno Setup 6.7.3 calls
-// DeinitializeSetup however setup ends, and ssPostInstall only once the
-// install finished ("Pascal Scripting: Event Functions"). An error before
-// then is rolled back ("Installation Order"), so this exe is the one that
-// was running. {app} is spelled out: an early failure may leave it unset.
+// Glimpse, which PrepareToInstall already quit. The Inno Setup 6.7.3 help
+// ("Pascal Scripting: Event Functions") says Setup calls DeinitializeSetup
+// just before it terminates, even when nothing was installed, and
+// ssPostInstall just after the installation finishes. "Installation Order"
+// says only that errors after the uninstaller is saved are not rolled
+// back; it does not say an earlier error puts back the files it replaced.
+// A failure during the file copy may leave old and new files mixed. This
+// starts whatever Glimpse.exe is there; while that is the old version, its
+// 24-hour attempt hold retries the update a day later. {app} is spelled
+// out: an early failure may leave it unset.
 procedure DeinitializeSetup();
 var
   ExePath: String;

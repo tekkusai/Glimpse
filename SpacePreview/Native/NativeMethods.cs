@@ -650,14 +650,33 @@ internal static class NativeMethods
             : TimeSpan.Zero;
     }
 
-    private const int QUNS_ACCEPTS_NOTIFICATIONS = 5;
+    /// <summary>QUERY_USER_NOTIFICATION_STATE, from shellapi.h.</summary>
+    internal enum UserNotificationState
+    {
+        Unknown = 0,
+
+        /// <summary>A screen saver runs, the PC is locked, or this session is switched away from.</summary>
+        NotPresent = 1,
+
+        /// <summary>A full-screen app runs, or presentation settings are on.</summary>
+        Busy = 2,
+        RunningD3DFullScreen = 3,
+        PresentationMode = 4,
+        AcceptsNotifications = 5,
+
+        /// <summary>The first hour after a new user's first sign-in.</summary>
+        QuietTime = 6,
+
+        /// <summary>A Store app runs.</summary>
+        App = 7
+    }
 
     [DllImport("shell32.dll")]
-    private static extern int SHQueryUserNotificationState(out int state);
+    private static extern int SHQueryUserNotificationState(out UserNotificationState state);
 
-    /// <summary>False while presenting, in a full-screen D3D app, or in quiet time.</summary>
-    public static bool AcceptsNotifications() =>
-        SHQueryUserNotificationState(out var state) == 0 && state == QUNS_ACCEPTS_NOTIFICATIONS;
+    /// <summary>What the shell says the user is doing; <see cref="UserNotificationState.Unknown"/> when it cannot say.</summary>
+    public static UserNotificationState QueryUserNotificationState() =>
+        SHQueryUserNotificationState(out var state) == 0 ? state : UserNotificationState.Unknown;
 
     [DllImport("shell32.dll")]
     private static extern int SHGetKnownFolderPath(

@@ -342,10 +342,13 @@ internal static partial class FileKinds
             0 => $"Today {time}",
             1 => $"Yesterday {time}",
             > 1 and < 7 => $"{when.ToString("dddd", English)} {time}",
-            _ when when.Year == now.Year => when.ToString("MMM d", English),
-            _ => when.ToString("MMM d, yyyy", English)
+            _ => DescribeDate(when, now)
         };
     }
+
+    /// <summary>A day in the interface's English: "Aug 27", with the year only when it is not this one.</summary>
+    public static string DescribeDate(DateTime when, DateTime now) =>
+        when.ToString(when.Year == now.Year ? "MMM d" : "MMM d, yyyy", English);
 
     private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
 }

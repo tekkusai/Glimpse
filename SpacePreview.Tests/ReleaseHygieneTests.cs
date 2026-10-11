@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+
 namespace SpacePreview.Tests;
 
 public sealed class ReleaseHygieneTests
@@ -149,28 +152,71 @@ public sealed class ReleaseHygieneTests
     [Fact]
     public void InstallerBuildWritesACompanionChecksumFile()
     {
-        var script = TestSource.Read(@"SpacePreview\scripts\build-installer.ps1");
+        var script = TestSource.Read(@"SpacePreview\scripts\sign-installer.ps1");
 
-        Assert.Contains("$checksum = \"$setup.sha256\"", script, StringComparison.Ordinal);
+        Assert.Contains("$checksum = \"$Setup.sha256\"", script, StringComparison.Ordinal);
         Assert.Contains("[System.IO.File]::WriteAllText", script, StringComparison.Ordinal);
-        Assert.Contains("$(Split-Path -Leaf $setup)", script, StringComparison.Ordinal);
+        Assert.Contains("$(Split-Path -Leaf $Setup)", script, StringComparison.Ordinal);
     }
 
     [Fact]
     public void InstallerBuildSignsTheChecksumAndChecksItWithTheAppsKey()
     {
-        var script = TestSource.Read(@"SpacePreview\scripts\build-installer.ps1");
+        var build = TestSource.Read(@"SpacePreview\scripts\build-installer.ps1");
+        var sign = TestSource.Read(@"SpacePreview\scripts\sign-installer.ps1");
 
         // A missing key stops the build before the long part, not after it.
-        var keyCheck = script.IndexOf("Test-Path -LiteralPath $signingKey", StringComparison.Ordinal);
-        Assert.InRange(keyCheck, 0, script.IndexOf("publish.ps1", StringComparison.Ordinal));
-        Assert.Contains("$env:GLIMPSE_UPDATE_KEY", script, StringComparison.Ordinal);
-        Assert.Contains(@"GlimpseRelease\update-signing-key.pem", script, StringComparison.Ordinal);
-        Assert.Contains("$signatureFile = \"$checksum.sig\"", script, StringComparison.Ordinal);
-        Assert.Contains("$signer.SignData($checksumBytes", script, StringComparison.Ordinal);
-        Assert.Contains("$verifier.VerifyData($checksumBytes", script, StringComparison.Ordinal);
-        Assert.Contains(@"Services\AppUpdateService.cs", script, StringComparison.Ordinal);
-        Assert.Contains("& pwsh -NoProfile -File $PSCommandPath", script, StringComparison.Ordinal);
+        var keyCheck = build.IndexOf("Test-Path -LiteralPath $signingKey", StringComparison.Ordinal);
+        Assert.InRange(keyCheck, 0, build.IndexOf("publish.ps1", StringComparison.Ordinal));
+        Assert.Contains("$env:GLIMPSE_UPDATE_KEY", build, StringComparison.Ordinal);
+        Assert.Contains(@"GlimpseRelease\update-signing-key.pem", build, StringComparison.Ordinal);
+        Assert.Contains("& pwsh -NoProfile -File $PSCommandPath", build, StringComparison.Ordinal);
+        Assert.Contains(@"sign-installer.ps1"" -Setup $setup -Key $signingKey", build, StringComparison.Ordinal);
+        Assert.Contains("$signatureFile = \"$checksum.sig\"", sign, StringComparison.Ordinal);
+        Assert.Contains("$signer.SignData($checksumBytes", sign, StringComparison.Ordinal);
+        Assert.Contains("$verifier.VerifyData($checksumBytes", sign, StringComparison.Ordinal);
+        Assert.Contains(@"Services\AppUpdateService.cs", sign, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SigningWithAnyKeyButTheReleaseKeyLeavesNothingToUpload()
+    {
+        using var temp = new TempDirectory();
+        using var throwaway = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var key = temp.CreateFile("throwaway.pem", throwaway.ExportPkcs8PrivateKeyPem());
+        var setup = temp.CreateFile("Glimpse-Setup-3.0.0.exe", "Stands in for the installer.");
+        var start = new ProcessStartInfo("pwsh")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList =
+            {
+                "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                "-File", TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"),
+                "-Setup", setup,
+                "-Key", key
+            }
+        };
+
+        using var pwsh = Process.Start(start)!;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var output = pwsh.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = pwsh.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            await pwsh.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            pwsh.Kill();
+            Assert.Fail("sign-installer.ps1 did not finish in a minute.");
+        }
+
+        Assert.NotEqual(0, pwsh.ExitCode);
+        Assert.Contains("is not the release key", await output + await error, StringComparison.Ordinal);
+        Assert.Equal([key], Directory.GetFiles(temp.Path));
     }
 
     [Fact]
@@ -184,6 +230,10 @@ public sealed class ReleaseHygieneTests
         Assert.Contains("GLIMPSE_UPDATE_KEY", release, StringComparison.Ordinal);
         Assert.Contains("Back up the key", release, StringComparison.Ordinal);
         Assert.Contains("Renaming the repository or transferring it", release, StringComparison.Ordinal);
+
+        // 2.0's updater offers 3.0.0 at once: it gets no two days.
+        Assert.Contains("3.0.0 has no such window", release, StringComparison.Ordinal);
+        Assert.Contains("Test 3.0.0 fully before it goes public.", release, StringComparison.Ordinal);
     }
 
     [Fact]

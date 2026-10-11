@@ -11,8 +11,6 @@ namespace SpacePreview.Tests;
 public sealed class UpdateFooterTests
 {
     private static readonly Version Current = new(3, 0, 0);
-    private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
-
     // Saturday afternoon on Eastern time, October 10.
     private static readonly DateTimeOffset Now = new(2026, 10, 10, 15, 0, 0, TimeSpan.FromHours(-4));
 
@@ -22,7 +20,12 @@ public sealed class UpdateFooterTests
         new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe"),
         ReleaseFixture.InstallerSize,
         new string('A', 64),
-        new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe.sha256"));
+        new Uri("https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe.sha256"))
+    {
+        PublishedAt = Now.AddDays(-3)
+    };
+
+    private const string Installer = @"C:\Updates\Glimpse-Setup-3.1.0.exe";
 
     private static readonly Settings Checked = new() { LastUpdateCheckUtc = Now.AddHours(-1) };
 
@@ -45,22 +48,73 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked));
 
     [Fact]
-    public void APendingUpdateSaysWhenItInstalls() =>
+    public void AnUpdateThatWillInstallOnItsOwnSaysWhen() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 installs the next time you step away."),
-            Describe(new UpdateState { Pending = Release }, Checked));
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked));
+
+    [Fact]
+    public void UntilItWouldInstallOnItsOwnItIsOnlyReady()
+    {
+        const string Ready = "3.1.0 is ready to install.";
+
+        // Not on disk yet: a metered connection, or a download that failed.
+        Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, Ready), Describe(new UpdateState { Pending = Release }, Checked));
+
+        // Its first two days, unless Install now was pressed.
+        var fresh = new UpdateState { Pending = Release with { PublishedAt = Now.AddHours(-47) }, Installer = Installer };
+        Assert.Equal(Ready, Describe(fresh, Checked).Caption);
+        Assert.Equal("3.1.0 installs the next time you step away.", Describe(fresh with { InstallNowPressed = true }, Checked).Caption);
+
+        // A setup of it ran in the last day.
+        Assert.Equal(Ready, Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked with
+        {
+            UpdateAttemptVersion = "3.1.0",
+            UpdateAttemptUtc = Now.AddHours(-2)
+        }).Caption);
+    }
 
     [Fact]
     public void WithAutomaticInstallsOffItWaitsForTheUser() =>
         Assert.Equal(
             new UpdateFooter(null, FooterLink.InstallNow, "3.1.0 is ready to install."),
-            Describe(new UpdateState { Pending = Release }, Checked with { InstallUpdatesAutomatically = false }));
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked with { InstallUpdatesAutomatically = false }));
 
     [Fact]
-    public void InstallNowSaysGlimpseWillBeBack() =>
+    public void InstallNowSaysWhileItDownloadsAndThatGlimpseWillBeBack()
+    {
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.None, "Downloading 3.1.0."),
+            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
         Assert.Equal(
             new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds."),
-            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
+            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer }, Checked));
+    }
+
+    [Fact]
+    public void AnInstallNowThatFailedSaysSoAndOffersItAgain()
+    {
+        var failed = new UpdateState { Pending = Release, InstallFailed = true };
+
+        Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."), Describe(failed, Checked));
+        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer }, Checked).Caption);
+    }
+
+    [Fact]
+    public void ACheckThatGotNoAnswerSaysSoUntilOneDoes()
+    {
+        var failed = new UpdateState { UpToDate = true, CheckFailed = true };
+
+        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "Couldn't check for updates."), Describe(failed, Checked));
+
+        // Asking again shows only the new check.
+        Assert.Equal(new UpdateFooter("Checking for updates", FooterLink.None, null), Describe(failed with { Checking = true }, Checked));
+
+        // After three days the since line takes over.
+        Assert.Equal(
+            "Couldn't check for updates since Oct 7.",
+            Describe(failed, Checked with { LastUpdateCheckUtc = Now.AddDays(-3) }).Caption);
+    }
 
     [Fact]
     public void ThreeDaysWithoutACheckSaysSinceWhenAndNeverUpToDate()
@@ -74,13 +128,26 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
-    public void TheDateFollowsTheUsersCulture()
+    public void TheDatesAreTheInterfacesEnglishInEveryRegion()
     {
         var stale = Checked with { LastUpdateCheckUtc = new DateTimeOffset(2026, 10, 7, 13, 0, 0, TimeSpan.Zero) };
+        var lastYear = Checked with { LastUpdateCheckUtc = new DateTimeOffset(2025, 12, 30, 13, 0, 0, TimeSpan.Zero) };
+        var saved = (CultureInfo.CurrentCulture, CultureInfo.CurrentUICulture);
+        try
+        {
+            foreach (var region in new[] { "de-DE", "fr-FR", "en-GB", "en-US" })
+            {
+                CultureInfo.CurrentCulture = CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(region);
 
-        Assert.Equal(
-            "Couldn't check for updates since 7 Oct.",
-            UpdateFooter.Describe(new UpdateState(), stale, Current, Now, CultureInfo.GetCultureInfo("en-GB")).Caption);
+                Assert.Equal("Couldn't check for updates since Oct 7.", Describe(new UpdateState(), stale).Caption);
+                Assert.Equal("Couldn't check for updates since Dec 30, 2025.", Describe(new UpdateState(), lastYear).Caption);
+                Assert.Equal("Updated yesterday", Describe(new UpdateState(), Checked with { UpdatedAtUtc = Now.AddDays(-1) }).Status);
+            }
+        }
+        finally
+        {
+            (CultureInfo.CurrentCulture, CultureInfo.CurrentUICulture) = saved;
+        }
     }
 
     [Fact]
@@ -96,14 +163,17 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
-    public void AnUpdateIsNamedForSevenDaysWithItsReleaseNotes()
+    public void AnUpdateIsNamedOnItsDayAndTheNextWithItsReleaseNotes()
     {
         UpdateFooter Landed(DateTimeOffset at) => Describe(new UpdateState { UpToDate = true }, Checked with { UpdatedAtUtc = at });
 
         Assert.Equal(new UpdateFooter("Updated today", FooterLink.WhatsNew, null), Landed(Now.AddHours(-14)));
-        Assert.Equal("Updated yesterday", Landed(Now.AddHours(-16)).Status);
-        Assert.Equal("Updated Oct 4", Landed(Now.AddDays(-6)).Status);
-        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(Now.AddDays(-7)));
+        Assert.Equal(new UpdateFooter("Updated yesterday", FooterLink.WhatsNew, null), Landed(Now.AddHours(-16)));
+        Assert.Equal("Updated yesterday", Landed(new DateTimeOffset(2026, 10, 9, 0, 1, 0, Now.Offset)).Status);
+
+        // The day after that, the usual footer is back.
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(new DateTimeOffset(2026, 10, 8, 23, 59, 0, Now.Offset)));
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(Now.AddDays(-6)));
     }
 
     [Fact]
@@ -118,8 +188,12 @@ public sealed class UpdateFooterTests
         var words = new[]
         {
             Describe(new UpdateState { Pending = Release }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installing = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, InstallFailed = true }, Checked).Caption,
+            Describe(new UpdateState { CheckFailed = true }, Checked).Caption,
             Describe(new UpdateState(), Checked with { LastUpdateCheckUtc = Now.AddDays(-9) }).Caption,
             Describe(new UpdateState(), Checked with { SkippedUpdateVersion = "3.1.0" }).Caption
         };
@@ -129,5 +203,5 @@ public sealed class UpdateFooterTests
     }
 
     private static UpdateFooter Describe(UpdateState state, Settings settings) =>
-        UpdateFooter.Describe(state, settings, Current, Now, English);
+        UpdateFooter.Describe(state, settings, Current, Now);
 }

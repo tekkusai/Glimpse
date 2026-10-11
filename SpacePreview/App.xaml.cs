@@ -181,7 +181,7 @@ public partial class App : Application
     {
         PreviewOpen = _controller?.NoPreviewOpen != true,
         FullscreenSuspended = _controller?.InputSuspendedForFullscreen != false,
-        AcceptsNotifications = NativeMethods.AcceptsNotifications(),
+        Notifications = NativeMethods.QueryUserNotificationState(),
         Idle = NativeMethods.TimeSinceLastInput()
     };
 

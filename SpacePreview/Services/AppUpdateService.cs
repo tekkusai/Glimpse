@@ -156,12 +156,22 @@ internal sealed partial class AppUpdateService : IDisposable
         ValidateChecksumSidecar(Encoding.ASCII.GetString(sidecar), release.InstallerFileName, release.InstallerSha256);
     }
 
-    public async Task<string> DownloadAndVerifyAsync(
+    /// <param name="download">
+    /// False on a metered connection: only an installer already on disk is
+    /// used, for the price of the sidecar and .sig, and null comes back
+    /// when there is none.
+    /// </param>
+    public async Task<string?> DownloadAndVerifyAsync(
         AppUpdateRelease release,
+        bool download,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
         ValidateRelease(release);
+        if (!download && !IsOnDisk(release))
+        {
+            return null;
+        }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(DownloadTimeout);
@@ -172,11 +182,16 @@ internal sealed partial class AppUpdateService : IDisposable
 
         await VerifyAsync(release, timeout.Token);
 
-        if (File.Exists(destination)
-            && new FileInfo(destination).Length == release.InstallerSize
-            && await FileMatchesSha256Async(destination, release.InstallerSha256, timeout.Token))
+        if (IsOnDisk(release) && await FileMatchesSha256Async(destination, release.InstallerSha256, timeout.Token))
         {
             return destination;
+        }
+
+        if (!download)
+        {
+            // Not the release's installer: no use on any connection.
+            TryDelete(destination);
+            return null;
         }
 
         TryDelete(partial);
@@ -243,6 +258,13 @@ internal sealed partial class AppUpdateService : IDisposable
             TryDelete(partial);
             throw;
         }
+    }
+
+    /// <summary>An installer of the release's size is on disk, from this run or an earlier one.</summary>
+    public bool IsOnDisk(AppUpdateRelease release)
+    {
+        var path = GetInstallerPath(release);
+        return File.Exists(path) && new FileInfo(path).Length == release.InstallerSize;
     }
 
     public async Task LaunchInstallerAsync(
@@ -389,16 +411,23 @@ internal sealed partial class AppUpdateService : IDisposable
 
     /// <summary>
     /// The signature asset, when the release has exactly one at the pinned
-    /// URL. Missing is not a failed check: the release is skipped by name.
+    /// URL. One listed but still uploading fails the check, as a sidecar
+    /// would, and it is asked again later. Missing beside an uploaded
+    /// installer and sidecar is not a failed check: the release is skipped
+    /// by name.
     /// </summary>
     internal static Uri? FindSignatureUri(GitHubRelease release, AppUpdateRelease update)
     {
         var name = update.InstallerFileName + ".sha256.sig";
         var matches = release.Assets
             .OfType<GitHubAsset>()
-            .Where(asset => string.Equals(asset.Name, name, StringComparison.Ordinal)
-                && string.Equals(asset.State, "uploaded", StringComparison.Ordinal))
+            .Where(asset => string.Equals(asset.Name, name, StringComparison.Ordinal))
             .ToArray();
+        if (matches.Any(asset => !string.Equals(asset.State, "uploaded", StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException($"The release's {name} is still uploading.");
+        }
+
         return matches is [{ Size: > 0 and <= MaxSignatureBytes } signature]
             && Uri.TryCreate(signature.BrowserDownloadUrl, UriKind.Absolute, out var uri)
             && IsExpectedReleaseAssetUri(uri, update.Tag, name)
