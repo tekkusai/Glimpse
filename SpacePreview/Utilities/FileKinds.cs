@@ -90,6 +90,21 @@ internal static partial class FileKinds
             || extension.Equals(".tsv", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// A page in the browser, by name alone, so the window can start the
+    /// browser before it reads the file. Code is a page only once a grammar
+    /// takes it, and Illustrator files only when they hold a PDF.
+    /// </summary>
+    public static bool OpensAsPage(string path) =>
+        Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+        || IsOffice(path)
+        || IsMedia(path)
+        || IsGif(path)
+        || (IsBrowserImage(path) && !IsImage(path))
+        || IsEpub(path)
+        || IsHtml(path)
+        || IsMarkdown(path);
+
     private static readonly HashSet<string> AudioExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".mp3", ".wav", ".m4a", ".aac", ".flac", ".wma", ".ogg", ".opus"

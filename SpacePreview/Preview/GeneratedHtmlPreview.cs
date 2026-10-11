@@ -110,10 +110,13 @@ internal static partial class GeneratedHtmlPreview
     /// The window's text lane needs both outcomes from one disk read: either
     /// generated HTML or the already-loaded text to hand to the native
     /// fallback. This avoids reading uncommon/large text-like files twice.
+    /// <paramref name="highlighting"/> runs, on this thread, once the text is
+    /// known to become a page and before the slow part, its highlighting.
     /// </summary>
     internal static GeneratedCodeAttempt TryBuildCodeForPreview(
         string path,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Action? highlighting = null)
     {
         TextPreview? loadedText = null;
         try
@@ -137,7 +140,7 @@ internal static partial class GeneratedHtmlPreview
                         return null;
                     }
 
-                    var body = TryRenderCode(path, loadedText.Text, cancellationToken);
+                    var body = TryRenderCode(path, loadedText.Text, cancellationToken, highlighting);
                     cancellationToken.ThrowIfCancellationRequested();
                     return body is null ? null : BuildShell(body, palette);
                 });
@@ -283,7 +286,7 @@ internal static partial class GeneratedHtmlPreview
         return $"https://{resourceHost}/{source.TrimStart('/')}";
     }
 
-    internal static string? TryRenderCode(string path, string text, CancellationToken cancellationToken = default)
+    internal static string? TryRenderCode(string path, string text, CancellationToken cancellationToken = default, Action? highlighting = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         SyntaxGate.Wait(cancellationToken);
@@ -296,6 +299,7 @@ internal static partial class GeneratedHtmlPreview
                 return null;
             }
 
+            highlighting?.Invoke();
             return RenderCode(text, grammar, cancellationToken);
         }
         finally

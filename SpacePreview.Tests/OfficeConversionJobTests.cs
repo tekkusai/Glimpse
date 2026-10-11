@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Reflection;
 using System.Text;
 using SpacePreview.Preview;
 using SpacePreview.Utilities;
@@ -213,6 +215,7 @@ public sealed class OfficeConversionJobTests
         // Another preview queues behind the deck's first pages, so the rest
         // of the deck waits its turn, and the user leaves meanwhile.
         var otherJob = OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
+        await WaitingInLaneAsync(1);
         firstPages.Finish(pages: 6);
         await job.FirstContent.WaitAsync(Patience);
         var otherRun = await engine.RunAsync(1);
@@ -222,6 +225,79 @@ public sealed class OfficeConversionJobTests
         Assert.NotNull(await otherJob.Complete.WaitAsync(Patience));
         Assert.Null(await job.Complete.WaitAsync(Patience));
         Assert.Equal(2, engine.RunCount);
+    }
+
+    // A quick return can land between a left job's stop and its end. Holding
+    // the converter's locks holds that moment open, so the return lands in
+    // it every time; before, it attached to the stopping job and got nothing.
+    [Fact]
+    public async Task AReturnAsALeftFileStopsConvertsItAfresh()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var other = temp.CreateFile("other.docx");
+        var path = temp.CreateFile("report.docx");
+        using var preview = new CancellationTokenSource();
+
+        OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
+        var otherRun = await engine.RunAsync(0);
+        var left = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, preview.Token);
+        await WaitingInLaneAsync(1);
+        OfficeConversionJob revisit;
+        lock (PriorityGate)
+        {
+            lock (Lane)
+            {
+                preview.Cancel();
+                revisit = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, CancellationToken.None);
+            }
+        }
+
+        Assert.NotSame(left, revisit);
+        otherRun.Finish();
+        Assert.Null(await left.Complete.WaitAsync(Patience));
+        (await engine.RunAsync(1)).Finish();
+        Assert.NotNull(await revisit.Complete.WaitAsync(Patience));
+    }
+
+    [Fact]
+    public async Task AReturnAsALeftDeckStopsShowsItsFirstPagesAndConvertsTheRest()
+    {
+        using var temp = new TempDirectory();
+        using var engine = new FakeEngine();
+        var path = Path.Combine(temp.Path, "deck.pptx");
+        OfficeDocumentPdfConverterTests.WriteOfficeAppProperties(path, "Slides", 51);
+        var other = temp.CreateFile("other.docx");
+        using var preview = new CancellationTokenSource();
+
+        // The rest of the deck waits behind another preview's conversion.
+        var left = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, preview.Token);
+        var firstPages = await engine.RunAsync(0);
+        OfficeDocumentPdfConverter.Convert(other, OfficeKind.Document, CancellationToken.None);
+        await WaitingInLaneAsync(1);
+        firstPages.Finish(pages: 6);
+        await left.FirstContent.WaitAsync(Patience);
+        var otherRun = await engine.RunAsync(1);
+        await WaitingInLaneAsync(1);
+        OfficeConversionJob revisit;
+        lock (PriorityGate)
+        {
+            lock (Lane)
+            {
+                preview.Cancel();
+                revisit = OfficeDocumentPdfConverter.Convert(path, OfficeKind.Presentation, CancellationToken.None);
+            }
+        }
+
+        Assert.NotSame(left, revisit);
+        var partial = await revisit.FirstContent.WaitAsync(Patience);
+        Assert.NotNull(partial);
+        Assert.True(partial.IsPartial);
+        otherRun.Finish();
+        var rest = await engine.RunAsync(2);
+        Assert.Equal("pdf", rest.Request.ConvertTo);
+        rest.Finish(pages: 51);
+        Assert.NotNull(await revisit.Complete.WaitAsync(Patience));
     }
 
     [Fact]
@@ -319,6 +395,32 @@ public sealed class OfficeConversionJobTests
         Assert.Equal(complete.DocumentPath, OfficeDocumentPdfConverter.TryGetCached(path)?.DocumentPath);
     }
 
+    private static object Lane => Converter<object>("Lane");
+
+    private static object PriorityGate => Converter<object>("PriorityGate");
+
+    private static T Converter<T>(string field) =>
+        (T)typeof(OfficeDocumentPdfConverter).GetField(field, BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
+
+    private static async Task WaitingInLaneAsync(int count)
+    {
+        var waiting = Converter<IList>("Waiting");
+        var deadline = DateTime.UtcNow + Patience;
+        while (true)
+        {
+            lock (Lane)
+            {
+                if (waiting.Count == count)
+                {
+                    return;
+                }
+            }
+
+            Assert.True(DateTime.UtcNow < deadline, $"Never {count} waiting for the engine.");
+            await Task.Delay(10);
+        }
+    }
+
     /// <summary>An engine that runs only when the test says so.</summary>
     private sealed class FakeEngine : IDisposable
     {
@@ -361,7 +463,20 @@ public sealed class OfficeConversionJobTests
             throw new TimeoutException($"Run {index} never started.");
         }
 
-        public void Dispose() => OfficeDocumentPdfConverter.Runner = _previous;
+        public void Dispose()
+        {
+            OfficeDocumentPdfConverter.Runner = _previous;
+
+            // A test that failed midway leaves its runs holding the lane;
+            // ended, they free it for the next test.
+            lock (_runs)
+            {
+                foreach (var run in _runs)
+                {
+                    run.Fail();
+                }
+            }
+        }
 
         private string? Execute(OfficeRunRequest request, CancellationToken kill)
         {

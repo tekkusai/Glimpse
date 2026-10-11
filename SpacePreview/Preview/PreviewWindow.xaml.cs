@@ -440,6 +440,13 @@ public partial class PreviewWindow : Window
             }
             else
             {
+                // A page known by its name starts its browser now, so the
+                // launch overlaps the file's reading and the page's build.
+                if (FileKinds.OpensAsPage(contentPath))
+                {
+                    WarmBrowserForNextGlance();
+                }
+
                 var signature = await Task.Run(() => FileSignatures.Detect(contentPath), token);
                 var useSignatureRouting = FileKinds.CanUseSignatureRouting(contentPath);
                 if (FileKinds.IsPdf(contentPath) || (useSignatureRouting && signature == FileSignatureKind.Pdf))
@@ -644,8 +651,14 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsText(path))
         {
+            // Text is a page only once a grammar takes it; README, LICENSE
+            // and .txt stay native. The browser starts then, beside the
+            // highlighting.
             var attempt = await Task.Run(
-                () => GeneratedHtmlPreview.TryBuildCodeForPreview(path, token),
+                () => GeneratedHtmlPreview.TryBuildCodeForPreview(
+                    path,
+                    token,
+                    highlighting: () => Dispatcher.InvokeAsync(WarmBrowserForNextGlance)),
                 token);
             if (attempt.Document is { } code)
             {
