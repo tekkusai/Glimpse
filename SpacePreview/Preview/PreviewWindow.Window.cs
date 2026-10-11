@@ -469,6 +469,12 @@ public partial class PreviewWindow
             DetachBrowseContext(restoreSlideshowSize: true);
             _warmBrowser.Stop();
         }
+        else if (PreviewContent.Content is FrameworkElement shown && WebViewIn(shown) is not null)
+        {
+            // The glance again: its page holds the browser now, the parked
+            // one past the hide.
+            WarmBrowserForNextGlance();
+        }
 
         SetBrowseControlsVisible(CurrentPath is not null && !pinned && !_isFileDialogMode);
     }

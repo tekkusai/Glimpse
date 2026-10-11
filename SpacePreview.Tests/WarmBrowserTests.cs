@@ -1,3 +1,4 @@
+using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -147,6 +148,33 @@ public sealed class WarmBrowserTests
             window.SetPinned(false);
             CreateWebSurface(window);
             Assert.True(WarmBrowserStarted(window));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    // Unpinned, the window is the glance again. Its page holds the browser
+    // now; without a parked one too, the hide lets it go and the next page
+    // starts cold.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void UnpinningAWindowThatShowsAPageParksTheBrowser(bool page) => Sta.Run(() =>
+    {
+        var window = new PreviewWindow { Left = -30000, Top = 0 };
+        new WindowInteropHelper(window).EnsureHandle();
+        try
+        {
+            window.SetPinned(true);
+            window.PreviewContent.Content = page
+                ? new Grid { Children = { new StagedWebView(WebSurfaceKind.Page) } }
+                : new Grid();
+
+            window.SetPinned(false);
+
+            Assert.Equal(page, WarmBrowserStarted(window));
         }
         finally
         {
