@@ -682,6 +682,115 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task InstallNowAsksGitHubOnceMoreBeforeItLaunches() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        // Hours later: one call to GitHub for the press, then setup.
+        AgeTheLastCheck();
+        await updates.InstallNowAsync();
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+        Assert.Equal(1, launches);
+    });
+
+    [Fact]
+    public Task InstallNowDuringACheckTakesThatChecksAnswer() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) =>
+            {
+                launches++;
+                return Task.CompletedTask;
+            });
+
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+
+        // A scheduled check is waiting on GitHub when the user presses Install now.
+        release.HoldCheck = new();
+        var check = updates.CheckNowAsync();
+        Assert.True(updates.State.Checking);
+        var install = updates.InstallNowAsync();
+        release.HoldCheck.SetResult();
+        await Task.WhenAll(check, install);
+
+        Assert.Equal(1, launches);
+        Assert.Equal(2, release.RequestsFor("/releases/latest"));
+    });
+
+    [Fact]
+    public Task InstallNowInstallsNothingPulledOrUnsignedSinceTheLastCheck() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        UpdateFooter Footer() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now);
+
+        // Pulled: nothing installs, and the footer says Glimpse is current.
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+        release.NoRelease = true;
+        await updates.InstallNowAsync();
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Footer());
+
+        // Back, then unsigned: it is skipped, and says so.
+        release.NoRelease = false;
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Pending);
+        AgeTheLastCheck();
+        release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
+        await updates.InstallNowAsync();
+        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification and was skipped."), Footer());
+
+        Assert.Equal(4, release.RequestsFor("/releases/latest"));
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+        Assert.False(updates.State.Installing);
+    });
+
+    [Fact]
+    public Task InstallNowWithoutAnAnswerFromGitHubSaysItCouldNotInstall() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+        AgeTheLastCheck();
+        release.Offline = true;
+        await updates.InstallNowAsync();
+
+        Assert.Equal(
+            new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."),
+            UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now));
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+    });
+
+    [Fact]
     public Task APulledReleaseIsDropped() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();

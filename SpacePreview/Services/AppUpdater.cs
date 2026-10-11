@@ -49,8 +49,11 @@ internal sealed record UpdateState
     /// <summary>The most recent check, scheduled or asked, got no answer. Nothing installs on its own until one does.</summary>
     public bool Unanswered { get; init; }
 
-    /// <summary>Install now is downloading, or setup is on its way and Glimpse closes for a few seconds.</summary>
+    /// <summary>Install now is under way, or setup is.</summary>
     public bool Installing { get; init; }
+
+    /// <summary>Setup is on its way, and Glimpse closes for a few seconds.</summary>
+    public bool SetupStarted { get; init; }
 }
 
 /// <summary>
@@ -84,6 +87,7 @@ internal sealed class AppUpdater : IDisposable
     private DispatcherTimer? _gateTimer;
     private CancellationTokenSource? _downloadCancel;
     private Task<string?>? _download;
+    private Task<bool>? _check;
     private DateTimeOffset _downloadRetryAt;
     private bool _disposed;
 
@@ -129,7 +133,8 @@ internal sealed class AppUpdater : IDisposable
 
     private async Task CheckThenTickAsync(bool asked)
     {
-        if (await CheckAsync(asked) && State.Pending is not null)
+        // Install now asks GitHub itself, and setup ends this run.
+        if (!State.Installing && await CheckAsync(asked) && State.Pending is not null)
         {
             await TickAsync();
         }
@@ -138,11 +143,15 @@ internal sealed class AppUpdater : IDisposable
     /// <summary>
     /// Asks GitHub for the latest release and verifies its signature, every
     /// time: a release pulled, replaced or unsigned since the last check
-    /// stops being pending. True when GitHub answered.
+    /// stops being pending. True when GitHub answered. One at a time: a
+    /// caller while one runs gets its answer.
     /// </summary>
-    private async Task<bool> CheckAsync(bool asked)
+    private Task<bool> CheckAsync(bool asked) =>
+        _check is { IsCompleted: false } running ? running : _check = RunCheckAsync(asked);
+
+    private async Task<bool> RunCheckAsync(bool asked)
     {
-        if (_disposed || State.Checking || State.Installing)
+        if (_disposed)
         {
             return false;
         }
@@ -175,8 +184,9 @@ internal sealed class AppUpdater : IDisposable
     }
 
     /// <summary>
-    /// Settings' Install now: downloads if needed and installs at once,
-    /// in either mode. Unsaved signing work comes forward and nothing installs.
+    /// Settings' Install now: downloads if needed, makes the same test as
+    /// an automatic install and installs at once, in either mode. Unsaved
+    /// signing work comes forward and nothing installs.
     /// </summary>
     public async Task InstallNowAsync()
     {
@@ -194,11 +204,13 @@ internal sealed class AppUpdater : IDisposable
         Set(State with { Installing = true });
         var installer = State.Installer ?? await DownloadAsync(release, download: true);
 
-        // Signing may have started while it downloaded. A release that
-        // failed verification meanwhile is skipped, and says so.
-        if (installer is null || State.Pending != release || !_canQuit())
+        // A release pulled or unsigned since the last check does not
+        // install, and the footer says what is true now. Signing may have
+        // started meanwhile. Only a failed download or no answer from
+        // GitHub is a failed install.
+        if (installer is null || !await ConfirmAsync(release) || !_canQuit())
         {
-            Set(State with { Installing = false, InstallFailed = installer is null && State.Pending == release });
+            Set(State with { Installing = false, InstallFailed = State.Pending == release && (installer is null || State.Unanswered) });
             return;
         }
 
@@ -263,10 +275,11 @@ internal sealed class AppUpdater : IDisposable
     }
 
     /// <summary>
-    /// The test before any launch: GitHub still offers this release,
-    /// signed, or it is no longer pending. A check that found it within
-    /// the last minute is that answer, so a scheduled check that opens the
-    /// gate does not ask twice. A clock set back is no answer.
+    /// The test before any launch, automatic or Install now: GitHub still
+    /// offers this release, signed, or it is no longer pending. A check
+    /// that found it within the last minute is that answer, so a scheduled
+    /// check that opens the gate does not ask twice. A clock set back is
+    /// no answer.
     /// </summary>
     private async Task<bool> ConfirmAsync(AppUpdateRelease release) =>
         State.Pending == release
@@ -485,7 +498,7 @@ internal sealed class AppUpdater : IDisposable
             UpdateAttemptVersion = release.VersionText,
             UpdateAttemptUtc = DateTimeOffset.UtcNow
         });
-        Set(State with { Installing = true });
+        Set(State with { Installing = true, SetupStarted = true });
         try
         {
             await _launch(release, installer, _lifetime.Token);
@@ -493,14 +506,14 @@ internal sealed class AppUpdater : IDisposable
         }
         catch (UpdateRejectedException ex)
         {
-            Set(State with { Installing = false });
+            Set(State with { Installing = false, SetupStarted = false });
             Skip(release, ex);
         }
         catch (Exception ex)
         {
             // The file vanished or changed on disk: fetch it again.
             DiagnosticLog.Write($"update install failed version={release.VersionText}: {ex.GetType().Name}: {ex.Message}");
-            Set(State with { Installer = null, Installing = false, InstallFailed = asked });
+            Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
         }
     }
 
@@ -517,7 +530,7 @@ internal sealed class AppUpdater : IDisposable
         }
 
         DiagnosticLog.Write($"update setup did not finish version={release.VersionText}");
-        Set(State with { Installer = null, Installing = false, InstallFailed = asked });
+        Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
     }
 
     private void Skip(AppUpdateRelease release, Exception reason)

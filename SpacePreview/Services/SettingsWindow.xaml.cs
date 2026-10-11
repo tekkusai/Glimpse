@@ -549,11 +549,13 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         if (state.Pending is { } pending)
         {
             var version = pending.VersionText;
+            // Install now says each step as it happens, and Installing only
+            // once setup starts. Between steps it claims nothing.
             if (state.Installing)
             {
-                return new(null, FooterLink.None, state.Downloading
-                    ? $"Downloading {version}."
-                    : $"Installing {version}. Back in a few seconds.");
+                return state.SetupStarted ? new(null, FooterLink.None, $"Installing {version}. Back in a few seconds.")
+                    : state.Downloading ? new(null, FooterLink.None, $"Downloading {version}.")
+                    : new(state.Checking ? "Checking for updates" : null, FooterLink.None, null);
             }
 
             return new(null, FooterLink.InstallNow, state.InstallFailed ? $"Couldn't install {version}."

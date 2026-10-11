@@ -95,7 +95,19 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked));
         Assert.Equal(
             new UpdateFooter(null, FooterLink.None, "Installing 3.1.0. Back in a few seconds."),
-            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer }, Checked));
+            Describe(new UpdateState { Pending = Release, Installing = true, Installer = Installer, SetupStarted = true }, Checked));
+    }
+
+    [Fact]
+    public void InstallNowSaysInstallingOnlyOnceSetupStarts()
+    {
+        var installNow = new UpdateState { Pending = Release, Installing = true, Installer = Installer };
+
+        // Asking GitHub once more before the launch.
+        Assert.Equal(new UpdateFooter("Checking for updates", FooterLink.None, null), Describe(installNow with { Checking = true }, Checked));
+
+        // Between steps: the link is gone, and nothing is claimed.
+        Assert.Equal(new UpdateFooter(null, FooterLink.None, null), Describe(installNow, Checked));
     }
 
     [Fact]
@@ -197,7 +209,7 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installer = Installer }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Downloading = true }, Checked).Caption,
-            Describe(new UpdateState { Pending = Release, Installing = true }, Checked).Caption,
+            Describe(new UpdateState { Pending = Release, Installing = true, SetupStarted = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, Installing = true, Downloading = true }, Checked).Caption,
             Describe(new UpdateState { Pending = Release, InstallFailed = true }, Checked).Caption,
             Describe(new UpdateState { CheckFailed = true }, Checked).Caption,
