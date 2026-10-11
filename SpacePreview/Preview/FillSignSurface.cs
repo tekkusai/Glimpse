@@ -104,14 +104,6 @@ internal sealed class FillSignSurface : Grid
         Background = Theme.Brush(palette.CanvasBg);
         Focusable = true;
         FocusVisualStyle = null;
-        KeyDown += (_, e) =>
-        {
-            if (e.Key is Key.Delete or Key.Back && e.OriginalSource is not TextBox && _selectedFrame is { } selected)
-            {
-                RemovePlacementFrame(selected);
-                e.Handled = true;
-            }
-        };
         RowDefinitions.Add(new RowDefinition { Height = new GridLength(BarHeight) });
         RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -171,6 +163,16 @@ internal sealed class FillSignSurface : Grid
         _pageArea = new Grid { ClipToBounds = true, Children = { _scroller, _chromeLayer, _inkOverlay } };
         SetRow(_pageArea, 1);
         Children.Add(_pageArea);
+
+        KeyDown += (_, e) =>
+        {
+            // Delete edits the page, so it waits whenever the page does.
+            if (e.Key is Key.Delete or Key.Back && _pageArea.IsEnabled && e.OriginalSource is not TextBox && _selectedFrame is { } selected)
+            {
+                RemovePlacementFrame(selected);
+                e.Handled = true;
+            }
+        };
 
         // The picker dismisses like any flyout: a press anywhere outside it
         // (except its own pill, which toggles) puts it away.
@@ -308,13 +310,15 @@ internal sealed class FillSignSurface : Grid
     /// <summary>
     /// While the writer runs, nothing here accepts input, and the save bar
     /// says so: replacing the original can retry for a few seconds, and
-    /// silent numbness reads as a hang.
+    /// silent numbness reads as a hang. The whole page area goes quiet, the
+    /// chips and pad above the page included: an edit made now would miss
+    /// the file and then go with the draft.
     /// </summary>
     public void SetSaving(bool saving)
     {
         _toolBar.IsEnabled = !saving;
         _saveBar.IsEnabled = !saving;
-        _placementLayer.IsEnabled = !saving;
+        _pageArea.IsEnabled = !saving;
         SetSaveStatus(saving ? "Saving\u2026" : null, failed: false);
     }
 
@@ -608,7 +612,12 @@ internal sealed class FillSignSurface : Grid
         _toolBar.Visibility = Visibility.Visible;
     }
 
-    private void RequestSave(bool overwrite) => SaveRequested?.Invoke(_placements.ToArray(), overwrite);
+    /// <summary>A date still being typed is part of the work: it goes in as typed.</summary>
+    private void RequestSave(bool overwrite)
+    {
+        _commitDateEdit?.Invoke();
+        SaveRequested?.Invoke(_placements.ToArray(), overwrite);
+    }
 
     // ------------------------------------------------------------------
     // Tools and placement.

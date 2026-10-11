@@ -331,6 +331,56 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void NothingOnThePageTakesAnEditWhileTheSaveRuns()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+            var changes = 0;
+            surface.WorkChanged += () => changes++;
+            surface.ShowSaveChoice();
+            surface.SetSaving(true);
+
+            // The selected date's remove chip and resize handle live in a
+            // layer of their own, above the page.
+            Assert.False(Fields.Get<Border>(surface, "_deleteChip").IsEnabled);
+            Assert.False(Fields.Get<Border>(surface, "_resizeHandle").IsEnabled);
+            Assert.False(Fields.Get<Grid>(surface, "_inkOverlay").IsEnabled);
+            PressKey(surface, Key.Delete);
+            Assert.Single(surface.Placements);
+            Assert.Equal(0, changes);
+
+            // A failed save hands the page back.
+            surface.ShowSaveFailure("The file is open in another app. Close it there and try again.");
+            Assert.True(Fields.Get<Border>(surface, "_deleteChip").IsEnabled);
+            PressKey(surface, Key.Delete);
+            Assert.Empty(surface.Placements);
+        });
+    }
+
+    [Fact]
+    public void ADateStillBeingTypedIsSavedAsTyped()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            IReadOnlyList<SignPlacement>? saved = null;
+            surface.SaveRequested += (placements, _) => saved = placements;
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+            // Pills never take focus, so the editor is still open when Save is pressed.
+            var frame = Fields.Get<Canvas>(surface, "_placementLayer").Children.OfType<Grid>().Single();
+            Fields.Call(surface, "BeginDateEdit", frame, frame.Children[0]);
+            frame.Children.OfType<TextBox>().Single().Text = "Signed 1 May";
+            surface.ShowSaveChoice();
+            Click(Pill(surface, "Save a signed copy"));
+
+            Assert.Equal("Signed 1 May", saved!.Single().Text);
+        });
+    }
+
+    [Fact]
     public void AnUnsignableFileSaysSoInsteadOfOfferingTools()
     {
         OnSta(() =>
@@ -662,6 +712,19 @@ public sealed class FillSignBehaviorTests
 
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonDownEvent });
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+    }
+
+    /// <summary>A key pressed on the element, as the input system would route it there.</summary>
+    private static void PressKey(UIElement element, Key key) =>
+        element.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, new DetachedSource(), 0, key) { RoutedEvent = Keyboard.KeyDownEvent });
+
+    private sealed class DetachedSource : PresentationSource
+    {
+        public override Visual? RootVisual { get; set; }
+
+        public override bool IsDisposed => false;
+
+        protected override CompositionTarget? GetCompositionTargetCore() => null;
     }
 
     /// <summary>The bounding box of dark pixels, in bitmap pixels.</summary>
