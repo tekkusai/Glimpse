@@ -79,10 +79,21 @@ public partial class PreviewWindow
                     continue;
                 }
 
+                // A view released mid-capture never answers; the shot goes on
+                // without it at once, so the frame keeps its moment.
+                var gone = new TaskCompletionSource();
+                DependencyPropertyChangedEventHandler hidden = (_, _) => gone.TrySetResult();
+                webView.IsVisibleChanged += hidden;
                 try
                 {
-                    var json = await core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}");
-                    using var document = JsonDocument.Parse(json);
+                    var capture = core.CallDevToolsProtocolMethodAsync("Page.captureScreenshot", "{}");
+                    if (await Task.WhenAny(capture, gone.Task, Task.Delay(TimeSpan.FromSeconds(2))) != capture)
+                    {
+                        DiagnosticLog.Write("probe composite webview skipped: it left mid-capture");
+                        continue;
+                    }
+
+                    using var document = JsonDocument.Parse(await capture);
                     var bytes = Convert.FromBase64String(document.RootElement.GetProperty("data").GetString() ?? string.Empty);
                     var frame = BitmapFrame.Create(new MemoryStream(bytes), BitmapCreateOptions.None, BitmapCacheOption.OnLoad);
                     var origin = webView.TransformToAncestor(this).Transform(new Point(0, 0));
@@ -93,6 +104,10 @@ public partial class PreviewWindow
                 catch (Exception ex)
                 {
                     DiagnosticLog.Write($"probe composite webview skipped: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    webView.IsVisibleChanged -= hidden;
                 }
             }
         }
@@ -227,9 +242,8 @@ public partial class PreviewWindow
             Window = new { Width = ActualWidth, Height = ActualHeight, State = WindowState.ToString() },
             ContentType = PreviewContent.Content?.GetType().Name,
             LoadFinished = _loadFinished,
-            Loading = LoadingOverlay.Visibility.ToString(),
-            Scrim = ContentSwapScrim.Visibility.ToString(),
-            ScrimBlocksInput = ContentSwapScrim.IsHitTestVisible,
+            StandIn = StandInLayer.Visibility.ToString(),
+            ShownTakesInput = PreviewContent.Content is UIElement { IsHitTestVisible: true },
             Icon = new { Visibility = FileIconImage.Visibility.ToString(), HasSource = FileIconImage.Source is not null },
             FileNameWidth = FileNameText.ActualWidth,
             OpenWidth = OpenControl.ActualWidth,
@@ -326,20 +340,8 @@ public partial class PreviewWindow
         }
     }
 
-    /// <summary>Dev probe only: recreates the cross-load overlay completion race.</summary>
-    internal async Task<bool> ProbeLoadingOverlayRaceAsync()
-    {
-        ShowLoadingOverlayNow();
-        FadeOutLoadingOverlay();
-        await Task.Delay(90);
-        ShowLoadingOverlayNow();
-        await Task.Delay(110);
-        var newOverlayStillOwnsTheStage =
-            LoadingOverlay.Visibility == Visibility.Visible && LoadingOverlay.Opacity >= 0.95;
-        DiagnosticLog.Write($"probe overlay-race -> visible={LoadingOverlay.Visibility} opacity={LoadingOverlay.Opacity:0.00} pass={newOverlayStillOwnsTheStage}");
-        HideLoadingOverlay();
-        return newOverlayStillOwnsTheStage;
-    }
+    /// <summary>Dev probe only: recreates the cross-load stand-in cleanup race.</summary>
+    internal Task<bool> ProbeLoadingOverlayRaceAsync() => Task.FromResult(ProbeStandInRace());
 
     /// <summary>
     /// Dev probe only: "sign" enters sign mode on the current PDF the way the

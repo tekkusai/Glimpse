@@ -382,11 +382,9 @@ public partial class PreviewWindow
 
     private FrameworkElement BuildBrowserImagePreview(string path)
     {
-        var palette = Theme.Current;
-        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        var grid = new Grid { Background = Brushes.Transparent };
         var webView = CreateWebView(
-            background,
+            WebSurfaceKind.Page,
             () => WriteImageHtml(path),
             $"browser image {path}",
             ex => _ = ShowFileCardFallbackAsync(path));

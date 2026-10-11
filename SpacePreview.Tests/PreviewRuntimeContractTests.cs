@@ -39,7 +39,9 @@ public sealed class PreviewRuntimeContractTests
         XElement Named(string name) => document.Descendants().Single(element => (string?)element.Attribute(x + "Name") == name);
 
         Assert.Equal("Hidden", (string?)Named("FileIconImage").Attribute("Visibility"));
-        Assert.Equal("True", (string?)Named("ContentSwapScrim").Attribute("IsHitTestVisible"));
+        Assert.Equal("False", (string?)Named("OutgoingContent").Attribute("IsHitTestVisible"));
+        Assert.Equal("False", (string?)Named("StandInLayer").Attribute("IsHitTestVisible"));
+        Assert.Equal("False", (string?)Named("IncomingContent").Attribute("IsHitTestVisible"));
         Assert.NotNull(Named("IdentityPanel"));
     }
 

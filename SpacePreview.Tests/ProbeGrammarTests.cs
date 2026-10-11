@@ -13,7 +13,7 @@ public sealed class ProbeGrammarTests
     [
         "delay", "shot", "fullshot", "size", "show", "evaljs", "welcome", "settingsshot", "warningshot",
         "warningfinalshot", "audit", "buttonaudit", "webshot", "zoomin", "multiselect", "pinnedoff",
-        "overlayrace", "sign", "signdate", "signpress", "zoomkey", "imagetoggle", "meshspin"
+        "overlayrace", "sign", "signdate", "signpress", "zoomkey", "imagetoggle", "meshspin", "hide"
     ];
 
     [Fact]

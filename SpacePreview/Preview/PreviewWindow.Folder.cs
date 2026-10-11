@@ -103,7 +103,7 @@ public partial class PreviewWindow
 
     private void StartFolderSizeScan(string path, TextBlock sizeLine, EntryList list, CancellationToken token)
     {
-        if (SystemParameters.ClientAreaAnimation)
+        if (Motion.Enabled)
         {
             sizeLine.BeginAnimation(OpacityProperty, new DoubleAnimation(1, 0.45, TimeSpan.FromMilliseconds(700))
             {

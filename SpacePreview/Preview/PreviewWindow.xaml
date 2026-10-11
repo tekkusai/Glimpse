@@ -25,11 +25,7 @@
     <Border x:Name="RootChrome"
             Background="{DynamicResource Theme.CanvasBg}"
             BorderBrush="{DynamicResource Theme.Border}"
-            BorderThickness="1"
-            RenderTransformOrigin="0.5,0.5">
-        <Border.RenderTransform>
-            <ScaleTransform x:Name="RootScale" ScaleX="1" ScaleY="1" />
-        </Border.RenderTransform>
+            BorderThickness="1">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="52" />
@@ -303,55 +299,14 @@
             </Border>
 
             <Grid Grid.Row="1">
+                <!-- The item making way for the next: it fades out, or waits
+                     under the next one while that dissolves over it. -->
+                <ContentControl x:Name="OutgoingContent" IsHitTestVisible="False" />
+                <!-- The best image of content that is not ready yet. -->
+                <ContentControl x:Name="StandInLayer" IsHitTestVisible="False" Visibility="Collapsed" />
                 <ContentControl x:Name="PreviewContent" />
-                <Border x:Name="ContentSwapScrim"
-                        Background="{DynamicResource Theme.CanvasBg}"
-                        Visibility="Collapsed"
-                        Opacity="0"
-                        IsHitTestVisible="True" />
-                <Border x:Name="LoadingOverlay"
-                        Background="{DynamicResource Theme.CanvasBg}"
-                        Visibility="Collapsed">
-                    <Grid ClipToBounds="True">
-                        <!-- Subtle shimmer shown during longer waits. -->
-                        <Rectangle x:Name="ShimmerBand"
-                                   Width="420"
-                                   HorizontalAlignment="Left"
-                                   VerticalAlignment="Stretch"
-                                   IsHitTestVisible="False"
-                                   Visibility="Collapsed">
-                            <Rectangle.Fill>
-                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-                                    <GradientStop Offset="0" Color="#00FFFFFF" />
-                                    <GradientStop x:Name="ShimmerPeak" Offset="0.5" Color="#12FFFFFF" />
-                                    <GradientStop Offset="1" Color="#00FFFFFF" />
-                                </LinearGradientBrush>
-                            </Rectangle.Fill>
-                            <Rectangle.RenderTransform>
-                                <TranslateTransform x:Name="ShimmerTranslate" X="-420" />
-                            </Rectangle.RenderTransform>
-                        </Rectangle>
-
-                        <StackPanel x:Name="LoadingMessagePanel"
-                                    HorizontalAlignment="Center"
-                                    VerticalAlignment="Center"
-                                    MaxWidth="300"
-                                    Visibility="Collapsed">
-                            <TextBlock x:Name="LoadingTitle"
-                                       HorizontalAlignment="Center"
-                                       FontSize="{x:Static u:Metrics.FontBody}"
-                                       FontWeight="SemiBold"
-                                       Foreground="{DynamicResource Theme.TextPrimary}" />
-                            <TextBlock x:Name="LoadingSubtitle"
-                                       Margin="0,5,0,0"
-                                       HorizontalAlignment="Center"
-                                       TextAlignment="Center"
-                                       TextWrapping="Wrap"
-                                       FontSize="12"
-                                       Foreground="{DynamicResource Theme.TextSecondary}" />
-                        </StackPanel>
-                    </Grid>
-                </Border>
+                <!-- A browser view starting its engine while the old item leaves. -->
+                <ContentControl x:Name="IncomingContent" IsHitTestVisible="False" Visibility="Hidden" />
             </Grid>
         </Grid>
     </Border>

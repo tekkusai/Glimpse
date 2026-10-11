@@ -51,18 +51,16 @@ public partial class PreviewWindow
     /// </summary>
     private FrameworkElement BuildEpubWebPreview(GeneratedHtmlDocument document, string path, CancellationToken token)
     {
-        var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        var grid = new Grid { Background = Brushes.Transparent };
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         var webView = CreateWebView(
-            document.Background,
+            WebSurfaceKind.Page,
             () => document.Source,
             $"epub preview {path}",
             ex => _ = ShowTextOrFileFallbackAsync(document.SourcePath),
-            configure: core => HardenForGeneratedHtml(core, document),
-            readinessMode: WebPaintReadinessMode.StaticLayout);
+            configure: core => HardenForGeneratedHtml(core, document));
         Grid.SetColumn(webView, 1);
         var railHost = BuildPdfPageRailHost();
         Grid.SetColumn(railHost, 0);

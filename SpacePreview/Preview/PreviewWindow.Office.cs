@@ -29,6 +29,12 @@ public partial class PreviewWindow
             }
 
             var job = OfficeDocumentPdfConverter.Convert(path, kind, token);
+            if (OfficeDocumentPdfConverter.EngineName is { } engine)
+            {
+                // The one wait worth a line: the stand-in names it after a beat.
+                SetWaitReason(version, $"Converting with {engine}");
+            }
+
             var first = await job.FirstContent.WaitAsync(token);
             if (first is { IsPartial: true } && !job.TryHoldPartial())
             {
@@ -61,8 +67,7 @@ public partial class PreviewWindow
     {
         var isHtml = document.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase);
         var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
-        var background = System.Drawing.Color.FromArgb(palette.CanvasBg.R, palette.CanvasBg.G, palette.CanvasBg.B);
+        var grid = new Grid { Background = isHtml ? Brushes.Transparent : Theme.Brush(palette.CanvasBg) };
         var initialPath = document.Sheets is { Count: > 1 } sheets ? sheets[0].Path : document.DocumentPath;
         if (!isHtml && PdfPageSizeProbe.TryReadFirstPageSize(initialPath, out var pageWidth, out var pageHeight))
         {
@@ -70,23 +75,18 @@ public partial class PreviewWindow
         }
 
         var webView = CreateWebView(
-            background,
+            isHtml ? WebSurfaceKind.Page : WebSurfaceKind.PdfViewer,
             () => isHtml ? new Uri(initialPath, UriKind.Absolute) : PdfViewerSource(initialPath),
             $"converted document {document.DocumentPath}",
             _ =>
             {
                 if (version == _loadVersion)
                 {
-                    SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null, animate: false);
+                    SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null);
                 }
             },
             configure: core =>
             {
-                // The sheet's chrome and the PDF toolbar follow the app theme
-                // through prefers-color-scheme, so cached pages stay neutral.
-                core.Profile.PreferredColorScheme = palette.IsDark
-                    ? CoreWebView2PreferredColorScheme.Dark
-                    : CoreWebView2PreferredColorScheme.Light;
                 if (isHtml)
                 {
                     HardenForUntrustedHtml(core);
@@ -96,8 +96,7 @@ public partial class PreviewWindow
                 {
                     ConfigurePdfViewer(core, initialPath);
                 }
-            },
-            readinessMode: isHtml ? WebPaintReadinessMode.StaticLayout : WebPaintReadinessMode.PdfPlugin);
+            });
 
         if (isHtml)
         {

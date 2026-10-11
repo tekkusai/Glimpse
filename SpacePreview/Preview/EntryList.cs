@@ -257,7 +257,7 @@ internal sealed class EntryList
 
             childHost.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
             var rotate = (RotateTransform)chevron.RenderTransform;
-            if (!SystemParameters.ClientAreaAnimation || !rowHost.IsLoaded)
+            if (!Motion.Enabled || !rowHost.IsLoaded)
             {
                 rotate.BeginAnimation(RotateTransform.AngleProperty, null);
                 rotate.Angle = expanded ? 90 : 0;

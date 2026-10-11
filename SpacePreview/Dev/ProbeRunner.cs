@@ -197,6 +197,13 @@ internal static class ProbeRunner
                 window.Left = -30000;
                 break;
 
+            case "hide":
+                // Closes the preview the way Space does, so a later show:
+                // measures a fresh open rather than a browse.
+                window.HidePreview();
+                await Task.Delay(150);
+                break;
+
             case "fullshot":
                 await window.ProbeCompositeShotAsync(value);
                 break;

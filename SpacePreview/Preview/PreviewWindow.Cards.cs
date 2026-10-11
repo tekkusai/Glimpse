@@ -616,7 +616,7 @@ public partial class PreviewWindow
             MaxWidth = 440
         });
 
-        if (!SystemParameters.ClientAreaAnimation)
+        if (!Motion.Enabled)
         {
             row.Opacity = 1;
             return;

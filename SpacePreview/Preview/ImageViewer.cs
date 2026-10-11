@@ -280,7 +280,7 @@ internal sealed class ImageViewer : IZoomableImage
         _hudText.Text = $"{Math.Round(_scale * 100)}%";
         _hud.BeginAnimation(UIElement.OpacityProperty, null);
         _hud.Opacity = 1;
-        var fade = SystemParameters.ClientAreaAnimation ? ZoomGestures.HudFade : TimeSpan.Zero;
+        var fade = Motion.Enabled ? ZoomGestures.HudFade : TimeSpan.Zero;
         _hud.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0, fade) { BeginTime = ZoomGestures.HudHold });
     }
 

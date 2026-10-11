@@ -131,25 +131,24 @@ public partial class PreviewWindow
             token);
         token.ThrowIfCancellationRequested();
 
-        // Video plays on black; the audio player paints the canvas.
-        var isAudio = FileKinds.IsAudio(path);
-        var canvas = palette.CanvasBg;
-        var grid = new Grid { Background = isAudio ? Theme.Brush(canvas) : Brushes.Black };
-        if (!isAudio)
+        // The page paints its own background (black for video, the canvas
+        // for audio) and fades itself in over the stand-in.
+        var grid = new Grid { Background = Brushes.Transparent };
+        if (!FileKinds.IsAudio(path))
         {
             var dimensionsKnown = _stageFitVersion == version
                 && _stageFitHint is { Kind: StageFitHint.FitKind.Pixels };
             grid.Tag = new MediaStageState(dimensionsKnown);
         }
         var webView = CreateWebView(
-            isAudio ? System.Drawing.Color.FromArgb(canvas.R, canvas.G, canvas.B) : System.Drawing.Color.Black,
+            WebSurfaceKind.Page,
             () => source,
             $"web media {path}",
             _ =>
             {
                 if (IsCurrentContentPath(path))
                 {
-                    SetPreviewContent(BuildMediaFailurePreview(path, null), null, animate: false);
+                    SetPreviewContent(BuildMediaFailurePreview(path, null), null);
                 }
             },
             configure: core =>
@@ -247,8 +246,7 @@ public partial class PreviewWindow
                 {
                     SetPreviewContent(
                         BuildMediaFailurePreview(path, codecs),
-                        null,
-                        animate: false);
+                        null);
                 }
 
                 return;

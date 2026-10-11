@@ -289,43 +289,19 @@ public partial class PreviewWindow
         };
     }
 
-    private enum WebPaintReadinessMode
-    {
-        AnimationFrames,
-        StaticLayout,
-        PdfPlugin
-    }
-
-    private static WebPaintReadinessMode PaintReadinessMode(WebView2 webView) =>
-        webView.Tag is WebPaintReadinessMode mode ? mode : WebPaintReadinessMode.AnimationFrames;
-
-    private static string PaintReadinessModeName(WebPaintReadinessMode mode) => mode switch
-    {
-        WebPaintReadinessMode.StaticLayout => "layout",
-        WebPaintReadinessMode.PdfPlugin => "pdf-plugin",
-        _ => "frames"
-    };
-
-    private WebView2 CreateWebView(
-        System.Drawing.Color background,
+    private StagedWebView CreateWebView(
+        WebSurfaceKind kind,
         Func<Uri> getSource,
         string diagnosticLabel,
         Action<Exception>? onFailed = null,
         Action<Microsoft.Web.WebView2.Core.CoreWebView2>? configure = null,
-        bool trackAsPreviewDisposable = true,
-        WebPaintReadinessMode readinessMode = WebPaintReadinessMode.AnimationFrames)
+        bool trackAsPreviewDisposable = true)
     {
         var requestVersion = _loadVersion;
         var requestToken = _loadCancellation?.Token ?? CancellationToken.None;
         var failureReported = 0;
         var initializationStarted = 0;
-        var webView = new WebView2
-        {
-            DefaultBackgroundColor = background,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            VerticalAlignment = VerticalAlignment.Stretch,
-            Tag = readinessMode
-        };
+        var webView = new StagedWebView(kind);
         if (trackAsPreviewDisposable)
         {
             _nextDisposable = webView;
@@ -387,13 +363,17 @@ public partial class PreviewWindow
                 }
 
                 // Loaded can fire again when a PDF is parked for Fill & Sign
-                // and then restored. Reconfiguring would duplicate every
+                // and then restored, or when a view staged during the beat
+                // moves into place. Reconfiguring would duplicate every
                 // handler and reset the viewer back to its original source.
                 if (Interlocked.CompareExchange(ref initializationStarted, 1, 0) != 0)
                 {
                     return;
                 }
 
+                // The source is built off the UI thread while the engine
+                // starts: media pages read shell metadata and artwork.
+                var source = Task.Run(getSource);
                 var environment = await WebViewEnvironment.GetAsync();
                 if (!IsCurrentRequest())
                 {
@@ -401,6 +381,7 @@ public partial class PreviewWindow
                 }
 
                 await webView.EnsureCoreWebView2Async(environment);
+                webView.EngineReady = Stopwatch.GetTimestamp();
                 if (!IsCurrentRequest())
                 {
                     return;
@@ -411,19 +392,22 @@ public partial class PreviewWindow
                 webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 webView.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                WebViewTheme.Apply(webView.CoreWebView2);
                 RememberWebViewProcesses(webView.CoreWebView2);
                 webView.CoreWebView2.ContextMenuRequested += (_, args) => OnWebContextMenuRequested(webView, args);
                 webView.CoreWebView2.ProcessFailed += (_, args) =>
                     ReportFailure(new InvalidOperationException($"browser process failed ({args.ProcessFailedKind})"));
                 configure?.Invoke(webView.CoreWebView2);
+                var uri = await source;
+                await webView.MayNavigate;
                 if (!IsCurrentRequest())
                 {
                     return;
                 }
 
-                var source = getSource();
                 sourceAssigned = true;
-                webView.Source = source;
+                webView.NavigationStarted = Stopwatch.GetTimestamp();
+                webView.Source = uri;
             }
             catch (Exception ex)
             {
@@ -434,11 +418,15 @@ public partial class PreviewWindow
         return webView;
     }
 
+    /// <summary>
+    /// A saved page is somebody else's document: opaque on white like a
+    /// browser, staged hidden and shown in one cut once laid out.
+    /// </summary>
     private FrameworkElement BuildHtmlPreview(string path)
     {
-        var grid = new Grid { Background = Brushes.White };
+        var grid = new Grid();
         grid.Children.Add(CreateWebView(
-            System.Drawing.Color.White,
+            WebSurfaceKind.SavedPage,
             () => new Uri(path, UriKind.Absolute),
             $"html preview {path}",
             ex => _ = ShowTextOrFileFallbackAsync(path),
@@ -446,22 +434,20 @@ public partial class PreviewWindow
             {
                 HardenForUntrustedHtml(core);
                 NormalizeHtmlPageScrolling(core);
-            },
-            readinessMode: WebPaintReadinessMode.StaticLayout));
+            }));
         return grid;
     }
 
     private FrameworkElement BuildGeneratedHtmlPreview(GeneratedHtmlDocument document, string label)
     {
-        var palette = Theme.Current;
-        var grid = new Grid { Background = Theme.Brush(palette.CanvasBg) };
+        // Transparent, so the page dissolves in over whatever stands under it.
+        var grid = new Grid();
         grid.Children.Add(CreateWebView(
-            document.Background,
+            WebSurfaceKind.Page,
             () => document.Source,
             label,
             ex => _ = ShowTextOrFileFallbackAsync(document.SourcePath),
-            configure: core => HardenForGeneratedHtml(core, document),
-            readinessMode: WebPaintReadinessMode.StaticLayout));
+            configure: core => HardenForGeneratedHtml(core, document)));
         return grid;
     }
 

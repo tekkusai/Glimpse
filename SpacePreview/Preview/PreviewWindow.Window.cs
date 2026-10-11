@@ -491,7 +491,7 @@ public partial class PreviewWindow
         }
 
         AlwaysOnTopButton.Visibility = Visibility.Visible;
-        if (!SystemParameters.ClientAreaAnimation)
+        if (!Motion.Enabled)
         {
             AlwaysOnTopButton.Opacity = 1;
             return;

@@ -1,0 +1,312 @@
+using System.Windows;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using SpacePreview.Preview;
+
+namespace SpacePreview.Tests;
+
+/// <summary>
+/// The reveal's decisions, run on a fake clock: what the user sees while a
+/// load waits, who may reveal it, and how the item on screen makes way.
+/// </summary>
+public sealed class RevealPlanTests
+{
+    private static readonly TimeSpan Ms = TimeSpan.FromMilliseconds(1);
+
+    private sealed class Clock
+    {
+        public TimeSpan Now { get; set; }
+
+        public Func<TimeSpan> Read => () => Now;
+    }
+
+    private static RevealPlan Open(Clock clock, bool motion = true) => new(1, freshOpen: true, clock.Read, motion);
+
+    private static RevealPlan Browse(Clock clock, SwapStyle swap = SwapStyle.FadeOut, bool beatOver = true)
+    {
+        var plan = new RevealPlan(2, freshOpen: false, clock.Read, motion: true) { Swap = swap };
+        if (beatOver)
+        {
+            plan.EndBeat();
+        }
+
+        return plan;
+    }
+
+    [Fact]
+    public void SupersededLoadsNeverReveal()
+    {
+        var plan = Open(new Clock());
+        plan.Supersede();
+
+        Assert.False(plan.TryReveal());
+        Assert.False(plan.TryShowWindow());
+        Assert.Equal(WaitView.Nothing, plan.WaitAt(RevealPlan.SheenAt, shaped: true));
+    }
+
+    [Fact]
+    public void EachLoadRevealsOnce()
+    {
+        var plan = Open(new Clock());
+
+        Assert.True(plan.TryReveal());
+        Assert.False(plan.TryReveal());
+    }
+
+    [Fact]
+    public void TheWindowFadesInOnce()
+    {
+        var open = Open(new Clock());
+        Assert.True(open.TryShowWindow());
+        Assert.False(open.TryShowWindow());
+
+        // A browse step's window is already on screen.
+        Assert.False(Browse(new Clock()).TryShowWindow());
+    }
+
+    [Fact]
+    public void ALateTimerNeverBringsTheStandInBackOverRevealedContent()
+    {
+        var clock = new Clock();
+        var plan = Open(clock);
+        clock.Now = 80 * Ms;
+        Assert.True(plan.TryReveal());
+
+        foreach (var moment in new[] { RevealPlan.StandInAt, RevealPlan.SheenAt, RevealPlan.ReasonAt })
+        {
+            clock.Now = moment;
+            Assert.Equal(WaitView.Nothing, plan.WaitAtMoment(moment, shaped: true));
+        }
+    }
+
+    [Fact]
+    public void TheWaitShowsNothingNewForTheFirst120Ms()
+    {
+        var plan = Open(new Clock());
+
+        Assert.Equal(WaitView.Nothing, plan.WaitAt(119 * Ms, shaped: true));
+        Assert.Equal(WaitView.StandIn, plan.WaitAt(RevealPlan.StandInAt, shaped: true));
+    }
+
+    [Fact]
+    public void ATimerFiringATickEarlyStillCountsAsItsMoment()
+    {
+        // Windows timers fire on 15.6 ms ticks: the 120 ms timer can run at
+        // 113 ms. Read as 113 ms the stand-in waited for the one-second
+        // timer instead.
+        var clock = new Clock { Now = 113 * Ms };
+        var plan = Open(clock);
+
+        Assert.Equal(WaitView.StandIn, plan.WaitAtMoment(RevealPlan.StandInAt, shaped: true));
+    }
+
+    [Fact]
+    public void TheSheenComesAfterASecondAndOnlyWithMotion()
+    {
+        Assert.Equal(WaitView.StandIn, Open(new Clock()).WaitAt(999 * Ms, shaped: true));
+        Assert.Equal(WaitView.StandIn | WaitView.Sheen, Open(new Clock()).WaitAt(RevealPlan.SheenAt, shaped: true));
+        Assert.Equal(WaitView.StandIn, Open(new Clock(), motion: false).WaitAt(RevealPlan.SheenAt, shaped: true));
+    }
+
+    [Fact]
+    public void TheReasonLineNeedsAReasonAndItsMoment()
+    {
+        var plan = Open(new Clock());
+        Assert.False(plan.WaitAt(RevealPlan.ReasonAt, shaped: true).HasFlag(WaitView.Reason));
+
+        plan.Reason = "Converting with LibreOffice";
+        Assert.False(plan.WaitAt(RevealPlan.ReasonAt - Ms, shaped: true).HasFlag(WaitView.Reason));
+        Assert.True(plan.WaitAt(RevealPlan.ReasonAt, shaped: true).HasFlag(WaitView.Reason));
+    }
+
+    [Fact]
+    public void NothingWaitsOverAnItemThatIsStillLeaving()
+    {
+        var plan = Browse(new Clock(), beatOver: false);
+        Assert.Equal(WaitView.Nothing, plan.WaitAt(RevealPlan.SheenAt, shaped: true));
+
+        plan.EndBeat();
+        Assert.NotEqual(WaitView.Nothing, plan.WaitAt(RevealPlan.SheenAt, shaped: true));
+    }
+
+    [Fact]
+    public void AHeldItemIsNotReplacedByABlankStandIn()
+    {
+        var plan = Browse(new Clock(), SwapStyle.Hold);
+
+        // A stand-in in the content's shape may dissolve over the held item.
+        Assert.Equal(WaitView.StandIn, plan.WaitAt(RevealPlan.StandInAt, shaped: true));
+
+        // A shapeless one would be a blank beat until the wait needs a sign of life.
+        Assert.Equal(WaitView.Nothing, plan.WaitAt(RevealPlan.SheenAt - Ms, shaped: false));
+        Assert.True(plan.WaitAt(RevealPlan.SheenAt, shaped: false).HasFlag(WaitView.StandIn));
+    }
+
+    [Fact]
+    public void AFreshOpenHasNoBeatToWaitFor()
+    {
+        Assert.True(Open(new Clock()).BeatEnded.IsCompleted);
+        Assert.False(new RevealPlan(2, freshOpen: false, () => TimeSpan.Zero, motion: true).BeatEnded.IsCompleted);
+    }
+
+    [Fact]
+    public void ASecondBeatInOneLoadWaitsAgain()
+    {
+        var plan = Browse(new Clock());
+        Assert.True(plan.BeatDone);
+
+        plan.BeginBeat();
+        Assert.False(plan.BeatDone);
+        Assert.False(plan.BeatEnded.IsCompleted);
+
+        plan.EndBeat();
+        Assert.True(plan.BeatEnded.IsCompleted);
+    }
+
+    [Fact]
+    public void SupersedingWakesAnythingWaitingOnTheBeat()
+    {
+        var plan = Browse(new Clock(), beatOver: false);
+        var waiting = plan.BeatEnded;
+
+        plan.Supersede();
+
+        Assert.True(waiting.IsCompleted);
+        Assert.False(plan.TryReveal());
+    }
+
+    [Theory]
+    [InlineData(false, false, false, "Clear")]
+    [InlineData(true, false, false, "Hold")]
+    [InlineData(true, false, true, "FadeOut")]
+    [InlineData(true, false, null, "FadeOut")]
+    [InlineData(true, true, false, "FadeOut")]
+    public void TheItemOnScreenHoldsOnlyWhenNothingForcesItOff(bool visible, bool web, bool? stageChanges, string expected)
+    {
+        // A browser window cannot be drawn over, and a new shape needs the
+        // stage to move while nothing shows.
+        Assert.Equal(Enum.Parse<SwapStyle>(expected), RevealPlan.ChooseSwap(visible, web, stageChanges));
+    }
+
+    [Fact]
+    public void ARevealTicketHasOneOwner()
+    {
+        var current = true;
+        var ticket = new RevealTicket(() => current);
+
+        Assert.True(ticket.TryTake());
+        Assert.False(ticket.TryTake());
+
+        var stale = new RevealTicket(() => current);
+        current = false;
+        Assert.False(stale.TryTake());
+    }
+
+    [Fact]
+    public async Task GatesAreCapped()
+    {
+        Task Instant(TimeSpan _) => Task.CompletedTask;
+
+        Assert.True(await RevealPlan.WaitCappedAsync(Task.CompletedTask, RevealPlan.RailGateCap, Instant));
+        Assert.False(await RevealPlan.WaitCappedAsync(new TaskCompletionSource().Task, RevealPlan.RailGateCap, Instant));
+    }
+}
+
+public sealed class StandInTests
+{
+    [Fact]
+    public void AGhostPageLandsWhereTheViewerDrawsItsFirstPage()
+    {
+        // Measured from the Chromium viewer: 5 px in from the rail, 8 px
+        // under its 40 px toolbar, 20 px short of its right edge.
+        var landing = StandIn.LandingIn(LandingKind.ViewerPage, 0.75, Size.Empty, 132, 40, new Size(1000, 800));
+
+        Assert.Equal(new Rect(137, 48, 843, 843 / 0.75), landing);
+    }
+
+    [Fact]
+    public void ALonePageThatFitsHasNoScrollbarBesideIt()
+    {
+        // Measured on an A4 landscape page in an 1139 px area under the 40 px
+        // toolbar: the viewer drops its scrollbar at 813 px of viewport, and
+        // at 812 keeps the narrow fit, centered.
+        const double a4 = 297.0 / 210;
+        Rect At(double viewport, double railWidth = 0) =>
+            StandIn.LandingIn(LandingKind.ViewerPage, a4, Size.Empty, railWidth, 40, new Size(1139, viewport + 40))!.Value;
+
+        Assert.Equal(new Rect(5, 48, 1128, 1128 / a4), At(813));
+        Assert.Equal(new Rect(12.5, 48, 1114, 1114 / a4), At(812));
+        Assert.Equal(new Rect(5, 48, 1114, 1114 / a4), At(700));
+        Assert.Equal(new Rect(137, 48, 982, 982 / a4), At(813, railWidth: 132));
+    }
+
+    [Fact]
+    public void PixelsLandCenteredAndImagesNeverUpscale()
+    {
+        var area = new Size(1000, 800);
+
+        Assert.Equal(new Rect(100, 0, 800, 800), StandIn.LandingIn(LandingKind.Pixels, 1, Size.Empty, 0, 0, area));
+        Assert.Equal(new Rect(400, 300, 200, 200), StandIn.LandingIn(LandingKind.Pixels, 1, new Size(200, 200), 0, 0, area));
+    }
+
+    [Fact]
+    public void ContentWithoutAShapeHasNoLanding()
+    {
+        Assert.Null(StandIn.LandingIn(LandingKind.None, 1, Size.Empty, 0, 0, new Size(1000, 800)));
+        Assert.Null(StandIn.LandingIn(LandingKind.Pixels, double.NaN, Size.Empty, 0, 0, new Size(1000, 800)));
+        Assert.False(StandIn.KnowsShape(null));
+        Assert.False(StandIn.KnowsShape(StageFitHint.Sheet()));
+        Assert.True(StandIn.KnowsShape(StageFitHint.PageAspect(0.77)));
+    }
+
+    [Fact]
+    public void APosterIsHonestOnlyWhenItIsAPictureInTheContentsShape()
+    {
+        Assert.True(StandIn.IsHonestPoster(Bitmap(768, 1024), 0.75));
+        Assert.False(StandIn.IsHonestPoster(Bitmap(96, 128), 0.75));
+        Assert.False(StandIn.IsHonestPoster(Bitmap(1024, 1024), 0.75));
+        Assert.False(StandIn.IsHonestPoster(null, 0.75));
+    }
+
+    private static BitmapSource Bitmap(int width, int height) =>
+        BitmapSource.Create(width, height, 96, 96, PixelFormats.Gray8, null, new byte[width * height], width);
+}
+
+/// <summary>Traps in the reveal path that only a source check can see.</summary>
+public sealed class RevealTrapTests
+{
+    [Fact]
+    public void ASavedPageLayoutCheckThatRunsLateDoesNothing()
+    {
+        // ExecuteScriptAsync cannot be cancelled. The layout check reads the
+        // deadline before it touches the page, and never changes the page.
+        var body = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "WaitForDocumentPaintAsync");
+        var deadline = body.IndexOf("if (Date.now() >", StringComparison.Ordinal);
+        var firstRead = body.IndexOf("getComputedStyle(root)", StringComparison.Ordinal);
+
+        Assert.True(deadline >= 0 && deadline < firstRead);
+        Assert.DoesNotContain("opacity", body, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("transition", body, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ADyingBrowserViewIsHiddenBeforeItIsDisposed()
+    {
+        // A WebView2 being disposed paints a black frame on its way out.
+        var release = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "ReleaseShown");
+
+        Assert.True(
+            release.IndexOf("Visibility.Collapsed", StringComparison.Ordinal)
+            < release.IndexOf("ClearPreviewContent()", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void EveryWaitAndBeatTimerRunsAtRenderPriority()
+    {
+        // Background priority let icon and scan work hold a ready card off
+        // screen for hundreds of milliseconds.
+        var runAfter = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RunAfter");
+
+        Assert.Contains("DispatcherPriority.Render", runAfter, StringComparison.Ordinal);
+    }
+}

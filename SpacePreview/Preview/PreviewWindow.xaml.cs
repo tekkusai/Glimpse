@@ -65,6 +65,7 @@ public partial class PreviewWindow : Window
 
     private IDisposable? _currentDisposable;
     private IDisposable? _nextDisposable;
+    private readonly WarmBrowser _warmBrowser = new();
     private CancellationTokenSource? _loadCancellation;
     private long _loadVersion;
     private readonly SemaphoreSlim _shellIconGate = new(1, 1);
@@ -94,8 +95,6 @@ public partial class PreviewWindow : Window
     private long _suppressOutsideDismissUntilTicks;
     private bool _userResizingStage;
     private bool _stageFrozenForProbe;
-    private DateTime _swapStartedAt = DateTime.MinValue;
-    private DateTime _loadStartedAt = DateTime.MinValue;
     private WebView2? _zoomWebView;
     private bool _loadFinished;
     private bool _escapeYieldsToContent;
@@ -103,7 +102,6 @@ public partial class PreviewWindow : Window
     private bool _userEngagedContent;
     private bool _contentDrivenMaximize;
     private int _fadeGeneration;
-    private long _loadingOverlayGeneration;
     private DispatcherTimer? _fadeTimer;
     private ImageRotationSession? _rotationSession;
     private FolderHoverThumbnail? _folderHover;
@@ -127,6 +125,7 @@ public partial class PreviewWindow : Window
         ZoomResetButton.Click += (_, _) => ResetZoom();
         StateChanged += (_, _) => SyncNativeWindowState();
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
+        Closed += (_, _) => _warmBrowser.Dispose();
 
         // One line per click: where it landed and who owned the capture.
         // This is the first question for any "clicks stopped working" report.
@@ -189,7 +188,11 @@ public partial class PreviewWindow : Window
         int selectedCount = 1,
         bool fileDialogMode = false)
     {
-        _loadStartedAt = DateTime.UtcNow;
+        var entered = Stopwatch.GetTimestamp();
+        // Taken once: a later load nobody pressed a key for (a slideshow
+        // step, a reload) starts its own clock.
+        var inputTimestamp = InputStamp;
+        InputStamp = 0;
         _isFileDialogMode = fileDialogMode;
         _placementOwnerHwnd = fileDialogMode ? explorerHwnd : IntPtr.Zero;
         RootChrome.ContextMenu = fileDialogMode ? null : _contextMenu;
@@ -222,27 +225,22 @@ public partial class PreviewWindow : Window
         }
 
         // The shapes knowable up front, before geometry is placed. Slower
-        // shapes (media metadata, conversions) hint later and are applied
-        // during the blank beat.
+        // shapes (media metadata, conversions) hint later and apply while
+        // nothing of the item shows.
+        var headed = Stopwatch.GetTimestamp();
         TrySetIntrinsicStageFit(contentPath, version);
-        var hasInitialStageFitHint = _stageFitVersion == version;
+        var probed = Stopwatch.GetTimestamp();
 
-        var freshOpen = !IsVisible;
+        // A window still waiting at zero alpha has shown nothing yet, so
+        // this is its open, not a browse step.
+        var freshOpen = !IsVisible || _windowAlpha == 0;
+        var presentation = BeginPresentation(version, freshOpen, inputTimestamp, entered, contentPath);
+        presentation.Headed = presentation.Entered + Stopwatch.GetElapsedTime(entered, headed).TotalMilliseconds;
+        presentation.Probed = presentation.Entered + Stopwatch.GetElapsedTime(entered, probed).TotalMilliseconds;
         var presented = true;
-        _swapStartedAt = freshOpen ? DateTime.MinValue : DateTime.UtcNow;
         if (!freshOpen)
         {
-            var defaultStageWithoutProbe = !hasInitialStageFitHint && UsesDefaultStageWithoutProbe(contentPath);
-            var outgoingIsWeb = FindVisualChild<WebView2>(PreviewContent) is not null;
-
-            var stageMoved = defaultStageWithoutProbe && !outgoingIsWeb && RetargetStageToFit();
-            ShowContentSwapScrim(instant: stageMoved);
-            FadeOutWebContent();
-            CollapseOutgoingContentSoon();
-            if (defaultStageWithoutProbe && outgoingIsWeb)
-            {
-                RetargetDefaultStageDuringBlankBeat(version);
-            }
+            BeginSwap(presentation, WillStageChange(version, contentPath));
         }
 
         // A maximize the CONTENT requested (video fullscreen) releases when
@@ -264,14 +262,18 @@ public partial class PreviewWindow : Window
         _fadeGeneration++;
         if (freshOpen)
         {
-            ClearPreviewContent();
-            HideLoadingOverlay();
-            presented = ShowWithEntrance(useScale: ShouldScaleEntrance());
+            ReleaseShown();
+            ReleaseIncoming();
+            presented = ShowTransparent();
         }
         else
         {
-            // A rapid hide/show race can leave a partially faded window behind.
-            EnsureOpaque();
+            // A rapid hide/show race can leave a partially faded window
+            // behind; it fades back from wherever it got to.
+            if (_windowAlpha < 255)
+            {
+                FadeWindowIn(presentation);
+            }
 
             // Reassert topmost without activation. This matches Quick Look's "above Finder" feel.
             Topmost = false;
@@ -280,15 +282,9 @@ public partial class PreviewWindow : Window
             LastPresentationFailureReason = presented ? string.Empty : failureReason;
         }
 
-        _ = ShowLoadingOverlayLaterAsync(version, freshOpen ? 240 : 420, token);
-
-        // A conversion still running after a beat gets named, nothing more.
-        if (FileKinds.IsOffice(contentPath) && OfficeDocumentPdfConverter.EngineName is { } engine)
-        {
-            _ = ShowLoadingOverlayLaterAsync(version, 1200, token, ($"Converting with {engine}", string.Empty));
-        }
-
-        _ = LoadPreviewAsync(path, contentPath, version, token);
+        _warmBrowser.Start(Hwnd);
+        ScheduleWait(presentation);
+        _ = LoadPreviewAsync(path, contentPath, version, token, coalesce: !freshOpen);
         return presented;
     }
 
@@ -299,8 +295,10 @@ public partial class PreviewWindow : Window
     /// </summary>
     public bool ShowWelcome()
     {
-        Interlocked.Increment(ref _loadVersion);
+        var entered = Stopwatch.GetTimestamp();
+        var version = Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
+        _loadFinished = false;
         _isFileDialogMode = false;
         _placementOwnerHwnd = IntPtr.Zero;
         RootChrome.ContextMenu = _contextMenu;
@@ -309,14 +307,28 @@ public partial class PreviewWindow : Window
         _shortcutTarget = null;
         ShowWelcomeHeader();
 
-        // The welcome uses the same stage geometry as normal previews.
-        ApplyStageGeometry(IntPtr.Zero);
+        var freshOpen = !IsVisible || _windowAlpha == 0;
+        var presentation = BeginPresentation(version, freshOpen, 0, entered, null);
+        presentation.Headed = presentation.Entered;
+        presentation.Probed = presentation.Entered;
+        var presented = true;
+        _fadeGeneration++;
+        if (freshOpen)
+        {
+            // The welcome uses the same stage geometry as normal previews.
+            ApplyStageGeometry(IntPtr.Zero);
+            ReleaseShown();
+            ReleaseIncoming();
+            presented = ShowTransparent();
+        }
+        else
+        {
+            BeginSwap(presentation, stageChanges: null);
+        }
 
-        ClearPreviewContent();
-        HideContentSwapScrim();
-        HideLoadingOverlay();
-        SetPreviewContent(BuildWelcomeContent(), null, animate: false);
-        return ShowWithEntrance();
+        SetPreviewContent(BuildWelcomeContent(), null);
+        _warmBrowser.Start(Hwnd);
+        return presented;
     }
 
     private static FrameworkElement BuildWelcomeContent()
@@ -373,7 +385,7 @@ public partial class PreviewWindow : Window
                 VerticalAlignment = VerticalAlignment.Center
             }, TextBlock.ForegroundProperty, "Theme.TextPrimary")
         }, Border.BackgroundProperty, "Theme.RaisedBg"), Border.BorderBrushProperty, "Theme.RaisedBorder");
-        if (SystemParameters.ClientAreaAnimation)
+        if (Motion.Enabled)
         {
             keycapGlow.BeginAnimation(DropShadowEffect.OpacityProperty, new DoubleAnimation(0.2, 0.5, TimeSpan.FromSeconds(2.4))
             {
@@ -415,12 +427,17 @@ public partial class PreviewWindow : Window
         }, Panel.BackgroundProperty, "Theme.CanvasBg");
     }
 
-    private async Task LoadPreviewAsync(string path, string contentPath, long version, CancellationToken token)
+    private async Task LoadPreviewAsync(string path, string contentPath, long version, CancellationToken token, bool coalesce)
     {
         try
         {
-            // Small yield so rapid arrow-key navigation coalesces on the newest file.
-            await Task.Delay(20, token);
+            // Rapid arrow presses coalesce on the newest file. A fresh open
+            // has nothing to coalesce with.
+            if (coalesce)
+            {
+                await Task.Delay(20, token);
+            }
+
             FrameworkElement content;
             string? fillSignPath = null;
             if (Directory.Exists(contentPath))
@@ -429,7 +446,7 @@ public partial class PreviewWindow : Window
                 // recursive sizing, and signature work are enrichment; none
                 // may put a live folder-to-folder swap behind the thread pool.
                 content = BuildDirectoryCard(contentPath, token);
-                DiagnosticLog.Write($"folder card ready +{ElapsedSinceSwap():0}ms");
+                DiagnosticLog.Write($"folder card ready +{ElapsedSinceInput():0}ms");
             }
             else
             {
@@ -673,7 +690,7 @@ public partial class PreviewWindow : Window
         var card = await BuildFileCardAsync(path);
         if (OwnsCurrentLoad(path, version, token))
         {
-            SetPreviewContent(card, null, animate: false);
+            SetPreviewContent(card, null);
         }
     }
 
@@ -706,7 +723,7 @@ public partial class PreviewWindow : Window
             content = BuildTextPreview(new TextPreview(text.Value.Text, Truncated: false, TotalBytes: 0), text.Value.Wrap);
         }
 
-        SetPreviewContent(content, null, animate: false);
+        SetPreviewContent(content, null);
     }
 
     private bool OwnsCurrentLoad(string contentPath, long version, CancellationToken token) =>
@@ -801,12 +818,13 @@ public partial class PreviewWindow : Window
         _stageFitHint = hint;
         _stageFitVersion = version;
 
-        // An async hint (media metadata, a finished conversion) lands after
-        // the swap started. Retake the stage only once the outgoing content
-        // has left the screen; the staging beat consumes the hint otherwise.
+        // An async hint (media metadata, rail truth) lands after the load
+        // started. It retakes the stage only once the old item has left and
+        // while nothing of this one shows; otherwise the beat's end or the
+        // content's arrival consumes it.
         if (IsVisible
-            && PreviewContent.Content is UIElement staged
-            && staged.Visibility != Visibility.Visible)
+            && _presentation is { Plan: { BeatDone: true, Swap: not SwapStyle.Hold } }
+            && !PreviewShows)
         {
             RetargetStageToFit();
         }

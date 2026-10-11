@@ -5,9 +5,10 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Services;
 
 /// <summary>
-/// One CoreWebView2Environment for the whole app. Creating an environment per preview
-/// paid the browser-process handshake on every Space press; sharing it makes repeat
-/// previews land on a warm runtime.
+/// One CoreWebView2Environment for the whole app, so previews share one
+/// browser and one profile. Holding the environment does not keep the
+/// browser running: it exits when its last controller closes. The preview
+/// window's WarmBrowser is what keeps it warm between previews.
 /// </summary>
 internal static class WebViewEnvironment
 {
@@ -20,7 +21,7 @@ internal static class WebViewEnvironment
         try
         {
             await GetAsync();
-            DiagnosticLog.Write("webview environment warm");
+            DiagnosticLog.Write("webview environment ready");
         }
         catch (Exception ex)
         {
@@ -35,9 +36,6 @@ internal static class WebViewEnvironment
         Directory.CreateDirectory(userDataFolder);
 
         // Autoplay: media previews must start without a click (inert elsewhere).
-        // Scrollbar style is chosen per view (CoreWebView2ControllerOptions):
-        // overlay bars for HTML pages, classic
-        // grabbable bars where the user navigates documents (PDF viewer).
         var options = new CoreWebView2EnvironmentOptions(
             "--autoplay-policy=no-user-gesture-required");
         return CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
