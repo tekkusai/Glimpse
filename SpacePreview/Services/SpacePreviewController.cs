@@ -987,9 +987,9 @@ internal sealed class SpacePreviewController : IDisposable
         SyncMouseHook();
         DiagnosticLog.Write($"pinned preview closed ({_pinnedWindows.Count} of {MaxPinnedPreviews})");
 
-        // The last pin was what held the trim off; a hidden glance and its
-        // browser would otherwise wait for the next Space.
-        if (!_previewVisible)
+        // The last pin held off the trim's collection and page-out; with no
+        // glance showing, nothing else brings them.
+        if (!_previewVisible && _pinnedWindows.Count == 0)
         {
             ScheduleIdleTrim();
         }
@@ -2070,7 +2070,7 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void ScheduleIdleTrim()
     {
-        if (_disposed || _pinnedWindows.Count > 0)
+        if (_disposed)
         {
             return;
         }
@@ -2092,7 +2092,7 @@ internal sealed class SpacePreviewController : IDisposable
     private void RunIdleTrim()
     {
         _idleTrimTimer.Stop();
-        if (_disposed || _previewVisible || _pinnedWindows.Count > 0)
+        if (_disposed || _previewVisible)
         {
             return;
         }
@@ -2119,7 +2119,9 @@ internal sealed class SpacePreviewController : IDisposable
 
         ResetSession();
 
-        if (Interlocked.Exchange(ref _idleTrimInFlight, 1) == 1)
+        // A pinned window is still in use: no pause across the process and
+        // no page-out under it. Closing the last pin trims again.
+        if (_pinnedWindows.Count > 0 || Interlocked.Exchange(ref _idleTrimInFlight, 1) == 1)
         {
             return;
         }

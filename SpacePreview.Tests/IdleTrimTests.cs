@@ -1,3 +1,4 @@
+using System.Windows.Interop;
 using System.Windows.Threading;
 using SpacePreview.Preview;
 using SpacePreview.Services;
@@ -6,8 +7,9 @@ namespace SpacePreview.Tests;
 
 /// <summary>
 /// The idle trim is what gives back a hidden glance's window, its parked
-/// browser and its memory. Pins hold it off, so the last pin closing has to
-/// bring it back.
+/// browser and its memory. A pin holds off only the process-wide part, the
+/// collection and the page-out, so the last pin closing has to bring that
+/// back.
 /// </summary>
 public sealed class IdleTrimTests
 {
@@ -46,6 +48,42 @@ public sealed class IdleTrimTests
             Fields.Call(controller, "OnPinnedCloseRequested", pinned);
 
             Assert.False(TrimScheduled(controller));
+        });
+    }
+
+    [Fact]
+    public void HidingTheGlanceUnderAPinSchedulesTheTrim()
+    {
+        WithPinnedWindow((controller, _) =>
+        {
+            Fields.Set(controller, "_previewWindow", new PreviewWindow());
+            Fields.Set(controller, "_previewVisible", true);
+
+            Fields.Call(controller, "HidePreview");
+
+            Assert.True(TrimScheduled(controller));
+        });
+    }
+
+    [Fact]
+    public void TheTrimUnderAPinLetsTheHiddenGlanceAndItsBrowserGoButCollectsNothing()
+    {
+        WithPinnedWindow((controller, _) =>
+        {
+            var glance = new PreviewWindow { Left = -30000, Top = 0 };
+            new WindowInteropHelper(glance).EnsureHandle();
+            var browser = Fields.Get<object>(glance, "_warmBrowser");
+            Fields.Call(browser, "Start", glance.Hwnd);
+            Fields.Set(controller, "_previewWindow", glance);
+
+            Fields.Call(controller, "RunIdleTrim");
+
+            Assert.Null(Fields.Get<PreviewWindow?>(controller, "_previewWindow"));
+            Assert.False(Fields.Get<bool>(browser, "_started"));
+
+            // The pinned window is in use: no pause across the process and
+            // no page-out under it.
+            Assert.Equal(0, Fields.Get<int>(controller, "_idleTrimInFlight"));
         });
     }
 
