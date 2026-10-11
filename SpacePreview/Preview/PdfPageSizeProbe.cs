@@ -29,6 +29,13 @@ internal static class PdfPageSizeProbe
     private const int MaxSections = 64;
     private const int MaxTreeDepth = 32;
     private const int MemoLimit = 256;
+
+    // Real files nest a handful of levels. A crafted one nests until the
+    // stack runs out, and no catch survives that, so past these it is a
+    // parse failure.
+    internal const int MaxNesting = 64;
+    internal const int MaxObjectDepth = 16;
+
     private static readonly TimeSpan Budget = TimeSpan.FromMilliseconds(250);
 
     private static readonly ConcurrentDictionary<string, Lazy<PdfOutline?>> Memo =
@@ -152,6 +159,7 @@ internal static class PdfPageSizeProbe
         private readonly Dictionary<int, object?> _objects = [];
         private PdfRef? _root;
         private bool _encrypted;
+        private int _depth;
 
         public bool TryLoadIndex()
         {
@@ -337,9 +345,18 @@ internal static class PdfPageSizeProbe
                 return known;
             }
 
+            // An object can need another to be read (its object stream, a
+            // length kept elsewhere); a chain longer than any real file's
+            // reads as missing, like a cycle.
+            if (_depth >= MaxObjectDepth)
+            {
+                return null;
+            }
+
             CheckBudget();
             _objects[number] = null; // a reference cycle reads as missing
             object? value = null;
+            _depth++;
             if (Find(number) is { } entry)
             {
                 value = entry.Kind == 1
@@ -347,6 +364,7 @@ internal static class PdfPageSizeProbe
                     : ReadFromObjectStream(entry.StreamNumber, entry.Index);
             }
 
+            _depth--;
             _objects[number] = value;
             return value;
         }
@@ -864,6 +882,8 @@ internal static class PdfPageSizeProbe
     /// <summary>The PDF object syntax, over bytes. Running off the end throws TruncatedException.</summary>
     private sealed class Lexer(byte[] bytes, int position)
     {
+        private int _depth;
+
         public int Position => position;
 
         public static bool IsSpace(byte value) => value is 0 or 9 or 10 or 12 or 13 or 32;
@@ -1005,6 +1025,7 @@ internal static class PdfPageSizeProbe
 
         private Dictionary<string, object?> ReadDictionary()
         {
+            Descend();
             position += 2;
             var dictionary = new Dictionary<string, object?>(StringComparer.Ordinal);
             while (true)
@@ -1018,6 +1039,7 @@ internal static class PdfPageSizeProbe
                 if (bytes[position] == (byte)'>' && bytes[position + 1] == (byte)'>')
                 {
                     position += 2;
+                    _depth--;
                     return dictionary;
                 }
 
@@ -1032,6 +1054,7 @@ internal static class PdfPageSizeProbe
 
         private List<object?> ReadArray()
         {
+            Descend();
             position++;
             var values = new List<object?>();
             while (true)
@@ -1045,10 +1068,19 @@ internal static class PdfPageSizeProbe
                 if (bytes[position] == (byte)']')
                 {
                     position++;
+                    _depth--;
                     return values;
                 }
 
                 values.Add(ReadValue());
+            }
+        }
+
+        private void Descend()
+        {
+            if (++_depth > MaxNesting)
+            {
+                throw new FormatException("The PDF nests values too deeply.");
             }
         }
 
