@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -194,6 +195,33 @@ public sealed class FillSignBehaviorTests
     }
 
     [Fact]
+    public void ASignedCopyNeverWritesOverAFileAlreadyThere()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "deal.pdf");
+        WritePdf(source, 200, 100);
+        var taken = temp.CreateFile("deal (signed).pdf", "another save's copy");
+        var date = new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.3, 0.1, "1/2/2026");
+
+        Assert.ThrowsAny<IOException>(() => PdfFillSignWriter.WriteSignedCopy(source, taken, [date]));
+        Assert.Equal("another save's copy", File.ReadAllText(taken));
+
+        // A write that fails before it made its file takes nothing with it.
+        var broken = temp.CreateFile("broken.pdf", "not a pdf");
+        Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.WriteSignedCopy(broken, taken, [date]));
+        Assert.Equal("another save's copy", File.ReadAllText(taken));
+    }
+
+    [Fact]
+    public void EverySaveStagesItsOwnFile()
+    {
+        var original = Path.Combine(Path.GetTempPath(), "deal.pdf");
+
+        Assert.NotEqual(PreviewWindow.SigningTempPath(original), PreviewWindow.SigningTempPath(original));
+        Assert.StartsWith(".deal.pdf.", Path.GetFileName(PreviewWindow.SigningTempPath(original)), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AReplaceThatLostTheOriginalKeepsTheSignedDocument()
     {
         using var temp = new TempDirectory();
@@ -327,6 +355,56 @@ public sealed class FillSignBehaviorTests
 
             Assert.True(Shown(Text(surface, reason)));
             Assert.True(Pill(surface, "Save a signed copy").IsEnabled);
+        });
+    }
+
+    [Fact]
+    public void NothingOnThePageTakesAnEditWhileTheSaveRuns()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+            var changes = 0;
+            surface.WorkChanged += () => changes++;
+            surface.ShowSaveChoice();
+            surface.SetSaving(true);
+
+            // The selected date's remove chip and resize handle live in a
+            // layer of their own, above the page.
+            Assert.False(Fields.Get<Border>(surface, "_deleteChip").IsEnabled);
+            Assert.False(Fields.Get<Border>(surface, "_resizeHandle").IsEnabled);
+            Assert.False(Fields.Get<Grid>(surface, "_inkOverlay").IsEnabled);
+            PressKey(surface, Key.Delete);
+            Assert.Single(surface.Placements);
+            Assert.Equal(0, changes);
+
+            // A failed save hands the page back.
+            surface.ShowSaveFailure("The file is open in another app. Close it there and try again.");
+            Assert.True(Fields.Get<Border>(surface, "_deleteChip").IsEnabled);
+            PressKey(surface, Key.Delete);
+            Assert.Empty(surface.Placements);
+        });
+    }
+
+    [Fact]
+    public void ADateStillBeingTypedIsSavedAsTyped()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            IReadOnlyList<SignPlacement>? saved = null;
+            surface.SaveRequested += (placements, _) => saved = placements;
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+            // Pills never take focus, so the editor is still open when Save is pressed.
+            var frame = Fields.Get<Canvas>(surface, "_placementLayer").Children.OfType<Grid>().Single();
+            Fields.Call(surface, "BeginDateEdit", frame, frame.Children[0]);
+            frame.Children.OfType<TextBox>().Single().Text = "Signed 1 May";
+            surface.ShowSaveChoice();
+            Click(Pill(surface, "Save a signed copy"));
+
+            Assert.Equal("Signed 1 May", saved!.Single().Text);
         });
     }
 
@@ -570,6 +648,57 @@ public sealed class FillSignBehaviorTests
     }
 
     // ------------------------------------------------------------------
+    // The page helper.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task AStuckPageHelperIsKilledAtItsDeadline()
+    {
+        using var stuck = StartStuckProcess();
+        try
+        {
+            var wait = PdfiumHelper.TryWaitAsync(stuck, TimeSpan.FromMilliseconds(200), CancellationToken.None);
+
+            Assert.Same(wait, await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(10))));
+            Assert.False(await wait);
+            Assert.True(stuck.WaitForExit(5000));
+        }
+        finally
+        {
+            PdfiumHelper.Kill(stuck);
+        }
+    }
+
+    [Fact]
+    public async Task AnEndedSessionKillsItsPageHelperAtOnce()
+    {
+        using var stuck = StartStuckProcess();
+        using var session = new CancellationTokenSource();
+        try
+        {
+            var wait = PdfiumHelper.TryWaitAsync(stuck, TimeSpan.FromMinutes(5), session.Token);
+            session.Cancel();
+
+            Assert.Same(wait, await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(10))));
+            Assert.False(await wait);
+            Assert.True(stuck.WaitForExit(5000));
+        }
+        finally
+        {
+            PdfiumHelper.Kill(stuck);
+        }
+    }
+
+    /// <summary>A child that never exits on its own, standing in for a hung pdfium helper.</summary>
+    private static Process StartStuckProcess() =>
+        Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "ping.exe"), "-n 600 127.0.0.1")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true
+        })!;
+
+    // ------------------------------------------------------------------
     // Helpers.
     // ------------------------------------------------------------------
 
@@ -662,6 +791,19 @@ public sealed class FillSignBehaviorTests
 
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonDownEvent });
         element.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+    }
+
+    /// <summary>A key pressed on the element, as the input system would route it there.</summary>
+    private static void PressKey(UIElement element, Key key) =>
+        element.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, new DetachedSource(), 0, key) { RoutedEvent = Keyboard.KeyDownEvent });
+
+    private sealed class DetachedSource : PresentationSource
+    {
+        public override Visual? RootVisual { get; set; }
+
+        public override bool IsDisposed => false;
+
+        protected override CompositionTarget? GetCompositionTargetCore() => null;
     }
 
     /// <summary>The bounding box of dark pixels, in bitmap pixels.</summary>

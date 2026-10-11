@@ -36,16 +36,27 @@ public partial class PreviewWindow
     // user's explicit second choice.
     // ---------------------------------------------------------------------
 
+    // ERROR_FILE_EXISTS: another save took the copy's name first.
+    private const int FileExists = unchecked((int)0x80070050);
+
+    // Every window's sign session, by the file it signs.
+    private static readonly Dictionary<string, SignSession> SignSessions = [];
+
     // The session's draft, and whether the loaded PDF has one waiting.
     private SignDraftKeeper? _signDraft;
     private bool _hasSignDraft;
+    private SignSession? _signSession;
+    private long _signPageRequest;
 
     /// <summary>Sign mode's page render: a pdfium helper, never this process. Tests stand in for it.</summary>
-    internal Func<string, int, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
-        (path, index) => PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
+    internal Func<string, int, CancellationToken, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
+        PdfiumHelper.TryRenderPageAsync;
 
     /// <summary>The writer's check before any work goes on; tests hold it to open the gap it leaves.</summary>
     internal Func<string, PdfSignCheck> CheckSignable { get; set; } = PdfFillSignWriter.Preflight;
+
+    /// <summary>The writer itself; tests hold it to open the gaps around a save.</summary>
+    internal Action<string, string, IReadOnlyList<SignPlacement>> WriteSignedPdf { get; set; } = PdfFillSignWriter.WriteSignedCopy;
 
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
@@ -77,11 +88,30 @@ public partial class PreviewWindow
 
     private async Task EnterFillSignModeAsync()
     {
-        if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))
+        if (_fillSignPath is not { } path
+            || _fillSignSurface is not null
+            || !IsCurrentContentPath(path)
+            || BeginSignSession(path) is not { } session)
         {
             return;
         }
 
+        try
+        {
+            await EnterFillSignSessionAsync(path, session);
+        }
+        finally
+        {
+            // An entry that did not leave its page up leaves the file free.
+            if (_fillSignSurface is null || !ReferenceEquals(_signSession, session))
+            {
+                EndSignSession(session);
+            }
+        }
+    }
+
+    private async Task EnterFillSignSessionAsync(string path, SignSession session)
+    {
         var version = _loadVersion;
         // Read again rather than trusted from the load: the file, or another
         // window's work on it, may have moved on since. The writer's check
@@ -99,7 +129,7 @@ public partial class PreviewWindow
 
         int? viewerPages = totalPages > 0 ? totalPages : null;
         var pageIndex = draft?.PageIndex ?? Math.Max(0, currentPage - 1);
-        var pages = new SignPageCache(index => RenderSignPage(path, index), viewerPages ?? pageIndex + 1);
+        var pages = new SignPageCache(index => RenderSignPage(path, index, session.Cancellation.Token), viewerPages ?? pageIndex + 1);
         var page = await pages.Get(pageIndex);
         if (page is null)
         {
@@ -117,13 +147,9 @@ public partial class PreviewWindow
             return;
         }
 
+        // The page shows now; its tools wait for the check below.
         var surface = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, page);
-        // Kept only once the check passes: a draft of work this file cannot
-        // save would offer to resume it forever.
-        SignDraftKeeper? keeper = null;
-        surface.WorkChanged += () => keeper?.Update(surface.PageIndex, surface.Placements);
         surface.ExitRequested += ExitFillSignMode;
-        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
         surface.PageChangeRequested += target => _ = ShowFillSignPageAsync(surface, pages, target);
 
         _fillSignParkedContent = current;
@@ -148,7 +174,13 @@ public partial class PreviewWindow
             check = new PdfSignCheck(check.PageCount, PdfFillSignWriter.UnsupportedStructure);
         }
 
-        if (check.Problem is not null)
+        if (check.Problem is null && file is null)
+        {
+            // A draft is pinned to the file's stamp: no stamp, no draft, no work.
+            check = new PdfSignCheck(check.PageCount, "This PDF can't be read right now.");
+        }
+
+        if (check.Problem is not null || file is not { } stamp)
         {
             // A problem never ends a draft: drafts exist only for files that
             // passed this check, and one waits for its file to read again.
@@ -163,20 +195,15 @@ public partial class PreviewWindow
             DiagnosticLog.Write($"fill-sign restored placements={draft.Placements.Count}");
         }
 
-        if (file is { } stamp)
-        {
-            keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
-            _signDraft = keeper;
-            // Work placed while the check ran had no keeper to hear it.
-            if (surface.Placements.Count != (draft?.Placements.Count ?? 0) || surface.PageIndex != pageIndex)
-            {
-                keeper.Update(surface.PageIndex, surface.Placements);
-            }
-        }
-
+        // The keeper listens before the tools come alive: no mark is ever
+        // made that a draft does not keep.
+        var keeper = new SignDraftKeeper(path, stamp, surface.PageIndex, surface.Placements);
+        _signDraft = keeper;
+        surface.WorkChanged += () => keeper.Update(surface.PageIndex, surface.Placements);
+        surface.SaveRequested += (placements, overwrite) => _ = SaveFillSignAsync(surface, keeper, placements, overwrite);
         surface.ApplyCheck(check);
         pages.PageCount = check.PageCount;
-        pages.KeepNeighbors(pageIndex);
+        pages.KeepNeighbors(surface.PageIndex);
     }
 
     private async Task ShowFillSignPageAsync(FillSignSurface surface, SignPageCache pages, int pageIndex)
@@ -186,11 +213,20 @@ public partial class PreviewWindow
             return;
         }
 
+        // Pages render at their own pace; only the last one asked for shows.
+        var request = ++_signPageRequest;
         var page = await pages.Get(pageIndex);
-        if (page is null || !IsCurrentContentPath(path) || !ReferenceEquals(_fillSignSurface, surface))
+        if (page is null)
         {
             pages.Forget(pageIndex);
             DiagnosticLog.Write($"fill-sign page render failed page={pageIndex + 1}");
+        }
+
+        if (page is null
+            || request != _signPageRequest
+            || !IsCurrentContentPath(path)
+            || !ReferenceEquals(_fillSignSurface, surface))
+        {
             return;
         }
 
@@ -242,6 +278,73 @@ public partial class PreviewWindow
         }
     }
 
+    /// <summary>
+    /// One sign session: from the Sign pill's press until the mode ends, or
+    /// the window moves on to another item or closes. Cancelling it stops
+    /// every page helper it started.
+    /// </summary>
+    private sealed record SignSession(PreviewWindow Window, string Key, long Version, CancellationTokenSource Cancellation)
+    {
+        /// <summary>A window that moved on or closed counted a new load, and its session went with it.</summary>
+        public bool IsLive => ReferenceEquals(Window._signSession, this) && Window._loadVersion == Version;
+    }
+
+    /// <summary>
+    /// Starts this window's sign session on the file. Two sessions on one
+    /// PDF would each keep the whole work and write it over the other's
+    /// draft, so a window that already signs it comes forward instead and
+    /// this answers null. UI thread only.
+    /// </summary>
+    private SignSession? BeginSignSession(string path)
+    {
+        var key = SignDrafts.Canonical(path);
+        if (SignSessions.TryGetValue(key, out var held) && held.IsLive)
+        {
+            if (!ReferenceEquals(held.Window, this))
+            {
+                DiagnosticLog.Write("fill-sign is open in another window, bringing it forward");
+                held.Window.BringForward();
+            }
+
+            return null;
+        }
+
+        // Any earlier session here ended when the window moved on; letting
+        // it go keeps a closed window from living on in the table.
+        EndSignSession(_signSession);
+
+        // A new item or a hide cancels the load, and the session with it.
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_loadCancellation?.Token ?? CancellationToken.None);
+        var session = new SignSession(this, key, _loadVersion, cancellation);
+        SignSessions[key] = session;
+        _signSession = session;
+        return session;
+    }
+
+    /// <summary>
+    /// The session is over: its helpers stop and its file is free to sign
+    /// again. Safe to call twice. The source is cancelled, never disposed,
+    /// so a late render that reads its token still gets an answer.
+    /// </summary>
+    private void EndSignSession(SignSession? session)
+    {
+        if (session is null)
+        {
+            return;
+        }
+
+        session.Cancellation.Cancel();
+        if (ReferenceEquals(_signSession, session))
+        {
+            _signSession = null;
+        }
+
+        if (SignSessions.TryGetValue(session.Key, out var held) && ReferenceEquals(held, session))
+        {
+            SignSessions.Remove(session.Key);
+        }
+    }
+
     private void ExitFillSignMode()
     {
         if (_fillSignSurface is null)
@@ -254,6 +357,7 @@ public partial class PreviewWindow
         _signDraft?.Discard();
         _signDraft = null;
         _fillSignSurface = null;
+        EndSignSession(_signSession);
         if (_fillSignParkedContent is not { } parked)
         {
             // A failed replace already released the viewer to free the file:
@@ -286,7 +390,7 @@ public partial class PreviewWindow
         deferredFailure?.Invoke();
     }
 
-    private async Task SaveFillSignAsync(FillSignSurface surface, SignDraftKeeper? keeper, IReadOnlyList<SignPlacement> placements, bool overwrite)
+    private async Task SaveFillSignAsync(FillSignSurface surface, SignDraftKeeper keeper, IReadOnlyList<SignPlacement> placements, bool overwrite)
     {
         if (_fillSignPath is not { } path
             || !ReferenceEquals(_fillSignSurface, surface)
@@ -303,15 +407,22 @@ public partial class PreviewWindow
             && IsCurrentContentPath(path);
 
         surface.SetSaving(true);
-        var finalPath = overwrite ? path : NextSignedCopyPath(path);
+        var stamp = keeper.File;
+        string finalPath;
         try
         {
             if (overwrite)
             {
+                finalPath = path;
                 var temp = SigningTempPath(path);
                 try
                 {
-                    await Task.Run(() => WriteHiddenSignedCopy(path, temp, placements));
+                    await Task.Run(() =>
+                    {
+                        RequireUnchanged(path, stamp);
+                        WriteSignedPdf(path, temp, placements);
+                        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
+                    });
 
                     // The embedded viewer holds the original open; release
                     // it and give Chromium a beat to let go before the swap.
@@ -323,7 +434,7 @@ public partial class PreviewWindow
                         _currentDisposable = null;
                     }
 
-                    await ReplaceWithRetriesAsync(temp, path);
+                    await ReplaceWithRetriesAsync(temp, path, stamp);
                 }
                 catch
                 {
@@ -333,7 +444,11 @@ public partial class PreviewWindow
             }
             else
             {
-                await Task.Run(() => PdfFillSignWriter.WriteSignedCopy(path, finalPath, placements));
+                finalPath = await Task.Run(() =>
+                {
+                    RequireUnchanged(path, stamp);
+                    return WriteSignedCopyBeside(path, placements);
+                });
             }
         }
         catch (Exception ex)
@@ -348,7 +463,7 @@ public partial class PreviewWindow
         }
 
         DiagnosticLog.Write($"fill-sign saved {(overwrite ? "in place" : "as copy")} placements={placements.Count}");
-        keeper?.Discard();
+        keeper.Discard();
         if (!StillOwnsSurface())
         {
             // Saving is file work and still completes; navigation is UI
@@ -360,6 +475,7 @@ public partial class PreviewWindow
         _fillSignSurface = null;
         _fillSignParkedContent = null;
         _signDraft = null;
+        EndSignSession(_signSession);
         SyncHeaderTools();
 
         // The saved file is the honest outcome: show it.
@@ -368,6 +484,9 @@ public partial class PreviewWindow
             PresentationFailed?.Invoke(this, LastPresentationFailureReason);
         }
     }
+
+    /// <summary>What a save says when the PDF is no longer the version the work was placed on.</summary>
+    internal const string ChangedSinceSigningBegan = "This PDF was changed in another app while you were signing. Nothing was saved.";
 
     /// <summary>What a failed save says in place of the choices it brings back.</summary>
     internal static string SaveFailureReason(Exception ex) => ex switch
@@ -382,22 +501,45 @@ public partial class PreviewWindow
     };
 
     /// <summary>
-    /// One predictable, hidden file beside the original: a crash leaves at
-    /// most one behind, and the next save reuses it.
+    /// The work was placed on one version of the file. Saving onto any
+    /// other would put ink on whatever is there now, or write over another
+    /// app's newer save, so the save is refused and the work stays.
+    /// </summary>
+    private static void RequireUnchanged(string path, FileStamp stamp)
+    {
+        if (FileStamp.Of(path) != stamp)
+        {
+            throw new InvalidOperationException(ChangedSinceSigningBegan);
+        }
+    }
+
+    /// <summary>
+    /// A hidden file beside the original, its own for each save: two saves
+    /// at once never write into, or swap in, each other's.
     /// </summary>
     internal static string SigningTempPath(string path) =>
-        Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, "." + Path.GetFileName(path) + ".signing");
+        Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, $".{Path.GetFileName(path)}.{Guid.NewGuid().ToString("N")[..8]}.signing");
 
-    private static void WriteHiddenSignedCopy(string path, string temp, IReadOnlyList<SignPlacement> placements)
+    /// <summary>
+    /// Writes the copy under the first free "(signed)" name. Another save
+    /// can take that name between the look and the write; the writer then
+    /// refuses it and the next free name is tried.
+    /// </summary>
+    private string WriteSignedCopyBeside(string path, IReadOnlyList<SignPlacement> placements)
     {
-        if (File.Exists(temp))
+        for (var attempt = 0; ; attempt++)
         {
-            File.SetAttributes(temp, FileAttributes.Normal);
-            File.Delete(temp);
+            var candidate = NextSignedCopyPath(path);
+            try
+            {
+                WriteSignedPdf(path, candidate, placements);
+                return candidate;
+            }
+            catch (IOException ex) when (ex.HResult == FileExists && attempt < 8)
+            {
+                // Taken a moment ago; the next look skips it.
+            }
         }
-
-        PdfFillSignWriter.WriteSignedCopy(path, temp, placements);
-        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
     }
 
     /// <summary>
@@ -430,12 +572,18 @@ public partial class PreviewWindow
         }
     }
 
-    private static async Task ReplaceWithRetriesAsync(string signedPath, string destinationPath)
+    /// <summary>
+    /// Swaps the signed file in, retrying while the viewer lets go of the
+    /// original. Every try checks first that the original is still the
+    /// version the work was placed on.
+    /// </summary>
+    private static async Task ReplaceWithRetriesAsync(string signedPath, string destinationPath, FileStamp stamp)
     {
         for (var attempt = 0; ; attempt++)
         {
             try
             {
+                RequireUnchanged(destinationPath, stamp);
                 File.Replace(signedPath, destinationPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
                 return;
             }

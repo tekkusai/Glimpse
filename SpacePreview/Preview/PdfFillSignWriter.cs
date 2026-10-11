@@ -102,6 +102,7 @@ internal static class PdfFillSignWriter
             throw new InvalidOperationException("The signed PDF must be written to a different file first.");
         }
 
+        var created = false;
         try
         {
             var document = PdfDocumentModel.Read(sourcePath);
@@ -112,13 +113,20 @@ internal static class PdfFillSignWriter
                 Directory.CreateDirectory(outputDirectory);
             }
 
-            using var output = File.Create(outputPath);
+            // A file already at this name is someone else's: never written over.
+            using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            created = true;
             output.Write(document.Bytes);
             WriteIncrementalUpdate(output, document, objects);
         }
         catch
         {
-            TryDelete(outputPath);
+            // Only a file this call made is taken back.
+            if (created)
+            {
+                TryDelete(outputPath);
+            }
+
             throw;
         }
     }

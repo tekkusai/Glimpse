@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -443,6 +444,168 @@ public sealed class SignDraftTests
         Assert.Contains(Descendants(surface).OfType<TextBlock>(), block => block.Text == "Your earlier work is back.");
     });
 
+    [Fact]
+    public Task TheLastPageAskedForIsThePageShownAndKept() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root, pages: 3);
+        SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 1, [Date(1)]);
+        var slow = new Dictionary<int, TaskCompletionSource<PdfPreviewPage?>> { [0] = new(), [2] = new() };
+        var surface = await EnterAsync(window, pdf, render: (index, _) =>
+            slow.TryGetValue(index, out var page) ? page.Task : Task.FromResult<PdfPreviewPage?>(BlankPage()));
+        Assert.Equal(1, surface.PageIndex);
+
+        // Next, then Previous; the page asked for first arrives last.
+        Fields.Get<Button>(surface, "_nextPageChip").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        Fields.Get<Button>(surface, "_previousPageChip").RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        slow[0].SetResult(BlankPage());
+        await SettleAsync(window);
+        slow[2].SetResult(BlankPage());
+        await SettleAsync(window);
+
+        Assert.Equal(0, surface.PageIndex);
+        SignDraftKeeper.FlushAll();
+        Assert.Equal(0, SignDrafts.Load(pdf).Draft!.PageIndex);
+    });
+
+    [Theory]
+    [InlineData("Discard")]
+    [InlineData("close")]
+    [InlineData("next item")]
+    public Task OneFileHasOneSigningSessionAcrossWindows(string end) => InDataRootAsync(async root =>
+    {
+        var first = new PreviewWindow();
+        var second = new PreviewWindow();
+        try
+        {
+            var pdf = SignablePdf(root);
+            var working = await EnterAsync(first, pdf);
+            working.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+            // A pinned window and a fresh glance on the same PDF: the second
+            // asks to sign and the first comes forward instead.
+            Assert.Null(await EnterAsync(second, pdf));
+            Assert.Null(Fields.Get<SignDraftKeeper?>(second, "_signDraft"));
+            Assert.True(await AppEndTests.LogEventuallyContainsAsync("fill-sign is open in another window"));
+            SignDraftKeeper.FlushAll();
+            Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+
+            // However the first session ends, the file is free to sign again.
+            switch (end)
+            {
+                case "Discard":
+                    working.ShowSaveChoice();
+                    Press(working, "Discard");
+                    break;
+                case "close":
+                    first.Close();
+                    break;
+                default:
+                    Fields.Set(first, "_loadVersion", Fields.Get<long>(first, "_loadVersion") + 1);
+                    Fields.Call(first, "ResetForNewItem");
+                    break;
+            }
+
+            Assert.NotNull(await EnterAsync(second, pdf));
+        }
+        finally
+        {
+            second.Close();
+            if (end != "close")
+            {
+                first.Close();
+            }
+        }
+    });
+
+    [Fact]
+    public Task AClosedWindowHoldsNoSigningSession() => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        var sessions = (System.Collections.IDictionary)typeof(PreviewWindow)
+            .GetField("SignSessions", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        var first = SignablePdf(root);
+        var second = Path.Combine(root, "docs", "lease.pdf");
+        FillSignBehaviorTests.WritePdf(second, 612, 792);
+
+        // Signs one file, moves on to the next and signs that, then closes.
+        await EnterAsync(window, first);
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+        Fields.Call(window, "ResetForNewItem");
+        window.PreviewContent.Content = null;
+        Assert.NotNull(await EnterAsync(window, second));
+        window.Close();
+
+        Assert.False(sessions.Contains(SignDrafts.Canonical(first)));
+        Assert.False(sessions.Contains(SignDrafts.Canonical(second)));
+    });
+
+    [Fact]
+    public Task AnEntryThatFailedLeavesTheFileFreeToSign() => InDataRootAsync(async root =>
+    {
+        var first = new PreviewWindow();
+        var second = new PreviewWindow();
+        try
+        {
+            var pdf = SignablePdf(root);
+            Assert.Null(await EnterAsync(first, pdf, render: (_, _) => Task.FromResult<PdfPreviewPage?>(null)));
+            Assert.NotNull(await EnterAsync(second, pdf));
+        }
+        finally
+        {
+            second.Close();
+            first.Close();
+        }
+    });
+
+    [Theory]
+    [InlineData("leave")]
+    [InlineData("close")]
+    [InlineData("next item")]
+    public Task EveryEndOfSignModeStopsItsPageHelpers(string end) => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        try
+        {
+            // The load's own cancellation: a new item or a hide cancels it.
+            var load = new CancellationTokenSource();
+            Fields.Set(window, "_loadCancellation", load);
+            var pdf = SignablePdf(root, pages: 3);
+            var helpers = new List<CancellationToken>();
+            var stuck = new TaskCompletionSource<PdfPreviewPage?>();
+            var surface = await EnterAsync(window, pdf, render: (index, token) =>
+            {
+                helpers.Add(token);
+                return index == 0 ? Task.FromResult<PdfPreviewPage?>(BlankPage()) : stuck.Task;
+            });
+
+            // The page on screen, and the next one rendering ahead.
+            Assert.Equal(2, helpers.Count);
+            Assert.DoesNotContain(helpers, token => token.IsCancellationRequested);
+
+            switch (end)
+            {
+                case "leave":
+                    surface.HandleEscape();
+                    break;
+                case "close":
+                    window.Close();
+                    break;
+                default:
+                    load.Cancel();
+                    break;
+            }
+
+            Assert.All(helpers, token => Assert.True(token.IsCancellationRequested, "a page helper outlived its session"));
+        }
+        finally
+        {
+            if (end != "close")
+            {
+                window.Close();
+            }
+        }
+    });
+
     [Theory]
     [InlineData("Discard")]
     [InlineData("Save a signed copy")]
@@ -478,6 +641,130 @@ public sealed class SignDraftTests
 
         SignDraftKeeper.FlushAll();
         Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+    });
+
+    [Fact]
+    public Task TwoCopiesSavedAtOnceGetTwoNames() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        var folder = Path.GetDirectoryName(pdf)!;
+        var first = Path.Combine(folder, "contract (signed).pdf");
+
+        // Another save takes the first free name between this one's look and its write.
+        var written = new List<string>();
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            if (!File.Exists(first))
+            {
+                File.WriteAllText(first, "the other save's copy");
+            }
+
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            lock (written)
+            {
+                written.Add(output);
+            }
+        };
+        surface.ShowSaveChoice();
+        Press(surface, "Save a signed copy");
+        // A finished save shows its file next, in a viewer a test never starts.
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+
+        Assert.True(await EventuallyAsync(() =>
+        {
+            lock (written)
+            {
+                return written.Count > 0;
+            }
+        }));
+        var second = Path.Combine(folder, "contract (signed 2).pdf");
+        Assert.Equal([second], written);
+        Assert.Equal("the other save's copy", File.ReadAllText(first));
+        Assert.Contains("/Subtype /FreeText", Latin1(second), StringComparison.Ordinal);
+    });
+
+    [Fact]
+    public Task TwoReplacesAtOnceEachUseTheirOwnSignedFile() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        var keeper = Fields.Get<SignDraftKeeper>(window, "_signDraft");
+        using var firstStaged = new ManualResetEventSlim();
+        using var firstGo = new ManualResetEventSlim();
+        using var secondStaged = new ManualResetEventSlim();
+        using var secondGo = new ManualResetEventSlim();
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            var (staged, go) = placements.Count == 1 ? (firstStaged, firstGo) : (secondStaged, secondGo);
+            staged.Set();
+            go.Wait(TimeSpan.FromSeconds(10));
+        };
+
+        // Two saves of different work, each written and waiting to swap.
+        SignPlacement[] one = [Date(0) with { Text = "AAA" }];
+        SignPlacement[] two = [Date(0) with { Text = "BBB" }, Date(0) with { Text = "BBB" }];
+        var firstSave = (Task)Fields.Call(window, "SaveFillSignAsync", surface, keeper, one, true)!;
+        Assert.True(await EventuallyAsync(() => firstStaged.IsSet));
+        var secondSave = (Task)Fields.Call(window, "SaveFillSignAsync", surface, keeper, two, true)!;
+        Assert.True(await EventuallyAsync(() => secondStaged.IsSet));
+        Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);
+
+        firstGo.Set();
+        await firstSave;
+        Assert.Contains("(AAA)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.DoesNotContain("(BBB)", Latin1(pdf), StringComparison.Ordinal);
+
+        // The second was made from the file before the first landed, so it
+        // is refused, and the first save's file stays.
+        secondGo.Set();
+        await secondSave;
+        Assert.Contains("(AAA)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.DoesNotContain("(BBB)", Latin1(pdf), StringComparison.Ordinal);
+        Assert.Equal([pdf], Directory.GetFiles(Path.GetDirectoryName(pdf)!));
+    });
+
+    [Theory]
+    [InlineData("Save a signed copy")]
+    [InlineData("Replace the original")]
+    public Task ASaveRefusesAPdfThatChangedSinceSigningBegan(string choice) => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        // Another app saves a different one-page document under the same name.
+        FillSignBehaviorTests.WritePdf(pdf, 595.5, 842);
+        var newer = File.ReadAllBytes(pdf);
+
+        surface.ShowSaveChoice();
+        Press(surface, choice);
+
+        await RefusedAsync(window, surface, pdf, () => newer);
+    });
+
+    [Fact]
+    public Task AnEditSavedWhileTheSignedFileIsWrittenIsKept() => InWindow(async (root, window) =>
+    {
+        var pdf = SignablePdf(root);
+        var surface = await EnterAsync(window, pdf);
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        byte[] newer = [];
+        window.WriteSignedPdf = (source, output, placements) =>
+        {
+            PdfFillSignWriter.WriteSignedCopy(source, output, placements);
+            // Another app saves its edit after the signed file is written, before the swap.
+            FillSignBehaviorTests.WritePdf(source, 595.5, 842);
+            newer = File.ReadAllBytes(source);
+        };
+
+        surface.ShowSaveChoice();
+        Press(surface, "Replace the original");
+
+        await RefusedAsync(window, surface, pdf, () => newer);
     });
 
     [Fact]
@@ -531,7 +818,7 @@ public sealed class SignDraftTests
         Fields.Set(window, "CurrentPath", pdf);
         Fields.Set(window, "_fillSignPath", pdf);
         window.PreviewContent.Content ??= new Border();
-        window.RenderSignPage = (_, _) => page.Task;
+        window.RenderSignPage = (_, _, _) => page.Task;
 
         var entering = (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
         window.Close();
@@ -548,7 +835,7 @@ public sealed class SignDraftTests
     });
 
     [Fact]
-    public Task WorkPlacedWhileTheFileIsCheckedReachesTheDraft() => InWindow(async (root, window) =>
+    public Task TheToolsWaitForTheFileCheckSoEveryMarkHasADraft() => InWindow(async (root, window) =>
     {
         var pdf = SignablePdf(root);
         using var checking = new ManualResetEventSlim();
@@ -561,12 +848,36 @@ public sealed class SignDraftTests
         var entering = EnterAsync(window, pdf);
         Assert.True(await EventuallyAsync(() => Fields.Get<object?>(window, "_fillSignSurface") is not null));
         var surface = Fields.Get<FillSignSurface>(window, "_fillSignSurface");
-        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        // The page is up, but nothing goes on it before a draft can keep it.
+        Assert.False(Button(surface, "Signature").IsEnabled);
+        Assert.False(Button(surface, "Date").IsEnabled);
+        Assert.False(Button(surface, "Stamp").IsEnabled);
+        Assert.False(Button(surface, "Save").IsEnabled);
+        Assert.True(Button(surface, "Cancel").IsEnabled);
+
         checking.Set();
         await entering;
+        Assert.True(Button(surface, "Date").IsEnabled);
 
-        // No later change, no close, no app end: the pause alone writes it.
-        Assert.True(await EventuallyAsync(() => File.Exists(SignDrafts.PathFor(pdf))), "work placed during the check never reached its draft");
+        // The very first mark is kept, even if the app ends at once.
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+        Assert.True(SignDraftKeeper.FlushAll());
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+    });
+
+    [Fact]
+    public Task AFileWithNoStampToPinADraftToOffersNoTools() => InWindow(async (root, window) =>
+    {
+        // Gone when the draft looked, back by the time the writer read it.
+        var pdf = Path.Combine(root, "docs", "contract.pdf");
+        window.CheckSignable = _ => new PdfSignCheck(1, null);
+
+        var surface = await EnterAsync(window, pdf);
+
+        Assert.Contains("can't be read right now", Fields.Get<TextBlock>(surface, "_centerText").Text, StringComparison.Ordinal);
+        Assert.Equal(Visibility.Collapsed, Fields.Get<StackPanel>(surface, "_tools").Visibility);
+        Assert.Null(Fields.Get<SignDraftKeeper?>(window, "_signDraft"));
     });
 
     [Fact]
@@ -638,20 +949,43 @@ public sealed class SignDraftTests
     /// page render is stood in for, since pdfium never runs here, and notes
     /// each page it is asked for.
     /// </summary>
-    private static async Task<FillSignSurface> EnterAsync(PreviewWindow window, string pdf, List<int>? rendered = null)
+    private static async Task<FillSignSurface> EnterAsync(
+        PreviewWindow window,
+        string pdf,
+        List<int>? rendered = null,
+        Func<int, CancellationToken, Task<PdfPreviewPage?>>? render = null)
     {
         Fields.Set(window, "CurrentPath", pdf);
         Fields.Set(window, "_fillSignPath", pdf);
         window.PreviewContent.Content ??= new Border();
-        window.RenderSignPage = (_, index) =>
+        window.RenderSignPage = (_, index, token) =>
         {
             rendered?.Add(index);
-            return Task.FromResult<PdfPreviewPage?>(BlankPage());
+            return render?.Invoke(index, token) ?? Task.FromResult<PdfPreviewPage?>(BlankPage());
         };
 
         await (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
         return Fields.Get<FillSignSurface>(window, "_fillSignSurface");
     }
+
+    private static string Latin1(string path) => Encoding.Latin1.GetString(File.ReadAllBytes(path));
+
+    /// <summary>The save said no, wrote nothing, left the newer file alone, and kept the work and its draft.</summary>
+    private static async Task RefusedAsync(PreviewWindow window, FillSignSurface surface, string pdf, Func<byte[]> newer)
+    {
+        var status = Fields.Get<TextBlock>(surface, "_saveStatus");
+        Assert.True(await EventuallyAsync(() => status.Text.Length > 0 && status.Text != "Saving…"), "the save never answered");
+        Assert.Equal(PreviewWindow.ChangedSinceSigningBegan, status.Text);
+        Assert.Equal(newer(), File.ReadAllBytes(pdf));
+        Assert.Equal([pdf], Directory.GetFiles(Path.GetDirectoryName(pdf)!));
+        Assert.Single(surface.Placements);
+        Assert.Same(surface, Fields.Get<FillSignSurface?>(window, "_fillSignSurface"));
+        Assert.True(SignDraftKeeper.FlushAll());
+    }
+
+    /// <summary>Lets every continuation already queued on the window's thread run.</summary>
+    private static Task SettleAsync(PreviewWindow window) =>
+        window.Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle).Task;
 
     private static string SignablePdf(string root, int pages = 1)
     {
@@ -662,8 +996,10 @@ public sealed class SignDraftTests
     }
 
     private static void Press(DependencyObject root, string label) =>
-        Descendants(root).OfType<ButtonBase>().First(button => button.Content as string == label)
-            .RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        Button(root, label).RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+
+    private static ButtonBase Button(DependencyObject root, string label) =>
+        Descendants(root).OfType<ButtonBase>().First(button => button.Content as string == label);
 
     private static async Task<bool> EventuallyAsync(Func<bool> condition)
     {
