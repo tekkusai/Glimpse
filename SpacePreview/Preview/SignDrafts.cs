@@ -49,9 +49,12 @@ internal static class SignDrafts
         Converters = { new JsonStringEnumConverter() }
     };
 
+    /// <summary>The PDF as drafts and sign sessions know it: one name per file, in any case.</summary>
+    public static string Canonical(string pdfPath) => Path.GetFullPath(pdfPath).ToUpperInvariant();
+
     public static string PathFor(string pdfPath)
     {
-        var key = SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(pdfPath).ToUpperInvariant()));
+        var key = SHA256.HashData(Encoding.UTF8.GetBytes(Canonical(pdfPath)));
         return AppPaths.InDataRoot("SignDrafts", Convert.ToHexString(key, 0, 16) + ".json");
     }
 

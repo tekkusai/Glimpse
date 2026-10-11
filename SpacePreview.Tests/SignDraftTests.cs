@@ -449,7 +449,7 @@ public sealed class SignDraftTests
         var pdf = SignablePdf(root, pages: 3);
         SignDrafts.Write(pdf, FileStamp.Of(pdf)!.Value, 1, [Date(1)]);
         var slow = new Dictionary<int, TaskCompletionSource<PdfPreviewPage?>> { [0] = new(), [2] = new() };
-        var surface = await EnterAsync(window, pdf, render: index =>
+        var surface = await EnterAsync(window, pdf, render: (index, _) =>
             slow.TryGetValue(index, out var page) ? page.Task : Task.FromResult<PdfPreviewPage?>(BlankPage()));
         Assert.Equal(1, surface.PageIndex);
 
@@ -464,6 +464,123 @@ public sealed class SignDraftTests
         Assert.Equal(0, surface.PageIndex);
         SignDraftKeeper.FlushAll();
         Assert.Equal(0, SignDrafts.Load(pdf).Draft!.PageIndex);
+    });
+
+    [Theory]
+    [InlineData("Discard")]
+    [InlineData("close")]
+    [InlineData("next item")]
+    public Task OneFileHasOneSigningSessionAcrossWindows(string end) => InDataRootAsync(async root =>
+    {
+        var first = new PreviewWindow();
+        var second = new PreviewWindow();
+        try
+        {
+            var pdf = SignablePdf(root);
+            var working = await EnterAsync(first, pdf);
+            working.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+            // A pinned window and a fresh glance on the same PDF: the second
+            // asks to sign and the first comes forward instead.
+            Assert.Null(await EnterAsync(second, pdf));
+            Assert.Null(Fields.Get<SignDraftKeeper?>(second, "_signDraft"));
+            Assert.True(await AppEndTests.LogEventuallyContainsAsync("fill-sign is open in another window"));
+            SignDraftKeeper.FlushAll();
+            Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+
+            // However the first session ends, the file is free to sign again.
+            switch (end)
+            {
+                case "Discard":
+                    working.ShowSaveChoice();
+                    Press(working, "Discard");
+                    break;
+                case "close":
+                    first.Close();
+                    break;
+                default:
+                    Fields.Set(first, "_loadVersion", Fields.Get<long>(first, "_loadVersion") + 1);
+                    Fields.Call(first, "ResetForNewItem");
+                    break;
+            }
+
+            Assert.NotNull(await EnterAsync(second, pdf));
+        }
+        finally
+        {
+            second.Close();
+            if (end != "close")
+            {
+                first.Close();
+            }
+        }
+    });
+
+    [Fact]
+    public Task AnEntryThatFailedLeavesTheFileFreeToSign() => InDataRootAsync(async root =>
+    {
+        var first = new PreviewWindow();
+        var second = new PreviewWindow();
+        try
+        {
+            var pdf = SignablePdf(root);
+            Assert.Null(await EnterAsync(first, pdf, render: (_, _) => Task.FromResult<PdfPreviewPage?>(null)));
+            Assert.NotNull(await EnterAsync(second, pdf));
+        }
+        finally
+        {
+            second.Close();
+            first.Close();
+        }
+    });
+
+    [Theory]
+    [InlineData("leave")]
+    [InlineData("close")]
+    [InlineData("next item")]
+    public Task EveryEndOfSignModeStopsItsPageHelpers(string end) => InDataRootAsync(async root =>
+    {
+        var window = new PreviewWindow();
+        try
+        {
+            // The load's own cancellation: a new item or a hide cancels it.
+            var load = new CancellationTokenSource();
+            Fields.Set(window, "_loadCancellation", load);
+            var pdf = SignablePdf(root, pages: 3);
+            var helpers = new List<CancellationToken>();
+            var stuck = new TaskCompletionSource<PdfPreviewPage?>();
+            var surface = await EnterAsync(window, pdf, render: (index, token) =>
+            {
+                helpers.Add(token);
+                return index == 0 ? Task.FromResult<PdfPreviewPage?>(BlankPage()) : stuck.Task;
+            });
+
+            // The page on screen, and the next one rendering ahead.
+            Assert.Equal(2, helpers.Count);
+            Assert.DoesNotContain(helpers, token => token.IsCancellationRequested);
+
+            switch (end)
+            {
+                case "leave":
+                    surface.HandleEscape();
+                    break;
+                case "close":
+                    window.Close();
+                    break;
+                default:
+                    load.Cancel();
+                    break;
+            }
+
+            Assert.All(helpers, token => Assert.True(token.IsCancellationRequested, "a page helper outlived its session"));
+        }
+        finally
+        {
+            if (end != "close")
+            {
+                window.Close();
+            }
+        }
     });
 
     [Theory]
@@ -554,7 +671,7 @@ public sealed class SignDraftTests
         Fields.Set(window, "CurrentPath", pdf);
         Fields.Set(window, "_fillSignPath", pdf);
         window.PreviewContent.Content ??= new Border();
-        window.RenderSignPage = (_, _) => page.Task;
+        window.RenderSignPage = (_, _, _) => page.Task;
 
         var entering = (Task)Fields.Call(window, "EnterFillSignModeAsync")!;
         window.Close();
@@ -689,15 +806,15 @@ public sealed class SignDraftTests
         PreviewWindow window,
         string pdf,
         List<int>? rendered = null,
-        Func<int, Task<PdfPreviewPage?>>? render = null)
+        Func<int, CancellationToken, Task<PdfPreviewPage?>>? render = null)
     {
         Fields.Set(window, "CurrentPath", pdf);
         Fields.Set(window, "_fillSignPath", pdf);
         window.PreviewContent.Content ??= new Border();
-        window.RenderSignPage = (_, index) =>
+        window.RenderSignPage = (_, index, token) =>
         {
             rendered?.Add(index);
-            return render?.Invoke(index) ?? Task.FromResult<PdfPreviewPage?>(BlankPage());
+            return render?.Invoke(index, token) ?? Task.FromResult<PdfPreviewPage?>(BlankPage());
         };
 
         await (Task)Fields.Call(window, "EnterFillSignModeAsync")!;

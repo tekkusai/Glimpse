@@ -36,14 +36,18 @@ public partial class PreviewWindow
     // user's explicit second choice.
     // ---------------------------------------------------------------------
 
+    // Every window's sign session, by the file it signs.
+    private static readonly Dictionary<string, SignSession> SignSessions = [];
+
     // The session's draft, and whether the loaded PDF has one waiting.
     private SignDraftKeeper? _signDraft;
     private bool _hasSignDraft;
+    private SignSession? _signSession;
     private long _signPageRequest;
 
     /// <summary>Sign mode's page render: a pdfium helper, never this process. Tests stand in for it.</summary>
-    internal Func<string, int, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
-        (path, index) => PdfiumHelper.TryRenderPageAsync(path, index, CancellationToken.None);
+    internal Func<string, int, CancellationToken, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
+        PdfiumHelper.TryRenderPageAsync;
 
     /// <summary>The writer's check before any work goes on; tests hold it to open the gap it leaves.</summary>
     internal Func<string, PdfSignCheck> CheckSignable { get; set; } = PdfFillSignWriter.Preflight;
@@ -78,11 +82,30 @@ public partial class PreviewWindow
 
     private async Task EnterFillSignModeAsync()
     {
-        if (_fillSignPath is not { } path || _fillSignSurface is not null || !IsCurrentContentPath(path))
+        if (_fillSignPath is not { } path
+            || _fillSignSurface is not null
+            || !IsCurrentContentPath(path)
+            || BeginSignSession(path) is not { } session)
         {
             return;
         }
 
+        try
+        {
+            await EnterFillSignSessionAsync(path, session);
+        }
+        finally
+        {
+            // An entry that did not leave its page up leaves the file free.
+            if (_fillSignSurface is null || !ReferenceEquals(_signSession, session))
+            {
+                EndSignSession(session);
+            }
+        }
+    }
+
+    private async Task EnterFillSignSessionAsync(string path, SignSession session)
+    {
         var version = _loadVersion;
         // Read again rather than trusted from the load: the file, or another
         // window's work on it, may have moved on since. The writer's check
@@ -100,7 +123,7 @@ public partial class PreviewWindow
 
         int? viewerPages = totalPages > 0 ? totalPages : null;
         var pageIndex = draft?.PageIndex ?? Math.Max(0, currentPage - 1);
-        var pages = new SignPageCache(index => RenderSignPage(path, index), viewerPages ?? pageIndex + 1);
+        var pages = new SignPageCache(index => RenderSignPage(path, index, session.Cancellation.Token), viewerPages ?? pageIndex + 1);
         var page = await pages.Get(pageIndex);
         if (page is null)
         {
@@ -249,6 +272,69 @@ public partial class PreviewWindow
         }
     }
 
+    /// <summary>
+    /// One sign session: from the Sign pill's press until the mode ends, or
+    /// the window moves on to another item or closes. Cancelling it stops
+    /// every page helper it started.
+    /// </summary>
+    private sealed record SignSession(PreviewWindow Window, string Key, long Version, CancellationTokenSource Cancellation)
+    {
+        /// <summary>A window that moved on or closed counted a new load, and its session went with it.</summary>
+        public bool IsLive => ReferenceEquals(Window._signSession, this) && Window._loadVersion == Version;
+    }
+
+    /// <summary>
+    /// Starts this window's sign session on the file. Two sessions on one
+    /// PDF would each keep the whole work and write it over the other's
+    /// draft, so a window that already signs it comes forward instead and
+    /// this answers null. UI thread only.
+    /// </summary>
+    private SignSession? BeginSignSession(string path)
+    {
+        var key = SignDrafts.Canonical(path);
+        if (SignSessions.TryGetValue(key, out var held) && held.IsLive)
+        {
+            if (!ReferenceEquals(held.Window, this))
+            {
+                DiagnosticLog.Write("fill-sign is open in another window, bringing it forward");
+                held.Window.BringForward();
+            }
+
+            return null;
+        }
+
+        // A new item or a hide cancels the load, and the session with it.
+        var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_loadCancellation?.Token ?? CancellationToken.None);
+        var session = new SignSession(this, key, _loadVersion, cancellation);
+        SignSessions[key] = session;
+        _signSession = session;
+        return session;
+    }
+
+    /// <summary>
+    /// The session is over: its helpers stop and its file is free to sign
+    /// again. Safe to call twice. The source is cancelled, never disposed,
+    /// so a late render that reads its token still gets an answer.
+    /// </summary>
+    private void EndSignSession(SignSession? session)
+    {
+        if (session is null)
+        {
+            return;
+        }
+
+        session.Cancellation.Cancel();
+        if (ReferenceEquals(_signSession, session))
+        {
+            _signSession = null;
+        }
+
+        if (SignSessions.TryGetValue(session.Key, out var held) && ReferenceEquals(held, session))
+        {
+            SignSessions.Remove(session.Key);
+        }
+    }
+
     private void ExitFillSignMode()
     {
         if (_fillSignSurface is null)
@@ -261,6 +347,7 @@ public partial class PreviewWindow
         _signDraft?.Discard();
         _signDraft = null;
         _fillSignSurface = null;
+        EndSignSession(_signSession);
         if (_fillSignParkedContent is not { } parked)
         {
             // A failed replace already released the viewer to free the file:
@@ -367,6 +454,7 @@ public partial class PreviewWindow
         _fillSignSurface = null;
         _fillSignParkedContent = null;
         _signDraft = null;
+        EndSignSession(_signSession);
         SyncHeaderTools();
 
         // The saved file is the honest outcome: show it.

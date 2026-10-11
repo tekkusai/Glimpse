@@ -15,6 +15,12 @@ namespace SpacePreview.Preview;
 /// </summary>
 internal static class PdfiumHelper
 {
+    /// <summary>
+    /// Far longer than a page takes, short enough that a hung helper costs
+    /// one failed page instead of a sign mode that never opens.
+    /// </summary>
+    private static readonly TimeSpan PageDeadline = TimeSpan.FromSeconds(20);
+
     /// <summary>Starts this exe in a helper mode, or null when it cannot start.</summary>
     public static Process? Start(params string[] arguments)
     {
@@ -55,8 +61,30 @@ internal static class PdfiumHelper
     }
 
     /// <summary>
+    /// Waits for a helper to finish. Past the deadline, or once the token
+    /// is cancelled, it kills that helper, by the handle it was started
+    /// with, and answers false.
+    /// </summary>
+    internal static async Task<bool> TryWaitAsync(Process process, TimeSpan deadline, CancellationToken token)
+    {
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
+        stop.CancelAfter(deadline);
+        try
+        {
+            await process.WaitForExitAsync(stop.Token);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            Kill(process);
+            return false;
+        }
+    }
+
+    /// <summary>
     /// One page at reading resolution for the sign surface, or null when the
-    /// page cannot be rendered. Page index is zero-based, matching the rail.
+    /// page cannot be rendered in time or the session ended first. Page
+    /// index is zero-based, matching the rail.
     /// </summary>
     public static async Task<PdfPreviewPage?> TryRenderPageAsync(string path, int pageIndex, CancellationToken token)
     {
@@ -70,14 +98,14 @@ internal static class PdfiumHelper
                 return null;
             }
 
-            try
+            if (!await TryWaitAsync(process, PageDeadline, token))
             {
-                await process.WaitForExitAsync(token);
-            }
-            catch (OperationCanceledException)
-            {
-                Kill(process);
-                throw;
+                if (!token.IsCancellationRequested)
+                {
+                    DiagnosticLog.Write($"pdf page helper missed its deadline page={pageIndex + 1}");
+                }
+
+                return null;
             }
 
             if (process.ExitCode != 0 || !File.Exists(png))
@@ -97,6 +125,10 @@ internal static class PdfiumHelper
                 bitmap.Freeze();
                 return new PdfPreviewPage(bitmap, bitmap.PixelWidth, bitmap.PixelHeight);
             }, token);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
         }
         finally
         {

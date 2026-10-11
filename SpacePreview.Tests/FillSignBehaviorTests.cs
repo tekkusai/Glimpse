@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
@@ -618,6 +619,57 @@ public sealed class FillSignBehaviorTests
             Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
         }
     }
+
+    // ------------------------------------------------------------------
+    // The page helper.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public async Task AStuckPageHelperIsKilledAtItsDeadline()
+    {
+        using var stuck = StartStuckProcess();
+        try
+        {
+            var wait = PdfiumHelper.TryWaitAsync(stuck, TimeSpan.FromMilliseconds(200), CancellationToken.None);
+
+            Assert.Same(wait, await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(10))));
+            Assert.False(await wait);
+            Assert.True(stuck.WaitForExit(5000));
+        }
+        finally
+        {
+            PdfiumHelper.Kill(stuck);
+        }
+    }
+
+    [Fact]
+    public async Task AnEndedSessionKillsItsPageHelperAtOnce()
+    {
+        using var stuck = StartStuckProcess();
+        using var session = new CancellationTokenSource();
+        try
+        {
+            var wait = PdfiumHelper.TryWaitAsync(stuck, TimeSpan.FromMinutes(5), session.Token);
+            session.Cancel();
+
+            Assert.Same(wait, await Task.WhenAny(wait, Task.Delay(TimeSpan.FromSeconds(10))));
+            Assert.False(await wait);
+            Assert.True(stuck.WaitForExit(5000));
+        }
+        finally
+        {
+            PdfiumHelper.Kill(stuck);
+        }
+    }
+
+    /// <summary>A child that never exits on its own, standing in for a hung pdfium helper.</summary>
+    private static Process StartStuckProcess() =>
+        Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "ping.exe"), "-n 600 127.0.0.1")
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true
+        })!;
 
     // ------------------------------------------------------------------
     // Helpers.

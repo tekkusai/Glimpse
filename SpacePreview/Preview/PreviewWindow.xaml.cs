@@ -130,6 +130,7 @@ public partial class PreviewWindow : Window
         Closed += (_, _) =>
         {
             Interlocked.Increment(ref _loadVersion);
+            EndSignSession(_signSession);
             if (_signDraft?.Close() == true)
             {
                 DiagnosticLog.Write("window close kept unsaved signing work as a draft");
