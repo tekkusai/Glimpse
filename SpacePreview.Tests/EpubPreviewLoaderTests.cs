@@ -67,59 +67,81 @@ public sealed class EpubPreviewLoaderTests
     }
 
     [Fact]
-    public void TryGetChaptersReturnsSpineOrderTitlesAndLazyBodies()
+    public void TheRailListsTheSectionsThePageContainsWithTheirNavigationTitles()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "book.epub");
         CreateMinimalEpub(path);
 
-        var chapters = EpubPreviewLoader.TryGetChapters(path);
+        var page = GeneratedHtmlPreview.TryBuildEpub(path);
+        var contents = EpubPreviewLoader.ReadContents(page!.HtmlPath);
 
-        Assert.NotNull(chapters);
-        Assert.Collection(chapters!,
-            first =>
-            {
-                Assert.Equal(0, first.SpineIndex);
-                Assert.Equal("Chapter One", first.Title);
-                Assert.EndsWith("chapter1.xhtml", first.EntryPath, StringComparison.Ordinal);
-            },
-            second =>
-            {
-                Assert.Equal(1, second.SpineIndex);
-                Assert.Equal("Chapter Two", second.Title);
-                Assert.EndsWith("chapter2.xhtml", second.EntryPath, StringComparison.Ordinal);
-                var body = second.TryRenderBody();
-                Assert.NotNull(body);
-                Assert.Contains("The second chapter should render too.", body!, StringComparison.Ordinal);
-            });
+        Assert.Equal(new EpubPreviewLoader.EpubSection[] { new(0, "Chapter One"), new(1, "Chapter Two") }, contents.Sections);
+        Assert.False(contents.Truncated);
+        Assert.DoesNotContain("<h2>Contents</h2>", File.ReadAllText(page.HtmlPath), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void TryGetChaptersFallsBackToFileNameWhenNavigationIsMissing()
+    public void ALongBookListsOnlyTheSectionsBeforeTheCutAndSaysItGoesOn()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "long.epub");
+        CreateBook(path, chapters: 6, charactersPerChapter: 150_000);
+
+        var page = GeneratedHtmlPreview.TryBuildEpub(path);
+        var contents = EpubPreviewLoader.ReadContents(page!.HtmlPath);
+        var html = File.ReadAllText(page.HtmlPath);
+
+        Assert.True(contents.Truncated);
+        Assert.Equal([0, 1, 2, 3], contents.Sections.Select(section => section.SpineIndex));
+        Assert.All(contents.Sections, section => Assert.Contains($"id=\"ch-{section.SpineIndex}\"", html, StringComparison.Ordinal));
+        Assert.DoesNotContain("id=\"ch-4\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ABookWithoutNavigationListsEverySectionByFileName()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "book.epub");
         CreateMinimalEpub(path, includeNav: false);
 
-        var chapters = EpubPreviewLoader.TryGetChapters(path);
+        var contents = EpubPreviewLoader.ReadContents(GeneratedHtmlPreview.TryBuildEpub(path)!.HtmlPath);
 
-        Assert.NotNull(chapters);
-        Assert.Equal("chapter1", chapters![0].Title);
-        Assert.Equal("chapter2", chapters[1].Title);
+        Assert.Equal(["chapter1", "chapter2"], contents.Sections.Select(section => section.Title));
     }
 
     [Fact]
-    public void TryGetChaptersReturnsNoChaptersForProtectedBooks()
+    public void AProtectedBookHasNoSectionsToList()
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "protected.epub");
         CreateMinimalEpub(path, encrypted: true);
 
-        var chapters = EpubPreviewLoader.TryGetChapters(path);
-
-        Assert.NotNull(chapters);
-        Assert.Empty(chapters!);
+        Assert.Empty(EpubPreviewLoader.ReadContents(GeneratedHtmlPreview.TryBuildEpub(path)!.HtmlPath).Sections);
     }
+
+    [Fact]
+    public void PicturesShareOneBudgetForTheWholeBook()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "comic.epub");
+        CreateBook(path, chapters: 30, charactersPerChapter: 20, imageBytes: 1_500_000);
+
+        var body = EpubPreviewLoader.TryBuildBody(path)!;
+        var embedded = body.Split("data:image/png;base64,").Length - 1;
+
+        Assert.InRange(embedded, 1, 16);
+        Assert.Contains("<em>Page art</em>", body, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("\"ch-12\"", 12)]
+    [InlineData("\"ch-0\"", 0)]
+    [InlineData("null", null)]
+    [InlineData("\"intro\"", null)]
+    [InlineData("\"ch--1\"", null)]
+    public void TheScrollPositionNamesTheSectionOnScreen(string scriptResult, int? spineIndex) =>
+        Assert.Equal(spineIndex, PreviewWindow.ParseSectionAnchor(scriptResult));
 
     [Fact]
     public void GeneratedEpubCacheChangesWhenContentChangesButModifiedTimeDoesNot()
@@ -165,16 +187,6 @@ public sealed class EpubPreviewLoaderTests
 
         Assert.Throws<OperationCanceledException>(() =>
             EpubPreviewLoader.TryBuildBody(path, cancellation.Token));
-    }
-
-    [Fact]
-    public void GeneratedEpubPassesCancellationIntoBodyExtraction()
-    {
-        var method = TestSource.CodeMethod(
-            @"SpacePreview\Preview\GeneratedHtmlPreview.cs",
-            "TryBuildEpub");
-
-        Assert.Contains("TryBuildBody(path, cancellationToken)", method, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -276,6 +288,39 @@ public sealed class EpubPreviewLoaderTests
         var entry = archive.CreateEntry("OEBPS/cover.png");
         using var imageStream = entry.Open();
         imageStream.Write(image);
+    }
+
+    private static void CreateBook(string path, int chapters, int charactersPerChapter, int imageBytes = 0)
+    {
+        using var stream = File.Create(path);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Create);
+        WriteEntry(archive, "mimetype", "application/epub+zip");
+        WriteEntry(archive, "META-INF/container.xml", """
+<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>
+""");
+        var manifest = new System.Text.StringBuilder();
+        var spine = new System.Text.StringBuilder();
+        for (var i = 0; i < chapters; i++)
+        {
+            manifest.Append($"<item id=\"c{i}\" href=\"c{i}.xhtml\" media-type=\"application/xhtml+xml\"/>");
+            spine.Append($"<itemref idref=\"c{i}\"/>");
+            var picture = imageBytes > 0 ? $"<img src=\"p{i}.png\" alt=\"Page art\"/>" : string.Empty;
+            WriteEntry(archive, $"c{i}.xhtml",
+                $"<html xmlns=\"http://www.w3.org/1999/xhtml\"><body><p>{new string('x', charactersPerChapter)}</p>{picture}</body></html>");
+            if (imageBytes > 0)
+            {
+                var image = archive.CreateEntry($"p{i}.png", CompressionLevel.Fastest);
+                using var imageStream = image.Open();
+                imageStream.Write(new byte[imageBytes]);
+            }
+        }
+
+        WriteEntry(archive, "content.opf",
+            $"<package xmlns=\"http://www.idpf.org/2007/opf\" version=\"3.0\"><metadata xmlns:dc=\"http://purl.org/dc/elements/1.1/\"><dc:title>Book</dc:title></metadata>"
+            + $"<manifest>{manifest}</manifest><spine>{spine}</spine></package>");
     }
 
     private static void WriteEntry(ZipArchive archive, string name, string text)

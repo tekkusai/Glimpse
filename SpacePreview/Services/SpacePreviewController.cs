@@ -2258,7 +2258,7 @@ internal sealed class SpacePreviewController : IDisposable
             foreach (var path in neighbors)
             {
                 token.ThrowIfCancellationRequested();
-                if (!OfficeOpenXmlPreviewLoader.IsSupported(path))
+                if (!FileKinds.IsOffice(path))
                 {
                     continue;
                 }

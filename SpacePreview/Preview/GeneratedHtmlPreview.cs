@@ -416,7 +416,7 @@ internal static partial class GeneratedHtmlPreview
         return false;
     }
 
-    private static string BuildShell(string body, ThemePalette palette) => $$"""
+    internal static string BuildShell(string body, ThemePalette palette) => $$"""
 <!doctype html>
 <html>
 <head>
