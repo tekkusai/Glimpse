@@ -50,6 +50,11 @@ Video always plays on black. Everything else follows the theme, including the
 audio player, spreadsheets and the PDF viewer's toolbar (WebView2's
 `PreferredColorScheme` follows the app theme).
 
+An open or pinned preview follows a theme change without reloading. Text and
+image canvases take their colors by resource. Each browser gets the new
+`PreferredColorScheme`, and the pages Glimpse writes carry both palettes,
+the second behind `prefers-color-scheme`, so they turn with it.
+
 ## Type
 
 Segoe UI Variable for words, Cascadia Mono for code and plain text.
