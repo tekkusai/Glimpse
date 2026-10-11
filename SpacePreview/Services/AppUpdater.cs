@@ -46,15 +46,16 @@ internal sealed record UpdateState
     /// <summary>The last Check for updates got no answer, and no check has since.</summary>
     public bool CheckFailed { get; init; }
 
-    /// <summary>Setup is on its way; Glimpse closes for a few seconds.</summary>
+    /// <summary>Install now is downloading, or setup is on its way and Glimpse closes for a few seconds.</summary>
     public bool Installing { get; init; }
 }
 
 /// <summary>
 /// Keeps Glimpse current without asking. It checks GitHub, verifies the
 /// release key's signature, downloads in the background on an unmetered
-/// connection and installs while the user is away. It never shows a
-/// window: Settings reads <see cref="State"/>.
+/// connection (on a metered one it uses only an installer already on
+/// disk) and installs while the user is away. It never shows a window:
+/// Settings reads <see cref="State"/>.
 /// </summary>
 internal sealed class AppUpdater : IDisposable
 {
@@ -83,7 +84,7 @@ internal sealed class AppUpdater : IDisposable
     private DateTimeOffset _checkRetryAt;
     private bool _disposed;
 
-    /// <param name="observe">The PC's side of <see cref="InstallState"/>: what is open, full screen, quiet time and idle.</param>
+    /// <param name="observe">The PC's half, <see cref="InstallState"/>: what is open, full screen, the shell's notification state and idle.</param>
     /// <param name="canQuit">Unsaved signing work comes forward and says no.</param>
     /// <param name="launch">Starts the verified installer; tests stand in for it.</param>
     public AppUpdater(
