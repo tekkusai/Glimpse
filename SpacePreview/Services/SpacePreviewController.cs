@@ -29,6 +29,10 @@ internal sealed class SpacePreviewController : IDisposable
     // A foreground flicker (a toast, a menu opening) must not end a glance.
     private static readonly TimeSpan OwnerLossDebounce = TimeSpan.FromMilliseconds(100);
 
+    // A game can go full screen in its own window, and no foreground event
+    // says so. While a pin is open, the window in front is looked at again.
+    private static readonly TimeSpan FullscreenRecheckInterval = TimeSpan.FromMilliseconds(500);
+
     private readonly Dispatcher _dispatcher;
     private readonly KeyboardHook _keyboardHook;
     private readonly MouseHook _mouseHook;
@@ -37,6 +41,12 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly NativeMethods.WinEventProc _foregroundChanged;
     private readonly DispatcherTimer _idleTrimTimer;
     private readonly DispatcherTimer _ownerLossTimer;
+    private readonly DispatcherTimer _fullscreenRecheckTimer;
+
+    // Tests stand in for the window in front and for the shell's browse.
+    private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
+    private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
+        (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
     private readonly uint _processId = (uint)Environment.ProcessId;
     private readonly List<PreviewWindow> _pinnedWindows = [];
     private IntPtr _foregroundHook;
@@ -105,6 +115,11 @@ internal sealed class SpacePreviewController : IDisposable
             Interval = OwnerLossDebounce
         };
         _ownerLossTimer.Tick += (_, _) => OnOwnerLossTimer();
+        _fullscreenRecheckTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
+        {
+            Interval = FullscreenRecheckInterval
+        };
+        _fullscreenRecheckTimer.Tick += (_, _) => RecheckFullscreen();
     }
 
     public void Start()
@@ -214,6 +229,17 @@ internal sealed class SpacePreviewController : IDisposable
         SyncMouseHook();
     }
 
+    // Same window, new shape. No window in front (a lock, a switch between
+    // windows) says nothing about the last one.
+    private void RecheckFullscreen()
+    {
+        var root = _foregroundRoot();
+        if (!_disposed && root != IntPtr.Zero)
+        {
+            _fullscreenInputSuspension.Observe(root);
+        }
+    }
+
     // A glance belongs to the window it came from. When the foreground goes
     // anywhere else (Alt+Tab, Win+D, the owner closing) the glance ends.
     private void ApplyOwnerRule(IntPtr root)
@@ -299,6 +325,10 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         Volatile.Write(ref _mouseActivationWindows, windows.ToArray());
+
+        // A glance goes with a foreground change; a pin stays through one.
+        // With no pin open, nothing runs.
+        _fullscreenRecheckTimer.IsEnabled = _pinnedWindows.Count > 0;
         if (MouseHook.ShouldRun(_fullscreenInputSuspension.IsSuspended, _previewVisible, _pinnedWindows.Count))
         {
             _mouseHook.Start();
@@ -1983,8 +2013,7 @@ internal sealed class SpacePreviewController : IDisposable
                 var ownerRoot = _previewOwnerRootHwnd;
                 var wasDesktop = source == SelectionSource.Desktop;
                 var hwnd = _lastExplorerHwnd;
-                var selection = await StaTask.Run(() =>
-                    ExplorerSelectionService.TryBrowseRelative(hwnd, wasDesktop, step));
+                var selection = await _browseRelative(hwnd, wasDesktop, step);
 
                 if (_disposed
                     || !_previewVisible
@@ -2005,6 +2034,12 @@ internal sealed class SpacePreviewController : IDisposable
                 DiagnosticLog.Write($"browse {step:+0;-0} -> {selection.Path} ({selection.ViewIndex + 1} of {selection.ViewCount})");
                 if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
                 {
+                    // Signing may have started while the shell answered.
+                    if (!CanLeavePreview(_previewWindow))
+                    {
+                        return;
+                    }
+
                     ShowPreview(selection, stepStamp);
                 }
                 else
@@ -2031,6 +2066,7 @@ internal sealed class SpacePreviewController : IDisposable
         _disposed = true;
         _idleTrimTimer.Stop();
         _ownerLossTimer.Stop();
+        _fullscreenRecheckTimer.Stop();
         if (_foregroundHook != IntPtr.Zero)
         {
             NativeMethods.UnhookWinEvent(_foregroundHook);

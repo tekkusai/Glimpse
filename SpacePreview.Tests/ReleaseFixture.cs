@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -24,9 +25,7 @@ internal sealed class ReleaseFixture : IDisposable
     public ReleaseFixture(string version = "3.1.0", bool signed = true, DateTimeOffset? publishedAt = null)
     {
         Version = version;
-        Installer = new byte[InstallerSize];
-        Installer[0] = 0x47;
-        Installer[^1] = 0x45;
+        Installer = SetupImage.Create(version, InstallerSize);
         Sha256 = Convert.ToHexString(SHA256.HashData(Installer));
         Sidecar = Encoding.ASCII.GetBytes($"{Sha256}  {InstallerName}\r\n");
         Signature = Sign(Sidecar);
@@ -74,8 +73,13 @@ internal sealed class ReleaseFixture : IDisposable
 
     public HttpClient Client() => new(new Handler(this));
 
-    public AppUpdateService Service(string downloadRoot, string currentVersion = "3.0.0") =>
-        new(Client(), new Version(currentVersion), downloadRoot, ownsHttpClient: true, publicKey: PublicKey);
+    /// <param name="start">Stands in for starting setup. Without one, reaching setup fails the launch.</param>
+    public AppUpdateService Service(string downloadRoot, string currentVersion = "3.0.0", Action<ProcessStartInfo>? start = null) =>
+        new(Client(), new Version(currentVersion), downloadRoot, ownsHttpClient: true, publicKey: PublicKey, start: start ?? NeverStart);
+
+    // No test runs an installer.
+    public static void NeverStart(ProcessStartInfo _) =>
+        throw new InvalidOperationException("This test never installs.");
 
     public byte[] Sign(byte[] data) =>
         Encoding.ASCII.GetBytes(Convert.ToBase64String(_key.SignData(data, HashAlgorithmName.SHA256)) + "\r\n");

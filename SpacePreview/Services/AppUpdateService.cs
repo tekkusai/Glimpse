@@ -71,6 +71,7 @@ internal sealed partial class AppUpdateService : IDisposable
     private readonly bool _ownsHttpClient;
     private readonly string _downloadRoot;
     private readonly string _publicKey;
+    private readonly Action<ProcessStartInfo> _start;
 
     public Version CurrentVersion { get; }
 
@@ -82,18 +83,21 @@ internal sealed partial class AppUpdateService : IDisposable
     }
 
     /// <param name="publicKey">Tests sign with a throwaway key; the app always uses <see cref="ReleasePublicKey"/>.</param>
+    /// <param name="start">Starts setup; tests stand in for it and never run an installer.</param>
     internal AppUpdateService(
         HttpClient httpClient,
         Version currentVersion,
         string downloadRoot,
         bool ownsHttpClient = false,
-        string publicKey = ReleasePublicKey)
+        string publicKey = ReleasePublicKey,
+        Action<ProcessStartInfo>? start = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         CurrentVersion = NormalizeVersion(currentVersion ?? throw new ArgumentNullException(nameof(currentVersion)));
         _downloadRoot = Path.GetFullPath(downloadRoot ?? throw new ArgumentNullException(nameof(downloadRoot)));
         _ownsHttpClient = ownsHttpClient;
         _publicKey = publicKey;
+        _start = start ?? StartProcess;
     }
 
     public async Task<AppUpdateRelease?> CheckForUpdateAsync(CancellationToken cancellationToken)
@@ -270,9 +274,15 @@ internal sealed partial class AppUpdateService : IDisposable
         return File.Exists(path) && new FileInfo(path).Length == release.InstallerSize;
     }
 
-    public async Task LaunchInstallerAsync(
+    /// <summary>
+    /// Verifies the installer one last time and starts it, unless
+    /// <paramref name="starting"/>, asked after the last await, says no.
+    /// False: nothing started.
+    /// </summary>
+    public async Task<bool> LaunchInstallerAsync(
         AppUpdateRelease release,
         string installerPath,
+        Func<bool> starting,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(release);
@@ -280,10 +290,16 @@ internal sealed partial class AppUpdateService : IDisposable
 
         var expectedPath = GetInstallerPath(release);
         var actualPath = Path.GetFullPath(installerPath);
-        if (!actualPath.Equals(expectedPath, StringComparison.OrdinalIgnoreCase)
-            || !File.Exists(actualPath)
-            || new FileInfo(actualPath).Length != release.InstallerSize
-            || !await FileMatchesSha256Async(actualPath, release.InstallerSha256, cancellationToken))
+        if (!actualPath.Equals(expectedPath, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("The downloaded installer could not be verified before launch.");
+        }
+
+        // Held from the hash until setup has started: the bytes that run
+        // are the bytes that were hashed.
+        await using var held = OpenToHash(actualPath);
+        if (held.Length != release.InstallerSize
+            || !await MatchesSha256Async(held, release.InstallerSha256, cancellationToken))
         {
             throw new InvalidDataException("The downloaded installer could not be verified before launch.");
         }
@@ -295,19 +311,25 @@ internal sealed partial class AppUpdateService : IDisposable
             versionInfo.ProductVersion,
             release.Version);
 
-        using var process = Process.Start(new ProcessStartInfo(actualPath)
+        if (!starting())
+        {
+            return false;
+        }
+
+        _start(new ProcessStartInfo(actualPath)
         {
             Arguments = InstallerArguments(AppPaths.InDataRoot("update-install.log")),
             UseShellExecute = true,
             WorkingDirectory = _downloadRoot
         });
-
-        if (process is null)
-        {
-            throw new InvalidOperationException("Windows did not start the installer.");
-        }
-
         DiagnosticLog.Write($"update installer launched version={release.VersionText}");
+        return true;
+    }
+
+    private static void StartProcess(ProcessStartInfo start)
+    {
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Windows did not start the installer.");
     }
 
     /// <summary>
@@ -710,18 +732,32 @@ internal sealed partial class AppUpdateService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Read-only, sharing only reads: while it is open nothing can write,
+    /// replace, rename or delete the file. Windows can still start it.
+    /// </summary>
+    internal static FileStream OpenToHash(string path) => new(
+        path,
+        FileMode.Open,
+        FileAccess.Read,
+        FileShare.Read,
+        128 * 1024,
+        FileOptions.Asynchronous | FileOptions.SequentialScan);
+
     private static async Task<bool> FileMatchesSha256Async(
         string path,
         string expectedSha256,
         CancellationToken cancellationToken)
     {
-        await using var stream = new FileStream(
-            path,
-            FileMode.Open,
-            FileAccess.Read,
-            FileShare.Read,
-            128 * 1024,
-            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        await using var stream = OpenToHash(path);
+        return await MatchesSha256Async(stream, expectedSha256, cancellationToken);
+    }
+
+    private static async Task<bool> MatchesSha256Async(
+        Stream stream,
+        string expectedSha256,
+        CancellationToken cancellationToken)
+    {
         var actual = await SHA256.HashDataAsync(stream, cancellationToken);
         var expected = Convert.FromHexString(expectedSha256);
         return CryptographicOperations.FixedTimeEquals(actual, expected);

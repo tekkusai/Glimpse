@@ -16,10 +16,6 @@ namespace SpacePreview.Tests;
 [Collection(WpfCollection.Name)]
 public sealed class AppUpdaterTests
 {
-    // These tests stand in for every launch; none may start an installer.
-    private static readonly Func<AppUpdateRelease, string, CancellationToken, Task> NeverLaunch =
-        (_, _, _) => throw new InvalidOperationException("This test never installs.");
-
     // The PC's half of an automatic install, all met.
     private static readonly InstallState Away = new()
     {
@@ -263,16 +259,11 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { Idle = TimeSpan.FromSeconds(5) };
-        var launches = new List<(string Version, string Installer)>();
+        var launches = new List<string>();
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: info => launches.Add(info.FileName)),
             () => pc,
-            isMetered: () => false,
-            launch: (update, installer, _) =>
-            {
-                launches.Add((update.VersionText, installer));
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         // The check verifies the signature, then downloads in the background.
         await updates.CheckNowAsync();
@@ -291,7 +282,7 @@ public sealed class AppUpdaterTests
         AgeTheLastCheck();
         pc = Away;
         await updates.TickAsync();
-        Assert.Equal(("3.1.0", installer), Assert.Single(launches));
+        Assert.Equal(installer, Assert.Single(launches));
         Assert.Equal(2, release.RequestsFor("/releases/latest"));
         Assert.Equal(3, release.RequestsFor(".sha256.sig"));
         Assert.Equal("3.1.0", Settings.Current.UpdateAttemptVersion);
@@ -310,14 +301,9 @@ public sealed class AppUpdaterTests
         var pc = Away with { PreviewOpen = true };
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => pc,
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         // Downloaded while the user was here.
         await updates.CheckNowAsync();
@@ -338,7 +324,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { PreviewOpen = true };
-        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
@@ -363,15 +349,10 @@ public sealed class AppUpdaterTests
         var mayQuit = false;
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away,
             canQuit: () => mayQuit,
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         await updates.TickAsync();
@@ -392,7 +373,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture(signed: false);
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => false);
 
         await updates.CheckNowAsync();
         await updates.CheckNowAsync();
@@ -414,7 +395,7 @@ public sealed class AppUpdaterTests
         var uploading = JsonNode.Parse(uploaded)!;
         uploading["assets"]!.AsArray().Single(asset => ((string)asset!["name"]!).EndsWith(".sig", StringComparison.Ordinal))!["state"] = "open";
         release.Json = uploading.ToJsonString();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true);
 
         await updates.CheckNowAsync();
         Assert.Null(updates.State.Pending);
@@ -434,8 +415,8 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
-        using var service = new AppUpdateService(release.Client(), new Version(3, 0, 0), root.Path, ownsHttpClient: true);
-        using var updates = new AppUpdater(service, () => Away, isMetered: () => false, launch: NeverLaunch);
+        using var service = new AppUpdateService(release.Client(), new Version(3, 0, 0), root.Path, ownsHttpClient: true, start: ReleaseFixture.NeverStart);
+        using var updates = new AppUpdater(service, () => Away, isMetered: () => false);
 
         await updates.CheckNowAsync();
         await updates.CheckNowAsync();
@@ -456,14 +437,9 @@ public sealed class AppUpdaterTests
         release.Installer[1] = 0xFF;
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away,
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         await updates.TickAsync();
@@ -481,7 +457,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var metered = true;
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => metered, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => metered);
 
         await updates.CheckNowAsync();
         await updates.TickAsync();
@@ -503,14 +479,9 @@ public sealed class AppUpdaterTests
         await File.WriteAllBytesAsync(installer, release.Installer);
         var launches = new List<string>();
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: info => launches.Add(info.FileName)),
             () => Away,
-            isMetered: () => true,
-            launch: (_, path, _) =>
-            {
-                launches.Add(path);
-                return Task.CompletedTask;
-            });
+            isMetered: () => true);
 
         // An earlier run downloaded it: checking it costs the sidecar and .sig.
         await updates.CheckNowAsync();
@@ -531,7 +502,7 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var installer = Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe");
         await File.WriteAllBytesAsync(installer, new byte[ReleaseFixture.InstallerSize]);
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true);
 
         await updates.CheckNowAsync();
         Assert.Null(updates.State.Installer);
@@ -560,8 +531,7 @@ public sealed class AppUpdaterTests
             using var updates = new AppUpdater(
                 release.Service(root.Path),
                 () => Away with { PreviewOpen = true },
-                isMetered: () => metered,
-                launch: NeverLaunch);
+                isMetered: () => metered);
             var downloading = false;
             updates.Changed += () => downloading |= updates.State.Downloading;
 
@@ -581,14 +551,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away,
-            isMetered: () => true,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => true);
 
         await updates.CheckNowAsync();
         await updates.TickAsync();
@@ -608,7 +573,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture { HoldInstaller = new() };
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => false);
 
         var check = updates.CheckNowAsync();
         await WaitUntilAsync(() => updates.State.Downloading);
@@ -628,14 +593,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away with { PreviewOpen = true },
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         // Off while the background download is held, then Install now at once.
         var check = updates.CheckNowAsync();
@@ -673,14 +633,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away,
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         release.Offline = true;
@@ -701,10 +656,9 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => throw new InvalidOperationException("Windows did not start the installer.")),
             () => Away with { PreviewOpen = true },
-            isMetered: () => false,
-            launch: (_, _, _) => throw new InvalidOperationException("Windows did not start the installer."));
+            isMetered: () => false);
         string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
 
         await updates.CheckNowAsync();
@@ -724,7 +678,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture(publishedAt: DateTimeOffset.UtcNow.AddHours(-1));
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false);
         string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
 
         // Install now on a fresh release, and GitHub gives no answer before the launch.
@@ -748,14 +702,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away with { PreviewOpen = true },
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
@@ -775,14 +724,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away with { PreviewOpen = true },
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         AgeTheLastCheck();
@@ -805,7 +749,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false);
         UpdateFooter Footer() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now);
 
         // Pulled: nothing installs, and the footer says Glimpse is current.
@@ -835,7 +779,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
@@ -855,7 +799,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Pending);
@@ -873,7 +817,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { Idle = TimeSpan.Zero };
-        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
@@ -897,7 +841,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { Idle = TimeSpan.Zero };
-        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false);
 
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Installer);
@@ -919,7 +863,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { Idle = TimeSpan.Zero };
-        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false);
 
         await updates.CheckNowAsync();
         AgeTheLastCheck();
@@ -945,7 +889,7 @@ public sealed class AppUpdaterTests
         using var release = new ReleaseFixture();
         using var root = new TempDirectory();
         var pc = Away with { PreviewOpen = true };
-        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false, launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path), () => pc, isMetered: () => false);
         string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
 
         await updates.CheckNowAsync();
@@ -981,14 +925,9 @@ public sealed class AppUpdaterTests
         using var root = new TempDirectory();
         var launches = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
+            release.Service(root.Path, start: _ => launches++),
             () => Away,
-            isMetered: () => false,
-            launch: (_, _, _) =>
-            {
-                launches++;
-                return Task.CompletedTask;
-            });
+            isMetered: () => false);
 
         await updates.CheckNowAsync();
         await updates.TickAsync();
@@ -1005,7 +944,7 @@ public sealed class AppUpdaterTests
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture { Offline = true };
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), launch: NeverLaunch);
+        using var updates = new AppUpdater(release.Service(root.Path));
         updates.Start();
 
         await updates.CheckNowAsync();
@@ -1022,6 +961,155 @@ public sealed class AppUpdaterTests
         Assert.True(updates.State.UpToDate);
         Assert.False(updates.State.CheckFailed);
         Assert.Equal(TimeSpan.FromHours(6), Fields.Get<DispatcherTimer>(updates, "_checkTimer").Interval);
+    });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task TheInstallerThatStartsIsTheOneThatWasVerified(bool installNow) => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope(settings => settings with { InstallUpdatesAutomatically = !installNow });
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+
+        // Names itself the same, and was never signed.
+        var impostor = (byte[])release.Installer.Clone();
+        impostor[^1] = 0x01;
+        var replacement = Path.Combine(root.Path, "impostor.exe");
+        await File.WriteAllBytesAsync(replacement, impostor);
+
+        var swaps = new List<string>();
+        byte[]? started = null;
+        using var updates = new AppUpdater(
+            release.Service(root.Path, start: info =>
+            {
+                // The last moment a swap could matter: every way to put
+                // other bytes where setup starts from.
+                if (Swapped(() => File.WriteAllBytes(info.FileName, impostor)))
+                {
+                    swaps.Add("written over");
+                }
+
+                if (Swapped(() => File.Move(replacement, info.FileName, overwrite: true)))
+                {
+                    swaps.Add("replaced");
+                }
+
+                if (Swapped(() => File.Delete(info.FileName)))
+                {
+                    swaps.Add("deleted");
+                }
+
+                started = File.ReadAllBytes(info.FileName);
+            }),
+            () => Away,
+            isMetered: () => false);
+
+        await updates.CheckNowAsync();
+        await (installNow ? updates.InstallNowAsync() : updates.TickAsync());
+
+        Assert.Empty(swaps);
+        Assert.Equal(release.Installer, started);
+    });
+
+    [Fact]
+    public Task SetupWaitsWhenTheUserComesBackWhileTheInstallerIsCheckedOneLastTime() => WpfApp.RunAsync(async () =>
+    {
+        foreach (var back in new[]
+        {
+            Away with { Idle = TimeSpan.Zero },
+            Away with { PreviewOpen = true },
+            Away with { FullscreenSuspended = true }
+        })
+        {
+            using var scope = new UpdateSettingsScope();
+            using var release = new ReleaseFixture();
+            using var root = new TempDirectory();
+            var installer = Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe");
+            var returns = true;
+            var launches = new List<(string? Attempt, bool SetupStarted)>();
+            AppUpdater? updates = null;
+            using var updater = new AppUpdater(
+                release.Service(root.Path, start: _ => launches.Add((Settings.Current.UpdateAttemptVersion, updates!.State.SetupStarted))),
+                // Away for every look before the launch; back while Glimpse
+                // holds the installer for its last hash.
+                () => returns && HeldOpen(installer) ? back : Away,
+                isMetered: () => false);
+            updates = updater;
+
+            await updates.CheckNowAsync();
+            await updates.TickAsync();
+
+            Assert.Empty(launches);
+            Assert.Null(Settings.Current.UpdateAttemptVersion);
+            Assert.Null(Settings.Current.SkippedUpdateVersion);
+            Assert.True(updates.State is { Installing: false, SetupStarted: false, InstallFailed: false, Installer: not null, Pending: not null });
+
+            // Not a failed attempt: the next time the user is away, it installs,
+            // and the attempt is on disk before setup starts.
+            returns = false;
+            await updates.TickAsync();
+            Assert.Equal(("3.1.0", true), Assert.Single(launches));
+        }
+    });
+
+    [Fact]
+    public Task SetupWaitsWhenTheSwitchGoesOffWhileTheInstallerIsCheckedOneLastTime() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path, start: _ => launches++),
+            () => Away,
+            isMetered: () => false);
+        await updates.CheckNowAsync();
+
+        // Off the moment the install is under way.
+        updates.Changed += () =>
+        {
+            if (updates.State.Installing && Settings.Current.InstallUpdatesAutomatically)
+            {
+                updates.SetInstallAutomatically(false);
+            }
+        };
+        await updates.TickAsync();
+
+        Assert.Equal(0, launches);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+        Assert.Null(Settings.Current.SkippedUpdateVersion);
+        Assert.True(updates.State is { Installing: false, SetupStarted: false, Installer: not null, Pending: not null });
+    });
+
+    [Fact]
+    public Task InstallNowWaitsWhenSigningStartsWhileTheInstallerIsCheckedOneLastTime() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        var installer = Path.Combine(root.Path, "Glimpse-Setup-3.1.0.exe");
+        var signs = true;
+        var launches = 0;
+        using var updates = new AppUpdater(
+            release.Service(root.Path, start: _ => launches++),
+            () => Away with { PreviewOpen = true },
+            // Signing starts while Glimpse holds the installer for its last hash.
+            canQuit: () => !(signs && HeldOpen(installer)),
+            isMetered: () => false);
+        await updates.CheckNowAsync();
+        Assert.NotNull(updates.State.Installer);
+
+        await updates.InstallNowAsync();
+
+        Assert.Equal(0, launches);
+        Assert.Null(Settings.Current.UpdateAttemptVersion);
+        Assert.True(updates.State is { Installing: false, SetupStarted: false, InstallFailed: false, Installer: not null, Pending: not null });
+
+        // The work saved, the next press installs.
+        signs = false;
+        await updates.InstallNowAsync();
+        Assert.Equal(1, launches);
     });
 
     [Fact]
@@ -1056,6 +1144,33 @@ public sealed class AppUpdaterTests
         ReleaseFixture.InstallerSize,
         new string('A', 64),
         new Uri($"https://github.com/tekkusai/Glimpse/releases/download/v{version}/Glimpse-Setup-{version}.exe.sha256"));
+
+    private static bool Swapped(Action swap)
+    {
+        try
+        {
+            swap();
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    // Glimpse's hold shares only reads: a writer is turned away while it lasts.
+    private static bool HeldOpen(string path)
+    {
+        try
+        {
+            using var writer = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            return false;
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+    }
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {

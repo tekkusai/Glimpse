@@ -4,11 +4,13 @@ param(
     [Parameter(Mandatory=$true)][string]$Key
 )
 
-# Writes the installer's .sha256 sidecar and the sidecar's .sig, then checks
-# the .sig the way the app will, with the public key compiled into it. When
-# any of that fails, the installer, sidecar and .sig are deleted before the
-# error: a copy of Glimpse that meets a release whose .sig does not verify
-# skips that version for good, so nothing half-signed may be left to upload.
+# Checks that the installer's name and its own version are the project's
+# version, writes the installer's .sha256 sidecar and the sidecar's .sig,
+# then checks the .sig the way the app will, with the public key compiled
+# into it. When any of that fails, the installer, sidecar and .sig are
+# deleted before the error: a copy of Glimpse that meets a release whose
+# .sig does not verify, or whose installer names another version, skips
+# that version for good, so nothing half-signed may be left to upload.
 
 $ErrorActionPreference = "Stop"
 
@@ -16,6 +18,19 @@ $root = Resolve-Path "$PSScriptRoot\.."
 $checksum = "$Setup.sha256"
 $signatureFile = "$checksum.sig"
 try {
+    [xml]$project = Get-Content -LiteralPath (Join-Path $root "SpacePreview.csproj")
+    $version = $project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+    if (-not $version) { throw "No <Version> in SpacePreview.csproj" }
+    $name = Split-Path -Leaf $Setup
+    if ($name -cne "Glimpse-Setup-$version.exe") {
+        throw "The installer is named $name. Project version $version needs Glimpse-Setup-$version.exe."
+    }
+    # The app reads the same field and rejects any other version.
+    $productVersion = "$((Get-Item -LiteralPath $Setup).VersionInfo.ProductVersion)".Trim()
+    if ($productVersion -cne $version) {
+        throw "The installer says it is version '$productVersion', not $version. Every copy of Glimpse would skip this release."
+    }
+
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Setup).Hash
     $checksumLine = "$hash  $(Split-Path -Leaf $Setup)"
     [System.IO.File]::WriteAllText($checksum, $checksumLine + [Environment]::NewLine, [System.Text.Encoding]::ASCII)

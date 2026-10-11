@@ -94,13 +94,8 @@ public sealed class SettingsWindowTests
         var metered = true;
         var launched = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
-            isMetered: () => metered,
-            launch: (_, _, _) =>
-            {
-                launched++;
-                return Task.CompletedTask;
-            });
+            release.Service(root.Path, start: _ => launched++),
+            isMetered: () => metered);
         await updates.CheckNowAsync();
         var settings = Open(updates);
         try
@@ -142,15 +137,15 @@ public sealed class SettingsWindowTests
         using var root = new TempDirectory();
         var launched = 0;
         using var updates = new AppUpdater(
-            release.Service(root.Path),
-            isMetered: () => false,
-            launch: (_, _, _) =>
+            release.Service(root.Path, start: _ =>
             {
                 // Windows refuses setup the first time.
-                return ++launched == 1
-                    ? throw new InvalidOperationException("Windows did not start the installer.")
-                    : Task.CompletedTask;
-            });
+                if (++launched == 1)
+                {
+                    throw new InvalidOperationException("Windows did not start the installer.");
+                }
+            }),
+            isMetered: () => false);
         await updates.CheckNowAsync();
         var settings = Open(updates);
         try
