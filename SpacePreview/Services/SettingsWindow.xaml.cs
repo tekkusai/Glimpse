@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -150,7 +149,7 @@ public partial class SettingsWindow : Window
     private void SyncAbout()
     {
         var current = _updates.CurrentVersion;
-        var footer = UpdateFooter.Describe(_updates.State, Settings.Current, current, DateTimeOffset.Now, CultureInfo.CurrentCulture);
+        var footer = UpdateFooter.Describe(_updates.State, Settings.Current, current, DateTimeOffset.Now);
         VersionText.Text = $"{Branding.Name} {current.ToString(3)}";
         ShowText(UpdateStatusText, footer.Status);
         ShowText(UpdateCaption, footer.Caption);
@@ -539,15 +538,9 @@ internal enum FooterLink
 internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Caption)
 {
     internal static readonly TimeSpan StaleAfter = TimeSpan.FromDays(3);
-    internal static readonly TimeSpan UpdatedNoteFor = TimeSpan.FromDays(7);
 
     /// <param name="now">Local time: "today" is the user's day.</param>
-    public static UpdateFooter Describe(
-        UpdateState state,
-        Settings settings,
-        Version current,
-        DateTimeOffset now,
-        CultureInfo culture)
+    public static UpdateFooter Describe(UpdateState state, Settings settings, Version current, DateTimeOffset now)
     {
         if (state.Pending is { } pending)
         {
@@ -565,8 +558,9 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
                 : $"{version} is ready to install.");
         }
 
+        // The date in the interface's English, as the header writes it.
         var stale = settings.LastUpdateCheckUtc is { } last && now - last >= StaleAfter
-            ? $"Couldn't check for updates since {ShortDate(last, now, culture)}."
+            ? $"Couldn't check for updates since {FileKinds.DescribeDate(last.ToOffset(now.Offset).DateTime, now.DateTime)}."
             : null;
         // Gone while a new check runs: that one answers.
         var failed = state.CheckFailed && !state.Checking ? "Couldn't check for updates." : null;
@@ -575,9 +569,11 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
             ?? (!state.UpToDate && AppUpdateService.TryParseVersion(settings.SkippedUpdateVersion, out var skipped) && skipped > current
                 ? $"{skipped.ToString(3)} failed verification and was skipped."
                 : null);
-        if (settings.UpdatedAtUtc is { } updated && now - updated < UpdatedNoteFor)
+        // The day it landed and the next, then the usual footer.
+        var updated = settings.UpdatedAtUtc is { } at ? (now.Date - at.ToOffset(now.Offset).Date).Days : -1;
+        if (updated is 0 or 1)
         {
-            return new(UpdatedOn(updated, now, culture), FooterLink.WhatsNew, caption);
+            return new(updated == 0 ? "Updated today" : "Updated yesterday", FooterLink.WhatsNew, caption);
         }
 
         if (state.Checking)
@@ -588,16 +584,4 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
         // Up to date only on the word of a check that reached GitHub.
         return new(state.UpToDate && stale is null && failed is null ? "Up to date" : null, FooterLink.CheckForUpdates, caption);
     }
-
-    private static string UpdatedOn(DateTimeOffset updated, DateTimeOffset now, CultureInfo culture) =>
-        (now.Date - updated.ToOffset(now.Offset).Date).Days switch
-        {
-            0 => "Updated today",
-            1 => "Updated yesterday",
-            _ => $"Updated {ShortDate(updated, now, culture)}"
-        };
-
-    // The culture's month and day with the month abbreviated: Oct 7, 7 Oct.
-    private static string ShortDate(DateTimeOffset when, DateTimeOffset now, CultureInfo culture) =>
-        when.ToOffset(now.Offset).ToString(culture.DateTimeFormat.MonthDayPattern.Replace("MMMM", "MMM", StringComparison.Ordinal), culture);
 }

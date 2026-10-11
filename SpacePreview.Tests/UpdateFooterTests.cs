@@ -11,8 +11,6 @@ namespace SpacePreview.Tests;
 public sealed class UpdateFooterTests
 {
     private static readonly Version Current = new(3, 0, 0);
-    private static readonly CultureInfo English = CultureInfo.GetCultureInfo("en-US");
-
     // Saturday afternoon on Eastern time, October 10.
     private static readonly DateTimeOffset Now = new(2026, 10, 10, 15, 0, 0, TimeSpan.FromHours(-4));
 
@@ -130,13 +128,26 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
-    public void TheDateFollowsTheUsersCulture()
+    public void TheDatesAreTheInterfacesEnglishInEveryRegion()
     {
         var stale = Checked with { LastUpdateCheckUtc = new DateTimeOffset(2026, 10, 7, 13, 0, 0, TimeSpan.Zero) };
+        var lastYear = Checked with { LastUpdateCheckUtc = new DateTimeOffset(2025, 12, 30, 13, 0, 0, TimeSpan.Zero) };
+        var saved = (CultureInfo.CurrentCulture, CultureInfo.CurrentUICulture);
+        try
+        {
+            foreach (var region in new[] { "de-DE", "fr-FR", "en-GB", "en-US" })
+            {
+                CultureInfo.CurrentCulture = CultureInfo.CurrentUICulture = CultureInfo.GetCultureInfo(region);
 
-        Assert.Equal(
-            "Couldn't check for updates since 7 Oct.",
-            UpdateFooter.Describe(new UpdateState(), stale, Current, Now, CultureInfo.GetCultureInfo("en-GB")).Caption);
+                Assert.Equal("Couldn't check for updates since Oct 7.", Describe(new UpdateState(), stale).Caption);
+                Assert.Equal("Couldn't check for updates since Dec 30, 2025.", Describe(new UpdateState(), lastYear).Caption);
+                Assert.Equal("Updated yesterday", Describe(new UpdateState(), Checked with { UpdatedAtUtc = Now.AddDays(-1) }).Status);
+            }
+        }
+        finally
+        {
+            (CultureInfo.CurrentCulture, CultureInfo.CurrentUICulture) = saved;
+        }
     }
 
     [Fact]
@@ -152,14 +163,17 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
-    public void AnUpdateIsNamedForSevenDaysWithItsReleaseNotes()
+    public void AnUpdateIsNamedOnItsDayAndTheNextWithItsReleaseNotes()
     {
         UpdateFooter Landed(DateTimeOffset at) => Describe(new UpdateState { UpToDate = true }, Checked with { UpdatedAtUtc = at });
 
         Assert.Equal(new UpdateFooter("Updated today", FooterLink.WhatsNew, null), Landed(Now.AddHours(-14)));
-        Assert.Equal("Updated yesterday", Landed(Now.AddHours(-16)).Status);
-        Assert.Equal("Updated Oct 4", Landed(Now.AddDays(-6)).Status);
-        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(Now.AddDays(-7)));
+        Assert.Equal(new UpdateFooter("Updated yesterday", FooterLink.WhatsNew, null), Landed(Now.AddHours(-16)));
+        Assert.Equal("Updated yesterday", Landed(new DateTimeOffset(2026, 10, 9, 0, 1, 0, Now.Offset)).Status);
+
+        // The day after that, the usual footer is back.
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(new DateTimeOffset(2026, 10, 8, 23, 59, 0, Now.Offset)));
+        Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Landed(Now.AddDays(-6)));
     }
 
     [Fact]
@@ -189,5 +203,5 @@ public sealed class UpdateFooterTests
     }
 
     private static UpdateFooter Describe(UpdateState state, Settings settings) =>
-        UpdateFooter.Describe(state, settings, Current, Now, English);
+        UpdateFooter.Describe(state, settings, Current, Now);
 }
