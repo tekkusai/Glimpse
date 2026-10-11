@@ -395,7 +395,7 @@ public partial class PreviewWindow
     // one action.
     // ---------------------------------------------------------------------
 
-    private sealed record PreviewAction(string Label, string Uri, string Tooltip);
+    internal sealed record PreviewAction(string Label, string Uri, string Tooltip);
 
     private static FrameworkElement BuildErrorPreview(string title, string detail, PreviewAction? action = null) =>
         BuildFileCard(
@@ -405,7 +405,7 @@ public partial class PreviewWindow
             action is null ? null : BuildActionPill(action));
 
     /// <summary>The one action pill: the house pill, centered, opening a URI.</summary>
-    private static FrameworkElement BuildActionPill(PreviewAction action)
+    internal static FrameworkElement BuildActionPill(PreviewAction action)
     {
         var pill = HousePill.Build(action.Label, () => OpenExternalUri(action.Uri));
         pill.Margin = new Thickness(0);

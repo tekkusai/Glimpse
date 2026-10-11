@@ -1,8 +1,10 @@
-using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using SpacePreview.Preview;
 using SpacePreview.Utilities;
@@ -18,19 +20,31 @@ public partial class SettingsWindow : Window
     internal const int DiagnosticLogLines = 200;
 
     private readonly Func<AppUpdateRelease?> _availableUpdate;
+    private readonly Func<bool> _updateChecked;
     private readonly Action _showUpdate;
     private readonly Action<ThemePreference> _themePicked;
+    private readonly Func<IReadOnlyList<MissingPiece>> _findMissingPieces;
     private readonly DispatcherTimer _copiedTimer;
+    private IReadOnlyList<MissingPiece> _missingPieces = [];
+    private IReadOnlyList<(string Path, DateTime Written)> _signatures = [];
+    private bool _findingMissingPieces;
+    private bool _closed;
     private bool _syncing;
 
+    /// <param name="updateChecked">True once an update check has reached GitHub.</param>
+    /// <param name="findMissingPieces">Runs off the UI thread; tests pass their own.</param>
     internal SettingsWindow(
         Func<AppUpdateRelease?> availableUpdate,
+        Func<bool> updateChecked,
         Action showUpdate,
-        Action<ThemePreference> themePicked)
+        Action<ThemePreference> themePicked,
+        Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null)
     {
         _availableUpdate = availableUpdate;
+        _updateChecked = updateChecked;
         _showUpdate = showUpdate;
         _themePicked = themePicked;
+        _findMissingPieces = findMissingPieces ?? MissingPieces.Find;
         InitializeComponent();
         Title = $"{Branding.Name} settings";
         WindowFrame.AttachDialog(this, TitleBar);
@@ -52,16 +66,15 @@ public partial class SettingsWindow : Window
         ThemeLight.Checked += (_, _) => PickTheme(ThemePreference.Light);
         ThemeDark.Checked += (_, _) => PickTheme(ThemePreference.Dark);
 
-        PinDefaultRow.MouseLeftButtonUp += (_, _) => PinDefaultToggle.IsChecked = PinDefaultToggle.IsChecked != true;
-        PinDefaultToggle.Checked += (_, _) => ApplyPinDefault(true);
-        PinDefaultToggle.Unchecked += (_, _) => ApplyPinDefault(false);
-
         UpdateLink.Click += (_, _) => _showUpdate();
         _copiedTimer = new DispatcherTimer(TimeSpan.FromSeconds(2), DispatcherPriority.Normal, (_, _) => EndCopiedFeedback(), Dispatcher);
         _copiedTimer.Stop();
         CopyDiagnosticsButton.Click += async (_, _) => await CopyDiagnosticsAsync();
-        OpenLogButton.Click += (_, _) => OpenLog();
-        Closed += (_, _) => _copiedTimer.Stop();
+        Closed += (_, _) =>
+        {
+            _closed = true;
+            _copiedTimer.Stop();
+        };
 
         // The registry can change while the window sits open; returning to it
         // re-reads the world instead of trusting a snapshot.
@@ -81,31 +94,225 @@ public partial class SettingsWindow : Window
             ThemeLight.IsChecked = theme == ThemePreference.Light;
             ThemeDark.IsChecked = theme == ThemePreference.Dark;
 
-            PinDefaultToggle.IsChecked = Settings.Current.PinnedAlwaysOnTopDefault;
+            SyncSignatures();
             SyncAbout();
         }
         finally
         {
             _syncing = false;
         }
+
+        _ = FindMissingPiecesAsync();
     }
 
     private void SyncAbout()
     {
-        DocumentsText.Text = $"Documents: {(OfficeDocumentPdfConverter.IsAvailable ? OfficeDocumentPdfConverter.EngineName : "basic previews")}";
         VersionText.Text = $"{Branding.Name} {CurrentVersion()}";
-        if (_availableUpdate() is { } update)
-        {
-            UpdateLink.Content = $"Update to {update.VersionText}";
-            UpdateLink.Visibility = Visibility.Visible;
-        }
-        else
-        {
-            UpdateLink.Visibility = Visibility.Collapsed;
-        }
+        var update = _availableUpdate();
+        UpdateLink.Content = update is null ? null : $"Update to {update.VersionText}";
+        UpdateLink.Visibility = update is null ? Visibility.Collapsed : Visibility.Visible;
+
+        // Never claimed without a check that reached GitHub and found nothing newer.
+        UpToDateText.Visibility = update is null && _updateChecked() ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private static string CurrentVersion() => AppUpdateService.DetectCurrentVersion().ToString(3);
+
+    private async Task FindMissingPiecesAsync()
+    {
+        if (_findingMissingPieces)
+        {
+            return;
+        }
+
+        _findingMissingPieces = true;
+        try
+        {
+            var pieces = await Task.Run(_findMissingPieces);
+            if (!_closed)
+            {
+                ShowMissingPieces(pieces);
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"missing pieces check failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            _findingMissingPieces = false;
+        }
+    }
+
+    private void ShowMissingPieces(IReadOnlyList<MissingPiece> pieces)
+    {
+        if (pieces.SequenceEqual(_missingPieces))
+        {
+            return;
+        }
+
+        _missingPieces = pieces;
+        MissingPiecesList.Children.Clear();
+        foreach (var piece in pieces)
+        {
+            MissingPiecesList.Children.Add(BuildMissingPieceRow(piece));
+        }
+
+        ShowSection(MissingPiecesSection, pieces.Count > 0);
+    }
+
+    private Grid BuildMissingPieceRow(MissingPiece piece)
+    {
+        var fix = PreviewWindow.BuildActionPill(piece.Fix);
+        fix.Margin = new Thickness(16, 0, 0, 0);
+        fix.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(fix, 1);
+
+        var row = new Grid
+        {
+            Margin = new Thickness(0, 9, 0, 9),
+            ColumnDefinitions =
+            {
+                new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) },
+                new ColumnDefinition { Width = GridLength.Auto }
+            }
+        };
+        row.Children.Add(new TextBlock
+        {
+            Text = piece.Text,
+            TextWrapping = TextWrapping.Wrap,
+            Style = (Style)FindResource("RowLabel")
+        });
+        row.Children.Add(fix);
+        return row;
+    }
+
+    /// <summary>
+    /// Fill &amp; Sign's saved ink, newest first, then the stamp. Rebuilt
+    /// only when a file comes, goes or changes, so a pending delete
+    /// survives the window being activated again.
+    /// </summary>
+    private void SyncSignatures()
+    {
+        var paths = SignatureStore.ListSignatures().ToList();
+        if (SignatureStore.HasStamp)
+        {
+            paths.Add(SignatureStore.StampPath);
+        }
+
+        var saved = paths.Select(path => (path, File.GetLastWriteTimeUtc(path))).ToList();
+        if (saved.SequenceEqual(_signatures))
+        {
+            return;
+        }
+
+        _signatures = saved;
+        SignaturesList.Children.Clear();
+        foreach (var (path, _) in saved)
+        {
+            SignaturesList.Children.Add(BuildSignatureRow(path));
+        }
+
+        ShowSection(SignaturesSection, saved.Count > 0);
+    }
+
+    /// <summary>
+    /// One saved signature or the stamp, on white paper: ink is dark on
+    /// transparent and must read in both themes. Deleting takes a second
+    /// click on a named button, as in Fill &amp; Sign, because ink is work
+    /// to redo.
+    /// </summary>
+    private Grid BuildSignatureRow(string path)
+    {
+        var what = string.Equals(path, SignatureStore.StampPath, StringComparison.OrdinalIgnoreCase) ? "stamp" : "signature";
+        var ink = new Image { Stretch = Stretch.Uniform, Margin = new Thickness(8, 4, 8, 4) };
+        _ = LoadInkAsync(ink, path);
+        var paper = new Border
+        {
+            Width = 160,
+            Height = 48,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = Brushes.White,
+            BorderThickness = new Thickness(1),
+            CornerRadius = Metrics.SurfaceCorner,
+            Child = ink
+        };
+        paper.SetResourceReference(Border.BorderBrushProperty, "Theme.RaisedBorder");
+        AutomationProperties.SetName(paper, $"Saved {what}");
+
+        var trash = new Button
+        {
+            Style = (Style)FindResource("IconButton"),
+            Content = "\uE74D",
+            ToolTip = $"Delete this {what}",
+            HorizontalAlignment = HorizontalAlignment.Right,
+            Margin = new Thickness(0, 0, -8, 0)
+        };
+        AutomationProperties.SetName(trash, $"Delete this {what}");
+
+        var confirm = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Right,
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed
+        };
+        var keep = HousePill.Build("Keep", () =>
+        {
+            confirm.Visibility = Visibility.Collapsed;
+            trash.Visibility = Visibility.Visible;
+        }, PillRole.Ghost);
+        var delete = HousePill.Build("Delete", () =>
+        {
+            SignatureStore.Remove(path);
+            SyncSignatures();
+        });
+        delete.Margin = new Thickness(0);
+        confirm.Children.Add(keep);
+        confirm.Children.Add(delete);
+
+        trash.Click += (_, _) =>
+        {
+            trash.Visibility = Visibility.Collapsed;
+            confirm.Visibility = Visibility.Visible;
+        };
+
+        var row = new Grid { Margin = new Thickness(0, 0, 0, 4) };
+        row.Children.Add(paper);
+        row.Children.Add(trash);
+        row.Children.Add(confirm);
+        return row;
+    }
+
+    // The paper is there at once; the decode stays off the UI thread.
+    private static async Task LoadInkAsync(Image ink, string path) =>
+        ink.Source = await Task.Run(() => SignatureStore.TryLoad(path));
+
+    /// <summary>
+    /// A section that arrives once the window is up fades in; one present at
+    /// open simply is there, and one that empties goes at once with its
+    /// divider.
+    /// </summary>
+    private void ShowSection(FrameworkElement section, bool show)
+    {
+        if (!show)
+        {
+            section.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (section.Visibility == Visibility.Visible)
+        {
+            return;
+        }
+
+        section.Visibility = Visibility.Visible;
+        if (IsLoaded)
+        {
+            Motion.Settle(section, 0);
+            Motion.Fade(section, 1, Motion.Reveal);
+        }
+    }
 
     private void ApplyStartup(bool enabled)
     {
@@ -133,16 +340,6 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void ApplyPinDefault(bool onTop)
-    {
-        if (_syncing)
-        {
-            return;
-        }
-
-        Settings.Update(settings => settings with { PinnedAlwaysOnTopDefault = onTop });
-    }
-
     private async Task CopyDiagnosticsAsync()
     {
         try
@@ -157,8 +354,6 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        // Holding the width keeps the neighbouring link where it was.
-        CopyDiagnosticsButton.MinWidth = CopyDiagnosticsButton.ActualWidth;
         CopyDiagnosticsButton.Content = "Copied";
         _copiedTimer.Stop();
         _copiedTimer.Start();
@@ -214,28 +409,5 @@ public partial class SettingsWindow : Window
         }
 
         return [.. tail];
-    }
-
-    private static void OpenLog()
-    {
-        try
-        {
-            var directory = Path.GetDirectoryName(DiagnosticLog.Pathname);
-            if (!string.IsNullOrWhiteSpace(directory))
-            {
-                Directory.CreateDirectory(directory);
-            }
-
-            if (!File.Exists(DiagnosticLog.Pathname))
-            {
-                File.WriteAllText(DiagnosticLog.Pathname, string.Empty);
-            }
-
-            Process.Start(new ProcessStartInfo(DiagnosticLog.Pathname) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"open log failed: {ex.GetType().Name}: {ex.Message}");
-        }
     }
 }

@@ -22,6 +22,12 @@
             </Style.Triggers>
         </Style>
 
+        <Style x:Key="Divider" TargetType="Border">
+            <Setter Property="Height" Value="1" />
+            <Setter Property="Margin" Value="0,10" />
+            <Setter Property="Background" Value="{DynamicResource Theme.Border}" />
+        </Style>
+
         <Style x:Key="RowLabel" TargetType="TextBlock">
             <Setter Property="FontSize" Value="{x:Static u:Metrics.FontBody}" />
             <Setter Property="Foreground" Value="{DynamicResource Theme.TextPrimary}" />
@@ -126,73 +132,61 @@
             </Grid>
         </Border>
 
-        <Border x:Name="PinDefaultRow" Style="{StaticResource SettingsRow}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <StackPanel VerticalAlignment="Center">
-                    <TextBlock Text="Pinned previews stay on top" Style="{StaticResource RowLabel}" />
-                    <TextBlock Margin="0,2,0,0"
-                               FontSize="{x:Static u:Metrics.FontCaption}"
-                               Foreground="{DynamicResource Theme.TextTertiary}"
-                               TextWrapping="Wrap"
-                               Text="You can change this on each pinned preview." />
-                </StackPanel>
-                <ToggleButton x:Name="PinDefaultToggle"
-                              Grid.Column="1"
-                              VerticalAlignment="Center"
-                              Style="{StaticResource HouseToggle}"
-                              AutomationProperties.Name="Pinned previews stay on top" />
-            </Grid>
-        </Border>
+        <!-- What this PC lacks, each with its one fix. Filled in a moment
+             after the window opens; absent on a complete PC. Each optional
+             section carries its own divider, so a missing one leaves no
+             gap and no double line. -->
+        <StackPanel x:Name="MissingPiecesSection" Visibility="Collapsed">
+            <Border Style="{StaticResource Divider}" />
+            <StackPanel x:Name="MissingPiecesList" />
+        </StackPanel>
 
-        <Border Height="1"
-                Margin="0,14,0,14"
-                Background="{DynamicResource Theme.Border}" />
+        <StackPanel x:Name="SignaturesSection" Visibility="Collapsed">
+            <Border Style="{StaticResource Divider}" />
+            <TextBlock Margin="0,9,0,8"
+                       Text="Saved signatures"
+                       Style="{StaticResource RowLabel}" />
+            <StackPanel x:Name="SignaturesList" Margin="0,0,0,5" />
+        </StackPanel>
 
-        <Grid>
+        <Border Style="{StaticResource Divider}" />
+
+        <Grid Margin="0,4,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <StackPanel VerticalAlignment="Center">
-                <StackPanel Orientation="Horizontal">
-                    <TextBlock x:Name="VersionText"
-                               VerticalAlignment="Center"
-                               FontSize="{x:Static u:Metrics.FontLabel}"
-                               FontWeight="SemiBold"
-                               Foreground="{DynamicResource Theme.TextSecondary}" />
-                    <Button x:Name="UpdateLink"
-                            Margin="6,0,0,0"
-                            Padding="6,2"
-                            Style="{StaticResource LinkButton}"
-                            FontSize="{x:Static u:Metrics.FontLabel}"
-                            FontWeight="SemiBold"
-                            Foreground="{DynamicResource Theme.Accent}"
-                            Visibility="Collapsed"
-                            AutomationProperties.Name="Install available update" />
-                </StackPanel>
-                <TextBlock x:Name="DocumentsText"
-                           Margin="0,3,0,0"
-                           FontSize="{x:Static u:Metrics.FontCaption}"
-                           Foreground="{DynamicResource Theme.TextTertiary}" />
-            </StackPanel>
-            <StackPanel Grid.Column="1"
-                        Margin="0,0,-8,0"
-                        Orientation="Horizontal"
-                        VerticalAlignment="Center">
-                <Button x:Name="CopyDiagnosticsButton"
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <TextBlock x:Name="VersionText"
+                           VerticalAlignment="Center"
+                           FontSize="{x:Static u:Metrics.FontLabel}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource Theme.TextSecondary}" />
+                <!-- One slot after the version: the quiet fact or the action. -->
+                <TextBlock x:Name="UpToDateText"
+                           Margin="12,0,0,0"
+                           VerticalAlignment="Center"
+                           FontSize="{x:Static u:Metrics.FontLabel}"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource Theme.TextTertiary}"
+                           Text="Up to date"
+                           Visibility="Collapsed" />
+                <Button x:Name="UpdateLink"
+                        Margin="6,0,0,0"
+                        Padding="6,2"
                         Style="{StaticResource LinkButton}"
-                        Content="Copy diagnostics"
-                        AutomationProperties.Name="Copy diagnostics" />
-                <Button x:Name="OpenLogButton"
-                        Style="{StaticResource LinkButton}"
-                        Margin="2,0,0,0"
-                        Content="Open log"
-                        AutomationProperties.Name="Open log" />
+                        FontSize="{x:Static u:Metrics.FontLabel}"
+                        FontWeight="SemiBold"
+                        Foreground="{DynamicResource Theme.Accent}"
+                        Visibility="Collapsed"
+                        AutomationProperties.Name="Install available update" />
             </StackPanel>
+            <Button x:Name="CopyDiagnosticsButton"
+                    Grid.Column="1"
+                    Margin="0,0,-8,0"
+                    Style="{StaticResource LinkButton}"
+                    Content="Copy diagnostics"
+                    AutomationProperties.Name="Copy diagnostics" />
         </Grid>
     </StackPanel>
 </Window>

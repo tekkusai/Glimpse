@@ -42,6 +42,10 @@ internal sealed class TrayIcon : IDisposable
     private bool _updateCheckRunning;
     private DateTime _lastUpdateCheckAt;
     private AppUpdateRelease? _availableUpdate;
+
+    // A check has reached GitHub: only then may Settings say "Up to date".
+    private bool _updateChecked;
+
     private AppUpdateWindow? _updateWindow;
     private PreviewAccessWarningWindow? _previewAccessWarningWindow;
 
@@ -172,6 +176,7 @@ internal sealed class TrayIcon : IDisposable
         {
             var window = new SettingsWindow(
                 () => _availableUpdate,
+                () => _updateChecked,
                 ShowAvailableUpdate,
                 PickTheme);
             _settingsWindow = window;
@@ -250,6 +255,7 @@ internal sealed class TrayIcon : IDisposable
             }
 
             _availableUpdate = update;
+            _updateChecked = true;
             RefreshUpdateItem();
             if (update is not null)
             {
