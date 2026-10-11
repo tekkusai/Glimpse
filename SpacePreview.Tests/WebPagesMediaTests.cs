@@ -62,6 +62,20 @@ public sealed class WebPagesMediaTests
         Assert.Contains($"--ctl-text: {WebPagesStyleTests.Hex(Theme.OverlayText)};", lightVideo, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SeekAndVolumeAreOneSliderFilledWithTheAccent(bool isAudio)
+    {
+        var page = MediaPlayerPage.Page(isAudio, Theme.Dark);
+
+        // One fill for every slider, set where the shared look is set; no
+        // slider names a fill of its own.
+        var fills = System.Text.RegularExpressions.Regex.Matches(page, @"--fill:\s*([^;]+);");
+        Assert.Equal("var(--accent)", Assert.Single(fills).Groups[1].Value);
+        Assert.Matches(@"input\[type=range\] \{[^}]*--fill: var\(--accent\);", page);
+    }
+
     [Fact]
     public void QueryValuesNeverBecomeMarkup()
     {
