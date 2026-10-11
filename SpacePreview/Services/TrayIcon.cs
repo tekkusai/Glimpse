@@ -96,16 +96,16 @@ internal sealed class TrayIcon : IDisposable
                 RebuildIcon();
                 AddIcon();
             },
-            settingChanged: () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIconForTheme)));
+            redraw: () => Application.Current?.Dispatcher.BeginInvoke(new Action(RefreshIcon)));
         RebuildIcon();
         AddIcon();
         _ = CheckForUpdatesAfterStartupAsync();
     }
 
     // The taskbar's own theme (a separate setting from app theme) picks the
-    // glyph color. Its broadcast holds up the app that sent it, so the
-    // redraw waits for this thread's next turn.
-    private void RefreshIconForTheme()
+    // glyph color, and its scale the glyph's size. A broadcast holds up the
+    // app that sent it, so the redraw waits for this thread's next turn.
+    private void RefreshIcon()
     {
         if (_disposed)
         {
