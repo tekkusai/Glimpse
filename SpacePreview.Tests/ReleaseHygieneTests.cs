@@ -230,6 +230,10 @@ public sealed class ReleaseHygieneTests
         Assert.Contains("GLIMPSE_UPDATE_KEY", release, StringComparison.Ordinal);
         Assert.Contains("Back up the key", release, StringComparison.Ordinal);
         Assert.Contains("Renaming the repository or transferring it", release, StringComparison.Ordinal);
+
+        // 2.0's updater offers 3.0.0 at once: it gets no two days.
+        Assert.Contains("3.0.0 has no such window", release, StringComparison.Ordinal);
+        Assert.Contains("Test 3.0.0 fully before it goes public.", release, StringComparison.Ordinal);
     }
 
     [Fact]
