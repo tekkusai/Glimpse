@@ -377,11 +377,14 @@ public partial class PreviewWindow
             ClearPreviewContent();
         }
 
+        // An item held under the next one is on screen too, until that one
+        // has dissolved over it.
         var shown = PreviewContent.Content as FrameworkElement;
+        var under = OutgoingContent.Content as UIElement;
         var standInShows = StandInLayer.Visibility == Visibility.Visible;
         var shownIsWeb = shown is not null && FindVisualChild<WebView2>(shown) is not null;
         var style = RevealPlan.ChooseSwap(
-            outgoingVisible: shown is not null || standInShows,
+            outgoingVisible: shown is not null || standInShows || under is not null,
             outgoingIsWeb: shownIsWeb,
             stageChanges);
         p.Plan.Swap = style;
@@ -422,6 +425,11 @@ public partial class PreviewWindow
                 if (standInShows)
                 {
                     Motion.Fade(StandInLayer, 0, Motion.Leave, easeIn: true);
+                }
+
+                if (under is not null)
+                {
+                    Motion.Fade(under, 0, Motion.Leave, easeIn: true);
                 }
 
                 RunAfter(Motion.Leave, () => EndBeat(p));

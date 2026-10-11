@@ -377,6 +377,62 @@ public sealed class RevealWindowTests
         }
     });
 
+    [Fact]
+    public Task APressBeforeTheStandInKeepsTheItemHeldUnderAStagedDocument() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            var document = Web(WebSurfaceKind.PdfViewer);
+            Fields.Call(window, "SetPreviewContent", document, null);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Equal(Visibility.Hidden, document.Visibility);
+
+            // The held item is all that shows, so it holds for the next item
+            // instead of dropping to a blank canvas.
+            Browse(window, Png(temp, "third.png"));
+            Assert.Same(held, window.OutgoingContent.Content);
+
+            var next = new Border();
+            Fields.Call(window, "SetPreviewContent", next, null);
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+            Assert.Same(next, window.PreviewContent.Content);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AFadeOutTakesTheItemHeldUnderAPageWithIt() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            var held = (UIElement)window.PreviewContent.Content;
+            Browse(window, Png(temp, "second.png"));
+            var page = Web(WebSurfaceKind.Page);
+            Fields.Call(window, "SetPreviewContent", page, null);
+            Assert.Same(held, window.OutgoingContent.Content);
+            Assert.Equal(Visibility.Visible, page.Visibility);
+
+            // A page cannot be held, so the next press fades it out. The item
+            // under it fades with it rather than showing through.
+            Browse(window, Png(temp, "third.png"));
+            Assert.Equal(0.0, (double)held.GetAnimationBaseValue(UIElement.OpacityProperty));
+            await WaitUntilAsync(() => window.OutgoingContent.Content is null);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
     /// <summary>
     /// Opens a parked, frozen stage on an item and waits until it has fully
     /// arrived and the window has faded in, so the next show is a browse step.
@@ -400,6 +456,8 @@ public sealed class RevealWindowTests
         window.ShowPreview(path, IntPtr.Zero);
         Fields.Get<CancellationTokenSource>(window, "_loadCancellation").Cancel();
     }
+
+    private static Grid Web(WebSurfaceKind kind) => new() { Children = { new StagedWebView(kind) } };
 
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
