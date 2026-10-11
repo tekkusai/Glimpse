@@ -538,13 +538,19 @@ internal static class OfficeDocumentPdfConverter
             lock (Lane)
             {
                 wanted = job.Waiters > 0;
+                if (!wanted)
+                {
+                    RemoveFromJobs(job);
+                }
             }
 
-            DiagnosticLog.Write($"office job preempted {job.SourcePath} {(wanted ? "requeued" : "dropped")}");
             if (!wanted)
             {
+                DiagnosticLog.Write($"office job stopped {job.SourcePath}: nobody is waiting");
                 return (null, true);
             }
+
+            DiagnosticLog.Write($"office job preempted {job.SourcePath} requeued");
         }
     }
 
@@ -554,6 +560,7 @@ internal static class OfficeDocumentPdfConverter
         {
             if (IsUnwanted(ticket.Job))
             {
+                RemoveFromJobs(ticket.Job);
                 ticket.Granted.TrySetResult(false);
             }
             else if (_holder is null)
@@ -603,6 +610,19 @@ internal static class OfficeDocumentPdfConverter
     private static bool IsUnwanted(OfficeConversionJob job) => job.Waiters == 0;
 
     /// <summary>
+    /// Under the lane lock, in the step that stops or ends the job: a preview
+    /// arriving after it starts a new job instead of attaching to one that
+    /// ends without output.
+    /// </summary>
+    private static void RemoveFromJobs(OfficeConversionJob job)
+    {
+        if (Jobs.TryGetValue(job.Key, out var current) && ReferenceEquals(current, job))
+        {
+            Jobs.Remove(job.Key);
+        }
+    }
+
+    /// <summary>
     /// The holder runs at Normal only while a preview waits for its first
     /// content, and at BelowNormal while its previews read what arrived. It
     /// is killed when nobody waits for it any more, or when a preview of
@@ -621,6 +641,7 @@ internal static class OfficeDocumentPdfConverter
                 foreach (var ticket in Waiting.Where(ticket => IsUnwanted(ticket.Job)).ToList())
                 {
                     Waiting.Remove(ticket);
+                    RemoveFromJobs(ticket.Job);
                     (unwatched ??= []).Add(ticket);
                 }
 
@@ -677,10 +698,7 @@ internal static class OfficeDocumentPdfConverter
         {
             job.Finished = true;
             job.Waiters = 0;
-            if (Jobs.TryGetValue(job.Key, out var current) && ReferenceEquals(current, job))
-            {
-                Jobs.Remove(job.Key);
-            }
+            RemoveFromJobs(job);
 
             registrations = [.. job.Registrations];
             job.Registrations.Clear();
