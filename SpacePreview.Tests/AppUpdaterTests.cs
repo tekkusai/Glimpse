@@ -694,6 +694,52 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
+    public Task CouldNotInstallEndsWhenTheInstallerVerifiesAgain() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture();
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(
+            release.Service(root.Path),
+            () => Away with { PreviewOpen = true },
+            isMetered: () => false,
+            launch: (_, _, _) => throw new InvalidOperationException("Windows did not start the installer."));
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        await updates.CheckNowAsync();
+        await updates.InstallNowAsync();
+        Assert.Equal("Couldn't install 3.1.0.", Caption());
+
+        // The next minute verifies the installer again. Setup ran within the
+        // day, so it waits for the user, and says only that.
+        await updates.TickAsync();
+        Assert.NotNull(updates.State.Installer);
+        Assert.Equal("3.1.0 is ready to install.", Caption());
+    });
+
+    [Fact]
+    public Task CouldNotInstallEndsWhenTheUpdateWillInstallOnItsOwn() => WpfApp.RunAsync(async () =>
+    {
+        using var scope = new UpdateSettingsScope();
+        using var release = new ReleaseFixture(publishedAt: DateTimeOffset.UtcNow.AddHours(-1));
+        using var root = new TempDirectory();
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away with { PreviewOpen = true }, isMetered: () => false, launch: NeverLaunch);
+        string? Caption() => UpdateFooter.Describe(updates.State, Settings.Current, updates.CurrentVersion, DateTimeOffset.Now).Caption;
+
+        // Install now on a fresh release, and GitHub gives no answer before the launch.
+        await updates.CheckNowAsync();
+        AgeTheLastCheck();
+        release.Offline = true;
+        await updates.InstallNowAsync();
+        Assert.Equal("Couldn't install 3.1.0.", Caption());
+
+        // GitHub answers again; the press waived the two days.
+        release.Offline = false;
+        await updates.CheckNowAsync();
+        Assert.Equal("3.1.0 installs the next time you step away.", Caption());
+    });
+
+    [Fact]
     public Task InstallNowAsksGitHubOnceMoreBeforeItLaunches() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();

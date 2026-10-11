@@ -116,8 +116,16 @@ public sealed class UpdateFooterTests
         var failed = new UpdateState { Pending = Release, InstallFailed = true };
 
         Assert.Equal(new UpdateFooter(null, FooterLink.InstallNow, "Couldn't install 3.1.0."), Describe(failed, Checked));
-        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer }, Checked).Caption);
+
+        // The installer is on disk, but GitHub gave no answer before the launch.
+        Assert.Equal("Couldn't install 3.1.0.", Describe(failed with { Installer = Installer, Unanswered = true }, Checked).Caption);
     }
+
+    [Fact]
+    public void AFailedInstallNowGivesWayOnceTheUpdateWillInstallOnItsOwn() =>
+        Assert.Equal(
+            "3.1.0 installs the next time you step away.",
+            Describe(new UpdateState { Pending = Release, Installer = Installer, InstallNowPressed = true, InstallFailed = true }, Checked).Caption);
 
     [Fact]
     public void ACheckThatGotNoAnswerSaysSoUntilOneDoes()

@@ -459,7 +459,8 @@ internal sealed class AppUpdater : IDisposable
             }
 
             DiagnosticLog.Write($"update {(download ? "downloaded" : "found on disk")} version={release.VersionText}");
-            Set(State with { Installer = installer });
+            // A failed Install now ends here: the installer verified again.
+            Set(State with { Installer = installer, InstallFailed = false });
             return installer;
         }
         catch (UpdateRejectedException ex)

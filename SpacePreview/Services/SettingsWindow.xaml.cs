@@ -558,9 +558,11 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
                     : new(state.Checking ? "Checking for updates" : null, FooterLink.None, null);
             }
 
-            return new(null, FooterLink.InstallNow, state.InstallFailed ? $"Couldn't install {version}."
+            // A failed Install now gives way once the update installs on its own.
+            return new(null, FooterLink.InstallNow, AppUpdater.InstallsWhenAway(state, settings, now)
+                ? $"{version} installs the next time you step away."
+                : state.InstallFailed ? $"Couldn't install {version}."
                 : state.Downloading && settings.InstallUpdatesAutomatically ? $"Downloading {version} in the background."
-                : AppUpdater.InstallsWhenAway(state, settings, now) ? $"{version} installs the next time you step away."
                 : $"{version} is ready to install.");
         }
 
