@@ -875,6 +875,7 @@ public partial class PreviewWindow
         }
 
         ContentReady?.Invoke(this, EventArgs.Empty);
+        WarmBrowserForPagesNearby();
     }
 
     /// <summary>
@@ -1044,6 +1045,7 @@ public partial class PreviewWindow
         StopSlideshow(restoreSize: false);
         Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
+        _pageScan?.Cancel();
         _presentation?.Plan.Supersede();
         CurrentPath = null;
         _shortcutTarget = null;

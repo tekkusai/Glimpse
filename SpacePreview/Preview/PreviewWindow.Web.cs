@@ -295,7 +295,8 @@ public partial class PreviewWindow
     /// A window that has shown a page keeps its browser for the next glance.
     /// A load starts it before its page exists: by name before the file is
     /// read, code once a grammar takes it, anything else in CreateWebView.
-    /// A pinned window never serves another glance.
+    /// An item that is not a page starts it once it shows, if its folder
+    /// holds one. A pinned window never serves another glance.
     /// </summary>
     private void WarmBrowserForNextGlance()
     {
@@ -303,6 +304,96 @@ public partial class PreviewWindow
         {
             _warmBrowser.Start(Hwnd);
         }
+    }
+
+    // A few thousand names or a fifth of a second, whichever ends first.
+    private const int PageScanEntries = 5000;
+    private static readonly TimeSpan PageScanTime = TimeSpan.FromMilliseconds(200);
+
+    // The folder or set last asked about, its answer, and a scan still asking.
+    private object? _pageScope;
+    private bool _pageScopeHoldsPage;
+    private CancellationTokenSource? _pageScan;
+
+    /// <summary>
+    /// A window that has shown only photos runs no browser, but the next
+    /// arrow may land on a page. Once an item that is not a page shows, one
+    /// scan off the UI thread asks whether its folder holds one (a
+    /// multi-selection asks its set), and the browser starts if it does.
+    /// The answer keeps until the folder changes; a hide or close stops the
+    /// scan. One scan at a time, so a share that hangs holds one thread.
+    /// </summary>
+    private async void WarmBrowserForPagesNearby()
+    {
+        if (IsPinned || _pageScan is not null || BrowseScope() is not { } scope)
+        {
+            return;
+        }
+
+        if (Equals(scope, _pageScope))
+        {
+            if (_pageScopeHoldsPage)
+            {
+                WarmBrowserForNextGlance();
+            }
+
+            return;
+        }
+
+        using var scan = new CancellationTokenSource();
+        _pageScan = scan;
+        _pageScope = null;
+        var holds = await Task.Run(() => HoldsPage(scope, scan.Token));
+        _pageScan = null;
+        if (scan.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _pageScope = scope;
+        _pageScopeHoldsPage = holds;
+
+        // A window that moved on to another folder asks again at its next reveal.
+        if (holds && Equals(scope, BrowseScope()))
+        {
+            WarmBrowserForNextGlance();
+        }
+    }
+
+    /// <summary>Where the next arrow goes: the selected set, else the shown item's folder.</summary>
+    private object? BrowseScope() =>
+        CurrentPath is { } path ? _multiSelectionPaths ?? (object?)Path.GetDirectoryName(path) : null;
+
+    /// <summary>
+    /// Whether a page opens among the first few thousand files. A folder
+    /// that can't be listed holds none.
+    /// </summary>
+    internal static bool HoldsPage(object scope, CancellationToken token)
+    {
+        var clock = Stopwatch.StartNew();
+        var seen = 0;
+        try
+        {
+            var paths = scope as IReadOnlyList<string> ?? Directory.EnumerateFiles((string)scope, "*", new EnumerationOptions());
+            foreach (var path in paths)
+            {
+                if (FileKinds.OpensAsPage(path))
+                {
+                    return true;
+                }
+
+                if (++seen == PageScanEntries || clock.Elapsed > PageScanTime || token.IsCancellationRequested)
+                {
+                    return false;
+                }
+            }
+        }
+        catch
+        {
+            // A virtual folder, a zip's inside, a share gone away: no page.
+        }
+
+        return false;
     }
 
     private StagedWebView CreateWebView(

@@ -124,7 +124,11 @@ public partial class PreviewWindow : Window
         ZoomResetButton.Click += (_, _) => ResetZoom();
         StateChanged += (_, _) => SyncNativeWindowState();
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
-        Closed += (_, _) => _warmBrowser.Stop();
+        Closed += (_, _) =>
+        {
+            _pageScan?.Cancel();
+            _warmBrowser.Stop();
+        };
         // A close past the leave gate is the app ending: placed work goes to
         // its draft now, and a sign mode still opening gives up.
         Closed += (_, _) =>
