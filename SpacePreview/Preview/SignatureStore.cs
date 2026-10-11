@@ -22,6 +22,9 @@ internal static class SignatureStore
     private const double InkScale = 3.0;
     private const double InkPenWidth = 2.2;
 
+    /// <summary>A signature or the stamp was saved or removed, from Settings or any sign session. UI thread.</summary>
+    public static event Action? Changed;
+
     public static string StampPath => AppPaths.InDataRoot("stamp.png");
 
     public static bool HasStamp => File.Exists(StampPath);
@@ -115,6 +118,8 @@ internal static class SignatureStore
         {
             // Already gone is the goal state.
         }
+
+        Changed?.Invoke();
     }
 
     /// <summary>
@@ -125,7 +130,13 @@ internal static class SignatureStore
     public static string? SaveSignatureFromStrokes(IReadOnlyList<IReadOnlyList<Point>> strokes, Color inkColor)
     {
         var ink = RenderComposite(baseImage: null, Rect.Empty, strokes, inkColor);
-        return ink is null ? null : SaveNewSignature(ink);
+        if (ink is null || SaveNewSignature(ink) is not { } saved)
+        {
+            return null;
+        }
+
+        Changed?.Invoke();
+        return saved;
     }
 
     /// <summary>Saves rendered ink as a new library entry, newest by mtime.</summary>
@@ -161,12 +172,14 @@ internal static class SignatureStore
 
             Directory.CreateDirectory(Path.GetDirectoryName(StampPath)!);
             File.WriteAllBytes(StampPath, png);
-            return true;
         }
         catch
         {
             return false;
         }
+
+        Changed?.Invoke();
+        return true;
     }
 
     /// <summary>

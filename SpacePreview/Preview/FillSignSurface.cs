@@ -185,6 +185,15 @@ internal sealed class FillSignSurface : Grid
             }
         };
 
+        // Settings, or this surface's own picker, may change the saved ink
+        // while the mode is open.
+        Loaded += (_, _) =>
+        {
+            SignatureStore.Changed -= OnStoreChanged;
+            SignatureStore.Changed += OnStoreChanged;
+        };
+        Unloaded += (_, _) => SignatureStore.Changed -= OnStoreChanged;
+
         UpdatePageChrome();
         UpdateWorkState();
     }
@@ -1298,7 +1307,7 @@ internal sealed class FillSignSurface : Grid
             CornerRadius = Metrics.RowCorner,
             Visibility = Visibility.Collapsed
         };
-        var delete = HousePill.Build("Delete", () => DeleteSignature(path));
+        var delete = HousePill.Build("Delete", () => SignatureStore.Remove(path));
         delete.Margin = new Thickness(0);
         confirm.Child = new StackPanel
         {
@@ -1333,18 +1342,26 @@ internal sealed class FillSignSurface : Grid
         return frame;
     }
 
-    private void DeleteSignature(string path)
+    /// <summary>
+    /// The saved ink changed, in this picker or in Settings. The picker lists
+    /// what is there now, and a tool holding ink that is gone is put down
+    /// instead of placing nothing. Placed ink carries its own pixels, so
+    /// deleting only changes what can be placed next.
+    /// </summary>
+    private void OnStoreChanged()
     {
-        // Already-placed ink carries its own pixels; deleting a saved
-        // signature only changes what can be placed next.
-        SignatureStore.Remove(path);
-        if (string.Equals(path, _selectedSignaturePath, StringComparison.OrdinalIgnoreCase))
+        if (_selectedSignaturePath is { } selected && !System.IO.File.Exists(selected))
         {
             _selectedSignaturePath = null;
             if (_armedTool == SignPlacementKind.Signature)
             {
                 DisarmTool();
             }
+        }
+
+        if (_armedTool == SignPlacementKind.Stamp && !SignatureStore.HasStamp)
+        {
+            DisarmTool();
         }
 
         RefreshSignaturePicker();

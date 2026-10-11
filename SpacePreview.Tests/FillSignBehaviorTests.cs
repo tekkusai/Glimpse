@@ -6,6 +6,7 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
+using SpacePreview.Services;
 
 namespace SpacePreview.Tests;
 
@@ -373,20 +374,137 @@ public sealed class FillSignBehaviorTests
                 var stored = SignatureStore.SaveSignatureFromStrokes(
                     [new List<Point> { new(0, 0), new(60, 20), new(120, 0) }],
                     Colors.Black)!;
+                File.WriteAllBytes(SignatureStore.StampPath, TopBarPng());
                 var surface = new FillSignSurface(0, 1, BlankPage());
 
-                Assert.True(surface.Place(SignPlacementKind.Signature, 0.5, 0.5));
-                var placed = surface.Placements.Single().ImagePng;
+                Assert.True(surface.Place(SignPlacementKind.Signature, 0.3, 0.3));
+                Assert.True(surface.Place(SignPlacementKind.Stamp, 0.7, 0.7));
+                var placed = surface.Placements[0].ImagePng;
                 SignatureStore.Remove(stored);
+                SignatureStore.Remove(SignatureStore.StampPath);
 
                 Assert.Empty(SignatureStore.ListSignatures());
                 Assert.False(File.Exists(stored));
-                Assert.Same(placed, surface.Placements.Single().ImagePng);
+                Assert.Same(placed, surface.Placements[0].ImagePng);
                 Assert.NotNull(SignatureStore.TryLoad(placed!));
+
+                // A save after the files went carries both, as placed: each
+                // image and its alpha.
+                var source = Path.Combine(temp.Path, "contract.pdf");
+                var output = Path.Combine(temp.Path, "contract (signed).pdf");
+                WritePdf(source, 612, 792);
+                PdfFillSignWriter.WriteSignedCopy(source, output, surface.Placements);
+                var appended = File.ReadAllText(output, Encoding.Latin1)[(int)new FileInfo(source).Length..];
+                Assert.Equal(4, Count(appended, "/Subtype /Image"));
             });
         }
         finally
         {
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    }
+
+    [Fact]
+    public async Task InkDeletedInSettingsLeavesThePickerAndPutsDownTheToolHoldingIt()
+    {
+        // Settings fixes its file at first use: let that be the run's root.
+        _ = Settings.Current;
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        try
+        {
+            await WpfApp.RunAsync(async () =>
+            {
+                var signatures = temp.CreateDirectory("signatures");
+                var kept = Path.Combine(signatures, "sig-20261010-120000-000.png");
+                var gone = Path.Combine(signatures, "sig-20261010-120100-000.png");
+                File.WriteAllBytes(kept, TopBarPng());
+                File.WriteAllBytes(gone, TopBarPng());
+                File.SetLastWriteTimeUtc(kept, DateTime.UtcNow.AddMinutes(-1));
+                File.WriteAllBytes(SignatureStore.StampPath, TopBarPng());
+
+                // Sign mode open on screen, Settings open beside it.
+                var surface = new FillSignSurface(0, 1, BlankPage());
+                var host = new Window { Left = -30000, Top = 0, Width = 800, Height = 600, ShowActivated = false, ShowInTaskbar = false, Content = surface };
+                host.Show();
+                var settings = new SettingsWindow(() => null, () => false, () => { }, _ => { }, () => []);
+                try
+                {
+                    Assert.True(await UntilAsync(() => surface.IsLoaded));
+
+                    // The newest signature in hand, and the picker open again.
+                    Click(Pill(surface, "Signature"));
+                    Click(SignatureRows(surface)[0]);
+                    Click(Pill(surface, "Signature"));
+                    Assert.Equal(SignPlacementKind.Signature, Fields.Get<SignPlacementKind?>(surface, "_armedTool"));
+                    Assert.Equal(2, SignatureRows(surface).Count);
+
+                    await DeleteInSettingsAsync(settings, gone);
+
+                    Assert.Null(Fields.Get<SignPlacementKind?>(surface, "_armedTool"));
+                    Assert.Single(SignatureRows(surface));
+                    Assert.True(surface.Place(SignPlacementKind.Signature, 0.5, 0.5));
+                    Assert.Equal(kept, surface.Placements.Single().Source!.File);
+
+                    // Ink saved elsewhere joins the open picker.
+                    SignatureStore.SaveSignatureFromStrokes([new List<Point> { new(0, 0), new(60, 20) }], Colors.Black);
+                    Assert.Equal(2, SignatureRows(surface).Count);
+
+                    // The stamp in hand goes down with its file too.
+                    Click(Pill(surface, "Stamp"));
+                    Assert.Equal(SignPlacementKind.Stamp, Fields.Get<SignPlacementKind?>(surface, "_armedTool"));
+                    await DeleteInSettingsAsync(settings, SignatureStore.StampPath);
+
+                    Assert.Null(Fields.Get<SignPlacementKind?>(surface, "_armedTool"));
+                    Assert.False(Shown(Pill(surface, "New stamp")));
+                }
+                finally
+                {
+                    settings.Close();
+                    host.Content = null;
+                    await UntilAsync(() => !surface.IsLoaded);
+                    host.Close();
+                }
+            });
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
+        }
+    }
+
+    [Fact]
+    public void TheStoreSaysWhenTheSavedInkChanges()
+    {
+        using var temp = new TempDirectory();
+        var previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+        Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", temp.Path);
+        var changes = 0;
+        void Count() => changes++;
+        SignatureStore.Changed += Count;
+        try
+        {
+            OnSta(() =>
+            {
+                var signature = SignatureStore.SaveSignatureFromStrokes([new List<Point> { new(0, 0), new(60, 20) }], Colors.Black)!;
+                Assert.Equal(1, changes);
+
+                var image = Path.Combine(temp.Path, "logo.png");
+                File.WriteAllBytes(image, TopBarPng());
+                Assert.True(SignatureStore.TryImportStamp(image));
+                Assert.Equal(2, changes);
+                Assert.False(SignatureStore.TryImportStamp(Path.Combine(temp.Path, "missing.png")));
+                Assert.Equal(2, changes);
+
+                SignatureStore.Remove(signature);
+                SignatureStore.Remove(SignatureStore.StampPath);
+                Assert.Equal(4, changes);
+            });
+        }
+        finally
+        {
+            SignatureStore.Changed -= Count;
             Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", previous);
         }
     }
@@ -456,6 +574,42 @@ public sealed class FillSignBehaviorTests
     // ------------------------------------------------------------------
 
     private static void OnSta(Action action) => Sta.Run(action);
+
+    private static async Task<bool> UntilAsync(Func<bool> condition)
+    {
+        for (var waited = 0; waited < 5000 && !condition(); waited += 20)
+        {
+            await Task.Delay(20);
+        }
+
+        return condition();
+    }
+
+    /// <summary>The open picker's saved signatures, newest first.</summary>
+    private static List<Border> SignatureRows(FillSignSurface surface) =>
+        ((StackPanel)Fields.Get<Border>(surface, "_signatureFlyout").Child).Children.OfType<Border>().ToList();
+
+    /// <summary>
+    /// The trash on that file's row in Settings, then Delete, on rows as
+    /// fresh as coming back to Settings makes them. Settings reads the ink
+    /// on a worker, and a file still open there cannot be deleted.
+    /// </summary>
+    private static async Task DeleteInSettingsAsync(SettingsWindow settings, string path)
+    {
+        Fields.Call(settings, "SyncSignatures");
+        Assert.True(await UntilAsync(() => settings.SignaturesList.Children.OfType<Grid>()
+            .All(row => ((Image)row.Children.OfType<Border>().Single().Child).Source is not null)));
+        var paths = SignatureStore.ListSignatures().ToList();
+        if (SignatureStore.HasStamp)
+        {
+            paths.Add(SignatureStore.StampPath);
+        }
+
+        var row = (Grid)settings.SignaturesList.Children[paths.IndexOf(path)];
+        Click(row.Children.OfType<Button>().Single());
+        Click((ButtonBase)row.Children.OfType<StackPanel>().Single().Children[1]);
+        Assert.False(File.Exists(path));
+    }
 
     private static PdfPreviewPage BlankPage()
     {
@@ -574,7 +728,7 @@ public sealed class FillSignBehaviorTests
         return Encode(BitmapSource.Create(16, 16, 96, 96, PixelFormats.Bgra32, null, pixels, 16 * 4));
     }
 
-    private static void WritePdf(
+    internal static void WritePdf(
         string path,
         double width,
         double height,
