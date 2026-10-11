@@ -16,9 +16,6 @@ internal sealed record Mp4CodecInfo(
         || codec.Equals("dvh1", StringComparison.OrdinalIgnoreCase)
         || codec.Equals("dvhe", StringComparison.OrdinalIgnoreCase));
 
-    public bool HasAv1Video => VideoCodecs.Any(codec =>
-        codec.Equals("av01", StringComparison.OrdinalIgnoreCase));
-
     public string DiagnosticText
     {
         get

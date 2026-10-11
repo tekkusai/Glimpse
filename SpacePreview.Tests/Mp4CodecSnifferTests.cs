@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Text;
+using SpacePreview.Preview;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
@@ -21,7 +22,6 @@ public sealed class Mp4CodecSnifferTests
         Assert.Contains("hvc1", info.VideoCodecs);
         Assert.Contains("ac-3", info.AudioCodecs);
         Assert.True(info.HasHevcVideo);
-        Assert.False(info.HasAv1Video);
         Assert.Equal("video=hvc1 audio=ac-3", info.DiagnosticText);
     }
 
@@ -41,7 +41,6 @@ public sealed class Mp4CodecSnifferTests
         Assert.Contains("avc1", info.VideoCodecs);
         Assert.Empty(info.AudioCodecs);
         Assert.False(info.HasHevcVideo);
-        Assert.False(info.HasAv1Video);
     }
 
     [Fact]
@@ -55,8 +54,18 @@ public sealed class Mp4CodecSnifferTests
 
         Assert.NotNull(info);
         Assert.Contains("av01", info.VideoCodecs);
-        Assert.True(info.HasAv1Video);
         Assert.False(info.HasHevcVideo);
+    }
+
+    [Fact]
+    public void OnlyAnHevcFailureOffersAStoreFix()
+    {
+        Assert.Same(PreviewWindow.HevcFix, PreviewWindow.MediaCodecStoreAction(new Mp4CodecInfo(["hvc1"], ["mp4a"])));
+
+        // WebView2 decodes AV1 itself; the Store extension cannot help it.
+        Assert.Null(PreviewWindow.MediaCodecStoreAction(new Mp4CodecInfo(["av01"], ["opus"])));
+        Assert.Null(PreviewWindow.MediaCodecStoreAction(new Mp4CodecInfo(["avc1"], ["mp4a"])));
+        Assert.Null(PreviewWindow.MediaCodecStoreAction(null));
     }
 
     [Fact]
