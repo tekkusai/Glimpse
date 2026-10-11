@@ -444,6 +444,14 @@ internal static class ProbeRunner
             DiagnosticLog.Write(read is null
                 ? "browse-test initial read -> NULL"
                 : $"browse-test initial read -> {Path.GetFileName(read.Path)} index={read.ViewIndex} count={read.ViewCount}");
+            if (read is not null)
+            {
+                var neighbors = await StaTask.Run(() => ExplorerSelectionService.TryGetNeighborPaths(hwnd, false, read.Path, 4));
+                DiagnosticLog.Write(neighbors is null
+                    ? "browse-test neighbors -> NULL"
+                    : $"browse-test neighbors -> {string.Join(", ", neighbors.Select(Path.GetFileName))}");
+            }
+
             foreach (var delta in new[] { 1, 1, -1, -9, 2 })
             {
                 var result = await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, false, delta));
