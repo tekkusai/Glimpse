@@ -49,7 +49,6 @@ internal readonly record struct PdfPageRect(double Left, double Bottom, double R
 internal static class PdfFillSignWriter
 {
     private const int MaxPages = 3000;
-    private const int MaxObjects = 200000;
     private const int MaxImagePixels = 24_000_000;
     private const long MaxPdfBytes = 256L * 1024 * 1024;
 
@@ -919,9 +918,7 @@ internal static class PdfFillSignWriter
 
             if ((!followed && !reader.ReadOnlyWhatIsDefinedOnce(scan))
                 || reader.Root is not { } root
-                || reader.StartXref < 0
-                || reader.ListedObjects() > MaxObjects
-                || scan.Definitions.Count > MaxObjects)
+                || reader.StartXref < 0)
             {
                 throw new SignRefusalException(UnsupportedStructure);
             }
@@ -981,9 +978,9 @@ internal static class PdfFillSignWriter
                 throw new SignRefusalException(UnsupportedStructure);
             }
 
-            // A /Count below the number of pages hides the rest from the
+            // A count below the number of pages hides the rest from the
             // viewer; one above it counts pages that are not there.
-            PageCount = Reader.DeclaredPageCount(tree.Node) ?? Pages.Count;
+            PageCount = Reader.PageCount(tree.Node);
             if (PageCount < Pages.Count)
             {
                 Pages.RemoveRange(PageCount, Pages.Count - PageCount);

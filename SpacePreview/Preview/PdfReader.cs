@@ -20,16 +20,35 @@ internal sealed class PdfString
 }
 
 /// <summary>
+/// The bytes values were read from. An object is read out of a window far
+/// larger than itself, so it keeps a copy of its own bytes and lets the
+/// window go. Positions stay the ones the window had.
+/// </summary>
+internal sealed class PdfSource(byte[] bytes)
+{
+    private byte[] _bytes = bytes;
+    private int _origin;
+
+    public ReadOnlySpan<byte> Span(int start, int end) => _bytes.AsSpan(start - _origin, end - start);
+
+    public void KeepOnly(int start, int end)
+    {
+        _bytes = _bytes[(start - _origin)..(end - _origin)];
+        _origin = start;
+    }
+}
+
+/// <summary>
 /// A dictionary, and where each entry sits in the bytes it was read from:
 /// the signer rewrites one entry of a page and copies the rest untouched.
 /// A key written twice reads as its last value, as the viewer reads it.
 /// </summary>
-internal sealed class PdfDictionary(byte[] source, int start)
+internal sealed class PdfDictionary(PdfSource source, int start)
 {
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.Ordinal);
     private HashSet<string>? _repeated;
 
-    private readonly record struct Entry(object? Value, int KeyStart, int ValueEnd);
+    private readonly record struct Entry(object? Value, int KeyStart, int ValueStart, int ValueEnd);
 
     public int End { get; private set; }
 
@@ -40,18 +59,10 @@ internal sealed class PdfDictionary(byte[] source, int start)
     public bool IsRepeated(string key) => _repeated?.Contains(key) == true;
 
     /// <summary>The value as it is written, or null when the key is absent.</summary>
-    public string? Raw(string key)
-    {
-        if (!_entries.TryGetValue(key, out var entry))
-        {
-            return null;
-        }
-
-        var lexer = new PdfLexer(source, entry.KeyStart);
-        lexer.ReadValue();
-        var valueStart = lexer.SkipWhitespace();
-        return Encoding.Latin1.GetString(source, valueStart, entry.ValueEnd - valueStart);
-    }
+    public string? Raw(string key) =>
+        _entries.TryGetValue(key, out var entry)
+            ? Encoding.Latin1.GetString(source.Span(entry.ValueStart, entry.ValueEnd))
+            : null;
 
     /// <summary>
     /// The dictionary's text with one entry replaced, or added just before
@@ -67,8 +78,8 @@ internal sealed class PdfDictionary(byte[] source, int start)
 
         var text = Encoding.Latin1.GetBytes($"/{key} {value}");
         return _entries.TryGetValue(key, out var entry)
-            ? [.. source.AsSpan(start, entry.KeyStart - start), .. text, .. source.AsSpan(entry.ValueEnd, End - entry.ValueEnd)]
-            : [.. source.AsSpan(start, End - 2 - start), (byte)' ', .. text, (byte)' ', (byte)'>', (byte)'>'];
+            ? [.. source.Span(start, entry.KeyStart), .. text, .. source.Span(entry.ValueEnd, End)]
+            : [.. source.Span(start, End - 2), (byte)' ', .. text, (byte)' ', (byte)'>', (byte)'>'];
     }
 
     public static PdfDictionary? Parse(byte[] text)
@@ -83,21 +94,21 @@ internal sealed class PdfDictionary(byte[] source, int start)
         }
     }
 
-    internal void Add(string key, object? value, int keyStart, int valueEnd)
+    internal void Add(string key, object? value, int keyStart, int valueStart, int valueEnd)
     {
         if (_entries.ContainsKey(key))
         {
             (_repeated ??= new HashSet<string>(StringComparer.Ordinal)).Add(key);
         }
 
-        _entries[key] = new Entry(value, keyStart, valueEnd);
+        _entries[key] = new Entry(value, keyStart, valueStart, valueEnd);
     }
 
     internal void Close(int end) => End = end;
 }
 
 /// <summary>An array, and each item as it is written.</summary>
-internal sealed class PdfArray(byte[] source)
+internal sealed class PdfArray(PdfSource source)
 {
     private readonly List<(int Start, int End)> _spans = [];
 
@@ -107,7 +118,7 @@ internal sealed class PdfArray(byte[] source)
 
     /// <summary>The items as they are written, a reference counting as one.</summary>
     public IEnumerable<string> Raw() =>
-        _spans.Select(span => Encoding.Latin1.GetString(source, span.Start, span.End - span.Start));
+        _spans.Select(span => Encoding.Latin1.GetString(source.Span(span.Start, span.End)));
 
     internal void Add(object? value, int itemStart, int itemEnd)
     {
@@ -116,7 +127,10 @@ internal sealed class PdfArray(byte[] source)
     }
 }
 
-/// <summary>A stream's dictionary and where its data starts. The data is read only when asked for.</summary>
+/// <summary>
+/// A stream's dictionary and where its data starts. The data is read only
+/// when asked for, and so is the member table of an object stream.
+/// </summary>
 internal sealed class PdfStream(PdfDictionary dictionary, long dataStart)
 {
     public PdfDictionary Dictionary { get; } = dictionary;
@@ -126,6 +140,23 @@ internal sealed class PdfStream(PdfDictionary dictionary, long dataStart)
     internal bool DataRead { get; set; }
 
     internal byte[]? Data { get; set; }
+
+    internal bool MembersRead { get; set; }
+
+    internal PdfMembers? Members { get; set; }
+}
+
+/// <summary>
+/// An object stream's header: each member's number and where it starts in
+/// the data, and the numbers the header gives to more than one member.
+/// </summary>
+internal sealed class PdfMembers((int Number, int Offset)[] members, int[] repeated)
+{
+    public int Count => members.Length;
+
+    public (int Number, int Offset) this[int index] => members[index];
+
+    public bool IsRepeated(int number) => Array.BinarySearch(repeated, number) >= 0;
 }
 
 internal readonly record struct PdfBox(double Left, double Bottom, double Right, double Top)
@@ -176,10 +207,20 @@ internal sealed class PdfReader
     // The viewer reads no object numbered past this.
     internal const int MaxObjectNumber = 4 * 1024 * 1024;
 
+    // The reader stops once it holds more objects than this. It reads only
+    // what lies on the way to the pages, so no real file comes near; a page
+    // tree of a million nodes is refused instead of read into memory. What
+    // the index lists is not counted: free rows and old revisions are not
+    // objects.
+    internal const int MaxObjects = 200_000;
+
     private const int TailBytes = 4096;
     private const int ScanPrefixBytes = 256 * 1024;
     private const int ScanSuffixBytes = 64 * 1024;
     private const int MaxTreeDepth = 64;
+
+    // The viewer takes no page count from this up.
+    private const int MaxPageCount = 1048575;
 
     // The viewer looks for startxref in the last 4 KB. Nearer the end than
     // this, it is certain to find it.
@@ -200,6 +241,7 @@ internal sealed class PdfReader
     private bool _formatDoubt;
     private int _startXrefFromEnd = int.MaxValue;
     private long _headerOffset;
+    private long _indexBytes;
     private int _depth;
     private ILookup<int, long>? _definitions;
     private Dictionary<int, List<XrefEntry>>? _packed;
@@ -245,7 +287,12 @@ internal sealed class PdfReader
     /// <summary>Kind 0 is free, 1 lives at an offset, 2 is entry Index of object stream StreamNumber.</summary>
     private readonly record struct XrefEntry(int Kind, long Offset, int StreamNumber, int Index);
 
-    /// <summary>A classic table's rows are read only when an object in them is asked for.</summary>
+    /// <summary>
+    /// A run of numbers a section lists, and where its rows start: in the
+    /// file for a table, in the decoded data for a stream. A row is read
+    /// only when an object in it is asked for, so a section costs nothing
+    /// for each row it claims.
+    /// </summary>
     private readonly record struct XrefRows(int First, int Count, long Offset, int Stride);
 
     private sealed class XrefSection(SectionKind kind, PdfDictionary trailer)
@@ -253,6 +300,12 @@ internal sealed class PdfReader
         public SectionKind Kind { get; } = kind;
         public PdfDictionary Trailer { get; } = trailer;
         public List<XrefRows> Rows { get; } = [];
+
+        /// <summary>For a stream: its decoded rows and their three field widths. A table's rows stay in the file.</summary>
+        public byte[]? Data { get; set; }
+        public int[] Widths { get; set; } = [];
+
+        /// <summary>What the prefix scan found. It has no rows.</summary>
         public Dictionary<int, XrefEntry> Entries { get; } = [];
 
         /// <summary>For a table: the stream its /XRefStm names.</summary>
@@ -358,7 +411,7 @@ internal sealed class PdfReader
         _objects.Clear();
         _headerOffset = 0;
         Root = null;
-        var section = new XrefSection(SectionKind.Table, new PdfDictionary([], 0));
+        var section = new XrefSection(SectionKind.Table, new PdfDictionary(new PdfSource([]), 0));
         var prefix = ReadAt(0, ScanPrefixBytes);
         IndexObjects(section, prefix, 0);
         if (_stream.Length > ScanPrefixBytes)
@@ -545,10 +598,6 @@ internal sealed class PdfReader
         return (int)Math.Min(highest, MaxObjectNumber);
     }
 
-    /// <summary>How many objects the index lists, an update counted again.</summary>
-    public int ListedObjects() =>
-        _sections.Sum(section => section.Entries.Count + section.Rows.Sum(rows => rows.Count));
-
     /// <summary>A table section's trailer or a cross-reference stream's dictionary.</summary>
     private PdfDictionary? LoadSection(long offset, bool hybrid)
     {
@@ -654,7 +703,7 @@ internal sealed class PdfReader
             var bytes = ReadAt(offset, window);
             try
             {
-                return new PdfLexer(bytes, 0).ReadValue() as PdfDictionary;
+                return new PdfLexer(bytes, 0).ReadValueAlone() as PdfDictionary;
             }
             catch (PdfTruncatedException) when (bytes.Length == window)
             {
@@ -705,47 +754,64 @@ internal sealed class PdfReader
             return false;
         }
 
+        // Every index stream of the file together is held to the size one
+        // stream may have: a chain of them cannot fill memory.
+        _indexBytes += data.Length;
+        if (_indexBytes > _maxStreamBytes)
+        {
+            return false;
+        }
+
+        section.Data = data;
+        section.Widths = w;
         var index = (xref.Dictionary.Get("Index") as PdfArray)?.Items ?? [0d, xref.Dictionary.Get("Size")];
+        var held = data.Length / rowBytes;
         var row = 0;
+        var reach = 0;
         for (var pair = 0; pair + 1 < index.Count; pair += 2)
         {
+            CheckBudget();
             if (index[pair] is not double first || index[pair + 1] is not double count
                 || first < 0 || count < 0 || first + count > MaxObjectNumber)
             {
                 return false;
             }
 
-            for (var i = 0; i < count; i++, row++)
+            var rows = (int)Math.Min(Math.Ceiling(count), held - row);
+            if (rows > 0)
             {
-                var at = (long)row * rowBytes;
-                if (at + rowBytes > data.Length)
-                {
-                    // Rows the stream promises and does not hold.
-                    _formatDoubt = true;
-                    return section.Entries.Count > 0;
-                }
+                // A number listed twice is a doubt, and only an index out of order can list one twice.
+                _formatDoubt |= first < reach && section.Rows.Any(known => first < known.First + known.Count && known.First < first + rows);
+                section.Rows.Add(new XrefRows((int)first, rows, (long)row * rowBytes, rowBytes));
+                reach = Math.Max(reach, (int)first + rows);
+                row += rows;
+            }
 
-                var kind = w[0] == 0 ? 1 : Field(data, (int)at, w[0]);
-                var second = Field(data, (int)at + w[0], w[1]);
-                var third = Field(data, (int)at + w[0] + w[1], w[2]);
-                XrefEntry? entry = kind switch
-                {
-                    0 => new XrefEntry(0, 0, 0, 0),
-                    1 => new XrefEntry(1, second, 0, 0),
-                    2 when second is >= 0 and <= MaxObjectNumber && third is >= 0 and <= int.MaxValue =>
-                        new XrefEntry(2, 0, (int)second, (int)third),
-                    _ => null
-                };
-
-                // A kind no viewer knows lists nothing. A number listed twice is a doubt.
-                if (entry is { } known && !section.Entries.TryAdd((int)first + i, known))
-                {
-                    _formatDoubt = true;
-                }
+            if (rows < count)
+            {
+                // Rows the stream promises and does not hold.
+                _formatDoubt = true;
+                return section.Rows.Count > 0;
             }
         }
 
         return true;
+    }
+
+    /// <summary>One row of an index stream. A kind no viewer knows lists nothing.</summary>
+    private static XrefEntry? ReadStreamEntry(byte[] data, int at, int[] w)
+    {
+        var kind = w[0] == 0 ? 1 : Field(data, at, w[0]);
+        var second = Field(data, at + w[0], w[1]);
+        var third = Field(data, at + w[0] + w[1], w[2]);
+        return kind switch
+        {
+            0 => new XrefEntry(0, 0, 0, 0),
+            1 => new XrefEntry(1, second, 0, 0),
+            2 when second is >= 0 and <= MaxObjectNumber && third is >= 0 and <= int.MaxValue =>
+                new XrefEntry(2, 0, (int)second, (int)third),
+            _ => null
+        };
     }
 
     private static long Field(byte[] data, int at, int width)
@@ -813,12 +879,29 @@ internal sealed class PdfReader
         // of the table's first is checked instead, at no offset at all.
         var oldest = _sections.FindLast(section => section.Kind == SectionKind.Table);
         if (first is not { } row
-            || oldest?.Hybrid?.Entries.Any(entry => entry.Value.Kind != 0 && entry.Key < row.Number) == true)
+            || (oldest?.Hybrid is { } hybrid && ListsInUseBelow(hybrid, row.Number)))
         {
             return false;
         }
 
         return ReadNumberAfter(ReadAt(row.Offset, 32), 0) == row.Number;
+    }
+
+    /// <summary>True when the section lists, in use, an object numbered below <paramref name="limit"/>.</summary>
+    private bool ListsInUseBelow(XrefSection section, int limit)
+    {
+        foreach (var rows in section.Rows)
+        {
+            for (var number = rows.First; number < Math.Min(limit, rows.First + rows.Count); number++)
+            {
+                if (Row(section, rows, number) is { Kind: not 0 })
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /// <summary>"nnnnnnnnnn ggggg n" and a two-byte line end.</summary>
@@ -925,14 +1008,20 @@ internal sealed class PdfReader
 
         foreach (var rows in section.Rows)
         {
-            if (number >= rows.First && number < rows.First + rows.Count
-                && ReadTableEntry(rows.Offset + (long)(number - rows.First) * rows.Stride) is { } row)
+            if (number >= rows.First && number < rows.First + rows.Count && Row(section, rows, number) is { } row)
             {
                 return row;
             }
         }
 
         return null;
+    }
+
+    /// <summary>The row a run holds for a number: out of a stream's decoded data, or out of the file for a table.</summary>
+    private XrefEntry? Row(XrefSection section, XrefRows rows, int number)
+    {
+        var at = rows.Offset + (long)(number - rows.First) * rows.Stride;
+        return section.Data is { } data ? ReadStreamEntry(data, (int)at, section.Widths) : ReadTableEntry(at);
     }
 
     /// <summary>
@@ -1059,7 +1148,7 @@ internal sealed class PdfReader
                     return null;
                 }
 
-                var value = lexer.ReadValue();
+                var value = lexer.ReadValueAlone();
                 if (value is PdfDictionary dictionary && lexer.TryReadStreamKeyword(out var dataStart))
                 {
                     value = new PdfStream(dictionary, offset + dataStart);
@@ -1112,7 +1201,7 @@ internal sealed class PdfReader
 
         // One build looks a packed object up by its place, another by its
         // number. The signer needs both to land on the same one.
-        if (_mode != Mode.Guess && (members[index].Number != number || members.Count(member => member.Number == number) != 1))
+        if (_mode != Mode.Guess && (members[index].Number != number || members.IsRepeated(number)))
         {
             throw new PdfUnsureException();
         }
@@ -1129,8 +1218,23 @@ internal sealed class PdfReader
         }
     }
 
-    /// <summary>An object stream's header: each member's number and where it starts in the data.</summary>
-    private List<(int Number, int Offset)>? Members(PdfStream objectStream)
+    /// <summary>
+    /// An object stream's members. The header is read once for the stream:
+    /// read again for every member asked for, a thousand pages in a stream
+    /// of twenty thousand members took seconds.
+    /// </summary>
+    private PdfMembers? Members(PdfStream objectStream)
+    {
+        if (!objectStream.MembersRead)
+        {
+            objectStream.MembersRead = true;
+            objectStream.Members = ReadMembers(objectStream);
+        }
+
+        return objectStream.Members;
+    }
+
+    private PdfMembers? ReadMembers(PdfStream objectStream)
     {
         if (objectStream.Dictionary.Get("N") is not double count
             || objectStream.Dictionary.Get("First") is not double first
@@ -1160,7 +1264,10 @@ internal sealed class PdfReader
             return null;
         }
 
-        return members;
+        // A number two members carry sits next to itself once the numbers are in order.
+        var numbers = members.Select(member => member.Number).Order().ToArray();
+        var repeated = numbers.Where((number, i) => i > 0 && number == numbers[i - 1]).Distinct().ToArray();
+        return new PdfMembers([.. members], repeated);
     }
 
     /// <summary>FlateDecode with an optional PNG predictor, which is what indexes use.</summary>
@@ -1282,14 +1389,49 @@ internal sealed class PdfReader
             : null;
 
     /// <summary>
-    /// The page count the viewer reports: the root's /Count when it is a
-    /// usable number, one for a root that is itself the page. Null leaves
-    /// the viewer counting leaves.
+    /// What a node says of its own pages, which the viewer takes on trust:
+    /// its /Count when that is a usable number, one for a node that is
+    /// itself a page. Null when it does not say.
     /// </summary>
-    public int? DeclaredPageCount(PdfDictionary root) =>
-        !root.Has("Kids") ? 1
-        : Resolve(root.Get("Count")) is double count && count >= 1 && count < 1048575 ? (int)count
+    public int? DeclaredPageCount(PdfDictionary node) =>
+        !node.Has("Kids") ? 1
+        : Resolve(node.Get("Count")) is double count && count >= 1 && count < MaxPageCount ? (int)count
         : null;
+
+    /// <summary>
+    /// The page count the viewer reports, counted as pdfium counts on the
+    /// build that renders the sign surface: what the node says of itself,
+    /// and for a node that does not say, its kids added up. So a root with
+    /// no usable /Count is not counted by its leaves: a node below it that
+    /// says 1 and holds two pages counts 1.
+    /// </summary>
+    public int PageCount(PdfDictionary node) => PageCount(node, 0);
+
+    private int PageCount(PdfDictionary node, int depth)
+    {
+        if (DeclaredPageCount(node) is { } declared)
+        {
+            return declared;
+        }
+
+        if (depth >= MaxTreeDepth || Resolve(node.Get("Kids")) is not PdfArray kids)
+        {
+            throw new PdfUnsureException();
+        }
+
+        var count = 0;
+        foreach (var kid in kids.Items)
+        {
+            CheckBudget();
+            count += Resolve(kid) is PdfDictionary child ? PageCount(child, depth + 1) : throw new PdfUnsureException();
+            if (count >= MaxPageCount)
+            {
+                throw new PdfUnsureException();
+            }
+        }
+
+        return count;
+    }
 
     /// <summary>
     /// Visits the pages in the viewer's order until <paramref name="visit"/>
@@ -1522,11 +1664,12 @@ internal sealed class PdfReader
         return read == count ? buffer : buffer[..read];
     }
 
+    /// <summary>The reader's two budgets: its time, and the objects it holds.</summary>
     private void CheckBudget()
     {
-        if (_clock.Elapsed > _budget)
+        if (_clock.Elapsed > _budget || _objects.Count > MaxObjects)
         {
-            throw new TimeoutException("The PDF reader ran out of time.");
+            throw new TimeoutException("The PDF reader ran out of time or room.");
         }
     }
 }
@@ -1535,6 +1678,7 @@ internal sealed class PdfReader
 internal sealed class PdfLexer(byte[] bytes, int position)
 {
     private int _depth;
+    private PdfSource? _source;
 
     public static bool IsSpace(byte value) => value is 0 or 9 or 10 or 12 or 13 or 32;
 
@@ -1612,6 +1756,20 @@ internal sealed class PdfLexer(byte[] bytes, int position)
 
         dataStart = position;
         return true;
+    }
+
+    /// <summary>
+    /// A value read out of a window of the file. What it keeps is a copy of
+    /// its own bytes, not the window: a page dictionary of 65 KB held the
+    /// megabyte it was read in.
+    /// </summary>
+    public object? ReadValueAlone()
+    {
+        var start = SkipWhitespace();
+        var value = ReadValue();
+        _source?.KeepOnly(start, position);
+        _source = null;
+        return value;
     }
 
     public object? ReadValue()
@@ -1707,7 +1865,7 @@ internal sealed class PdfLexer(byte[] bytes, int position)
     private PdfDictionary ReadDictionary()
     {
         Descend();
-        var dictionary = new PdfDictionary(bytes, position);
+        var dictionary = new PdfDictionary(_source ??= new PdfSource(bytes), position);
         position += 2;
         while (true)
         {
@@ -1730,8 +1888,9 @@ internal sealed class PdfLexer(byte[] bytes, int position)
                 throw new FormatException();
             }
 
+            var valueStart = SkipWhitespace();
             var value = ReadValue();
-            dictionary.Add(key.Value, value, keyStart, position);
+            dictionary.Add(key.Value, value, keyStart, valueStart, position);
         }
     }
 
@@ -1739,7 +1898,7 @@ internal sealed class PdfLexer(byte[] bytes, int position)
     {
         Descend();
         position++;
-        var values = new PdfArray(bytes);
+        var values = new PdfArray(_source ??= new PdfSource(bytes));
         while (true)
         {
             var itemStart = SkipWhitespace();

@@ -261,6 +261,74 @@ public sealed class PdfReaderTests
         Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.WriteSignedCopy(source, Path.Combine(temp.Path, "out.pdf"), [BlackStamp(1)]));
     }
 
+    // A node's /Count moves no page. The viewer finds page n by walking the
+    // leaves in order, whatever the nodes above them say they hold, and the
+    // signer's pages are those leaves in that order. Measured on pdfium over
+    // 33 trees; three of them are held here.
+    [Theory]
+    [InlineData("/Kids [20 0 R 13 0 R] /Count 3", "20:/Kids [11 0 R 12 0 R] /Count 1", new[] { 110, 120, 130 })]
+    [InlineData("/Kids [13 0 R 20 0 R] /Count 3", "20:/Kids [11 0 R 12 0 R] /Count 5", new[] { 130, 110, 120 })]
+    [InlineData("/Kids [20 0 R 13 0 R] /Count 3", "20:/Kids [21 0 R] /Count 1;21:/Kids [11 0 R 12 0 R] /Count 0", new[] { 110, 120, 130 })]
+    public void APageIsFoundByItsPlaceAmongTheLeavesWhateverANodeSaysItHolds(string root, string nodes, int[] widths)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "tree.pdf");
+        var output = Path.Combine(temp.Path, "tree-signed.pdf");
+        WriteTree(source, root, nodes);
+
+        for (var index = 0; index < widths.Length; index++)
+        {
+            Assert.Equal((widths[index], 200), ViewerPageSize(source, index));
+        }
+
+        // Ink for the second page the viewer shows goes onto that page's object.
+        var stamp = BlackStamp(1);
+        Assert.Equal(new PdfSignCheck(3, null), PdfFillSignWriter.Preflight(source));
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+        Assert.Contains("/Annots", LastDefinition(output, widths[1] / 10), StringComparison.Ordinal);
+    }
+
+    // With no usable /Count on the root the viewer does not count leaves.
+    // It adds up what each node below says of itself, and takes a node at
+    // its word. The signer counted leaves: it offered a page the viewer
+    // does not have, and disagreed with the rail's count.
+    [Theory]
+    [InlineData("/Kids [20 0 R 13 0 R]", "20:/Kids [11 0 R 12 0 R] /Count 1", 2)]
+    [InlineData("/Kids [20 0 R 13 0 R] /Count 0", "20:/Kids [21 0 R];21:/Kids [11 0 R 12 0 R] /Count 1", 2)]
+    [InlineData("/Kids [20 0 R 13 0 R]", "20:/Kids [11 0 R 12 0 R] /Count 0", 3)]
+    public void WithNoCountOnTheRootThePagesAreCountedAsTheViewerCountsThem(string root, string nodes, int count)
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "tree.pdf");
+        WriteTree(source, root, nodes);
+
+        // The viewer draws that many pages and no more.
+        Assert.NotNull(RenderOrNull(source, count - 1));
+        Assert.Null(RenderOrNull(source, count));
+        Assert.Equal(new PdfSignCheck(count, null), PdfFillSignWriter.Preflight(source));
+        Assert.ThrowsAny<Exception>(() => PdfFillSignWriter.WriteSignedCopy(source, Path.Combine(temp.Path, "out.pdf"), [BlackStamp(count)]));
+    }
+
+    // A node can say more than it holds, too. For this tree pdfium reports
+    // six pages (measured) and draws three; the last of them still signs.
+    [Fact]
+    public void ANodeThatSaysMoreThanItHoldsIsCountedAtItsWord()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "tree.pdf");
+        var output = Path.Combine(temp.Path, "tree-signed.pdf");
+        WriteTree(source, "/Kids [20 0 R 13 0 R]", "20:/Kids [11 0 R 12 0 R] /Count 5");
+
+        Assert.Equal((130, 200), ViewerPageSize(source, 2));
+        Assert.Null(RenderOrNull(source, 3));
+        Assert.Equal(new PdfSignCheck(6, null), PdfFillSignWriter.Preflight(source));
+
+        var stamp = BlackStamp(2);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
+    }
+
     // ------------------------------------------------------------------
     // Cost: the file is streamed, and a hostile one costs little.
     // ------------------------------------------------------------------
@@ -417,6 +485,29 @@ public sealed class PdfReaderTests
         }
 
         Write($"trailer\n<< /Size 9 /Root 1 0 R /XRefStm {offsets[8]} >>\nstartxref\n{table}\n%%EOF\n");
+    }
+
+    /// <summary>
+    /// Three pages of different widths (object 11 is 110 points wide, 12 is
+    /// 120, 13 is 130) under a root and the nodes given as "number:entries".
+    /// </summary>
+    private static void WriteTree(string path, string root, string nodes)
+    {
+        var file = new Raw().Obj(1, Catalog).Obj(2, $"<< /Type /Pages {root} >>").Stream(4, "");
+        foreach (var number in new[] { 11, 12, 13 })
+        {
+            file.Obj(number, $"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {number * 10} 200] /Resources << >> /Contents 4 0 R >>");
+        }
+
+        var last = 13;
+        foreach (var node in nodes.Split(';'))
+        {
+            var parts = node.Split(':');
+            last = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+            file.Obj(last, $"<< /Type /Pages /Parent 2 0 R {parts[1]} >>");
+        }
+
+        file.Save(path, file.Table($"/Size {last + 1} /Root 1 0 R"));
     }
 
     /// <summary>A PDF written piece by piece, where an object can be left out of the index.</summary>
