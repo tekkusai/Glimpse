@@ -103,7 +103,8 @@ internal readonly record struct KeyFacts
     /// <summary>The surface in front offers a selection to open; null otherwise.</summary>
     public ForegroundSelectionContext? Context { get; init; }
 
-    public bool PickerCacheReady { get; init; }
+    /// <summary>The picker in front has this selection verified; null while it has none.</summary>
+    public ExplorerSelection? PickerSelection { get; init; }
 }
 
 /// <summary>
@@ -236,7 +237,7 @@ internal static class PreviewKeyMap
                 && (space || IsNavigation(key.Vk))
                 && key.RootFileListFocus,
             Context = key.Context,
-            PickerCacheReady = key.PickerCacheReady
+            PickerSelection = key.PickerSelection
         };
 
         // Window facts describe the window the keys are going to: the pinned
@@ -295,6 +296,67 @@ internal static class PreviewKeyMap
             ? KeyAction.FollowExplorer
             : hook.Action;
     }
+
+    /// <summary>
+    /// The published state as it will be once the dispatcher has run
+    /// <paramref name="action"/> for a key that went to <paramref name="root"/>.
+    /// The hook thread answers a key before the dispatcher has run the one
+    /// before it, so it counts in what that one is certain to change: a
+    /// glance it ends, a find bar or a toolbar click it spends. The same
+    /// state comes back when the action changes nothing the keymap reads,
+    /// or nothing that is certain.
+    /// </summary>
+    public static KeyState After(KeyState state, IntPtr root, KeyAction action)
+    {
+        switch (action)
+        {
+            case KeyAction.Hide:
+            case KeyAction.HideForPickerCommit:
+            case KeyAction.ReturnToPicker:
+                return state.PreviewVisible ? state with { PreviewVisible = false } : state;
+            case KeyAction.YieldEscape:
+                return Spend(state, root, findBar: true);
+            case KeyAction.YieldEnter:
+            case KeyAction.OpenCurrent:
+                return Spend(state, root, findBar: false);
+            default:
+                return state;
+        }
+    }
+
+    // The window is picked as Facts picks it: the pinned preview the key
+    // went to, otherwise the glance.
+    private static KeyState Spend(KeyState state, IntPtr root, bool findBar)
+    {
+        for (var i = 0; i < state.Pinned.Length; i++)
+        {
+            if (root == IntPtr.Zero || state.Pinned[i].Hwnd != root)
+            {
+                continue;
+            }
+
+            if (!Armed(state.Pinned[i], findBar))
+            {
+                return state;
+            }
+
+            var pinned = (WindowKeyState[])state.Pinned.Clone();
+            pinned[i] = Spent(pinned[i], findBar);
+            return state with { Pinned = pinned };
+        }
+
+        return state.PreviewVisible && Armed(state.Preview, findBar)
+            ? state with { Preview = Spent(state.Preview, findBar) }
+            : state;
+    }
+
+    // Esc for a find bar spends the bar and the toolbar click with it; an
+    // Enter spends the click alone.
+    private static bool Armed(WindowKeyState window, bool findBar) =>
+        window.EnterYield || (findBar && window.FindBarArmed);
+
+    private static WindowKeyState Spent(WindowKeyState window, bool findBar) =>
+        window with { FindBarArmed = window.FindBarArmed && !findBar, EnterYield = false };
 
     public static KeyDecision Route(in KeyFacts f)
     {
@@ -603,7 +665,7 @@ internal static class PreviewKeyMap
         // an unverified picker selection: it passes and remembers the press.
         if (context.IsFileDialog)
         {
-            return f.PickerCacheReady ? Claim(KeyAction.OpenPicker) : Let(KeyAction.DeferPickerOpen);
+            return f.PickerSelection is not null ? Claim(KeyAction.OpenPicker) : Let(KeyAction.DeferPickerOpen);
         }
 
         return Claim(KeyAction.Open);

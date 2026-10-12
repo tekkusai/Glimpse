@@ -61,7 +61,7 @@ public sealed class InputKeyStateTests
     [
         ("Space on Explorer with nothing open opens", At(Owner, Space), Idle, true, KeyAction.Open),
         ("Space where nothing offers a selection passes", At(Stranger, Space), Idle, false, KeyAction.None),
-        ("Space in a picker with a verified selection opens it", InPicker(Space) with { PickerCacheReady = true }, Idle, true, KeyAction.OpenPicker),
+        ("Space in a picker with a verified selection opens it", InPicker(Space) with { PickerSelection = new ExplorerSelection(@"C:\picked\file.txt", Dialog) }, Idle, true, KeyAction.OpenPicker),
         ("Space in a picker without one passes and is remembered", InPicker(Space), Idle, false, KeyAction.DeferPickerOpen),
         ("Esc during an open lookup cancels it and still reaches the app", At(Owner, Esc), Opening, false, KeyAction.CancelOpen),
         ("An arrow with nothing open is Explorer's", At(Owner, Right), Idle, false, KeyAction.None),

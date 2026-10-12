@@ -59,9 +59,11 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _fullscreenRecheckTimer;
 
     // Tests stand in for the window in front, for the shell's browse, for
-    // what the hook thread reads at a key and for the rights of another app.
+    // what the hook thread reads at a key, for the rights of another app
+    // and for the preview window going up.
     private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
     private readonly Func<int, bool, KeyPress> _readKey;
+    private readonly Action<ExplorerSelection, long> _showPreview;
     private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
         (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
     private readonly Func<IntPtr, PreviewAccessWarningInfo?> _readAccessWarning =
@@ -85,11 +87,14 @@ internal sealed class SpacePreviewController : IDisposable
     private KeyState? _keyState = KeyState.Idle;
     private long _otherKeyDowns;
 
-    // Hook thread only.
+    // Hook thread only. _keysAhead holds the keys this thread answered that
+    // change what the next key means, until the dispatcher has acted on
+    // them; _downPosted marks the keys whose press went to the dispatcher.
     private readonly SpaceKeyLatch _spaceKey = new(SpaceKeyLatch.RepeatWindowFor(SystemParameters.KeyboardDelay));
+    private readonly List<(long Number, IntPtr Root, KeyAction Action)> _keysAhead = [];
+    private readonly bool[] _downPosted = new bool[256];
     private int _spaceKeyEpochSeen;
     private long _keyNumber;
-    private long _glanceEndedAtKey;
 
     // Dispatcher only.
     private readonly HashSet<Type> _reportedKeyStateFailures = [];
@@ -136,6 +141,7 @@ internal sealed class SpacePreviewController : IDisposable
     {
         _dispatcher = dispatcher;
         _readKey = ReadKey;
+        _showPreview = ShowPreview;
         _keyboardHook = new KeyboardHook(OnKeyDown, OnKeyUp);
         _mouseHook = new MouseHook(QueueMouseDown, IsMouseActivationWindow);
         _fullscreenInputSuspension = new FullscreenInputSuspension();
@@ -144,7 +150,7 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor.SelectionChanged += OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted += OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved += OnCommonFileDialogObserved;
-        _commonFileDialogMonitor.DialogShown += OnCommonFileDialogShown;
+        _commonFileDialogMonitor.DialogBuilt += OnCommonFileDialogBuilt;
         _foregroundChanged = OnForegroundChanged;
         _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
         {
@@ -221,16 +227,23 @@ internal sealed class SpacePreviewController : IDisposable
         {
             _commonFileDialogMonitor.ObserveForeground(root);
         }
+        else
+        {
+            // A window of Glimpse's own is in front, so no dialog is. A
+            // picker keeps its watch for the glance over it; a dialog that
+            // was no picker is looked at again when it comes back.
+            _commonFileDialogMonitor.StopWatchingBuild();
+        }
 
         SyncKeyboardHook(root, processId);
         ApplyOwnerRule(root);
     }
 
     /// <summary>
-    /// A dialog that took the foreground before it was built is on screen
+    /// A dialog that took the foreground before it was built has its frame
     /// now. No foreground event says so; to Glimpse it is the same moment.
     /// </summary>
-    private void OnCommonFileDialogShown(IntPtr dialogRoot)
+    private void OnCommonFileDialogBuilt(IntPtr dialogRoot)
     {
         if (!_disposed && _foregroundRoot() == dialogRoot)
         {
@@ -560,31 +573,69 @@ internal sealed class SpacePreviewController : IDisposable
 
         var press = _readKey(vk, space && _spaceKey.IsRepeat(time));
 
-        // This thread claimed the key that ends the glance. Until the
-        // dispatcher has acted on it the published state still shows the
-        // glance, and the next arrow would be swallowed for nothing.
-        if (state.AckedKey < _glanceEndedAtKey)
+        // The dispatcher has yet to act on keys this thread already
+        // answered, and the published state does not show them. What they
+        // are certain to change counts from here: the arrow after the key
+        // that ended the glance is Explorer's, and the Esc after the one
+        // that closed a find bar ends the glance.
+        if (_keysAhead.Count > 0)
         {
-            state = state with { PreviewVisible = false };
+            state = Ahead(state);
         }
 
-        var decision = PreviewKeyMap.Route(PreviewKeyMap.Facts(press, state));
+        var facts = PreviewKeyMap.Facts(press, state);
+        var decision = PreviewKeyMap.Route(facts);
         if (space)
         {
             _spaceKey.Press(time, acted: decision.Swallow || decision.Action != KeyAction.None);
         }
 
-        var number = ++_keyNumber;
-        if (decision.Action is KeyAction.Hide or KeyAction.HideForPickerCommit or KeyAction.ReturnToPicker)
+        // A key typed into a text box is the text box's and means nothing
+        // to a preview, whatever the dispatcher knows by its turn, so
+        // nothing is posted for it. What this thread keeps for itself is
+        // done by here: the Space latch above, and at the top the end of a
+        // picker Space that still waited.
+        if (facts.Typing)
         {
-            _glanceEndedAtKey = number;
+            _downPosted[vk] = false;
+            return false;
+        }
+
+        var number = ++_keyNumber;
+        if (!ReferenceEquals(PreviewKeyMap.After(state, press.Root, decision.Action), state))
+        {
+            _keysAhead.Add((number, press.Root, decision.Action));
         }
 
         // Ahead of everything queued, in key order: the same place the key
         // had when the hook ran on the dispatcher.
         var routed = new RoutedKey(number, press, decision, stamp, _otherKeyDowns);
+        _downPosted[vk] = true;
         _dispatcher.BeginInvoke(() => OnKeyRouted(routed), DispatcherPriority.Send);
         return decision.Swallow;
+    }
+
+    /// <summary>
+    /// Keyboard hook thread. The published state with this thread's own
+    /// keys counted in, for as long as the dispatcher has not answered them.
+    /// </summary>
+    private KeyState Ahead(KeyState state)
+    {
+        var kept = 0;
+        for (var i = 0; i < _keysAhead.Count; i++)
+        {
+            var key = _keysAhead[i];
+            if (key.Number <= state.AckedKey)
+            {
+                continue;
+            }
+
+            _keysAhead[kept++] = key;
+            state = PreviewKeyMap.After(state, key.Root, key.Action);
+        }
+
+        _keysAhead.RemoveRange(kept, _keysAhead.Count - kept);
+        return state;
     }
 
     /// <summary>
@@ -622,9 +673,10 @@ internal sealed class SpacePreviewController : IDisposable
         return press with
         {
             Context = context,
-            PickerCacheReady = context is { IsFileDialog: true }
+            PickerSelection = context is { IsFileDialog: true }
                 && _commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var cached)
-                && cached is not null
+                    ? cached
+                    : null
         };
     }
 
@@ -711,7 +763,7 @@ internal sealed class SpacePreviewController : IDisposable
                 QueueOpen(facts.Context!, stamp);
                 return;
             case KeyAction.OpenPicker:
-                QueuePickerOpen(facts.Context!, stamp);
+                QueuePickerOpen(facts.Context!, facts.PickerSelection!, stamp);
                 return;
             case KeyAction.DeferPickerOpen:
                 DeferPickerOpen(facts.Context!, stamp);
@@ -830,9 +882,11 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         // Only a navigation key can owe the glance a look at what its
-        // release committed.
-        if (PreviewKeyMap.IsNavigation(vk))
+        // release committed, and only one whose press went to the
+        // dispatcher: a key typed into a text box left nothing to look at.
+        if (PreviewKeyMap.IsNavigation(vk) && _downPosted[vk])
         {
+            _downPosted[vk] = false;
             var root = NativeMethods.GetForegroundRoot();
             _dispatcher.BeginInvoke(() => OnNavigationKeyUp(vk, root), DispatcherPriority.Send);
         }
@@ -1688,43 +1742,50 @@ internal sealed class SpacePreviewController : IDisposable
         ShowPreview(selection, inputStamp);
     }
 
-    private void QueuePickerOpen(ForegroundSelectionContext context, long inputStamp)
+    // The hook thread swallowed this Space on the selection it found
+    // verified, and the press carries that selection: what opens is the
+    // file the key was pressed on. A picker being read again by the key's
+    // turn changes nothing here; if it has moved, the glance follows it
+    // once the read is back.
+    private void QueuePickerOpen(ForegroundSelectionContext context, ExplorerSelection selection, long inputStamp)
     {
         var generation = ++_openRequestGeneration;
         DiagnosticLog.Write($"space -> queued selection lookup class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
         ClearPendingFileDialogPreview();
-        _dispatcher.BeginInvoke(() => ShowCommonFileDialogPreview(context, generation, inputStamp));
+        _dispatcher.BeginInvoke(() => ShowCommonFileDialogPreview(context, selection, generation, inputStamp));
     }
 
     // Fail open. The hook never waits for UI Automation and never swallows
     // Space on an unverified dialog selection. It remembers this one press
-    // briefly; a completed, still-owned refresh may fulfill it off the hook.
+    // briefly, for the answer to one read of the picker: the read already
+    // under way, or one asked for here. That answer is the file the press
+    // was on. The answer to any later read is a file the user moved to
+    // afterwards, and opens nothing.
     private void DeferPickerOpen(ForegroundSelectionContext context, long inputStamp)
     {
         var generation = ++_openRequestGeneration;
-        ArmPendingFileDialogPreview(context.Hwnd, generation, inputStamp);
-        _commonFileDialogMonitor.RequestRefresh(context.Hwnd, settleMilliseconds: 0);
+        var refresh = _commonFileDialogMonitor.PendingRefresh(context.Hwnd);
+        if (refresh == 0)
+        {
+            refresh = _commonFileDialogMonitor.RequestRefresh(context.Hwnd, settleMilliseconds: 0);
+        }
+
+        ArmPendingFileDialogPreview(context.Hwnd, generation, inputStamp, refresh);
         DiagnosticLog.Write("space -> file dialog selection not ready, deferred and passed through");
     }
 
     private void ShowCommonFileDialogPreview(
         ForegroundSelectionContext context,
+        ExplorerSelection selection,
         int requestGeneration,
         long inputStamp)
     {
         if (_disposed
             || requestGeneration != _openRequestGeneration
-            || NativeMethods.GetForegroundRoot() != context.Hwnd
+            || _foregroundRoot() != context.Hwnd
             || !CommonFileDialogSelectionService.HasFileListFocus(context.Hwnd))
         {
             DiagnosticLog.Write("queued file dialog preview -> focus changed, dropping");
-            return;
-        }
-
-        if (!_commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var selection)
-            || selection is null)
-        {
-            DiagnosticLog.Write("queued file dialog preview -> selection changed, dropping");
             return;
         }
 
@@ -1735,16 +1796,17 @@ internal sealed class SpacePreviewController : IDisposable
 
         _lastSelectionSource = SelectionSource.CommonFileDialog;
         _previewOwnerRootHwnd = context.Hwnd;
-        ShowPreview(selection, inputStamp);
+        _showPreview(selection, inputStamp);
     }
 
-    private void ArmPendingFileDialogPreview(IntPtr dialogRoot, int requestGeneration, long inputStamp)
+    private void ArmPendingFileDialogPreview(IntPtr dialogRoot, int requestGeneration, long inputStamp, long refresh)
     {
         var intent = _pendingFileDialogPreview.Arm(
             dialogRoot,
             requestGeneration,
             Environment.TickCount64,
-            inputStamp);
+            inputStamp,
+            refresh);
 
         _dispatcher.BeginInvoke(async () =>
         {
@@ -1758,7 +1820,8 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void OnCommonFileDialogRefreshCompleted(
         IntPtr dialogRoot,
-        ExplorerSelection? selection)
+        ExplorerSelection? selection,
+        long refresh)
     {
         var intent = _pendingFileDialogPreview.Current;
         if (intent is null)
@@ -1770,42 +1833,25 @@ internal sealed class SpacePreviewController : IDisposable
         var ownershipValid = !_disposed
             && _keyboardHookWanted
             && !_fullscreenInputSuspension.IsSuspended
-            && NativeMethods.GetForegroundRoot() == dialogRoot
+            && _foregroundRoot() == dialogRoot
             && CommonFileDialogSelectionService.HasFileListFocus(dialogRoot);
-
-        // A newer WinEvent may have started another refresh between this
-        // completion and our dispatcher callback. Keep the intent armed; the
-        // next completion either fulfills it or the deadline expires it.
-        ExplorerSelection? latestSelection = null;
-        var cacheReady = selection is not null
-            && ownershipValid
-            && _commonFileDialogMonitor.TryGetCachedSelection(
-                dialogRoot,
-                out latestSelection)
-            && latestSelection is not null;
         var decision = _pendingFileDialogPreview.EvaluateRefresh(
             intent,
             dialogRoot,
+            refresh,
             _openRequestGeneration,
             now,
             DeferredFileDialogPreviewLifetimeMilliseconds,
             ownershipValid,
-            selectionAvailable: selection is not null,
-            cacheReady);
-        if (decision is DeferredFileDialogPreviewDecision.Ignore
-            or DeferredFileDialogPreviewDecision.Wait)
+            selectionAvailable: selection is not null);
+        if (decision == DeferredFileDialogPreviewDecision.Ignore)
         {
             return;
         }
 
-        if (decision == DeferredFileDialogPreviewDecision.Drop)
+        if (decision == DeferredFileDialogPreviewDecision.Drop || selection is null)
         {
             DiagnosticLog.Write("deferred file dialog preview -> ownership or request changed, dropping");
-            return;
-        }
-
-        if (latestSelection is null)
-        {
             return;
         }
 
@@ -1815,7 +1861,7 @@ internal sealed class SpacePreviewController : IDisposable
             dialogRoot,
             SelectionSource.CommonFileDialog,
             CommonFileDialogSelectionService.DialogWindowClass);
-        ShowCommonFileDialogPreview(context, intent.RequestGeneration, intent.InputStamp);
+        ShowCommonFileDialogPreview(context, selection, intent.RequestGeneration, intent.InputStamp);
     }
 
     private void ClearPendingFileDialogPreview() => _pendingFileDialogPreview.Cancel();
@@ -2415,7 +2461,7 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor.SelectionChanged -= OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted -= OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved -= OnCommonFileDialogObserved;
-        _commonFileDialogMonitor.DialogShown -= OnCommonFileDialogShown;
+        _commonFileDialogMonitor.DialogBuilt -= OnCommonFileDialogBuilt;
         ClearPendingFileDialogPreview();
         _commonFileDialogMonitor.Dispose();
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;

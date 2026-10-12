@@ -106,14 +106,26 @@ public sealed class KeyboardHookThreadTests
     /// it is not Glimpse's any more and passes unread.
     /// </summary>
     [Fact]
-    public void AKeyAfterStopIsNotReadEvenBeforeTheUnhook()
+    public async Task AKeyAfterStopIsNotReadEvenBeforeTheUnhook()
     {
         var windows = new FakeHookDelivery();
         var read = 0;
+        using var inFirstKey = new ManualResetEventSlim();
+        using var stopAsked = new ManualResetEventSlim();
         var hook = new KeyboardHook(
             (_, _, _) =>
             {
-                Interlocked.Increment(ref read);
+                // The first key holds the hook thread until Stop has been
+                // asked for and a second key waits behind it. Windows hands
+                // a waiting key to a thread before the thread's own posted
+                // messages, so that key arrives ahead of the unhook.
+                if (Interlocked.Increment(ref read) == 1)
+                {
+                    inFirstKey.Set();
+                    stopAsked.Wait(TimeSpan.FromSeconds(5));
+                    FakeHookDelivery.WaitForAKeyBehindThisOne();
+                }
+
                 return true;
             },
             _ => { });
@@ -122,13 +134,18 @@ public sealed class KeyboardHookThreadTests
         {
             hook.Start();
             Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)));
-            Assert.True(windows.Deliver(NativeMethods.WM_KEYDOWN, Space, timeoutMilliseconds: 3000));
+            var first = Task.Run(() => windows.Deliver(NativeMethods.WM_KEYDOWN, Space, timeoutMilliseconds: 5000));
+            Assert.True(inFirstKey.Wait(TimeSpan.FromSeconds(5)), "The first key never reached the hook.");
 
-            // Stop has been asked for; the hook thread has not unhooked yet.
-            Fields.Set(hook, "_wanted", false);
+            hook.Stop();
+            var second = Task.Run(() => windows.Deliver(NativeMethods.WM_KEYDOWN, Space, timeoutMilliseconds: 5000));
+            stopAsked.Set();
 
-            Assert.False(windows.Deliver(NativeMethods.WM_KEYDOWN, Space, timeoutMilliseconds: 3000));
+            Assert.True(await first, "The key before Stop was not read.");
+            Assert.False(await second, "A key that arrived after Stop was read.");
+            Assert.True(windows.Removed.Wait(TimeSpan.FromSeconds(5)), "Stop never took the hook out.");
             Assert.Equal(1, Volatile.Read(ref read));
+            Assert.Equal(2, windows.KeysBeforeRemoval);
         }
         finally
         {
@@ -148,11 +165,13 @@ internal sealed class FakeHookDelivery
 {
     private const uint WmKey = NativeMethods.WM_APP + 0x71;
     private const int GwlpWndProc = -4;
+    private const uint QsSendMessage = 0x0040;
     private static readonly IntPtr MessageOnlyParent = new(-3);
     private static readonly WindowProc Proc = OnMessage;
     private static readonly IntPtr ProcPointer = Marshal.GetFunctionPointerForDelegate(Proc);
-    private static readonly ConcurrentDictionary<IntPtr, NativeMethods.LowLevelKeyboardProc> Hooks = new();
+    private static readonly ConcurrentDictionary<IntPtr, (NativeMethods.LowLevelKeyboardProc Proc, FakeHookDelivery Owner)> Hooks = new();
     private IntPtr _window;
+    private int _keys;
 
     private delegate IntPtr WindowProc(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam);
 
@@ -172,6 +191,23 @@ internal sealed class FakeHookDelivery
     public int RemoveThread { get; private set; }
 
     public int InstallCount { get; private set; }
+
+    /// <summary>How many keys had reached the hook when it was last removed.</summary>
+    public int KeysBeforeRemoval { get; private set; }
+
+    /// <summary>
+    /// For the hook's callback: returns once another key has been delivered
+    /// to this thread and waits for the callback to return.
+    /// </summary>
+    public static void WaitForAKeyBehindThisOne()
+    {
+        var waited = Stopwatch.StartNew();
+        while ((GetQueueStatus(QsSendMessage) >> 16 & QsSendMessage) == 0)
+        {
+            Assert.True(waited.ElapsedMilliseconds < 5000, "No second key was delivered.");
+            Thread.Yield();
+        }
+    }
 
     public void Attach(KeyboardHook hook)
     {
@@ -204,7 +240,7 @@ internal sealed class FakeHookDelivery
 
         var window = CreateWindowEx(0, "STATIC", null, 0, 0, 0, 0, 0, MessageOnlyParent, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
         Assert.NotEqual(IntPtr.Zero, window);
-        Hooks[window] = proc;
+        Hooks[window] = (proc, this);
         SetWindowLongPtr(window, GwlpWndProc, ProcPointer);
         InstallThread = Environment.CurrentManagedThreadId;
         InstallCount++;
@@ -219,6 +255,7 @@ internal sealed class FakeHookDelivery
     {
         Hooks.TryRemove(hook, out _);
         RemoveThread = Environment.CurrentManagedThreadId;
+        KeysBeforeRemoval = _keys;
         Installed.Reset();
         Removed.Set();
         return DestroyWindow(hook);
@@ -226,11 +263,14 @@ internal sealed class FakeHookDelivery
 
     private static IntPtr OnMessage(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)
     {
-        if (message != WmKey || !Hooks.TryGetValue(hwnd, out var proc))
+        if (message != WmKey || !Hooks.TryGetValue(hwnd, out var hook))
         {
             return DefWindowProc(hwnd, message, wParam, lParam);
         }
 
+        // Counted on the installing thread, which also removes the hook.
+        hook.Owner._keys++;
+        var proc = hook.Proc;
         var data = new NativeMethods.KBDLLHOOKSTRUCT
         {
             vkCode = (uint)lParam.ToInt32(),
@@ -272,6 +312,9 @@ internal sealed class FakeHookDelivery
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyWindow(IntPtr hwnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetQueueStatus(uint flags);
 
     [DllImport("user32.dll", EntryPoint = "SendMessageTimeoutW")]
     private static extern IntPtr SendMessageTimeout(

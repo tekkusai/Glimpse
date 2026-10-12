@@ -37,7 +37,12 @@ internal readonly record struct KeyPress
     /// <summary>What the window in front offers to open. Only a fresh bare Space asks.</summary>
     public ForegroundSelectionContext? Context { get; init; }
 
-    public bool PickerCacheReady { get; init; }
+    /// <summary>
+    /// A picker's verified selection at this press; null when none was
+    /// ready. The press carries it, so what opens is the file the key was
+    /// pressed on, whatever the picker is asked afterwards.
+    /// </summary>
+    public ExplorerSelection? PickerSelection { get; init; }
 }
 
 /// <summary>One preview window as the keymap reads it.</summary>

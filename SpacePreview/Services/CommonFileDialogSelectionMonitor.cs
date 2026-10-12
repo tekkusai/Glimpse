@@ -7,10 +7,12 @@ namespace SpacePreview.Services;
 /// Keeps a verified dialog selection ready before Space is pressed. The
 /// keyboard hook never performs UI Automation or filesystem work; if this
 /// cache is missing or being refreshed, the dialog receives Space normally.
-/// The controller reports foreground changes. A dialog is looked at once,
-/// when it is on screen: it is a file picker or it is nothing to Glimpse.
-/// Focus and selection events are watched only in a picker's own process,
-/// only while it is in front, and nothing here runs on a clock.
+/// The controller reports foreground changes. A dialog in front is a file
+/// picker or it is nothing to Glimpse, and while it is nothing, the one
+/// thing that could make it a picker is listened for: its thread creating
+/// the frame or the shell view. Focus and selection events are watched only
+/// in a picker's own process, only while it is in front, and nothing here
+/// runs on a clock.
 /// Everything here runs on the dispatcher except
 /// <see cref="TryGetCachedSelection"/>, which the keyboard hook thread calls.
 /// </summary>
@@ -23,24 +25,32 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     private sealed record DialogCache(
         IntPtr Cached,
         IntPtr Pending,
-        IntPtr Disabled,
         ExplorerSelection? Selection)
     {
-        public static readonly DialogCache Empty = new(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, null);
+        public static readonly DialogCache Empty = new(IntPtr.Zero, IntPtr.Zero, null);
     }
 
     private const int SelectionSettleMilliseconds = 35;
-    private const uint EventObjectShow = 0x8002;
+    private const uint EventObjectCreate = 0x8000;
     private const int ObjectIdWindow = 0;
 
     private readonly Dispatcher _dispatcher;
+
+    // Tests stand in for the picker's own answer and shorten the wait for it.
+    private readonly Func<IntPtr, ExplorerSelection?> _lookUp = CommonFileDialogSelectionService.TryGetSelection;
+    private readonly TimeSpan _lookupTimeout = TimeSpan.FromSeconds(2);
     private readonly NativeMethods.WinEventProc _objectChanged;
-    private readonly NativeMethods.WinEventProc _windowShown;
+    private readonly NativeMethods.WinEventProc _windowCreated;
+
+    // A dialog is asked one thing at a time, and one that did not answer in
+    // time is not asked again: a provider that hangs holds one worker.
+    private readonly Dictionary<IntPtr, Task> _lookups = [];
+    private readonly HashSet<IntPtr> _unanswering = [];
     private IntPtr _objectHook;
     private uint _objectHookProcessId;
     private IntPtr _verifiedDialog;
-    private IntPtr _shownHook;
-    private IntPtr _awaitedDialog;
+    private IntPtr _buildHook;
+    private IntPtr _unbuiltDialog;
     private DialogCache _cache = DialogCache.Empty;
     private long _refreshGeneration;
     private bool _disposed;
@@ -49,17 +59,19 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     {
         _dispatcher = dispatcher;
         _objectChanged = OnObjectChanged;
-        _windowShown = OnWindowShown;
+        _windowCreated = OnWindowCreated;
     }
 
     public event Action<IntPtr, ExplorerSelection?>? SelectionChanged;
-    public event Action<IntPtr, ExplorerSelection?>? RefreshCompleted;
+
+    /// <summary>A read of the picker is back: the dialog, what is selected, and the read's number.</summary>
+    public event Action<IntPtr, ExplorerSelection?, long>? RefreshCompleted;
 
     /// <summary>A file picker is in front and confirmed.</summary>
     public event Action<IntPtr>? DialogObserved;
 
-    /// <summary>A dialog that came to the front unbuilt has shown itself: look at it now.</summary>
-    public event Action<IntPtr>? DialogShown;
+    /// <summary>A dialog in front that was no picker has built a frame or a view: look at it now.</summary>
+    public event Action<IntPtr>? DialogBuilt;
 
     /// <summary>The dialog is the confirmed picker this monitor watches.</summary>
     public bool IsWatching(IntPtr root) => root != IntPtr.Zero && _verifiedDialog == root;
@@ -85,29 +97,39 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         return true;
     }
 
-    public void RequestRefresh(IntPtr dialogRoot, int settleMilliseconds = SelectionSettleMilliseconds)
+    /// <summary>
+    /// Asks for the picker to be read again. Returns the number of this
+    /// read, which <see cref="RefreshCompleted"/> names when its answer is
+    /// back; 0 when the dialog is not read at all.
+    /// </summary>
+    public long RequestRefresh(IntPtr dialogRoot, int settleMilliseconds = SelectionSettleMilliseconds)
     {
         if (_disposed
             || dialogRoot == IntPtr.Zero
+            || _unanswering.Contains(dialogRoot)
             || !CommonFileDialogSelectionService.IsFilePicker(dialogRoot))
         {
-            return;
+            return 0;
         }
 
         var generation = Interlocked.Increment(ref _refreshGeneration);
-        var cache = _cache;
-        if (cache.Disabled == dialogRoot)
-        {
-            return;
-        }
-
-        // Another dialog's timeout no longer applies.
-        Volatile.Write(ref _cache, cache with { Disabled = IntPtr.Zero, Pending = dialogRoot });
+        Volatile.Write(ref _cache, _cache with { Pending = dialogRoot });
 
         _dispatcher.BeginInvoke(
             () => _ = RefreshAsync(dialogRoot, generation, Math.Max(0, settleMilliseconds)),
             DispatcherPriority.Background);
+        return generation;
     }
+
+    /// <summary>
+    /// The number of the read under way for this dialog; 0 when none is.
+    /// It was asked for at the picker's last move and nothing has been heard
+    /// from the picker since, so its answer is what is selected now.
+    /// </summary>
+    public long PendingRefresh(IntPtr dialogRoot) =>
+        dialogRoot != IntPtr.Zero && _cache.Pending == dialogRoot
+            ? Interlocked.Read(ref _refreshGeneration)
+            : 0;
 
     private async Task RefreshAsync(IntPtr dialogRoot, long generation, int settleMilliseconds)
     {
@@ -116,11 +138,24 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             await Task.Delay(settleMilliseconds);
         }
 
-        if (_disposed || generation != Interlocked.Read(ref _refreshGeneration))
+        // One question per dialog at a time. The answer that is out was
+        // asked before this request, so it is waited for and not used: the
+        // newest request asks again.
+        if (generation == Interlocked.Read(ref _refreshGeneration)
+            && _lookups.TryGetValue(dialogRoot, out var answered))
+        {
+            await answered;
+        }
+
+        if (_disposed
+            || generation != Interlocked.Read(ref _refreshGeneration)
+            || _unanswering.Contains(dialogRoot))
         {
             return;
         }
 
+        var back = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _lookups[dialogRoot] = back.Task;
         ExplorerSelection? selection;
         try
         {
@@ -128,22 +163,19 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             // unresponsive during teardown. Keep them away from the shell STA
             // used by Explorer and stop querying this dialog after one bounded
             // timeout; Space then remains native for the rest of its lifetime.
-            selection = await Task.Run(() =>
-                    CommonFileDialogSelectionService.TryGetSelection(dialogRoot))
-                .WaitAsync(TimeSpan.FromSeconds(2));
+            selection = await Task.Run(() => _lookUp(dialogRoot)).WaitAsync(_lookupTimeout);
         }
         catch (TimeoutException)
         {
-            if (_disposed || generation != Interlocked.Read(ref _refreshGeneration))
-            {
-                return;
-            }
-
-            Volatile.Write(ref _cache, new DialogCache(dialogRoot, IntPtr.Zero, dialogRoot, null));
-
-            DiagnosticLog.Write($"file dialog selection timed out hwnd=0x{dialogRoot.ToInt64():X}; disabled for dialog");
+            GiveUpOn(dialogRoot);
             return;
         }
+        finally
+        {
+            _lookups.Remove(dialogRoot);
+            back.SetResult();
+        }
+
         if (_disposed || generation != Interlocked.Read(ref _refreshGeneration))
         {
             return;
@@ -158,7 +190,30 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             SelectionChanged?.Invoke(dialogRoot, selection);
         }
 
-        RefreshCompleted?.Invoke(dialogRoot, selection);
+        RefreshCompleted?.Invoke(dialogRoot, selection, generation);
+    }
+
+    // The wait counts against the dialog, whatever has been asked of it
+    // since. A glance over it would go on showing a file the user has left,
+    // so the picker is reported as having nothing selected.
+    private void GiveUpOn(IntPtr dialogRoot)
+    {
+        _unanswering.RemoveWhere(dialog => !NativeMethods.IsWindow(dialog));
+        _unanswering.Add(dialogRoot);
+        DiagnosticLog.Write($"file dialog selection timed out hwnd=0x{dialogRoot.ToInt64():X}; disabled for dialog");
+
+        var cache = _cache;
+        if (_disposed || (cache.Cached != dialogRoot && cache.Pending != dialogRoot))
+        {
+            return;
+        }
+
+        var hadSelection = cache.Cached == dialogRoot && cache.Selection is not null;
+        Volatile.Write(ref _cache, new DialogCache(dialogRoot, IntPtr.Zero, null));
+        if (hadSelection)
+        {
+            SelectionChanged?.Invoke(dialogRoot, null);
+        }
     }
 
     /// <summary>Called for every foreground root outside this process.</summary>
@@ -169,8 +224,8 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             return;
         }
 
-        // Whatever was waited for, the foreground has moved on or this is it.
-        StopAwaitingShow();
+        // Whatever was listened to, the foreground has moved on or this is it.
+        StopWatchingBuild();
         if (!CommonFileDialogSelectionService.HasDialogWindowClass(root))
         {
             _verifiedDialog = IntPtr.Zero;
@@ -183,30 +238,26 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             return;
         }
 
-        // #32770 is also a message box, an installer page, a whole app. A
-        // dialog takes the foreground while it is still hidden, builds its
-        // controls, and shows itself when its first work is done: a picker
-        // has its frame by then, a dialog without one never gets it. So a
-        // dialog is judged once, on screen. One still hidden is waited for
-        // by its own show event, and nothing looks at it a second time.
+        // #32770 is also a message box, an installer page, a whole app, and
+        // an Open dialog that has not built its frame yet. A picker takes
+        // the foreground before it builds one, and in what order it then
+        // shows itself is the app's own code: a dialog can be on screen
+        // before it has a frame. So a dialog that is no picker is listened
+        // to for as long as it stays in front, for the frame or the view
+        // alone, and nothing looks at it again without one.
         _verifiedDialog = IntPtr.Zero;
-        var picker = CommonFileDialogSelectionService.IsFilePicker(root);
-        if (!picker && !NativeMethods.IsWindowVisible(root))
+        if (!CommonFileDialogSelectionService.IsFilePicker(root))
         {
-            AwaitShow(root);
+            WatchBuild(root);
 
-            // Shown between the look and the hook: no event is coming.
-            if (NativeMethods.IsWindowVisible(root))
+            // Built between the look and the hook: no event is coming.
+            if (!CommonFileDialogSelectionService.IsFilePicker(root))
             {
-                StopAwaitingShow();
-                picker = CommonFileDialogSelectionService.IsFilePicker(root);
+                UnwatchDialogProcess();
+                return;
             }
-        }
 
-        if (!picker)
-        {
-            UnwatchDialogProcess();
-            return;
+            StopWatchingBuild();
         }
 
         _verifiedDialog = root;
@@ -215,39 +266,49 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         RequestRefresh(root, settleMilliseconds: 0);
     }
 
-    private void AwaitShow(IntPtr root)
+    private void WatchBuild(IntPtr root)
     {
+        // No thread means no window; with neither named the hook would
+        // hear every window on the PC.
         var threadId = NativeMethods.GetWindowThreadProcessId(root, out var processId);
-        _shownHook = NativeMethods.SetWinEventHook(
-            EventObjectShow,
-            EventObjectShow,
+        if (threadId == 0)
+        {
+            return;
+        }
+
+        _buildHook = NativeMethods.SetWinEventHook(
+            EventObjectCreate,
+            EventObjectCreate,
             IntPtr.Zero,
-            _windowShown,
+            _windowCreated,
             processId,
             threadId,
             NativeMethods.WINEVENT_OUTOFCONTEXT);
-        if (_shownHook == IntPtr.Zero)
+        if (_buildHook == IntPtr.Zero)
         {
-            DiagnosticLog.Write("dialog show event unavailable; a file dialog opening now is not served");
+            DiagnosticLog.Write("dialog create event unavailable; a file dialog opening now is not served");
             return;
         }
 
-        _awaitedDialog = root;
+        _unbuiltDialog = root;
     }
 
-    private void StopAwaitingShow()
+    /// <summary>The dialog that was no picker has left the front: nothing listens to it.</summary>
+    public void StopWatchingBuild()
     {
-        if (_shownHook == IntPtr.Zero)
+        if (_buildHook == IntPtr.Zero)
         {
             return;
         }
 
-        NativeMethods.UnhookWinEvent(_shownHook);
-        _shownHook = IntPtr.Zero;
-        _awaitedDialog = IntPtr.Zero;
+        NativeMethods.UnhookWinEvent(_buildHook);
+        _buildHook = IntPtr.Zero;
+        _unbuiltDialog = IntPtr.Zero;
     }
 
-    private void OnWindowShown(
+    // Every window the dialog's thread creates while it is in front and no
+    // picker comes through here. Only the two that make it one go further.
+    private void OnWindowCreated(
         IntPtr hWinEventHook,
         uint eventType,
         IntPtr hwnd,
@@ -258,14 +319,23 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     {
         if (_disposed
             || hwnd == IntPtr.Zero
-            || hwnd != _awaitedDialog
             || idObject != ObjectIdWindow)
         {
             return;
         }
 
-        StopAwaitingShow();
-        DialogShown?.Invoke(hwnd);
+        var className = NativeMethods.GetClassNameString(hwnd);
+        if (!className.Equals(CommonFileDialogSelectionService.ShellViewWindowClass, StringComparison.OrdinalIgnoreCase)
+            && !className.Equals(CommonFileDialogSelectionService.ExplorerFrameWindowClass, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var dialog = _unbuiltDialog;
+        if (dialog != IntPtr.Zero && NativeMethods.GetRoot(hwnd) == dialog)
+        {
+            DialogBuilt?.Invoke(dialog);
+        }
     }
 
     private void WatchDialogProcess(IntPtr root)
@@ -367,7 +437,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 
         _disposed = true;
         Interlocked.Increment(ref _refreshGeneration);
-        StopAwaitingShow();
+        StopWatchingBuild();
         UnwatchDialogProcess();
         _verifiedDialog = IntPtr.Zero;
         Volatile.Write(ref _cache, DialogCache.Empty);

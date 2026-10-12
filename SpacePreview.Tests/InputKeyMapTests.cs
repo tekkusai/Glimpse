@@ -36,7 +36,7 @@ public sealed class InputKeyMapTests
         // Opening.
         ("Space on Explorer opens the selection", Idle(Space, ExplorerWindow), true, KeyAction.Open),
         ("Space on the desktop opens the selection", Idle(Space, Desktop), true, KeyAction.Open),
-        ("Space in a picker with a verified selection opens it", Idle(Space, Picker) with { PickerCacheReady = true }, true, KeyAction.OpenPicker),
+        ("Space in a picker with a verified selection opens it", Idle(Space, Picker) with { PickerSelection = new ExplorerSelection(@"C:\picked\file.txt", Picker.Hwnd) }, true, KeyAction.OpenPicker),
         ("Space in a picker without one passes and remembers the press", Idle(Space, Picker), false, KeyAction.DeferPickerOpen),
         ("Space where nothing offers a selection passes", Idle(Space, null), false, KeyAction.None),
         ("Shift+Space never opens", Idle(Space, ExplorerWindow) with { Shift = true }, false, KeyAction.None),

@@ -54,12 +54,12 @@ public sealed class DeferredFileDialogPreviewIntentTests
         var decision = slot.EvaluateRefresh(
             intent,
             Dialog,
+            completedRefresh: 0,
             currentGeneration: 10,
             now: 1100,
             lifetimeMilliseconds: 1200,
             ownershipValid: false,
-            selectionAvailable: true,
-            cacheReady: true);
+            selectionAvailable: true);
 
         Assert.Equal(DeferredFileDialogPreviewDecision.Drop, decision);
         Assert.Null(slot.Current);
@@ -100,46 +100,49 @@ public sealed class DeferredFileDialogPreviewIntentTests
         Assert.Null(slot.Current);
     }
 
+    // The press asked for one read of the picker. That read coming back
+    // with nothing selected settles it: nothing was there to preview, and
+    // whatever is selected later is not what the press was on.
     [Fact]
-    public void NullCompletionWaitsThenVerifiedCompletionFulfills()
+    public void ItsOwnReadWithNothingSelectedSpendsTheIntent()
     {
         var slot = new DeferredFileDialogPreviewIntentSlot();
-        var intent = slot.Arm(Dialog, requestGeneration: 10, armedAtTick: 1000);
+        var intent = slot.Arm(Dialog, requestGeneration: 10, armedAtTick: 1000, refresh: 7);
 
-        var waiting = slot.EvaluateRefresh(
+        var decision = slot.EvaluateRefresh(
             intent,
             Dialog,
+            completedRefresh: 7,
             currentGeneration: 10,
             now: 1050,
             lifetimeMilliseconds: 1200,
             ownershipValid: true,
-            selectionAvailable: false,
-            cacheReady: false);
+            selectionAvailable: false);
 
-        Assert.Equal(DeferredFileDialogPreviewDecision.Wait, waiting);
-        Assert.Same(intent, slot.Current);
-        Assert.Equal(DeferredFileDialogPreviewDecision.Fulfill, Complete(slot, intent, 1100));
+        Assert.Equal(DeferredFileDialogPreviewDecision.Drop, decision);
+        Assert.Null(slot.Current);
+    }
+
+    // A later read means the picker moved after the press (a click on
+    // another file). Its answer is that file, which nobody pressed Space on.
+    [Fact]
+    public void TheAnswerToALaterReadDropsTheIntent()
+    {
+        var slot = new DeferredFileDialogPreviewIntentSlot();
+        var intent = slot.Arm(Dialog, requestGeneration: 10, armedAtTick: 1000, refresh: 7);
+
+        Assert.Equal(DeferredFileDialogPreviewDecision.Drop, Complete(slot, intent, now: 1050, refresh: 8));
+        Assert.Null(slot.Current);
     }
 
     [Fact]
-    public void NewerRefreshInFlightWaitsWithoutConsumingIntent()
+    public void TheAnswerToItsOwnReadFulfillsTheIntent()
     {
         var slot = new DeferredFileDialogPreviewIntentSlot();
-        var intent = slot.Arm(Dialog, requestGeneration: 10, armedAtTick: 1000);
+        var intent = slot.Arm(Dialog, requestGeneration: 10, armedAtTick: 1000, refresh: 7);
 
-        var waiting = slot.EvaluateRefresh(
-            intent,
-            Dialog,
-            currentGeneration: 10,
-            now: 1050,
-            lifetimeMilliseconds: 1200,
-            ownershipValid: true,
-            selectionAvailable: true,
-            cacheReady: false);
-
-        Assert.Equal(DeferredFileDialogPreviewDecision.Wait, waiting);
-        Assert.Same(intent, slot.Current);
-        Assert.Equal(DeferredFileDialogPreviewDecision.Fulfill, Complete(slot, intent, 1100));
+        Assert.Equal(DeferredFileDialogPreviewDecision.Fulfill, Complete(slot, intent, now: 1050, refresh: 7));
+        Assert.Null(slot.Current);
     }
 
     [Fact]
@@ -157,12 +160,12 @@ public sealed class DeferredFileDialogPreviewIntentTests
         var decision = replacedSlot.EvaluateRefresh(
             replaced,
             completedDialog: new IntPtr(456),
+            completedRefresh: 0,
             currentGeneration: 10,
             now: 1100,
             lifetimeMilliseconds: 1200,
             ownershipValid: true,
-            selectionAvailable: true,
-            cacheReady: true);
+            selectionAvailable: true);
 
         Assert.Equal(DeferredFileDialogPreviewDecision.Drop, decision);
         Assert.Null(replacedSlot.Current);
@@ -172,14 +175,15 @@ public sealed class DeferredFileDialogPreviewIntentTests
         DeferredFileDialogPreviewIntentSlot slot,
         DeferredFileDialogPreviewIntent intent,
         long now,
-        int currentGeneration = 10) =>
+        int currentGeneration = 10,
+        long refresh = 0) =>
         slot.EvaluateRefresh(
             intent,
             Dialog,
+            refresh,
             currentGeneration,
             now,
             lifetimeMilliseconds: 1200,
             ownershipValid: true,
-            selectionAvailable: true,
-            cacheReady: true);
+            selectionAvailable: true);
 }

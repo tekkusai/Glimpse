@@ -3,19 +3,24 @@ namespace SpacePreview.Services;
 internal enum DeferredFileDialogPreviewDecision
 {
     Ignore,
-    Wait,
     Drop,
     Fulfill
 }
 
+/// <param name="Refresh">
+/// The read of the picker this press asked for. Its answer is the file the
+/// press was on; the answer to any later read is not.
+/// </param>
 internal sealed record DeferredFileDialogPreviewIntent(
     IntPtr DialogRoot,
     int RequestGeneration,
     long ArmedAtTick,
-    long InputStamp = 0)
+    long InputStamp = 0,
+    long Refresh = 0)
 {
     public bool IsCurrent(
         IntPtr completedDialog,
+        long completedRefresh,
         int currentGeneration,
         long now,
         int lifetimeMilliseconds)
@@ -25,6 +30,7 @@ internal sealed record DeferredFileDialogPreviewIntent(
             && RequestGeneration == currentGeneration
             && DialogRoot != IntPtr.Zero
             && DialogRoot == completedDialog
+            && Refresh == completedRefresh
             && lifetimeMilliseconds > 0
             && age >= 0
             && age <= lifetimeMilliseconds;
@@ -34,8 +40,9 @@ internal sealed record DeferredFileDialogPreviewIntent(
 /// <summary>
 /// One immutable deferred picker request, exchanged atomically between the
 /// keyboard hook thread and the dispatcher. The hook thread only cancels;
-/// the dispatcher arms, evaluates and expires. Refreshes may wait without
-/// consuming it; every cancel, expiry, replacement, or fulfillment is
+/// the dispatcher arms, evaluates and expires. The first read of the picker
+/// to complete settles it: its own read with a selection fulfills, anything
+/// else drops. Every cancel, expiry, replacement, or fulfillment is
 /// compare-and-swap guarded.
 /// </summary>
 internal sealed class DeferredFileDialogPreviewIntentSlot
@@ -48,13 +55,15 @@ internal sealed class DeferredFileDialogPreviewIntentSlot
         IntPtr dialogRoot,
         int requestGeneration,
         long armedAtTick,
-        long inputStamp = 0)
+        long inputStamp = 0,
+        long refresh = 0)
     {
         var intent = new DeferredFileDialogPreviewIntent(
             dialogRoot,
             requestGeneration,
             armedAtTick,
-            inputStamp);
+            inputStamp,
+            refresh);
         Interlocked.Exchange(ref _current, intent);
         return intent;
     }
@@ -66,12 +75,12 @@ internal sealed class DeferredFileDialogPreviewIntentSlot
     public DeferredFileDialogPreviewDecision EvaluateRefresh(
         DeferredFileDialogPreviewIntent intent,
         IntPtr completedDialog,
+        long completedRefresh,
         int currentGeneration,
         long now,
         int lifetimeMilliseconds,
         bool ownershipValid,
-        bool selectionAvailable,
-        bool cacheReady)
+        bool selectionAvailable)
     {
         if (!ReferenceEquals(Current, intent))
         {
@@ -80,18 +89,15 @@ internal sealed class DeferredFileDialogPreviewIntentSlot
 
         if (!intent.IsCurrent(
                 completedDialog,
+                completedRefresh,
                 currentGeneration,
                 now,
                 lifetimeMilliseconds)
-            || !ownershipValid)
+            || !ownershipValid
+            || !selectionAvailable)
         {
             Cancel(intent);
             return DeferredFileDialogPreviewDecision.Drop;
-        }
-
-        if (!selectionAvailable || !cacheReady)
-        {
-            return DeferredFileDialogPreviewDecision.Wait;
         }
 
         return Cancel(intent)

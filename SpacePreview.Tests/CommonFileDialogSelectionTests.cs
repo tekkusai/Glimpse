@@ -104,20 +104,6 @@ public sealed class CommonFileDialogSelectionTests
         Assert.Equal([nested], resolved, StringComparer.OrdinalIgnoreCase);
     }
 
-    // UI Automation into another process can hang during teardown. The
-    // picker is read off the hook and off the shell STA, with one bounded
-    // wait per dialog; the hook only ever looks at the finished cache (the
-    // keymap table covers the fail-open press, the hook theory the ban).
-    [Fact]
-    public void PickerReadsAreBoundedAndOffTheHook()
-    {
-        var monitor = TestSource.Read(@"SpacePreview\Services\CommonFileDialogSelectionMonitor.cs");
-
-        Assert.Contains("Task.Run", monitor, StringComparison.Ordinal);
-        Assert.Contains("WaitAsync(TimeSpan.FromSeconds(2))", monitor, StringComparison.Ordinal);
-        Assert.Contains("RefreshCompleted?.Invoke(dialogRoot, selection)", monitor, StringComparison.Ordinal);
-    }
-
     [Fact]
     public void PickerModeRemovesActionsThatCompeteWithTheModalDialog()
     {

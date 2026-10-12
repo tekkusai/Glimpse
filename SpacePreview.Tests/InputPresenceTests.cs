@@ -10,7 +10,8 @@ namespace SpacePreview.Tests;
 /// "Glimpse is present only where there are files." The keyboard hook is in
 /// while Explorer, the desktop, a file picker or Glimpse itself is in front,
 /// and a dialog counts as a file picker only once its own windows say so.
-/// A dialog that is not one is judged once and never looked at again.
+/// A dialog that is not one is looked at again only when it builds the
+/// frame that would make it one, and only while it is in front.
 /// </summary>
 public sealed class InputPresenceTests
 {
@@ -123,59 +124,125 @@ public sealed class InputPresenceTests
 
     /// <summary>
     /// A dialog takes the foreground while it is still hidden and holds only
-    /// its template's controls; an Open dialog builds its frame after that
-    /// and then shows itself. 3.0.0 bridged the gap by looking again every
-    /// 500 ms, at every dialog. The dialog's own show event is the signal.
+    /// its template's controls; an Open dialog builds its frame after that.
+    /// 3.0.0 bridged the gap by looking again every 500 ms, at every dialog.
+    /// The frame being created is the signal. A real Open dialog on this PC
+    /// created 46 other windows first; none of those is a reason to look.
     /// </summary>
     [Fact]
-    public Task AFilePickerStillBeingBuiltIsServedFromTheMomentItShowsItself() => WithController(async controller =>
+    public Task AFilePickerStillBeingBuiltIsServedFromTheMomentItHasItsFrame() => WithController(async controller =>
+    {
+        var windows = new FakeHookDelivery();
+        windows.Attach(Fields.Get<KeyboardHook>(controller, "_keyboardHook"));
+        var monitor = PickerMonitor(controller);
+        var looks = 0;
+        monitor.DialogBuilt += _ => looks++;
+        using var picker = TestWindow.Root("#32770");
+        using var nameBox = picker.Child("Static");
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => picker.Handle));
+
+        Fields.Call(controller, "OnForeground", picker.Handle);
+        Assert.False(monitor.IsWatching(picker.Handle));
+        Assert.False(windows.Installed.IsSet, "The hook was in over a dialog nothing had shown to be a file picker.");
+
+        using var button = picker.Child("Button");
+        using var edit = picker.Child("Edit");
+        await Task.Delay(100);
+        Assert.Equal(0, looks);
+
+        using var frame = picker.Child(Frame);
+        await Until(() => monitor.IsWatching(picker.Handle));
+
+        Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)), "The hook did not come in when the picker had its frame.");
+        Assert.Equal(1, looks);
+        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
+    });
+
+    /// <summary>
+    /// The fault: a dialog on screen with no frame yet was judged once and
+    /// not looked at again while it stayed in front. Nothing in Windows
+    /// makes a picker build its frame before it shows itself; the order is
+    /// the app's. A real GetOpenFileName dialog whose hook shows it, run on
+    /// this PC: foreground, show, and only then SHELLDLL_DefView.
+    /// </summary>
+    [Fact]
+    public Task AFilePickerThatBuildsItsViewAfterItIsOnScreenIsServedOnceItHasOne() => WithController(async controller =>
     {
         var windows = new FakeHookDelivery();
         windows.Attach(Fields.Get<KeyboardHook>(controller, "_keyboardHook"));
         using var picker = TestWindow.Root("#32770");
         using var nameBox = picker.Child("Static");
+        picker.Show();
         Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => picker.Handle));
 
         Fields.Call(controller, "OnForeground", picker.Handle);
         Assert.False(PickerMonitor(controller).IsWatching(picker.Handle));
         Assert.False(windows.Installed.IsSet, "The hook was in over a dialog nothing had shown to be a file picker.");
 
-        using var frame = picker.Child(Frame);
-        picker.Show();
+        using var view = picker.Child(View);
         await Until(() => PickerMonitor(controller).IsWatching(picker.Handle));
 
-        Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)), "The hook did not come in when the picker showed itself.");
-        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(PickerMonitor(controller), "_shownHook"));
+        Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)), "The hook did not come in when the picker had its view.");
     });
 
+    /// <summary>
+    /// A message box, an installer page, a dialog-based app: listened to
+    /// for a frame and nothing else, and only while it is in front.
+    /// </summary>
     [Fact]
-    public Task ADialogWithNoFilesIsJudgedOnceAndLeftAlone() => WithController(async controller =>
+    public Task ADialogWithNoFilesIsListenedToForAFrameAndOnlyWhileItIsInFront() => WithController(async controller =>
     {
         var monitor = PickerMonitor(controller);
-        var shown = 0;
-        monitor.DialogShown += _ => shown++;
+        using var dialog = TestWindow.Root("#32770");
+        using var message = dialog.Child("Static");
+        using var elsewhere = TestWindow.Root("GlimpseTestSomeOtherApp");
 
-        // Already on screen: judged at once, and nothing is left listening.
-        using var onScreen = TestWindow.Root("#32770");
-        using var message = onScreen.Child("Static");
-        onScreen.Show();
-        Fields.Call(controller, "OnForeground", onScreen.Handle);
-        Assert.False(monitor.IsWatching(onScreen.Handle));
-        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_shownHook"));
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => dialog.Handle));
+        Fields.Call(controller, "OnForeground", dialog.Handle);
+        Assert.False(monitor.IsWatching(dialog.Handle));
+        Assert.NotEqual(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
         Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_objectHook"));
 
-        // Still hidden: one wait for its show event, then the same.
-        using var hidden = TestWindow.Root("#32770");
-        using var ok = hidden.Child("Button");
-        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => hidden.Handle));
-        Fields.Call(controller, "OnForeground", hidden.Handle);
-        Assert.NotEqual(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_shownHook"));
+        // It leaves the front: nothing is left listening, and what it builds
+        // from here on is looked at when it comes back.
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => elsewhere.Handle));
+        Fields.Call(controller, "OnForeground", elsewhere.Handle);
+        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
+        using var frame = dialog.Child(Frame);
+        await Task.Delay(100);
+        Assert.False(monitor.IsWatching(dialog.Handle));
 
-        hidden.Show();
-        await Until(() => shown > 0);
-        Assert.False(monitor.IsWatching(hidden.Handle));
-        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_shownHook"));
-        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_objectHook"));
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => dialog.Handle));
+        Fields.Call(controller, "OnForeground", dialog.Handle);
+        Assert.True(monitor.IsWatching(dialog.Handle));
+        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
+    });
+
+    /// <summary>
+    /// A window of Glimpse's own in front is the dialog leaving the front
+    /// too: a pinned preview that is clicked, the settings window. The
+    /// picker monitor is not told about Glimpse's windows, so the listening
+    /// ends here.
+    /// </summary>
+    [Fact]
+    public Task ADialogWithNoFilesIsNotListenedToBehindAWindowOfGlimpsesOwn() => WithController(controller =>
+    {
+        var monitor = PickerMonitor(controller);
+        using var dialog = TestWindow.Root("#32770");
+        using var message = dialog.Child("Static");
+        using var own = TestWindow.Root("GlimpseTestOwnWindow");
+
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => dialog.Handle));
+        Fields.Call(controller, "OnForeground", dialog.Handle);
+        Assert.NotEqual(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
+
+        // The test's windows are this process's: from here they are Glimpse's own.
+        Fields.Set(controller, "_processId", (uint)Environment.ProcessId);
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => own.Handle));
+        Fields.Call(controller, "OnForeground", own.Handle);
+
+        Assert.Equal(IntPtr.Zero, Fields.Get<IntPtr>(monitor, "_buildHook"));
+        return Task.CompletedTask;
     });
 
     /// <summary>
@@ -309,7 +376,10 @@ public sealed class InputPresenceTests
 
         // The test's windows stand in for another app's, and a foreground
         // watch is in place, so a window Glimpse does not serve takes the
-        // hook out. The keyboard hook is only ever the fake one.
+        // hook out. The keyboard hook is only ever a fake one: a picker
+        // coming forward asks for the hook, and no test may put a real one
+        // on this PC's keyboard. A test that watches the hook attaches its own.
+        new FakeHookDelivery().Attach(Fields.Get<KeyboardHook>(controller, "_keyboardHook"));
         Fields.Set(controller, "_processId", 0u);
         Fields.Set(controller, "_foregroundHook", new IntPtr(1));
         try
