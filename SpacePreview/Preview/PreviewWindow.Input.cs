@@ -27,12 +27,20 @@ public partial class PreviewWindow
     /// </summary>
     public void NoteFindShortcut()
     {
-        if (FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2.Source: { } source }
-            && IsPdfViewerSource(source))
+        if (TakesFindShortcut)
         {
             _escapeYieldsToContent = true;
         }
     }
+
+    /// <summary>
+    /// Ctrl+F opens a find bar in what is on show. Published with the
+    /// rest of the window's facts, so a key pressed before the dispatcher
+    /// has noted the Ctrl+F is still judged with the bar open.
+    /// </summary>
+    internal bool TakesFindShortcut =>
+        FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2.Source: { } source }
+        && IsPdfViewerSource(source);
 
     /// <summary>True once per armed find bar: this Esc is the content's.</summary>
     public bool ConsumeEscapeYield()

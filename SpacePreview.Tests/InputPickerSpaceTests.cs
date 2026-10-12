@@ -76,6 +76,68 @@ public sealed class InputPickerSpaceTests
         Assert.Null(Waiting(controller).Current);
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task ASpaceIsNotAnsweredByAReadStartedBeforeTheDispatcherRunsTheKey(bool readCompletesBeforeKey) => WithController(async controller =>
+    {
+        using var picker = TestPicker.Open();
+        var lookups = new PickerLookups { Selected = picker.Selected("pressed.txt") };
+        lookups.Attach(Monitor(controller));
+        var shown = Shown(controller);
+
+        lookups.Hold();
+        try
+        {
+            BringToFront(controller, picker);
+            await HookThread.Until(() => lookups.Started == 1, "The picker was never asked.");
+            DispatcherOperation? delayedKey = null;
+            void DelayKey(object? sender, DispatcherHookEventArgs args)
+            {
+                if (args.Operation.Priority == DispatcherPriority.Send)
+                {
+                    delayedKey = args.Operation;
+                    delayedKey.Priority = DispatcherPriority.Inactive;
+                }
+            }
+
+            var hooks = Dispatcher.CurrentDispatcher.Hooks;
+            if (readCompletesBeforeKey)
+                hooks.OperationPosted += DelayKey;
+            try
+            {
+                Assert.False(HookThread.KeyDown(controller, InList(picker)));
+            }
+            finally
+            {
+                hooks.OperationPosted -= DelayKey;
+            }
+            Assert.Null(Waiting(controller).Current);
+
+            // The click reaches the monitor before the key reaches the dispatcher.
+            lookups.Selected = picker.Selected("clicked.txt");
+            SelectionMoved(controller, picker);
+            if (!readCompletesBeforeKey)
+                await HookThread.Idle();
+
+            lookups.Release();
+            await HookThread.Until(() => Cached(controller, picker) == lookups.Selected, "The picker was never read again.");
+            if (readCompletesBeforeKey)
+            {
+                Assert.NotNull(delayedKey);
+                delayedKey.Priority = DispatcherPriority.Send;
+            }
+            await HookThread.Idle();
+
+            Assert.Empty(shown);
+            Assert.Null(Waiting(controller).Current);
+        }
+        finally
+        {
+            lookups.Release();
+        }
+    });
+
     /// <summary>
     /// A press that lands while the picker is being read waits for that
     /// read and no other. It was asked for at the picker's last move and

@@ -105,6 +105,9 @@ internal readonly record struct KeyFacts
 
     /// <summary>The picker in front has this selection verified; null while it has none.</summary>
     public ExplorerSelection? PickerSelection { get; init; }
+
+    /// <summary>The picker's latest read when the key was pressed. A later read is not this press's answer.</summary>
+    public long PickerRefresh { get; init; }
 }
 
 /// <summary>
@@ -237,7 +240,8 @@ internal static class PreviewKeyMap
                 && (space || IsNavigation(key.Vk))
                 && key.RootFileListFocus,
             Context = key.Context,
-            PickerSelection = key.PickerSelection
+            PickerSelection = key.PickerSelection,
+            PickerRefresh = key.PickerRefresh
         };
 
         // Window facts describe the window the keys are going to: the pinned
@@ -302,7 +306,8 @@ internal static class PreviewKeyMap
     /// <paramref name="action"/> for a key that went to <paramref name="root"/>.
     /// The hook thread answers a key before the dispatcher has run the one
     /// before it, so it counts in what that one is certain to change: a
-    /// glance it ends, a find bar or a toolbar click it spends. The same
+    /// glance it ends, a find bar it opens, a find bar or a toolbar click
+    /// it spends. The same
     /// state comes back when the action changes nothing the keymap reads,
     /// or nothing that is certain.
     /// </summary>
@@ -314,6 +319,8 @@ internal static class PreviewKeyMap
             case KeyAction.HideForPickerCommit:
             case KeyAction.ReturnToPicker:
                 return state.PreviewVisible ? state with { PreviewVisible = false } : state;
+            case KeyAction.NoteFind:
+                return Find(state, root);
             case KeyAction.YieldEscape:
                 return Spend(state, root, findBar: true);
             case KeyAction.YieldEnter:
@@ -322,6 +329,33 @@ internal static class PreviewKeyMap
             default:
                 return state;
         }
+    }
+
+    // Ctrl+F opens the bar where the content has one. In 3.0.0 the bar
+    // was noted before the hook answered, so a reader could press Ctrl+F
+    // and type at once. The window is picked as Spend picks it.
+    private static KeyState Find(KeyState state, IntPtr root)
+    {
+        for (var i = 0; i < state.Pinned.Length; i++)
+        {
+            if (root == IntPtr.Zero || state.Pinned[i].Hwnd != root)
+            {
+                continue;
+            }
+
+            if (!state.Pinned[i].TakesFind || state.Pinned[i].FindBarArmed)
+            {
+                return state;
+            }
+
+            var pinned = (WindowKeyState[])state.Pinned.Clone();
+            pinned[i] = pinned[i] with { FindBarArmed = true };
+            return state with { Pinned = pinned };
+        }
+
+        return state.PreviewVisible && state.Preview.TakesFind && !state.Preview.FindBarArmed
+            ? state with { Preview = state.Preview with { FindBarArmed = true } }
+            : state;
     }
 
     // The window is picked as Facts picks it: the pinned preview the key

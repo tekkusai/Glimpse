@@ -14,7 +14,7 @@ namespace SpacePreview.Services;
 /// in a picker's own process, only while it is in front, and nothing here
 /// runs on a clock.
 /// Everything here runs on the dispatcher except
-/// <see cref="TryGetCachedSelection"/>, which the keyboard hook thread calls.
+/// <see cref="TryGetCachedSelection"/> and <see cref="LatestRefresh"/>, which the keyboard hook thread calls.
 /// </summary>
 internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 {
@@ -25,7 +25,8 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     private sealed record DialogCache(
         IntPtr Cached,
         IntPtr Pending,
-        ExplorerSelection? Selection)
+        ExplorerSelection? Selection,
+        long Refresh = 0)
     {
         public static readonly DialogCache Empty = new(IntPtr.Zero, IntPtr.Zero, null);
     }
@@ -113,7 +114,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         }
 
         var generation = Interlocked.Increment(ref _refreshGeneration);
-        Volatile.Write(ref _cache, _cache with { Pending = dialogRoot });
+        Volatile.Write(ref _cache, _cache with { Pending = dialogRoot, Refresh = generation });
 
         _dispatcher.BeginInvoke(
             () => _ = RefreshAsync(dialogRoot, generation, Math.Max(0, settleMilliseconds)),
@@ -130,6 +131,15 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         dialogRoot != IntPtr.Zero && _cache.Pending == dialogRoot
             ? Interlocked.Read(ref _refreshGeneration)
             : 0;
+
+    /// <summary>The latest read for this dialog, whether still out or back. Safe for the hook thread.</summary>
+    public long LatestRefresh(IntPtr dialogRoot)
+    {
+        var cache = Volatile.Read(ref _cache);
+        return dialogRoot != IntPtr.Zero
+            && dialogRoot == (cache.Pending != IntPtr.Zero ? cache.Pending : cache.Cached)
+                ? cache.Refresh : 0;
+    }
 
     private async Task RefreshAsync(IntPtr dialogRoot, long generation, int settleMilliseconds)
     {
@@ -209,7 +219,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         }
 
         var hadSelection = cache.Cached == dialogRoot && cache.Selection is not null;
-        Volatile.Write(ref _cache, new DialogCache(dialogRoot, IntPtr.Zero, null));
+        Volatile.Write(ref _cache, new DialogCache(dialogRoot, IntPtr.Zero, null, cache.Refresh));
         if (hadSelection)
         {
             SelectionChanged?.Invoke(dialogRoot, null);

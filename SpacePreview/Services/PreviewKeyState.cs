@@ -43,6 +43,9 @@ internal readonly record struct KeyPress
     /// pressed on, whatever the picker is asked afterwards.
     /// </summary>
     public ExplorerSelection? PickerSelection { get; init; }
+
+    /// <summary>The picker's latest read at this press. A later read is not its answer.</summary>
+    public long PickerRefresh { get; init; }
 }
 
 /// <summary>One preview window as the keymap reads it.</summary>
@@ -53,6 +56,9 @@ internal readonly record struct WindowKeyState
     public bool FillSign { get; init; }
     public bool TextFocus { get; init; }
     public bool FindBarArmed { get; init; }
+
+    /// <summary>Ctrl+F opens a find bar in the content on show: the PDF viewer and nothing else.</summary>
+    public bool TakesFind { get; init; }
     public bool GridOpen { get; init; }
     public bool EscapeLayer { get; init; }
     public bool HeaderZoom { get; init; }

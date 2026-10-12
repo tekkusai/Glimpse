@@ -119,6 +119,59 @@ public sealed class InputQuickKeysTests
             $"{promise}: expected swallow={row.Swallow} action={row.Action}, got swallow={second.Swallow} action={second.Action} (first={first.Action})");
     }
 
+    /// <summary>
+    /// The fault: Ctrl+F was not counted in, so a key pressed before the
+    /// dispatcher had noted it was judged with the bar closed, taken by
+    /// the hook, and by its turn belonged to a bar that never got it:
+    /// an Esc to close the bar again, an Enter to repeat the last search.
+    /// These are the keys whose answer the bar changes.
+    /// </summary>
+    [Theory]
+    [InlineData(Esc)]
+    [InlineData(Space)]
+    [InlineData(Enter)]
+    public void AKeyRightAfterCtrlFInAPdfIsAnsweredWithTheFindBarOpen(int vk)
+    {
+        var pdf = Showing with { Preview = Showing.Preview with { TakesFind = true } };
+        var open = pdf with { Preview = pdf.Preview with { FindBarArmed = true } };
+
+        var find = PreviewKeyMap.Route(PreviewKeyMap.Facts(At(Glance, 'F') with { Ctrl = true }, pdf));
+        Assert.Equal(new KeyDecision(false, KeyAction.NoteFind), find);
+        var ahead = PreviewKeyMap.After(pdf, Glance, find.Action);
+
+        var withBarOpen = PreviewKeyMap.Route(PreviewKeyMap.Facts(At(Glance, vk), open));
+        Assert.NotEqual(withBarOpen, PreviewKeyMap.Route(PreviewKeyMap.Facts(At(Glance, vk), pdf)));
+        Assert.Equal(withBarOpen, PreviewKeyMap.Route(PreviewKeyMap.Facts(At(Glance, vk), ahead)));
+    }
+
+    [Fact]
+    public void EscRightAfterCtrlFInAPdfGoesToTheFindBar()
+    {
+        var pdf = Showing with { Preview = Showing.Preview with { TakesFind = true } };
+
+        var ahead = PreviewKeyMap.After(pdf, Glance, KeyAction.NoteFind);
+
+        Assert.Equal(
+            new KeyDecision(false, KeyAction.YieldEscape),
+            PreviewKeyMap.Route(PreviewKeyMap.Facts(At(Glance, Esc), ahead)));
+    }
+
+    [Fact]
+    public void CtrlFOverContentWithNoFindBarChangesNothing()
+    {
+        Assert.Same(Showing, PreviewKeyMap.After(Showing, Glance, KeyAction.NoteFind));
+
+        // One window's Ctrl+F is not another's.
+        var pinnedPdf = Showing with
+        {
+            Pinned = [new WindowKeyState { Hwnd = Pin, Browsable = true, TakesFind = true }]
+        };
+        var ahead = PreviewKeyMap.After(pinnedPdf, Pin, KeyAction.NoteFind);
+        Assert.True(ahead.Pinned[0].FindBarArmed);
+        Assert.False(ahead.Preview.FindBarArmed);
+        Assert.False(pinnedPdf.Pinned[0].FindBarArmed);
+    }
+
     [Fact]
     public void EveryPairIsStatedOnce()
     {

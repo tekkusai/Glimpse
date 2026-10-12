@@ -508,6 +508,7 @@ internal sealed class SpacePreviewController : IDisposable
         FillSign = window.IsFillSignModeActive,
         TextFocus = window.HasTextFocus,
         FindBarArmed = window.IsEscapeYieldArmed,
+        TakesFind = window.TakesFindShortcut,
         GridOpen = window.IsGridViewOpen,
         EscapeLayer = window.IsGridViewOpen || window.IsSlideshowActive,
         HeaderZoom = window.HasHeaderZoom,
@@ -572,6 +573,10 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         var press = _readKey(vk, space && _spaceKey.IsRepeat(time));
+        if (press.Context is { IsFileDialog: true } context && press.PickerSelection is null)
+        {
+            press = press with { PickerRefresh = _commonFileDialogMonitor.LatestRefresh(context.Hwnd) };
+        }
 
         // The dispatcher has yet to act on keys this thread already
         // answered, and the published state does not show them. What they
@@ -768,7 +773,7 @@ internal sealed class SpacePreviewController : IDisposable
                 QueuePickerOpen(facts.Context!, facts.PickerSelection!, stamp);
                 return;
             case KeyAction.DeferPickerOpen:
-                DeferPickerOpen(facts.Context!, stamp);
+                DeferPickerOpen(facts.Context!, stamp, facts.PickerRefresh);
                 return;
             case KeyAction.CancelOpen:
                 _openRequestGeneration++;
@@ -1763,9 +1768,14 @@ internal sealed class SpacePreviewController : IDisposable
     // under way, or one asked for here. That answer is the file the press
     // was on. The answer to any later read is a file the user moved to
     // afterwards, and opens nothing.
-    private void DeferPickerOpen(ForegroundSelectionContext context, long inputStamp)
+    private void DeferPickerOpen(ForegroundSelectionContext context, long inputStamp, long refreshAtPress)
     {
         var generation = ++_openRequestGeneration;
+        if (_commonFileDialogMonitor.LatestRefresh(context.Hwnd) > refreshAtPress)
+        {
+            return;
+        }
+
         var refresh = _commonFileDialogMonitor.PendingRefresh(context.Hwnd);
         if (refresh == 0)
         {

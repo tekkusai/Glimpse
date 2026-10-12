@@ -72,6 +72,7 @@ public sealed class HookPathArchitectureTests
     {
         Assert.Equal(
             [
+                "CommonFileDialogSelectionMonitor.LatestRefresh",
                 "CommonFileDialogSelectionMonitor.TryGetCachedSelection",
                 "CommonFileDialogSelectionService.HasFileListFocus",
                 "DeferredFileDialogPreviewIntentSlot.Cancel",
@@ -103,6 +104,7 @@ public sealed class HookPathArchitectureTests
                 "PreviewKeyMap.Claim",
                 "PreviewKeyMap.Classify",
                 "PreviewKeyMap.Facts",
+                "PreviewKeyMap.Find",
                 "PreviewKeyMap.IsArrow",
                 "PreviewKeyMap.IsMapped",
                 "PreviewKeyMap.IsNavigation",
