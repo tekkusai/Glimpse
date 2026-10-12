@@ -27,6 +27,33 @@ using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
 
+/// <summary>
+/// One monitor as the stage sees it: its work area in DIPs, and the scale
+/// between those DIPs and its pixels. Both come from one reading, and a
+/// rectangle placed in the one goes back to pixels through the other, so
+/// nothing pairs a monitor's pixels with another monitor's DPI, or with none.
+/// </summary>
+internal readonly record struct StageMonitor(Rect WorkArea, double Scale)
+{
+    public static StageMonitor FromPixels(Rect workAreaPixels, uint dpi)
+    {
+        var scale = (dpi == 0 ? 96 : dpi) / 96.0;
+        return new StageMonitor(
+            new Rect(
+                workAreaPixels.X / scale,
+                workAreaPixels.Y / scale,
+                workAreaPixels.Width / scale,
+                workAreaPixels.Height / scale),
+            scale);
+    }
+
+    public Rect ToPixels(Rect dips) => new(
+        Math.Round(dips.X * Scale),
+        Math.Round(dips.Y * Scale),
+        Math.Round(dips.Width * Scale),
+        Math.Round(dips.Height * Scale));
+}
+
 public partial class PreviewWindow
 {
     /// <summary>
@@ -285,59 +312,60 @@ public partial class PreviewWindow
         AutomationProperties.SetName(MaximizeButton, IsStageMaximized ? "Restore preview size" : "Fill screen");
     }
 
-    internal static Rect GetWorkAreaDips(IntPtr hwnd)
+    /// <summary>
+    /// The monitor a window is on, read once; with no window, the primary
+    /// one. The scale is the monitor's own, never a window's: a window that
+    /// is not DPI aware reports 96 on any monitor, and no window reports
+    /// nothing at all, which is how the welcome once took pixels for DIPs.
+    /// </summary>
+    internal static StageMonitor ReadMonitor(IntPtr hwnd)
     {
+        const uint MONITOR_DEFAULTTOPRIMARY = 1;
+        const int MDT_EFFECTIVE_DPI = 0;
         try
         {
-            var monitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+            var monitor = NativeMethods.MonitorFromWindow(
+                hwnd,
+                hwnd == IntPtr.Zero ? MONITOR_DEFAULTTOPRIMARY : NativeMethods.MONITOR_DEFAULTTONEAREST);
             var info = new NativeMethods.MONITORINFO
             {
                 cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.MONITORINFO>()
             };
 
-            if (monitor != IntPtr.Zero && NativeMethods.GetMonitorInfo(monitor, ref info))
+            if (monitor != IntPtr.Zero
+                && NativeMethods.GetMonitorInfo(monitor, ref info)
+                && NativeMethods.GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, out var dpi, out _) == 0)
             {
-                var dpi = hwnd == IntPtr.Zero ? 96 : NativeMethods.GetDpiForWindow(hwnd);
-                if (dpi == 0)
-                {
-                    dpi = 96;
-                }
-
-                var scale = 96.0 / dpi;
-                return new Rect(
-                    info.rcWork.Left * scale,
-                    info.rcWork.Top * scale,
-                    info.rcWork.Width * scale,
-                    info.rcWork.Height * scale);
+                return StageMonitor.FromPixels(
+                    new Rect(info.rcWork.Left, info.rcWork.Top, info.rcWork.Width, info.rcWork.Height),
+                    dpi);
             }
         }
         catch
         {
-            // Fall back to primary work area below.
+            // Fall back to the primary work area below.
         }
 
-        return SystemParameters.WorkArea;
+        // No monitor answered. WPF's own reading of the primary work area is
+        // in DIPs already; the window's DPI, where there is one, converts it.
+        var windowDpi = hwnd == IntPtr.Zero ? 0 : NativeMethods.GetDpiForWindow(hwnd);
+        return new StageMonitor(SystemParameters.WorkArea, (windowDpi == 0 ? 96 : windowDpi) / 96.0);
     }
 
-    private static Rect? TryGetWindowRectDips(IntPtr hwnd)
+    /// <summary>The monitor the stage is placed on: the one a window is on, unless a test parked the stage.</summary>
+    private StageMonitor MonitorFor(IntPtr hwnd) => ParkedMonitor ?? ReadMonitor(hwnd);
+
+    internal static Rect GetWorkAreaDips(IntPtr hwnd) => ReadMonitor(hwnd).WorkArea;
+
+    /// <summary>A window's rectangle in the DIPs of the monitor the stage is placed on.</summary>
+    private static Rect? TryGetWindowRectDips(IntPtr hwnd, double scale)
     {
         if (hwnd == IntPtr.Zero || !NativeMethods.GetWindowRect(hwnd, out var rect))
         {
             return null;
         }
 
-        var dpi = NativeMethods.GetDpiForWindow(hwnd);
-        if (dpi == 0)
-        {
-            dpi = 96;
-        }
-
-        var scale = 96.0 / dpi;
-        return new Rect(
-            rect.Left * scale,
-            rect.Top * scale,
-            rect.Width * scale,
-            rect.Height * scale);
+        return new Rect(rect.Left / scale, rect.Top / scale, rect.Width / scale, rect.Height / scale);
     }
 
     private void ApplyWindowNativeStyle()
@@ -373,6 +401,10 @@ public partial class PreviewWindow
             // A borderless window maximizes over the taskbar by default;
             // cap it to the work area so maximized still means "fill the
             // desktop", the same promise the button has always made.
+            // Handling the message keeps it from WPF's own handler, which
+            // is what holds a border drag to MinWidth and MinHeight, so the
+            // floor is written here too.
+            KeepStageMinimum(hwnd, lParam);
             CapMaximizedBoundsToWorkArea(hwnd, lParam, ref handled);
         }
         else if (msg == WM_SIZING)
@@ -395,6 +427,17 @@ public partial class PreviewWindow
         }
 
         return IntPtr.Zero;
+    }
+
+    /// <summary>The smallest size a border drag may reach, in the window's own pixels.</summary>
+    private void KeepStageMinimum(IntPtr hwnd, IntPtr minMaxInfo)
+    {
+        var dpi = NativeMethods.GetDpiForWindow(hwnd);
+        var scale = (dpi == 0 ? 96 : dpi) / 96.0;
+        var limits = System.Runtime.InteropServices.Marshal.PtrToStructure<NativeMethods.MINMAXINFO>(minMaxInfo);
+        limits.ptMinTrackSize.X = (int)Math.Ceiling(MinWidth * scale);
+        limits.ptMinTrackSize.Y = (int)Math.Ceiling(MinHeight * scale);
+        System.Runtime.InteropServices.Marshal.StructureToPtr(limits, minMaxInfo, fDeleteOld: false);
     }
 
     private static void CapMaximizedBoundsToWorkArea(IntPtr hwnd, IntPtr minMaxInfo, ref bool handled)
@@ -508,27 +551,11 @@ public partial class PreviewWindow
             return;
         }
 
-        AlwaysOnTopButton.BeginAnimation(OpacityProperty, null);
-        if (!visible)
+        Motion.Settle(AlwaysOnTopButton, 0);
+        AlwaysOnTopButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (visible)
         {
-            AlwaysOnTopButton.Visibility = Visibility.Collapsed;
-            AlwaysOnTopButton.Opacity = 0;
-            return;
+            Motion.Fade(AlwaysOnTopButton, 1, TimeSpan.FromMilliseconds(140));
         }
-
-        AlwaysOnTopButton.Visibility = Visibility.Visible;
-        if (!Motion.Enabled)
-        {
-            AlwaysOnTopButton.Opacity = 1;
-            return;
-        }
-
-        AlwaysOnTopButton.Opacity = 0;
-        AlwaysOnTopButton.BeginAnimation(
-            OpacityProperty,
-            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(140))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
     }
 }

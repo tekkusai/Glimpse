@@ -318,15 +318,16 @@
                 </Grid>
             </Border>
 
+            <!-- Two hosts hold the content and trade roles (PreviewWindow.Reveal.cs).
+                 The front one holds the item on screen. The back one holds
+                 the next item, hidden until its reveal, and draws over the
+                 stand-in, which draws over the front. Each host's Tag keeps
+                 what its content owns. -->
             <Grid Grid.Row="1">
-                <!-- The item making way for the next: it fades out, or waits
-                     under the next one while that dissolves over it. -->
-                <ContentControl x:Name="OutgoingContent" IsHitTestVisible="False" />
+                <ContentControl x:Name="ContentHostA" Panel.ZIndex="0" />
                 <!-- The best image of content that is not ready yet. -->
-                <ContentControl x:Name="StandInLayer" IsHitTestVisible="False" Visibility="Collapsed" />
-                <ContentControl x:Name="PreviewContent" />
-                <!-- A browser view starting its engine while the old item leaves. -->
-                <ContentControl x:Name="IncomingContent" IsHitTestVisible="False" Visibility="Hidden" />
+                <ContentControl x:Name="StandInLayer" Panel.ZIndex="1" IsHitTestVisible="False" Visibility="Collapsed" />
+                <ContentControl x:Name="ContentHostB" Panel.ZIndex="2" />
             </Grid>
         </Grid>
     </Border>

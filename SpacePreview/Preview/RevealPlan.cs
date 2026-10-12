@@ -5,7 +5,7 @@ namespace SpacePreview.Preview;
 /// <summary>How the item on screen makes way for the next one.</summary>
 internal enum SwapStyle
 {
-    /// <summary>Nothing of the old item is on screen: drop it at once.</summary>
+    /// <summary>Nothing of the old item is on screen.</summary>
     Clear,
 
     /// <summary>It stays until the next item dissolves over it (same shape, no browser window in the way).</summary>
@@ -26,20 +26,17 @@ internal enum WaitView
 }
 
 /// <summary>
-/// One load's presentation decisions, as plain state on an injected clock.
-/// The window owns the timers and the pixels; this owns the yes and no. A
-/// superseded load never reveals, the first owner reveals and later ones are
-/// told no, the window fades in once, the old item's beat ends before the
-/// next item shows, and the wait shows its stand-in, sheen and reason only
-/// while nothing has been revealed.
+/// The reveal's yes and no, as pure functions of a moment on a load's clock
+/// (docs/DESIGN.md, Motion and Waiting). The window keeps the state and the
+/// pixels; nothing here remembers anything.
 /// </summary>
-internal sealed class RevealPlan
+internal static class RevealPlan
 {
     public static readonly TimeSpan StandInAt = Motion.OpenWait;
     public static readonly TimeSpan SheenAt = TimeSpan.FromMilliseconds(1000);
     public static readonly TimeSpan ReasonAt = TimeSpan.FromMilliseconds(1200);
 
-    /// <summary>A browser view that never finishes navigating still reveals.</summary>
+    /// <summary>A browser view whose navigation never finishes still reveals, this long after it began.</summary>
     public static readonly TimeSpan EscapeAfter = TimeSpan.FromMilliseconds(1400);
 
     /// <summary>A PDF waits this long at most for its first rail decision.</summary>
@@ -48,138 +45,41 @@ internal sealed class RevealPlan
     /// <summary>A video with no probed shape waits this long at most for its metadata.</summary>
     public static readonly TimeSpan MediaShapeCap = TimeSpan.FromMilliseconds(600);
 
-    private readonly Func<TimeSpan> _sinceInput;
-    private readonly bool _motion;
-    private TaskCompletionSource _beat = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    /// <summary>
+    /// The moment a step runs at. Windows timers fire on 15.6 ms ticks, so a
+    /// timer can fire a tick early; it still counts as the moment it was set
+    /// for.
+    /// </summary>
+    public static TimeSpan Moment(TimeSpan elapsed, TimeSpan setFor) => elapsed > setFor ? elapsed : setFor;
 
     /// <summary>
-    /// A fresh open has nothing on screen to make way, so its beat is over;
-    /// a browse step's window is already on screen, so it has nothing left
-    /// to fade in.
+    /// What a load that has not revealed shows at <paramref name="elapsed"/>
+    /// since its input: nothing new at first, then the still stand-in, then
+    /// a sheen (only with motion on), then the reason line when there is
+    /// one. Over an item still on screen only a poster, a real image of the
+    /// next one, takes its place that early; a ghost or the bare canvas
+    /// would trade a picture for a flat rectangle, so it waits until the
+    /// wait itself needs showing.
     /// </summary>
-    public RevealPlan(long version, bool freshOpen, Func<TimeSpan> sinceInput, bool motion)
+    public static WaitView WaitAt(TimeSpan elapsed, bool overItem, bool poster, bool reason, bool motion)
     {
-        Version = version;
-        FreshOpen = freshOpen;
-        _sinceInput = sinceInput;
-        _motion = motion;
-        if (freshOpen)
-        {
-            _beat.TrySetResult();
-        }
-        else
-        {
-            WindowShown = true;
-        }
-    }
-
-    public long Version { get; }
-
-    public bool FreshOpen { get; }
-
-    public TimeSpan Elapsed => _sinceInput();
-
-    public bool Superseded { get; private set; }
-
-    public bool Revealed { get; private set; }
-
-    public bool WindowShown { get; private set; }
-
-    /// <summary>The old item has left (or stays, holding): content may attach and the stage may move.</summary>
-    public bool BeatDone => _beat.Task.IsCompleted;
-
-    /// <summary>Completes when the beat ends; a view staged meanwhile reveals only after it.</summary>
-    public Task BeatEnded => _beat.Task;
-
-    public SwapStyle Swap { get; set; } = SwapStyle.Clear;
-
-    /// <summary>Why the wait is long, when there is a reason worth one line.</summary>
-    public string? Reason { get; set; }
-
-    /// <summary>A newer load took over. Anything waiting on this one's beat wakes and finds it stale.</summary>
-    public void Supersede()
-    {
-        Superseded = true;
-        _beat.TrySetResult();
-    }
-
-    /// <summary>The item on screen starts to make way; a second beat in one load waits again.</summary>
-    public void BeginBeat()
-    {
-        if (_beat.Task.IsCompleted && !Superseded)
-        {
-            _beat = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        }
-    }
-
-    public void EndBeat() => _beat.TrySetResult();
-
-    /// <summary>True for the first owner only, and never once superseded.</summary>
-    public bool TryReveal()
-    {
-        if (Superseded || Revealed)
-        {
-            return false;
-        }
-
-        Revealed = true;
-        return true;
-    }
-
-    /// <summary>The window fades in once per open: with its content, or at the end of the wait.</summary>
-    public bool TryShowWindow()
-    {
-        if (Superseded || WindowShown)
-        {
-            return false;
-        }
-
-        WindowShown = true;
-        return true;
-    }
-
-    /// <summary>
-    /// What the wait shows at <paramref name="elapsed"/> since the input:
-    /// nothing new at first, then the still stand-in, then a sheen (only
-    /// with motion on), then the reason line when there is one. Nothing
-    /// shows while the old item is still leaving. Over an item that holds,
-    /// a stand-in without the content's shape would be a blank beat, so it
-    /// waits until the wait itself needs showing.
-    /// </summary>
-    public WaitView WaitAt(TimeSpan elapsed, bool shaped)
-    {
-        if (Superseded || Revealed || !BeatDone || elapsed < StandInAt)
-        {
-            return WaitView.Nothing;
-        }
-
-        if (Swap == SwapStyle.Hold && !shaped && elapsed < SheenAt)
+        if (elapsed < StandInAt || (overItem && !poster && elapsed < SheenAt))
         {
             return WaitView.Nothing;
         }
 
         var view = WaitView.StandIn;
-        if (_motion && elapsed >= SheenAt)
+        if (motion && elapsed >= SheenAt)
         {
             view |= WaitView.Sheen;
         }
 
-        if (Reason is not null && elapsed >= ReasonAt)
+        if (reason && elapsed >= ReasonAt)
         {
             view |= WaitView.Reason;
         }
 
         return view;
-    }
-
-    /// <summary>
-    /// The wait at a timer's moment. Windows timers fire on 15.6 ms ticks, so
-    /// a timer can fire a tick early; it still counts as its moment.
-    /// </summary>
-    public WaitView WaitAtMoment(TimeSpan moment, bool shaped)
-    {
-        var elapsed = Elapsed;
-        return WaitAt(elapsed > moment ? elapsed : moment, shaped);
     }
 
     /// <summary>
@@ -195,37 +95,5 @@ internal sealed class RevealPlan
         }
 
         return !outgoingIsWeb && stageChanges == false ? SwapStyle.Hold : SwapStyle.FadeOut;
-    }
-
-    /// <summary>Waits for a gate, never past its cap. True when the gate answered.</summary>
-    public static async Task<bool> WaitCappedAsync(Task gate, TimeSpan cap, Func<TimeSpan, Task> delay)
-    {
-        if (gate.IsCompleted)
-        {
-            return true;
-        }
-
-        return await Task.WhenAny(gate, delay(cap)) == gate;
-    }
-}
-
-/// <summary>
-/// One browser view's reveal. Navigation and the escape hatch race for it;
-/// the first taker owns the reveal and every later one is told no, so a
-/// slow gate can never reveal twice or reveal a superseded load.
-/// </summary>
-internal sealed class RevealTicket(Func<bool> stillCurrent)
-{
-    public bool Taken { get; private set; }
-
-    public bool TryTake()
-    {
-        if (Taken || !stillCurrent())
-        {
-            return false;
-        }
-
-        Taken = true;
-        return true;
     }
 }

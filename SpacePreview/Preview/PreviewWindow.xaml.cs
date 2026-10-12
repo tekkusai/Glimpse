@@ -53,7 +53,6 @@ public partial class PreviewWindow : Window
     private const double EpubChapterRailWidth = 168;
     private const int PdfPageRailMaxPages = 120;
     private const int MaxImageDecodePixels = 4096;
-    private const int LargeImageFirstFramePixels = 2048;
     private static readonly TimeSpan LargeImageFullDecodeDelay = TimeSpan.FromMilliseconds(420);
     private const string PinGlyph = "\uE718";
     private const string UnpinGlyph = "\uE77A";
@@ -62,11 +61,16 @@ public partial class PreviewWindow : Window
     private const string PlayGlyph = "\uE768";
     private const string StopSlideshowGlyph = "\uE71A";
 
-    private IDisposable? _currentDisposable;
-    private IDisposable? _nextDisposable;
     private readonly WarmBrowser _warmBrowser = new();
     private CancellationTokenSource? _loadCancellation;
     private long _loadVersion;
+
+    // The load now reading and building, superseded or not. A browse step
+    // that finds it still at work waits for it (see LoadPreviewAsync).
+    private Task _loadAtWork = Task.CompletedTask;
+
+    /// <summary>The longest a browse step waits for the load before it to let go.</summary>
+    private static readonly TimeSpan BusyLoadCap = TimeSpan.FromMilliseconds(50);
     private readonly SemaphoreSlim _shellIconGate = new(1, 1);
     private readonly SemaphoreSlim _folderSizeScanGate = new(1, 1);
     private readonly SemaphoreSlim _imageDecodeGate = new(1, 1);
@@ -79,6 +83,7 @@ public partial class PreviewWindow : Window
     private bool _recenterStage;
     private StageFitHint? _stageFitHint;
     private long _stageFitVersion;
+    private long _stageHoldLogged;
 
     private FillSignSurface? _fillSignSurface;
     private FrameworkElement? _fillSignParkedContent;
@@ -116,6 +121,8 @@ public partial class PreviewWindow : Window
     public PreviewWindow()
     {
         InitializeComponent();
+        _front = ContentHostA;
+        _back = ContentHostB;
         ApplyTopmost();
         FollowTheme();
         BuildContextMenu();
@@ -134,6 +141,7 @@ public partial class PreviewWindow : Window
         Closed += (_, _) =>
         {
             Interlocked.Increment(ref _loadVersion);
+            _presentation = null;
             EndSignSession(_signSession);
             if (_signDraft?.Close() == true)
             {
@@ -217,7 +225,7 @@ public partial class PreviewWindow : Window
         _loadCancellation?.Dispose();
         _loadCancellation = new CancellationTokenSource();
         var token = _loadCancellation.Token;
-        _loadFinished = false;
+        var before = RetirePresentation();
         RestoreFromNativeMinimize();
 
         CurrentPath = path;
@@ -240,7 +248,8 @@ public partial class PreviewWindow : Window
 
         // The shapes knowable up front, before geometry is placed. Slower
         // shapes (media metadata, conversions) hint later and apply while
-        // nothing of the item shows.
+        // nothing of the item shows. No load is current yet, so these are
+        // only recorded: the swap below is what acts on them.
         var headed = Stopwatch.GetTimestamp();
         TrySetIntrinsicStageFit(contentPath, version);
         var probed = Stopwatch.GetTimestamp();
@@ -248,13 +257,13 @@ public partial class PreviewWindow : Window
         // A window still waiting at zero alpha has shown nothing yet, so
         // this is its open, not a browse step.
         var freshOpen = !IsVisible || _windowAlpha == 0;
-        var presentation = BeginPresentation(version, freshOpen, inputTimestamp, entered, contentPath);
+        var presentation = BeginPresentation(freshOpen, inputTimestamp, entered, contentPath);
         presentation.Headed = presentation.Entered + Stopwatch.GetElapsedTime(entered, headed).TotalMilliseconds;
         presentation.Probed = presentation.Entered + Stopwatch.GetElapsedTime(entered, probed).TotalMilliseconds;
         var presented = true;
         if (!freshOpen)
         {
-            BeginSwap(presentation, WillStageChange(version, contentPath));
+            BeginSwap(presentation, before, WillStageChange(contentPath));
         }
 
         // A maximize the CONTENT requested (video fullscreen) releases when
@@ -276,8 +285,7 @@ public partial class PreviewWindow : Window
         _fadeGeneration++;
         if (freshOpen)
         {
-            ReleaseShown();
-            ReleaseIncoming();
+            ReleaseStage();
             presented = ShowTransparent();
         }
         else
@@ -298,6 +306,7 @@ public partial class PreviewWindow : Window
 
         ScheduleWait(presentation);
         _ = LoadPreviewAsync(path, contentPath, version, token, coalesce: !freshOpen);
+        Advance(presentation);
         return presented;
     }
 
@@ -309,9 +318,9 @@ public partial class PreviewWindow : Window
     public bool ShowWelcome()
     {
         var entered = Stopwatch.GetTimestamp();
-        var version = Interlocked.Increment(ref _loadVersion);
+        Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
-        _loadFinished = false;
+        var before = RetirePresentation();
         _isFileDialogMode = false;
         _placementOwnerHwnd = IntPtr.Zero;
         RootChrome.ContextMenu = _contextMenu;
@@ -321,22 +330,22 @@ public partial class PreviewWindow : Window
         ShowWelcomeHeader();
 
         var freshOpen = !IsVisible || _windowAlpha == 0;
-        var presentation = BeginPresentation(version, freshOpen, 0, entered, null);
+        var presentation = BeginPresentation(freshOpen, 0, entered, null);
         presentation.Headed = presentation.Entered;
         presentation.Probed = presentation.Entered;
         var presented = true;
         _fadeGeneration++;
         if (freshOpen)
         {
-            // The welcome uses the same stage geometry as normal previews.
+            // The welcome uses the same stage geometry as normal previews,
+            // on the primary monitor: there is no Explorer window to follow.
             ApplyStageGeometry(IntPtr.Zero);
-            ReleaseShown();
-            ReleaseIncoming();
+            ReleaseStage();
             presented = ShowTransparent();
         }
         else
         {
-            BeginSwap(presentation, stageChanges: null);
+            BeginSwap(presentation, before, stageChanges: null);
         }
 
         SetPreviewContent(BuildWelcomeContent(), null);
@@ -418,14 +427,24 @@ public partial class PreviewWindow : Window
 
     private async Task LoadPreviewAsync(string path, string contentPath, long version, CancellationToken token, bool coalesce)
     {
+        TaskCompletionSource? atWork = null;
         try
         {
-            // Rapid arrow presses coalesce on the newest file. A fresh open
-            // has nothing to coalesce with.
-            if (coalesce)
+            // A single press starts its load at once. A press that finds the
+            // load before it still reading or decoding means keys are coming
+            // faster than loads finish: it waits for that load to let go,
+            // and by then only the newest press is still wanted. So a held
+            // arrow runs one load at a time, not one per repeat. The wait is
+            // capped, so a load stuck on a dead share holds nothing back. A
+            // fresh open has nothing to coalesce with.
+            if (coalesce && !_loadAtWork.IsCompleted)
             {
-                await Task.Delay(20, token);
+                await Task.WhenAny(_loadAtWork, Task.Delay(BusyLoadCap, token));
+                token.ThrowIfCancellationRequested();
             }
+
+            atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _loadAtWork = atWork.Task;
 
             FrameworkElement content;
             string? fillSignPath = null;
@@ -481,17 +500,17 @@ public partial class PreviewWindow : Window
                 }
             }
 
-            var disposable = _nextDisposable;
-            _nextDisposable = null;
             if (token.IsCancellationRequested || version != _loadVersion || !string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase))
             {
-                disposable?.Dispose();
+                // A load that was replaced lets go of the browser view it
+                // built, and of nothing else.
+                WebViewIn(content)?.Dispose();
                 return;
             }
 
             _fillSignPath = fillSignPath;
             SyncHeaderTools();
-            SetPreviewContent(content, disposable);
+            SetPreviewContent(content, null);
             if (fillSignPath is not null)
             {
                 _ = FindSignDraftAsync(fillSignPath, version);
@@ -510,6 +529,10 @@ public partial class PreviewWindow : Window
                 SetPreviewContent(BuildErrorPreview("Can't preview this file", "Something went wrong while reading it."), null);
             }
         }
+        finally
+        {
+            atWork?.SetResult();
+        }
     }
 
     private async Task<FrameworkElement> BuildPreviewContentAsync(
@@ -524,9 +547,9 @@ public partial class PreviewWindow : Window
             return await BuildMediaPreviewAsync(path, version, token);
         }
 
-        if (FileKinds.IsGif(path) || (useSignatureRouting && signature == FileSignatureKind.Gif))
+        if (await IsAnimatedImageAsync(path, signature, useSignatureRouting, token))
         {
-            // WPF's Image control freezes GIFs on the first frame; the web engine plays them.
+            // WPF's Image control freezes an animation on its first frame; the web engine plays it.
             return BuildBrowserImagePreview(path);
         }
 
@@ -794,13 +817,20 @@ public partial class PreviewWindow : Window
             return;
         }
 
-        var workArea = GetWorkAreaDips(explorerHwnd);
-        ApplyFunctionalMinimum(workArea);
-        var size = ComputeStageTarget(workArea, explorerHwnd);
+        // The window has its handle before it is placed, so every placement,
+        // the first one too, is made in the target monitor's own pixels.
+        if (Hwnd == IntPtr.Zero)
+        {
+            new WindowInteropHelper(this).EnsureHandle();
+        }
+
+        var monitor = MonitorFor(explorerHwnd);
+        ApplyFunctionalMinimum(monitor.WorkArea);
+        var size = ComputeStageTarget(monitor.WorkArea, monitor.Scale);
         var anchor = _isFileDialogMode
-            ? TryGetWindowRectDips(_placementOwnerHwnd)
+            ? TryGetWindowRectDips(_placementOwnerHwnd, monitor.Scale)
             : null;
-        SetGeometry(StagePlacement.CenterAndClamp(size, workArea, anchor), explorerHwnd);
+        SetGeometry(StagePlacement.CenterAndClamp(size, monitor.WorkArea, anchor), monitor);
     }
 
     /// <summary>
@@ -822,14 +852,13 @@ public partial class PreviewWindow : Window
         _stageFitVersion = version;
 
         // An async hint (media metadata, rail truth) lands after the load
-        // started. It retakes the stage only once the old item has left and
-        // while nothing of this one shows; otherwise the beat's end or the
-        // content's arrival consumes it.
-        if (IsVisible
-            && _presentation is { Plan: { BeatDone: true, Swap: not SwapStyle.Hold } }
-            && !PreviewShows)
+        // started. Advance lets it retake the stage only once the old item
+        // has left and while nothing of this one shows; otherwise the beat's
+        // end consumes it. A hint that lands while its load is still being
+        // set up finds no load to advance, and is only recorded.
+        if (_presentation is { } presentation)
         {
-            RetargetStageToFit();
+            Advance(presentation);
         }
     }
 
@@ -845,9 +874,10 @@ public partial class PreviewWindow : Window
             return false;
         }
 
-        var workArea = GetWorkAreaDips(Hwnd);
+        var monitor = MonitorFor(Hwnd);
+        var workArea = monitor.WorkArea;
         ApplyFunctionalMinimum(workArea);
-        var target = ComputeStageTarget(workArea, Hwnd);
+        var target = ComputeStageTarget(workArea, monitor.Scale);
         var recenter = _recenterStage;
         if (!recenter
             && Math.Abs(target.Width - Width) <= StageFit.Hysteresis
@@ -858,7 +888,13 @@ public partial class PreviewWindow : Window
 
         if (_stageFrozenForProbe || IsStageMaximized || _itemStageSize is not null)
         {
-            DiagnosticLog.Write($"stage fit held ({(_itemStageSize is not null ? "user size" : IsStageMaximized ? "maximized" : "probe")}) -> {target.Width:0}x{target.Height:0}");
+            // Said once for a load: Advance asks again after every event.
+            if (_stageHoldLogged != _loadVersion)
+            {
+                _stageHoldLogged = _loadVersion;
+                DiagnosticLog.Write($"stage fit held ({(_itemStageSize is not null ? "user size" : IsStageMaximized ? "maximized" : "probe")}) -> {target.Width:0}x{target.Height:0}");
+            }
+
             return false;
         }
 
@@ -870,18 +906,21 @@ public partial class PreviewWindow : Window
         var recentered = StagePlacement.CenterAndClamp(
             target,
             workArea,
-            _isFileDialogMode ? TryGetWindowRectDips(_placementOwnerHwnd) : null);
+            _isFileDialogMode ? TryGetWindowRectDips(_placementOwnerHwnd, monitor.Scale) : null);
         var left = recenter ? recentered.Left : Left + (Width - target.Width) / 2;
         var top = recenter ? recentered.Top : Top + (Height - target.Height) / 2;
         left = Math.Clamp(left, workArea.Left, Math.Max(workArea.Left, workArea.Right - target.Width));
         top = Math.Clamp(top, workArea.Top, Math.Max(workArea.Top, workArea.Bottom - target.Height));
-        SetGeometry(new Rect(left, top, target.Width, target.Height), Hwnd);
+        SetGeometry(new Rect(left, top, target.Width, target.Height), monitor);
         DiagnosticLog.Write($"stage fit -> {target.Width:0}x{target.Height:0} ({DescribeStageFit()}{(recenter ? ", recentered" : "")})");
         return true;
     }
 
-    /// <summary>The stage size the current item has earned on this monitor.</summary>
-    private Size ComputeStageTarget(Rect workArea, IntPtr dpiHwnd)
+    /// <summary>The stage size the current item has earned on the monitor a window is on.</summary>
+    private Size ComputeStageTarget(Rect workArea, IntPtr dpiHwnd) =>
+        ComputeStageTarget(workArea, DpiScaleFor(dpiHwnd == IntPtr.Zero ? Hwnd : dpiHwnd));
+
+    private Size ComputeStageTarget(Rect workArea, double dpiScale)
     {
         var hint = _stageFitVersion == _loadVersion ? _stageFitHint : null;
         if (hint is null)
@@ -892,7 +931,7 @@ public partial class PreviewWindow : Window
         return StageFit.WindowFor(
             hint.Value,
             workArea,
-            DpiScaleFor(dpiHwnd == IntPtr.Zero ? Hwnd : dpiHwnd),
+            dpiScale,
             PdfPageRailWidth,
             ViewerChromeBandHeight,
             new Size(StageMinWidth, StageMinHeight));
@@ -901,18 +940,19 @@ public partial class PreviewWindow : Window
     private string DescribeStageFit() =>
         _stageFitVersion == _loadVersion && _stageFitHint is { } hint ? hint.Describe() : "default";
 
-    private static double DpiScaleFor(IntPtr hwnd)
-    {
-        var dpi = hwnd == IntPtr.Zero ? 96 : NativeMethods.GetDpiForWindow(hwnd);
-        return (dpi == 0 ? 96 : dpi) / 96.0;
-    }
+    /// <summary>The scale of the monitor a window is on; with no window, the primary one's.</summary>
+    private static double DpiScaleFor(IntPtr hwnd) => ReadMonitor(hwnd).Scale;
 
     /// <summary>
-    /// The shapes knowable before anything loads: an image header names its
-    /// pixels (transposed when EXIF says the camera was turned), audio is
-    /// compact by identity. Network paths skip the header read; the async
-    /// lanes hint later, still inside the blank beat. Shape is a nicety -
-    /// on any doubt the default stage is always correct.
+    /// The shapes knowable before anything loads. A kind that names its own
+    /// shape (audio is compact, text and sheets scroll) needs nothing from
+    /// the file, so it holds wherever the file is. The rest read a few
+    /// bytes: an image header names its pixels (transposed when EXIF says
+    /// the camera was turned), a document its first page. Those reads wait
+    /// for the disk with no window on screen, so a file whose bytes are not
+    /// at hand skips them; the async lanes hint later, still inside the
+    /// blank beat. Shape is a nicety - on any doubt the default stage is
+    /// always correct.
     /// </summary>
     private void TrySetIntrinsicStageFit(string contentPath, long version)
     {
@@ -924,15 +964,25 @@ public partial class PreviewWindow : Window
                 return;
             }
 
-            if (!LooksLikeLocalDrivePath(contentPath) || !File.Exists(contentPath))
+            // Shapeless content you scroll through all opens at one size.
+            // A folder can carry any name, and it is a card.
+            if ((FileKinds.IsHtml(contentPath) || FileKinds.IsMarkdown(contentPath) || FileKinds.IsText(contentPath))
+                && !Directory.Exists(contentPath))
             {
+                SetStageFitHint(StageFitHint.Scroll(), version);
                 return;
             }
 
-            // Shapeless content you scroll through all opens at one size.
-            if (FileKinds.IsHtml(contentPath) || FileKinds.IsMarkdown(contentPath) || FileKinds.IsText(contentPath))
+            // Spreadsheets convert to HTML, not pages: no PDF to probe and
+            // no page size to declare. They scroll, like a page.
+            if (FileKinds.IsSpreadsheet(contentPath) && !Directory.Exists(contentPath))
             {
                 SetStageFitHint(StageFitHint.Scroll(), version);
+                return;
+            }
+
+            if (!HasBytesAtHand(contentPath))
+            {
                 return;
             }
 
@@ -946,6 +996,14 @@ public partial class PreviewWindow : Window
                 && ImageHeader.TryRead(contentPath) is { } image)
             {
                 SetStageFitHint(StageFitHint.ImagePixels(image.Width, image.Height), version);
+
+                // The one read of the header on this thread: the details
+                // line takes its pixel size from it.
+                if (FileKinds.IsImage(contentPath) || FileKinds.IsPhotoshop(contentPath))
+                {
+                    ShowHeaderFact($"{image.Width}×{image.Height}", version);
+                }
+
                 return;
             }
 
@@ -964,14 +1022,6 @@ public partial class PreviewWindow : Window
 
             if (FileKinds.IsOffice(contentPath))
             {
-                // Spreadsheets convert to HTML, not pages: no PDF to probe
-                // and no page size to declare. They scroll, like a page.
-                if (FileKinds.IsSpreadsheet(contentPath))
-                {
-                    SetStageFitHint(StageFitHint.Scroll(), version);
-                    return;
-                }
-
                 if (OfficeDocumentPdfConverter.TryGetCached(contentPath) is { } cached
                     && TryHintPdfStage(cached.DocumentPath, version))
                 {
@@ -990,43 +1040,70 @@ public partial class PreviewWindow : Window
         }
     }
 
-    private void SetGeometry(Rect rect, IntPtr dpiHwnd)
+    /// <summary>
+    /// Whether a file's first bytes can be read now, without waiting on a
+    /// network. The path's shape cannot say: a mapped share has a drive
+    /// letter too, and a file OneDrive keeps online only looks like any
+    /// other until it is opened.
+    /// </summary>
+    private static bool HasBytesAtHand(string path)
     {
-        if (TrySetWindowRect(rect, dpiHwnd))
-        {
-            return;
-        }
-
-        Left = rect.X;
-        Top = rect.Y;
-        Width = rect.Width;
-        Height = rect.Height;
-    }
-
-    private bool TrySetWindowRect(Rect rect, IntPtr dpiHwnd)
-    {
-        if (Hwnd == IntPtr.Zero)
+        if (!LooksLikeLocalDrivePath(path))
         {
             return false;
         }
 
-        var referenceHwnd = dpiHwnd == IntPtr.Zero ? Hwnd : dpiHwnd;
-        var dpi = referenceHwnd == IntPtr.Zero ? 96 : NativeMethods.GetDpiForWindow(referenceHwnd);
-        if (dpi == 0)
+        try
         {
-            dpi = 96;
-        }
+            var root = Path.GetPathRoot(path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path);
+            if (root is null || new DriveInfo(root).DriveType == DriveType.Network)
+            {
+                return false;
+            }
 
-        var scale = dpi / 96.0;
-        return NativeMethods.SetWindowPos(
+            var attributes = File.GetAttributes(path);
+            return !attributes.HasFlag(FileAttributes.Directory) && !IsPlaceholder(attributes);
+        }
+        catch
+        {
+            // Gone, or not ours to read: nothing to probe.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A placeholder's data is somewhere else, and reading it fetches it.
+    /// Windows marks one as offline, or to recall on open or on data access.
+    /// </summary>
+    internal static bool IsPlaceholder(FileAttributes attributes)
+    {
+        const FileAttributes RecallOnOpen = (FileAttributes)0x00040000;
+        const FileAttributes RecallOnDataAccess = (FileAttributes)0x00400000;
+        return (attributes & (FileAttributes.Offline | RecallOnOpen | RecallOnDataAccess)) != 0;
+    }
+
+    /// <summary>
+    /// Moves the window to a rectangle in a monitor's DIPs, through that
+    /// same monitor's scale, so the pixels are the ones that monitor means.
+    /// </summary>
+    private void SetGeometry(Rect rect, StageMonitor monitor)
+    {
+        if (!TrySetWindowRect(monitor.ToPixels(rect)))
+        {
+            DiagnosticLog.Write($"stage placement refused {rect.Width:0}x{rect.Height:0} at {rect.X:0},{rect.Y:0}");
+        }
+    }
+
+    private bool TrySetWindowRect(Rect pixels) =>
+        Hwnd != IntPtr.Zero
+        && NativeMethods.SetWindowPos(
             Hwnd,
             IntPtr.Zero,
-            (int)Math.Round(rect.X * scale),
-            (int)Math.Round(rect.Y * scale),
-            (int)Math.Round(rect.Width * scale),
-            (int)Math.Round(rect.Height * scale),
+            (int)pixels.X,
+            (int)pixels.Y,
+            (int)pixels.Width,
+            (int)pixels.Height,
             NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
-    }
 
     /// <summary>
     /// The default stage: the home for content with no intrinsic shape, and

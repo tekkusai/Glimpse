@@ -136,36 +136,39 @@ internal sealed class StandIn : Panel
         double toolbarHeight,
         BitmapSource? poster)
     {
-        var kind = LandingKind.None;
-        double aspect = 0;
+        var (kind, aspect) = LandingOf(hint);
 
-        // Every page-shaped preview (PDF, Illustrator, converted documents)
-        // lands in the PDF viewer, and a lone page lands with no rail beside
-        // it, as the stage reserved none.
-        if (hint is { Kind: StageFitHint.FitKind.PageAspect } page)
+        // A lone page lands with no rail beside it, as the stage reserved none.
+        if (hint is { Kind: StageFitHint.FitKind.PageAspect, SinglePage: true })
         {
-            kind = LandingKind.ViewerPage;
-            aspect = page.Aspect;
-            if (page.SinglePage)
-            {
-                railWidth = 0;
-            }
-        }
-        else if (hint is { Kind: StageFitHint.FitKind.Pixels or StageFitHint.FitKind.ImagePixels } pixels)
-        {
-            // Images and video both fill their box, so the stand-in lands
-            // where the content will.
-            kind = LandingKind.Pixels;
-            aspect = pixels.Width / pixels.Height;
+            railWidth = 0;
         }
 
-        var honest = kind != LandingKind.None && IsHonestPoster(poster, aspect);
-        return new StandIn(kind, aspect, railWidth, toolbarHeight, dpiScale, honest ? poster : null);
+        return new StandIn(kind, aspect, railWidth, toolbarHeight, dpiScale, ShowsPoster(hint, poster) ? poster : null);
     }
 
+    /// <summary>
+    /// Where a hint's content lands, and at what shape. Every page-shaped
+    /// preview (PDF, Illustrator, converted documents) lands in the PDF
+    /// viewer; images and video both fill their box.
+    /// </summary>
+    private static (LandingKind Kind, double Aspect) LandingOf(StageFitHint? hint) => hint switch
+    {
+        { Kind: StageFitHint.FitKind.PageAspect } page => (LandingKind.ViewerPage, page.Aspect),
+        { Kind: StageFitHint.FitKind.Pixels or StageFitHint.FitKind.ImagePixels } pixels =>
+            (LandingKind.Pixels, pixels.Width / pixels.Height),
+        _ => (LandingKind.None, 0)
+    };
+
     /// <summary>Whether a hint says where the content lands: pages, images and video do.</summary>
-    internal static bool KnowsShape(StageFitHint? hint) =>
-        hint is { Kind: StageFitHint.FitKind.PageAspect or StageFitHint.FitKind.Pixels or StageFitHint.FitKind.ImagePixels };
+    internal static bool KnowsShape(StageFitHint? hint) => LandingOf(hint).Kind != LandingKind.None;
+
+    /// <summary>Whether the stand-in for this hint would show this poster, and not a ghost.</summary>
+    internal static bool ShowsPoster(StageFitHint? hint, BitmapSource? poster)
+    {
+        var (kind, aspect) = LandingOf(hint);
+        return kind != LandingKind.None && IsHonestPoster(poster, aspect);
+    }
 
     internal static bool IsHonestPoster(BitmapSource? poster, double aspect) =>
         poster is { PixelWidth: > 0, PixelHeight: > 0 }

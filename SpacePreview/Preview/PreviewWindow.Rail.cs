@@ -2,7 +2,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using System.Windows.Media.Animation;
 using Microsoft.Web.WebView2.Wpf;
 using SpacePreview.Utilities;
 
@@ -32,12 +31,9 @@ public partial class PreviewWindow
         host.BeginAnimation(FrameworkElement.WidthProperty, null);
         if (content is not null)
         {
-            content.Opacity = 0;
+            Motion.Settle(content, 0);
             host.Content = content;
-            content.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(100))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
+            Motion.Fade(content, 1, TimeSpan.FromMilliseconds(100));
         }
         else if (targetWidth < 1)
         {
@@ -49,7 +45,8 @@ public partial class PreviewWindow
 
     /// <summary>
     /// The viewer refits when the rail's column changes width; hide that
-    /// refit behind a short fade of the document itself.
+    /// refit behind a short fade of the document itself. With motion off
+    /// the document comes back in one cut.
     /// </summary>
     private void CloakViewerForRailResize(WebView2 webView, long version)
     {
@@ -78,9 +75,7 @@ public partial class PreviewWindow
 
             try
             {
-                _ = currentCore.ExecuteScriptAsync(
-                    "document.documentElement.style.transition='opacity 120ms ease-out';"
-                    + "document.documentElement.style.opacity='1';");
+                _ = currentCore.ExecuteScriptAsync(UncloakScript(Motion.Enabled));
             }
             catch
             {
@@ -88,6 +83,11 @@ public partial class PreviewWindow
             }
         });
     }
+
+    /// <summary>The script that brings a cloaked document back: faded in, or at once.</summary>
+    internal static string UncloakScript(bool motion) =>
+        $"document.documentElement.style.transition='{(motion ? "opacity 120ms ease-out" : "none")}';"
+        + "document.documentElement.style.opacity='1';";
 
     private static void ConfigureRailTile(
         Border tile,

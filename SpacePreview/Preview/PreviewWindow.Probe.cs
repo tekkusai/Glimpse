@@ -404,4 +404,11 @@ public partial class PreviewWindow
 
     /// <summary>Dev probe only: parked probe windows must never re-place themselves.</summary>
     internal void MarkGeometryUserPinnedForProbe() => _stageFrozenForProbe = true;
+
+    /// <summary>
+    /// Tests only: a monitor of the test's choosing, off the desktop. A
+    /// window parked on one places and reshapes its stage for real, and
+    /// never comes on screen.
+    /// </summary>
+    internal StageMonitor? ParkedMonitor { get; set; }
 }

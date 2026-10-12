@@ -65,9 +65,6 @@ internal sealed class StagedWebView : WebView2
 
     public void AllowNavigation() => _mayNavigate.TrySetResult();
 
-    /// <summary>Whether the host already watches this view's navigation for its reveal.</summary>
-    public bool RevealWatched { get; set; }
-
     /// <summary>Stopwatch timestamps for the load breakdown.</summary>
     public long? EngineReady { get; set; }
 

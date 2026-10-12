@@ -502,25 +502,17 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The details line and the time it names. The directory entry, and an
-    /// image's pixel size from its header bytes, are read on the item's first
-    /// line only. Nothing when the item is gone.
+    /// The details line and the time it names. The directory entry is read
+    /// on the item's first line only. The one fact beside the size arrives
+    /// through ShowHeaderFact: an image's pixels from the header read that
+    /// shapes the stage, a document's pages from its viewer. Nothing when
+    /// the item is gone.
     /// </summary>
     private (string Details, DateTime? Modified) DescribeHeaderItem(string path)
     {
         try
         {
-            if (_headerItem is null)
-            {
-                _headerItem = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
-                if ((FileKinds.IsImage(path) || FileKinds.IsPhotoshop(path))
-                    && LooksLikeLocalDrivePath(path)
-                    && ImageHeader.TryRead(path) is { } image)
-                {
-                    _headerFact = $"{image.Width}×{image.Height}";
-                }
-            }
-
+            _headerItem ??= Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
             return (FileKinds.Describe(_headerItem, _headerFact, DateTime.Now, CultureInfo.CurrentCulture), _headerItem.LastWriteTime);
         }
         catch
@@ -1296,9 +1288,10 @@ public partial class PreviewWindow
             return;
         }
 
+        // The cap is the controller's to know, so the words name no number.
         PinButton.IsEnabled = !reached;
         PinButton.ToolTip = reached
-            ? "Up to 6 previews can stay pinned. Unpin one to pin this."
+            ? "No more previews can stay pinned. Unpin one to pin this."
             : "Pin (stays open)";
     }
 

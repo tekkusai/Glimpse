@@ -117,13 +117,11 @@ public partial class PreviewWindow
         ApplyScrollBarStyle(grid.Root);
 
         var host = (Grid)PreviewContent.Parent;
+        Panel.SetZIndex(grid.Root, SheetLayer);
         host.Children.Add(grid.Root);
         ShowPreviewUnderSheet(false);
-        grid.Root.Opacity = 0;
-        grid.Root.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(120))
-        {
-            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-        });
+        Motion.Settle(grid.Root, 0);
+        Motion.Fade(grid.Root, 1, TimeSpan.FromMilliseconds(120));
 
         _gridView = grid;
         GridButton.SetResourceReference(ForegroundProperty, "Theme.Accent");
@@ -154,8 +152,8 @@ public partial class PreviewWindow
     private void ShowPreviewUnderSheet(bool show)
     {
         var visibility = show ? Visibility.Visible : Visibility.Hidden;
-        PreviewContent.Visibility = visibility;
-        OutgoingContent.Visibility = visibility;
+        _front.Visibility = visibility;
+        _back.Visibility = visibility;
     }
 
     /// <summary>Arrow keys walk the sheet while it is up.</summary>

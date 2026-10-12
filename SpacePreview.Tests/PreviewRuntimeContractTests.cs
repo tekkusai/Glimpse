@@ -39,9 +39,14 @@ public sealed class PreviewRuntimeContractTests
         XElement Named(string name) => document.Descendants().Single(element => (string?)element.Attribute(x + "Name") == name);
 
         Assert.Equal("Hidden", (string?)Named("FileIconImage").Attribute("Visibility"));
-        Assert.Equal("False", (string?)Named("OutgoingContent").Attribute("IsHitTestVisible"));
         Assert.Equal("False", (string?)Named("StandInLayer").Attribute("IsHitTestVisible"));
-        Assert.Equal("False", (string?)Named("IncomingContent").Attribute("IsHitTestVisible"));
+
+        // Two hosts trade the item on screen and the next one. The stand-in
+        // draws between them, and an item making way stops taking clicks in
+        // code (RevealSequencingTests).
+        Assert.Equal("0", (string?)Named("ContentHostA").Attribute("Panel.ZIndex"));
+        Assert.Equal("1", (string?)Named("StandInLayer").Attribute("Panel.ZIndex"));
+        Assert.Equal("2", (string?)Named("ContentHostB").Attribute("Panel.ZIndex"));
         Assert.NotNull(Named("IdentityPanel"));
     }
 

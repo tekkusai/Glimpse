@@ -175,6 +175,10 @@ cut once it has painted at its final size.
 | after 1 s | A slow sheen moves across the stand-in. |
 | after 1.2 s, when there is a reason | One line under the stand-in, e.g. "Converting with LibreOffice". |
 
+While browsing with the current item still on screen, only a poster takes
+its place at 120 ms. A ghost page waits until 1 s: a picture does not give
+way to a blank rectangle.
+
 Posters come from, in order: the PDF rail cache's first page, the Office file's
 embedded thumbnail, Explorer's cached thumbnail. A ghost page is `RaisedBg`
 with a `RaisedBorder` hairline at the page's aspect, placed where the real page

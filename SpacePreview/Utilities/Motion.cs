@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 
 namespace SpacePreview.Utilities;
@@ -25,7 +26,10 @@ internal static class Motion
     /// <summary>The current item fading out before a new shape, and the window closing.</summary>
     public static readonly TimeSpan Leave = TimeSpan.FromMilliseconds(90);
 
-    public static bool Enabled => SystemParameters.ClientAreaAnimation;
+    public static bool Enabled => Override ?? SystemParameters.ClientAreaAnimation;
+
+    /// <summary>Tests turn motion on or off here. Nothing in the app writes it.</summary>
+    internal static bool? Override { get; set; }
 
     /// <summary>
     /// Fades an element from wherever it is now. The base value is set to the
@@ -60,6 +64,53 @@ internal static class Motion
     {
         element.BeginAnimation(UIElement.OpacityProperty, null);
         element.Opacity = opacity;
+    }
+
+    /// <summary>
+    /// A sideways slide for a template part, set from a trigger: a XAML
+    /// storyboard cannot ask the switch, so a part that slides is moved
+    /// from here (the settings toggle's thumb).
+    /// </summary>
+    public static readonly DependencyProperty SlideXProperty = DependencyProperty.RegisterAttached(
+        "SlideX",
+        typeof(double),
+        typeof(Motion),
+        new PropertyMetadata(0.0, OnSlideXChanged));
+
+    public static double GetSlideX(UIElement element) => (double)element.GetValue(SlideXProperty);
+
+    public static void SetSlideX(UIElement element, double value) => element.SetValue(SlideXProperty, value);
+
+    private static void OnSlideXChanged(DependencyObject target, DependencyPropertyChangedEventArgs change)
+    {
+        if (target is not UIElement element)
+        {
+            return;
+        }
+
+        // A transform declared in a template is shared and frozen; each
+        // element slides on one of its own.
+        if (element.RenderTransform is not TranslateTransform { IsFrozen: false } slide)
+        {
+            slide = new TranslateTransform((double)change.OldValue, 0);
+            element.RenderTransform = slide;
+        }
+
+        // From wherever it is now, as Fade does: the base value takes the
+        // end state first.
+        var from = slide.X;
+        var to = (double)change.NewValue;
+        slide.BeginAnimation(TranslateTransform.XProperty, null);
+        slide.X = to;
+        if (!Enabled || Math.Abs(from - to) < 0.001)
+        {
+            return;
+        }
+
+        slide.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(from, to, TimeSpan.FromMilliseconds(120))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        });
     }
 
     /// <summary>Cubic ease-out (opening) or ease-in (leaving) for a 0..1 progress.</summary>
