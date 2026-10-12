@@ -28,15 +28,14 @@ public sealed class AppPackagePreviewLoaderTests
         Assert.NotNull(info);
         Assert.Equal("Glimpse Test App", info!.Title);
         Assert.Equal("Example Publisher", info.Publisher);
-        Assert.Equal("Glimpse.Test", info.IdentityName);
+        Assert.Equal("Small package used by tests.", info.Description);
         Assert.Equal("1.2.3.4", info.Version);
         Assert.Equal("x64", info.Architecture);
         Assert.Equal(1, info.ApplicationCount);
         Assert.False(info.IsBundle);
         Assert.Contains("internetClient", info.Capabilities);
         Assert.Equal(path, info.SourcePath);
-        Assert.NotNull(info.LogoBytes);
-        Assert.NotEmpty(info.LogoBytes!);
+        Assert.NotNull(info.Logo);
     }
 
     [Fact]

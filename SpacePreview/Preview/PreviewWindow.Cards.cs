@@ -548,15 +548,27 @@ public partial class PreviewWindow
         return builder.ToString();
     }
 
+    /// <summary>
+    /// What the header cannot say about a package: what it is, then who
+    /// made it and which build this is. The description takes one line, so
+    /// with one the publisher joins the build line; without, it keeps its own.
+    /// </summary>
     internal static IReadOnlyList<string> AppPackageFacts(AppPackageInfo info)
     {
         var facts = new List<string>(2);
-        if (!string.IsNullOrWhiteSpace(info.Publisher))
+        var description = string.Join(' ', (info.Description ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+        var described = description.Length > 0 && !description.Equals(info.Title, StringComparison.OrdinalIgnoreCase);
+        if (described)
         {
-            facts.Add(info.Publisher);
+            facts.Add(description);
         }
 
         var meta = new List<string>();
+        if (!string.IsNullOrWhiteSpace(info.Publisher))
+        {
+            (described ? meta : facts).Add(info.Publisher);
+        }
+
         if (!string.IsNullOrWhiteSpace(info.Version))
         {
             meta.Add($"Version {info.Version}");
@@ -688,38 +700,18 @@ public partial class PreviewWindow
         });
     }
 
-    private static FrameworkElement BuildAppPackageLogo(AppPackageInfo info)
-    {
-        if (info.LogoBytes is { Length: > 0 })
+    /// <summary>The logo the loader decoded, or the glyph tile when the package has none to show.</summary>
+    private static FrameworkElement BuildAppPackageLogo(AppPackageInfo info) => info.Logo is { } logo
+        ? new Border
         {
-            try
-            {
-                var bitmap = new BitmapImage();
-                bitmap.BeginInit();
-                bitmap.CacheOption = BitmapCacheOption.OnLoad;
-                bitmap.StreamSource = new MemoryStream(info.LogoBytes);
-                bitmap.DecodePixelWidth = 256;
-                bitmap.EndInit();
-                bitmap.Freeze();
-                return new Border
-                {
-                    Width = CardTileSide,
-                    Height = CardTileSide,
-                    CornerRadius = Metrics.CardCorner,
-                    HorizontalAlignment = HorizontalAlignment.Center,
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Background = new ImageBrush(bitmap) { Stretch = Stretch.UniformToFill }
-                };
-            }
-            catch (Exception ex)
-            {
-                // Undecodable logo asset: the glyph tile stands in.
-                DiagnosticLog.Write($"package logo decode failed: {ex.GetType().Name}");
-            }
+            Width = CardTileSide,
+            Height = CardTileSide,
+            CornerRadius = Metrics.CardCorner,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            Background = new ImageBrush(logo) { Stretch = Stretch.UniformToFill }
         }
-
-        return GlyphTile("\uE7B8", "Theme.TextTertiary");
-    }
+        : GlyphTile("\uE7B8", "Theme.TextTertiary");
 
     private static FrameworkElement BuildAppCapabilityChip(string capability)
     {

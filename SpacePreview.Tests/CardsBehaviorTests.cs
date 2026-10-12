@@ -128,7 +128,7 @@ public sealed class CardsBehaviorTests
     [Fact]
     public void PackageFactsAreThePublisherThenOneMetaLine()
     {
-        var info = new AppPackageInfo("Sketchpad", "Contoso Labs", null, "Contoso.Sketchpad", "2.4.1.0", "x64", 1, false, [], 0, null, "app.msix");
+        var info = new AppPackageInfo("Sketchpad", "Contoso Labs", null, "2.4.1.0", "x64", 1, false, [], 0, null, "app.msix");
 
         Assert.Equal(["Contoso Labs", "Version 2.4.1.0 · x64"], PreviewWindow.AppPackageFacts(info));
     }

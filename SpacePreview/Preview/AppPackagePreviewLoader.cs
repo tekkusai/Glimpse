@@ -2,6 +2,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography.X509Certificates;
+using System.Windows.Media.Imaging;
 using System.Xml;
 using System.Xml.Linq;
 using SpacePreview.Services;
@@ -23,19 +24,23 @@ internal sealed record AppPackageInfo(
     string Title,
     string? Publisher,
     string? Description,
-    string? IdentityName,
     string? Version,
     string? Architecture,
     int ApplicationCount,
     bool IsBundle,
     IReadOnlyList<string> Capabilities,
     int CapabilityOverflow,
-    byte[]? LogoBytes,
+    BitmapSource? Logo,
     string SourcePath);
 
 internal static class AppPackagePreviewLoader
 {
     private const long MaxLogoBytes = 2 * 1024 * 1024;
+
+    // A package's largest logo is 600 pixels square (150 at 400% scale). A
+    // PNG can declare any size in a few bytes, and decoding pays for all of it.
+    private const long MaxLogoPixels = 2048 * 2048;
+    private const int LogoDecodeWidth = 256;
     private const int MaxCapabilities = 16;
     private const uint WtdUiNone = 2;
     private const uint WtdRevokeNone = 0;
@@ -97,7 +102,6 @@ internal static class AppPackagePreviewLoader
                 title,
                 publisher,
                 description,
-                identity?.Attribute("Name")?.Value,
                 identity?.Attribute("Version")?.Value,
                 identity?.Attribute("ProcessorArchitecture")?.Value,
                 applicationCount,
@@ -217,7 +221,11 @@ internal static class AppPackagePreviewLoader
         }
     }
 
-    private static byte[]? TryReadLogo(ZipArchive archive, string? manifestPath)
+    /// <summary>
+    /// The logo, decoded and frozen here, off the UI thread, so the card
+    /// only has to draw it. Null when the package has none worth decoding.
+    /// </summary>
+    private static BitmapSource? TryReadLogo(ZipArchive archive, string? manifestPath)
     {
         if (string.IsNullOrWhiteSpace(manifestPath))
         {
@@ -231,10 +239,40 @@ internal static class AppPackagePreviewLoader
             return null;
         }
 
-        using var stream = entry.Open();
-        using var memory = new MemoryStream();
-        stream.CopyTo(memory);
-        return memory.ToArray();
+        try
+        {
+            var bytes = new byte[entry.Length];
+            using (var stream = entry.Open())
+            {
+                stream.ReadExactly(bytes);
+            }
+
+            // The frame's size comes from the header; nothing is decoded yet.
+            var frame = BitmapDecoder.Create(
+                new MemoryStream(bytes),
+                BitmapCreateOptions.DelayCreation | BitmapCreateOptions.IgnoreColorProfile,
+                BitmapCacheOption.None).Frames[0];
+            if ((long)frame.PixelWidth * frame.PixelHeight > MaxLogoPixels)
+            {
+                DiagnosticLog.Write($"package logo skipped: {frame.PixelWidth}x{frame.PixelHeight} pixels");
+                return null;
+            }
+
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.StreamSource = new MemoryStream(bytes);
+            bitmap.DecodePixelWidth = LogoDecodeWidth;
+            bitmap.EndInit();
+            bitmap.Freeze();
+            return bitmap;
+        }
+        catch (Exception ex)
+        {
+            // Undecodable logo asset: the glyph tile stands in.
+            DiagnosticLog.Write($"package logo decode failed: {ex.GetType().Name}");
+            return null;
+        }
     }
 
     private static ZipArchiveEntry? FindScaledAsset(ZipArchive archive, string normalized)

@@ -194,6 +194,10 @@ own icon, its name, one fact line (`44.6 KB · 4 files`,
 an accent bar, largest first once the sizes are known. Folders inside an
 archive open in place.
 
+An app package's two fact lines are what it is, then who made it and which
+build: its description, then the publisher, version and architecture on one
+line.
+
 ## Words
 
 - Sentence case. Straight quotes. No em dashes.
