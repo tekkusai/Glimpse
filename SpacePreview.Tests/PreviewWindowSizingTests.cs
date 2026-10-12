@@ -374,8 +374,9 @@ public sealed class PreviewWindowSizingTests
         Assert.Contains("StageFitHint.PageAspect(pageWidth / pageHeight)", windowSource, StringComparison.Ordinal);
     }
 
+    // The image lane keeps the same rule where it runs: ImageRouteTests
+    // builds a giant image and reads the shape the stage was given.
     [Theory]
-    [InlineData("TryBuildImagePreviewAsync")]
     [InlineData("TryBuildPsdPreviewAsync")]
     public void DecodedPixelsCannotOverwriteIntrinsicHeaderTruth(string lane)
     {

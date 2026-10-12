@@ -16,11 +16,15 @@ internal sealed class ImageRotationSession
 {
     private static readonly TimeSpan CommitDelay = TimeSpan.FromSeconds(1);
 
-    // Rotations still on their way to disk, by file. One file's writes
-    // land one after another, whichever preview asked, and a preview that
-    // opens the same file waits for them, so it never shows the picture as
-    // it was a moment before.
-    private static readonly Dictionary<string, Task> SavesInFlight = new(StringComparer.OrdinalIgnoreCase);
+    // Work on a picture's file still to be done, by file: a rotation on its
+    // way to disk, or the removal of a working file a save left behind.
+    // One file's work runs one job after another, whichever preview asked,
+    // and a preview that opens the same file waits for it, so it never
+    // shows the picture as it was a moment before. Each entry is the last
+    // job queued for its file. The lock guards this table and nothing
+    // else: no file is touched under it and nothing is waited for, so a
+    // disk that stalls holds up only the file it stalled on.
+    private static readonly Dictionary<string, Task> WorkByFile = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
     private BitmapSource _decoded;
@@ -60,7 +64,8 @@ internal sealed class ImageRotationSession
     /// <summary>
     /// Raised on the UI thread when a rotation did not reach the file. The
     /// view has already turned back, unless the file cannot carry a rotation
-    /// at all: then the turn stays, for this preview only.
+    /// at all: then the turn stays, for this preview only. It stays too when
+    /// the turned picture was saved, but under another name.
     /// </summary>
     public event Action<RotationSaveResult>? NotSaved;
 
@@ -75,12 +80,16 @@ internal sealed class ImageRotationSession
     public BitmapSource CurrentBitmap =>
         _current ??= ImageOrientation.Apply(_decoded, ImageOrientation.RotateCw(_baseOrientation, _turns));
 
-    /// <summary>Completes once no rotation of this file is still on its way to disk.</summary>
+    /// <summary>
+    /// Completes once nothing is queued for this file any more: no rotation
+    /// on its way to disk, and no working file being removed.
+    /// </summary>
     public static Task WhenSaved(string path)
     {
-        lock (SavesInFlight)
+        var key = System.IO.Path.GetFullPath(path);
+        lock (WorkByFile)
         {
-            return SavesInFlight.GetValueOrDefault(System.IO.Path.GetFullPath(path), Task.CompletedTask);
+            return WorkByFile.GetValueOrDefault(key, Task.CompletedTask);
         }
     }
 
@@ -91,19 +100,21 @@ internal sealed class ImageRotationSession
     /// </summary>
     public static bool WaitForSaves(TimeSpan bound)
     {
-        Task[] saves;
-        lock (SavesInFlight)
+        Task[] work;
+        lock (WorkByFile)
         {
-            saves = [.. SavesInFlight.Values];
+            work = [.. WorkByFile.Values];
         }
 
-        return Task.WaitAll(saves, bound);
+        return Task.WaitAll(work, bound);
     }
 
     /// <summary>
     /// Removes the working file a save left beside this picture when the
-    /// app ended under it. A save of this file that is running now owns
-    /// that name, and no save can begin while this looks.
+    /// app ended under it. The removal is queued like a save of the file,
+    /// behind any that is running, so it never takes a working file from
+    /// under the save that is writing it. One that is the only copy of the
+    /// picture stays.
     /// </summary>
     public static void RemoveStrandedTemp(string path)
     {
@@ -113,13 +124,51 @@ internal sealed class ImageRotationSession
         }
 
         var key = System.IO.Path.GetFullPath(path);
-        lock (SavesInFlight)
+        Enqueue(key, () =>
         {
-            if (!SavesInFlight.ContainsKey(key) && ImageRotationService.DeleteTemp(ImageRotationService.TempPathFor(key)))
+            var removed = ImageRotationService.DeleteTemp(ImageRotationService.TempPathFor(key), key);
+            if (removed)
             {
                 DiagnosticLog.Write($"rotate stranded temp removed beside {key}");
             }
+
+            return removed;
+        });
+    }
+
+    /// <summary>
+    /// Adds a job to the end of a file's queue. It runs on a worker once
+    /// the jobs before it are done, and leaves the table when it is the
+    /// last.
+    /// </summary>
+    private static Task<T> Enqueue<T>(string key, Func<T> work)
+    {
+        Task<T> job;
+        lock (WorkByFile)
+        {
+            job = WorkByFile.GetValueOrDefault(key, Task.CompletedTask).ContinueWith(
+                _ => work(),
+                CancellationToken.None,
+                TaskContinuationOptions.RunContinuationsAsynchronously,
+                TaskScheduler.Default);
+            WorkByFile[key] = job;
         }
+
+        job.ContinueWith(
+            done =>
+            {
+                lock (WorkByFile)
+                {
+                    if (WorkByFile.GetValueOrDefault(key) == done)
+                    {
+                        WorkByFile.Remove(key);
+                    }
+                }
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+        return job;
     }
 
     /// <summary>Rotates the view a quarter turn. Positive is clockwise.</summary>
@@ -208,30 +257,8 @@ internal sealed class ImageRotationSession
         _committed = true;
 
         var key = System.IO.Path.GetFullPath(Path);
-        Task<RotationSaveResult> save;
-        lock (SavesInFlight)
-        {
-            save = SavesInFlight.GetValueOrDefault(key, Task.CompletedTask).ContinueWith(
-                _ => ImageRotationService.SaveQuarterTurns(key, turns),
-                CancellationToken.None,
-                TaskContinuationOptions.RunContinuationsAsynchronously,
-                TaskScheduler.Default);
-            SavesInFlight[key] = save;
-        }
-
-        save.ContinueWith(
-            done =>
-            {
-                lock (SavesInFlight)
-                {
-                    if (SavesInFlight.GetValueOrDefault(key) == done)
-                    {
-                        SavesInFlight.Remove(key);
-                    }
-                }
-
-                _dispatcher.InvokeAsync(() => OnSaved(turns, done.Result));
-            },
+        Enqueue(key, () => ImageRotationService.SaveQuarterTurns(key, turns)).ContinueWith(
+            done => _dispatcher.InvokeAsync(() => OnSaved(turns, done.Result)),
             TaskScheduler.Default);
     }
 
@@ -239,6 +266,14 @@ internal sealed class ImageRotationSession
     {
         if (result == RotationSaveResult.Saved)
         {
+            return;
+        }
+
+        if (result == RotationSaveResult.SavedAside)
+        {
+            // The picture is as the view shows it, under another name:
+            // there is nothing to turn back, only something to say.
+            NotSaved?.Invoke(result);
             return;
         }
 

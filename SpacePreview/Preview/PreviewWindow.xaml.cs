@@ -578,7 +578,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsImage(path) || (useSignatureRouting && FileSignatures.IsImage(signature)))
         {
-            if (await TryBuildImagePreviewAsync(path, version, token, StageHeader(version)) is { } image)
+            if (await TryBuildImagePreviewAsync(path, version, token) is { } image)
             {
                 return image;
             }
@@ -602,7 +602,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsPhotoshop(path))
         {
-            if (await TryBuildPsdPreviewAsync(path, version, token, StageHeader(version)) is { } composite)
+            if (await TryBuildPsdPreviewAsync(path, version, token) is { } composite)
             {
                 return composite;
             }
@@ -1016,7 +1016,7 @@ public partial class PreviewWindow : Window
             }
 
             if ((FileKinds.IsImage(contentPath) || FileKinds.IsBrowserImage(contentPath) || FileKinds.IsPhotoshop(contentPath))
-                && ReadStageHeader(contentPath, version) is { } image)
+                && ReadStageHeader(contentPath) is { } image)
             {
                 SetStageFitHint(StageFitHint.ImagePixels(image.Width, image.Height), version);
 
@@ -1024,7 +1024,7 @@ public partial class PreviewWindow : Window
                 // line takes its pixel size from it.
                 if (FileKinds.IsImage(contentPath) || FileKinds.IsPhotoshop(contentPath))
                 {
-                    ShowHeaderFact($"{image.Width}×{image.Height}", version);
+                    ShowHeaderFact(PixelSize(image), version);
                 }
 
                 return;

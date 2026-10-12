@@ -46,44 +46,35 @@ internal static class BmpRotation
         }
     }
 
-    public static RotationSaveResult Save(string path, int turns)
+    /// <summary>
+    /// Builds the turned picture at <paramref name="tempPath"/>. False when
+    /// this file's pixels cannot be moved, and nothing is written.
+    /// </summary>
+    public static bool Write(string path, int turns, string tempPath)
     {
-        var tempPath = ImageRotationService.TempPathFor(path);
-        try
+        // Kept open, and so closed to writers, until the turned copy
+        // is on disk: the copy is of the file as it is, not as it was.
+        using var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (source.Length >= Array.MaxLength)
         {
-            // Kept open, and so closed to writers, until the turned copy
-            // is on disk: the copy is of the file as it is, not as it was.
-            using (var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            {
-                if (source.Length >= Array.MaxLength)
-                {
-                    return Refused(path);
-                }
-
-                var file = new byte[source.Length];
-                source.ReadExactly(file);
-                if (ReadLayout(file, file.Length) is not { } layout || Turn(file, layout, turns) is not { } turned)
-                {
-                    return Refused(path);
-                }
-
-                File.WriteAllBytes(tempPath, turned);
-            }
-
-            File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-            DiagnosticLog.Write($"rotate saved (re-encode {turns * 90} deg) {path}");
-            return RotationSaveResult.Saved;
+            return Refused(path);
         }
-        finally
+
+        var file = new byte[source.Length];
+        source.ReadExactly(file);
+        if (ReadLayout(file, file.Length) is not { } layout || Turn(file, layout, turns) is not { } turned)
         {
-            ImageRotationService.DeleteTemp(tempPath);
+            return Refused(path);
         }
+
+        File.WriteAllBytes(tempPath, turned);
+        return true;
     }
 
-    private static RotationSaveResult Refused(string path)
+    private static bool Refused(string path)
     {
         DiagnosticLog.Write($"rotate not persisted (bmp: layout cannot be moved) {path}");
-        return RotationSaveResult.CannotCarry;
+        return false;
     }
 
     /// <summary>

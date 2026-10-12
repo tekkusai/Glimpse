@@ -420,7 +420,8 @@ public sealed class ImageRotationCarryTests
 
     private static IEnumerable<PngChunk> WithoutImageData(List<PngChunk> chunks) => chunks.Where(chunk => chunk.Name != "IDAT");
 
-    internal static byte[] AnimatedPng()
+    /// <summary>A two-frame animated PNG, with a run of text chunks in front of its animation when asked.</summary>
+    internal static byte[] AnimatedPng(int textChunksInFront = 0)
     {
         // One frame control and the default image, then a second frame.
         byte[] control = [.. BigEndian(0), .. BigEndian(5), .. BigEndian(3), .. BigEndian(0), .. BigEndian(0), 0, 1, 0, 10, 0, 0];
@@ -430,7 +431,11 @@ public sealed class ImageRotationCarryTests
             8,
             6,
             RandomRows(5, 3, bitsPerPixel: 32, seed: 5),
-            [new PngChunk("acTL", [.. BigEndian(2), .. BigEndian(0)]), new PngChunk("fcTL", control)],
+            [
+                .. Enumerable.Range(0, textChunksInFront).Select(i => new PngChunk("tEXt", [.. "Comment"u8, 0, .. Encoding.ASCII.GetBytes($"note {i}")])),
+                new PngChunk("acTL", [.. BigEndian(2), .. BigEndian(0)]),
+                new PngChunk("fcTL", control)
+            ],
             [new PngChunk("fcTL", [.. BigEndian(1), .. control.AsSpan(4)]), new PngChunk("fdAT", [.. BigEndian(2), .. Deflate(new byte[3 * 21])])]);
     }
 

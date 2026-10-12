@@ -104,7 +104,7 @@ public sealed class ImageRotationWordsTests
                 "Rotation not saved. Free up disk space, then rotate again.",
                 "Rotation not saved. This file can't be changed."
             },
-            Failures.Select(PreviewWindow.RotationNotSavedNotice).ToArray());
+            Failures.Select(result => PreviewWindow.RotationNotSavedNotice(@"C:\photos\IMG_0412.jpg", result)).ToArray());
 
         Assert.Equal(
             new[]
@@ -119,6 +119,14 @@ public sealed class ImageRotationWordsTests
         Assert.All(
             Failures,
             result => Assert.Equal("Rotation not saved", PreviewWindow.RotationNotSavedTrayNotice(@"C:\photos\IMG_0412.jpg", result).Title));
+
+        // The one save that leaves the picture under another name gives
+        // both names, on the image and in the tray, and says what to do.
+        const string aside = "The rotated picture was saved as \"IMG_0412.jpg.spvw-rotate.tmp\" in the same folder. Rename it to \"IMG_0412.jpg\".";
+        Assert.Equal(aside, PreviewWindow.RotationNotSavedNotice(@"C:\photos\IMG_0412.jpg", RotationSaveResult.SavedAside));
+        Assert.Equal(
+            ("Rotation saved under another name", aside),
+            PreviewWindow.RotationNotSavedTrayNotice(@"C:\photos\IMG_0412.jpg", RotationSaveResult.SavedAside));
     }
 
     private static RotationSaveResult[] Failures =>

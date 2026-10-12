@@ -277,6 +277,8 @@ public sealed class ImageRotationRaceTests
             window.ShowPreview(path, IntPtr.Zero);
             await WaitUntilAsync(() => Viewer(window) is not null);
 
+            // The removal is queued for the file as a save would be.
+            await ImageRotationSession.WhenSaved(path);
             Assert.NotNull(Viewer(window));
             Assert.Equal(!removed, File.Exists(stranded));
             Assert.Equal(before, File.ReadAllBytes(path));
@@ -309,6 +311,7 @@ public sealed class ImageRotationRaceTests
 
         await ImageRotationSession.WhenSaved(path);
         ImageRotationSession.RemoveStrandedTemp(path);
+        await ImageRotationSession.WhenSaved(path);
         Assert.False(File.Exists(working));
         Assert.Equal(6, ImageOrientation.Read(path));
     });

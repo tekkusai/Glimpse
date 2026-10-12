@@ -256,3 +256,6 @@ One gesture set for every zoomable view:
 - A sentence the image has to say, such as a rotation that did not save,
   appears where the zoom readout does, in the same glass and type, and holds
   for four seconds.
+- A rotation that could only be saved under another name is said on the
+  image and in the tray, with both file names, so the picture can be found
+  after the preview is gone.

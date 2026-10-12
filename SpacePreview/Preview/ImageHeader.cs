@@ -1,4 +1,3 @@
-using System.Buffers.Binary;
 using System.IO;
 using System.Windows.Media.Imaging;
 using SpacePreview.Utilities;
@@ -15,8 +14,9 @@ namespace SpacePreview.Preview;
 internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orientation, bool IsJpeg)
 {
     // A PNG lists a handful of chunks before its pixels. A file with more
-    // than this is not one to keep walking on the way to showing the window.
-    private const int MaxPngHeaderChunks = 64;
+    // than this is not one to keep walking on the way to showing the window:
+    // a glance stops here, and says it stopped.
+    private const int PngChunksAtAGlance = 64;
 
     private static readonly object Sync = new();
     private static (ImageFileStamp Stamp, ImageHeader? Header)? _last;
@@ -30,6 +30,14 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
     /// <summary>Transparency a PNG or an extended WebP declares up front. Other formats do not say here.</summary>
     public bool HasAlpha { get; init; }
 
+    /// <summary>
+    /// A glance at a PNG ran out of chunks to walk before it reached the
+    /// pixels. <see cref="IsAnimated"/> and <see cref="HasAlpha"/> are then
+    /// only what it had found, not an answer: a read that is not a glance
+    /// walks the rest.
+    /// </summary>
+    public bool IsUndecided { get; init; }
+
     /// <summary>Width as displayed, after the EXIF turn.</summary>
     public int Width => ImageOrientation.SwapsAxes(Orientation) ? StoredHeight : StoredWidth;
 
@@ -38,16 +46,26 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
 
     public int LongSide => Math.Max(StoredWidth, StoredHeight);
 
-    public static ImageHeader? TryRead(string path)
-    {
-        if (!ImageFileStamp.TryCreate(path, out var stamp))
-        {
-            return null;
-        }
+    /// <summary>
+    /// <paramref name="atAGlance"/> is for the UI thread on the way to
+    /// showing the window: a PNG is walked no further than a fixed number
+    /// of chunks, and the header may come back <see cref="IsUndecided"/>.
+    /// Every other read walks to the pixels, however far that is, and can
+    /// be called off through <paramref name="token"/>.
+    /// </summary>
+    public static ImageHeader? TryRead(string path, bool atAGlance = false, CancellationToken token = default) =>
+        ImageFileStamp.TryCreate(path, out var stamp) ? TryRead(stamp, atAGlance, token) : null;
 
+    /// <summary>
+    /// The header of the file <paramref name="stamp"/> was taken from. A
+    /// caller that holds the stamp it will decode under asks with it, and
+    /// is answered from memory only for that same version of the file.
+    /// </summary>
+    public static ImageHeader? TryRead(ImageFileStamp stamp, bool atAGlance = false, CancellationToken token = default)
+    {
         lock (Sync)
         {
-            if (_last is { } last && last.Stamp == stamp)
+            if (_last is { } last && last.Stamp == stamp && (atAGlance || last.Header is not { IsUndecided: true }))
             {
                 return last.Header;
             }
@@ -56,7 +74,7 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
         ImageHeader? header;
         try
         {
-            header = Read(path);
+            header = Read(stamp.Path, atAGlance, token);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -80,7 +98,7 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
             ? decoder.Frames.MaxBy(frame => ((long)frame.PixelWidth * frame.PixelHeight, frame.Format.BitsPerPixel))!
             : decoder.Frames[0];
 
-    private static ImageHeader? Read(string path)
+    private static ImageHeader? Read(string path, bool atAGlance, CancellationToken token)
     {
         if (FileKinds.IsPhotoshop(path))
         {
@@ -97,10 +115,16 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
             // WIC decoder built just to read those once cost 34 ms on a
             // giant sample, and the subtitle reads it on the way to showing
             // the window. The same bytes say whether the file is animated,
-            // which the decoder would not.
-            if (TryReadPng(stream) is { } png)
+            // which the decoder would not. The walk is the rotation rule's
+            // own, so the two give one answer to whether a PNG moves.
+            if (PngRotation.ReadFront(stream, atAGlance ? PngChunksAtAGlance : int.MaxValue, token) is { } png)
             {
-                return png;
+                return new ImageHeader(png.Width, png.Height, ImageOrientation.Normal, IsJpeg: false)
+                {
+                    IsAnimated = png.IsAnimated,
+                    HasAlpha = png.ColorType is 4 or 6 || png.HasTransparency,
+                    IsUndecided = !png.Complete
+                };
             }
 
             stream.Position = 0;
@@ -121,67 +145,11 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
                 ImageOrientation.ReadFrom(frame, path),
                 decoder is JpegBitmapDecoder);
         }
-        catch (Exception ex) when (ex is not (IOException or UnauthorizedAccessException))
+        catch (Exception ex) when (ex is not (IOException or UnauthorizedAccessException or OperationCanceledException))
         {
             // Not an image any decoder here reads.
             return null;
         }
-    }
-
-    /// <summary>
-    /// The size from the fixed IHDR, then the chunks in front of the first
-    /// IDAT: an acTL there makes the file an animation, and a tRNS gives it
-    /// transparency its color type does not show.
-    /// </summary>
-    private static ImageHeader? TryReadPng(Stream stream)
-    {
-        // Signature, the IHDR's length and name, then width, height, bit
-        // depth and color type.
-        Span<byte> start = stackalloc byte[26];
-        var read = stream.ReadAtLeast(start, start.Length, throwOnEndOfStream: false);
-        ReadOnlySpan<byte> signature = [137, 80, 78, 71, 13, 10, 26, 10];
-        if (read < 24 || !start[..8].SequenceEqual(signature) || !start[12..16].SequenceEqual("IHDR"u8))
-        {
-            return null;
-        }
-
-        var storedWidth = BinaryPrimitives.ReadUInt32BigEndian(start[16..20]);
-        var storedHeight = BinaryPrimitives.ReadUInt32BigEndian(start[20..24]);
-        if (storedWidth is 0 or > int.MaxValue || storedHeight is 0 or > int.MaxValue)
-        {
-            return null;
-        }
-
-        var hasAlpha = read == start.Length && start[25] is 4 or 6;
-        var isAnimated = false;
-
-        // Each chunk is a length, a name, that many bytes and a checksum.
-        // A file cut short still has the size it declared.
-        Span<byte> chunk = stackalloc byte[8];
-        stream.Position = 16L + BinaryPrimitives.ReadUInt32BigEndian(start[8..12]) + 4;
-        for (var walked = 0; walked < MaxPngHeaderChunks; walked++)
-        {
-            if (stream.ReadAtLeast(chunk, chunk.Length, throwOnEndOfStream: false) < chunk.Length)
-            {
-                break;
-            }
-
-            var name = chunk[4..];
-            if (name.SequenceEqual("IDAT"u8) || name.SequenceEqual("IEND"u8))
-            {
-                break;
-            }
-
-            isAnimated |= name.SequenceEqual("acTL"u8);
-            hasAlpha |= name.SequenceEqual("tRNS"u8);
-            stream.Seek(BinaryPrimitives.ReadUInt32BigEndian(chunk) + 4L, SeekOrigin.Current);
-        }
-
-        return new ImageHeader((int)storedWidth, (int)storedHeight, ImageOrientation.Normal, IsJpeg: false)
-        {
-            IsAnimated = isAnimated,
-            HasAlpha = hasAlpha
-        };
     }
 
     /// <summary>

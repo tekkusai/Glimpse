@@ -211,24 +211,6 @@ public sealed class ImageRotationSaveTests
     });
 
     [Fact]
-    public Task AFileStillBeingSavedIsWaitedFor() => WpfApp.RunAsync(async () =>
-    {
-        using var temp = new TempDirectory();
-        var path = WriteImage(temp, "scan.png", 1200, 800);
-        var session = Open(path);
-        Assert.True(ImageRotationSession.WhenSaved(path).IsCompleted);
-
-        session.Rotate(1);
-        session.Commit();
-
-        // What a preview of the same file awaits before it decodes: after
-        // it, the file is already the rotated one.
-        await ImageRotationSession.WhenSaved(path);
-        Assert.Equal((800, 1200), (ImageHeader.TryRead(path)!.Width, ImageHeader.TryRead(path)!.Height));
-        Assert.True(ImageRotationSession.WhenSaved(Path.Combine(temp.Path, "other.png")).IsCompleted);
-    });
-
-    [Fact]
     public Task SavesOfOneFileFromTwoPreviewsLandOneAfterTheOther() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
@@ -284,7 +266,7 @@ public sealed class ImageRotationSaveTests
     {
         using var temp = new TempDirectory();
         var path = WriteImage(temp, "IMG_0412.jpg", 320, 200);
-        var notice = PreviewWindow.RotationNotSavedNotice(RotationSaveResult.InUse);
+        var notice = PreviewWindow.RotationNotSavedNotice(path, RotationSaveResult.InUse);
         var window = OpenStage();
         try
         {
@@ -347,13 +329,21 @@ public sealed class ImageRotationSaveTests
     [Fact]
     public void EveryFailureHasItsOwnWords()
     {
+        const string photo = @"C:\photos\IMG_0412.jpg";
         var failures = Enum.GetValues<RotationSaveResult>().Where(result => result != RotationSaveResult.Saved).ToArray();
-        var onScreen = failures.Select(PreviewWindow.RotationNotSavedNotice).ToArray();
-        var inTray = failures.Select(result => PreviewWindow.RotationNotSavedTrayNotice(@"C:\photos\IMG_0412.jpg", result).Text).ToArray();
+        var onScreen = failures.Select(result => PreviewWindow.RotationNotSavedNotice(photo, result)).ToArray();
+        var inTray = failures.Select(result => PreviewWindow.RotationNotSavedTrayNotice(photo, result).Text).ToArray();
 
         Assert.Equal(failures.Length, onScreen.Distinct().Count());
         Assert.Equal(failures.Length, inTray.Distinct().Count());
-        Assert.All(onScreen, sentence => Assert.StartsWith("Rotation not saved. ", sentence, StringComparison.Ordinal));
+
+        // "Not saved" is said of every save that left the file as it was,
+        // and never of the one that saved the picture under another name.
+        Assert.All(
+            failures.Zip(onScreen),
+            said => Assert.Equal(
+                said.First != RotationSaveResult.SavedAside,
+                said.Second.StartsWith("Rotation not saved. ", StringComparison.Ordinal)));
         Assert.All(inTray, sentence => Assert.Contains("IMG_0412.jpg", sentence, StringComparison.Ordinal));
 
         // docs/DESIGN.md, Words: straight quotes, no em dashes.

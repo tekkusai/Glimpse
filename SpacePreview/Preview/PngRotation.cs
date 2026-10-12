@@ -17,7 +17,9 @@ namespace SpacePreview.Preview;
 /// international text, adds color chunks the file never had and re-maps a
 /// small palette. A file it cannot write back in its own pixel format, an
 /// animation, and a file holding a chunk that must not outlive the pixels it
-/// describes all stay view-only.
+/// describes all stay view-only. The chunks are read one at a time and
+/// never kept, so a file with millions of them costs what its bytes cost to
+/// read.
 /// </summary>
 internal static class PngRotation
 {
@@ -26,191 +28,306 @@ internal static class PngRotation
     // Chunks a quarter turn leaves true as they stand: they describe color,
     // the palette or the file, not where a pixel sits. pHYs is here because
     // it is rewritten with its two axes swapped.
-    private static readonly HashSet<string> SurvivesATurn =
+    private static readonly HashSet<uint> SurvivesATurn =
     [
-        "PLTE", "tRNS", "gAMA", "cHRM", "sRGB", "iCCP", "cICP", "mDCV", "cLLI", "sBIT", "bKGD", "hIST", "sPLT",
-        "tEXt", "zTXt", "iTXt", "tIME", "eXIf", "pHYs"
+        .. new[]
+        {
+            "PLTE", "tRNS", "gAMA", "cHRM", "sRGB", "iCCP", "cICP", "mDCV", "cLLI", "sBIT", "bKGD", "hIST", "sPLT",
+            "tEXt", "zTXt", "iTXt", "tIME", "eXIf", "pHYs"
+        }.Select(name => BinaryPrimitives.ReadUInt32BigEndian(Encoding.ASCII.GetBytes(name)))
     ];
 
     private static readonly SearchValues<byte> Letters =
         SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"u8);
 
     /// <summary>One chunk: a length, a four-letter name, that many bytes and a checksum.</summary>
-    private sealed record Chunk(string Name, long Start, int Length)
+    private readonly record struct Chunk(uint Name, long Start, int Length)
     {
         public long Size => 12L + Length;
 
         public long End => Start + Size;
-    }
 
-    /// <summary>
-    /// Whether a rotation of this file can be saved, as far as the chunks in
-    /// front of its pixels say. A save reads the rest and may still refuse.
-    /// </summary>
-    public static bool CanCarry(string path)
-    {
-        try
-        {
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            return ReadChunks(stream, toEnd: false) is { } chunks && Refusal(stream, chunks) is null;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+        public bool Is(ReadOnlySpan<byte> name) => Name == BinaryPrimitives.ReadUInt32BigEndian(name);
 
-    public static RotationSaveResult Save(string path, int turns)
-    {
-        var tempPath = ImageRotationService.TempPathFor(path);
-        try
+        /// <summary>The name as its four letters, for the log.</summary>
+        public string Text => string.Create(4, Name, (letters, name) =>
         {
-            using (var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+            for (var i = 0; i < 4; i++)
             {
-                if (ReadChunks(source, toEnd: true) is not { } chunks)
-                {
-                    return Refused("not a readable png", path);
-                }
-
-                if (Refusal(source, chunks) is { } refusal)
-                {
-                    return Refused(refusal, path);
-                }
-
-                source.Position = 0;
-                var frame = BitmapDecoder.Create(
-                    source,
-                    BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreColorProfile,
-                    BitmapCacheOption.OnLoad).Frames[0];
-                var rotated = ImageOrientation.Apply(frame, ImageOrientation.FromQuarterTurns(turns));
-
-                // Only the image data is wanted from the encoder, so it gets
-                // the pixels alone: no metadata to rewrite or to choke on.
-                using var encoded = new MemoryStream();
-                var encoder = new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(WithFullPalette(rotated)));
-                encoder.Save(encoded);
-                var pixels = ReadChunks(encoded, toEnd: true);
-                if (pixels is null || !SamePixelFormat(ReadData(source, chunks[0]), ReadData(encoded, pixels[0])))
-                {
-                    return Refused("pixel format would change", path);
-                }
-
-                using (var target = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
-                {
-                    Splice(source, chunks, encoded, pixels, target, swapAxes: turns % 2 == 1);
-                }
-
-                // The file is the user's only copy. It is replaced only by
-                // one that decodes to the same pixels, bit for bit.
-                if (!DecodesTo(tempPath, rotated))
-                {
-                    return Refused("pixels would change", path);
-                }
+                letters[i] = (char)(byte)(name >> (24 - 8 * i));
             }
-
-            File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-            DiagnosticLog.Write($"rotate saved (re-encode {turns * 90} deg) {path}");
-            return RotationSaveResult.Saved;
-        }
-        finally
-        {
-            ImageRotationService.DeleteTemp(tempPath);
-        }
-    }
-
-    private static RotationSaveResult Refused(string reason, string path)
-    {
-        DiagnosticLog.Write($"rotate not persisted (png: {reason}) {path}");
-        return RotationSaveResult.CannotCarry;
+        });
     }
 
     /// <summary>
-    /// The file's chunks in order, up to its first IDAT or, for a save, to
-    /// its IEND. Null when the file is not a well-formed PNG.
+    /// Steps through a PNG's chunks from a place in its stream, and keeps
+    /// nothing behind it. A step fails where the file ends or stops being a
+    /// PNG: a name that is not four letters, or a length that runs past the
+    /// end.
     /// </summary>
-    private static List<Chunk>? ReadChunks(Stream stream, bool toEnd)
+    private sealed class ChunkReader(Stream stream, long position)
     {
-        Span<byte> head = stackalloc byte[8];
-        stream.Position = 0;
-        if (stream.ReadAtLeast(head, head.Length, throwOnEndOfStream: false) < head.Length || !head.SequenceEqual(Signature))
-        {
-            return null;
-        }
+        // Asked once: a file open to writers answers this from the disk
+        // every time.
+        private readonly long _length = stream.Length;
+        private long _next = position;
 
-        var chunks = new List<Chunk>();
-        var position = (long)Signature.Length;
-        while (true)
+        public bool TryNext(out Chunk chunk)
         {
-            stream.Position = position;
+            Span<byte> head = stackalloc byte[8];
+            chunk = default;
+            stream.Position = _next;
             if (stream.ReadAtLeast(head, head.Length, throwOnEndOfStream: false) < head.Length)
             {
-                return null;
+                return false;
             }
 
             var length = BinaryPrimitives.ReadUInt32BigEndian(head);
             var name = head[4..];
             if (length > int.MaxValue || name.ContainsAnyExcept(Letters))
             {
-                return null;
+                return false;
             }
 
-            var chunk = new Chunk(Encoding.ASCII.GetString(name), position, (int)length);
-            if (chunk.End > stream.Length)
+            var read = new Chunk(BinaryPrimitives.ReadUInt32BigEndian(name), _next, (int)length);
+            if (read.End > _length)
             {
-                return null;
+                return false;
             }
 
-            chunks.Add(chunk);
-            if (chunk.Name == "IEND" || (!toEnd && chunk.Name == "IDAT"))
-            {
-                return chunks;
-            }
-
-            position = chunk.End;
+            chunk = read;
+            _next = read.End;
+            return true;
         }
     }
 
-    /// <summary>What this file would lose to a rotation, or null when it would lose nothing.</summary>
-    private static string? Refusal(Stream stream, IReadOnlyList<Chunk> chunks)
+    /// <summary>
+    /// What a PNG says in front of its pixels: its size, whether it is an
+    /// animation, whether a tRNS chunk gives it transparency, and what a
+    /// rotation would lose among those chunks. <see cref="Complete"/> is
+    /// false when the walk stopped at its budget before the pixels: the
+    /// rest is then not known yet, and nothing here says "no".
+    /// </summary>
+    internal readonly record struct Front(
+        int Width,
+        int Height,
+        byte ColorType,
+        bool IsAnimated,
+        bool HasTransparency,
+        string? Refusal,
+        bool Complete);
+
+    /// <summary>
+    /// The one walk of the chunks in front of a PNG's pixels, at most
+    /// <paramref name="budget"/> of them. The header asks it whether the
+    /// file moves and the rotation rule asks it whether a turn can be
+    /// saved, so the two cannot disagree. Each chunk is looked at and left.
+    /// Null when the stream does not open as a PNG.
+    /// </summary>
+    internal static Front? ReadFront(Stream stream, int budget = int.MaxValue, CancellationToken token = default)
     {
-        if (chunks[0] is not { Name: "IHDR", Length: 13 })
+        // Signature, the IHDR's length and name, then width, height, bit
+        // depth and color type. A file cut short still has the size it
+        // declared.
+        Span<byte> start = stackalloc byte[26];
+        stream.Position = 0;
+        var read = stream.ReadAtLeast(start, start.Length, throwOnEndOfStream: false);
+        if (read < 24 || !start[..8].SequenceEqual(Signature) || !start[12..16].SequenceEqual("IHDR"u8))
+        {
+            return null;
+        }
+
+        var width = BinaryPrimitives.ReadUInt32BigEndian(start[16..20]);
+        var height = BinaryPrimitives.ReadUInt32BigEndian(start[20..24]);
+        if (width is 0 or > int.MaxValue || height is 0 or > int.MaxValue)
+        {
+            return null;
+        }
+
+        var headerLength = BinaryPrimitives.ReadUInt32BigEndian(start[8..12]);
+        var colorType = read == start.Length ? start[25] : (byte)0;
+        var refusal = read == start.Length && headerLength == 13 ? null : "no header";
+        var isAnimated = false;
+        var hasTransparency = false;
+        var complete = false;
+        var reader = new ChunkReader(stream, Signature.Length + 12L + headerLength);
+        for (var walked = 0; walked < budget && !complete; walked++)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!reader.TryNext(out var chunk))
+            {
+                // Cut short or broken: there is nothing more to learn.
+                refusal ??= "not a readable png";
+                complete = true;
+            }
+            else if (chunk.Is("IDAT"u8) || chunk.Is("IEND"u8))
+            {
+                complete = true;
+            }
+            else
+            {
+                isAnimated |= chunk.Is("acTL"u8);
+                hasTransparency |= chunk.Is("tRNS"u8);
+                refusal ??= Loss(chunk, colorType);
+            }
+        }
+
+        // WPF has no gray-with-alpha format: it would come back RGBA.
+        refusal ??= colorType == 4 ? "gray with alpha" : null;
+        return new Front((int)width, (int)height, colorType, isAnimated, hasTransparency, refusal, complete);
+    }
+
+    /// <summary>
+    /// Whether a rotation of this file can be saved, as far as the chunks in
+    /// front of its pixels say. A save reads the rest and may still refuse.
+    /// </summary>
+    public static bool CanCarry(string path, CancellationToken token = default)
+    {
+        try
+        {
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return ReadFront(stream, token: token) is { Refusal: null };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Builds the turned picture at <paramref name="tempPath"/>. False when
+    /// the file would lose something to the turn, and nothing written there
+    /// is then worth keeping.
+    /// </summary>
+    public static bool Write(string path, int turns, string tempPath)
+    {
+        using var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (Refusal(source) is { } refusal)
+        {
+            return Refused(refusal, path);
+        }
+
+        source.Position = 0;
+        var frame = BitmapDecoder.Create(
+            source,
+            BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreColorProfile,
+            BitmapCacheOption.OnLoad).Frames[0];
+        var rotated = ImageOrientation.Apply(frame, ImageOrientation.FromQuarterTurns(turns));
+
+        // Only the image data is wanted from the encoder, so it gets
+        // the pixels alone: no metadata to rewrite or to choke on.
+        using var encoded = new MemoryStream();
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(WithFullPalette(rotated)));
+        encoder.Save(encoded);
+        if (!SamePixelFormat(source, encoded))
+        {
+            return Refused("pixel format would change", path);
+        }
+
+        using (var target = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            Splice(source, encoded, target, swapAxes: turns % 2 == 1);
+        }
+
+        // The file is the user's only copy. It is replaced only by
+        // one that decodes to the same pixels, bit for bit.
+        return DecodesTo(tempPath, rotated) || Refused("pixels would change", path);
+    }
+
+    private static bool Refused(string reason, string path)
+    {
+        DiagnosticLog.Write($"rotate not persisted (png: {reason}) {path}");
+        return false;
+    }
+
+    /// <summary>
+    /// What this file would lose to a rotation, with every chunk up to its
+    /// IEND read, or null when it would lose nothing.
+    /// </summary>
+    private static string? Refusal(Stream stream)
+    {
+        Span<byte> signature = stackalloc byte[8];
+        stream.Position = 0;
+        var reader = new ChunkReader(stream, Signature.Length);
+        if (stream.ReadAtLeast(signature, signature.Length, throwOnEndOfStream: false) < signature.Length
+            || !signature.SequenceEqual(Signature)
+            || !reader.TryNext(out var header))
+        {
+            return "not a readable png";
+        }
+
+        if (!header.Is("IHDR"u8) || header.Length != 13)
         {
             return "no header";
         }
 
-        var colorType = ReadData(stream, chunks[0])[9];
-        foreach (var chunk in chunks)
+        var colorType = ReadData(stream, header)[9];
+        while (reader.TryNext(out var chunk))
         {
-            switch (chunk.Name)
+            if (Loss(chunk, colorType) is { } loss)
             {
-                case "IHDR" or "IDAT" or "IEND":
-                    continue;
-                case "acTL" or "fcTL" or "fdAT":
-                    return "animated";
-                // A color key on a gray or true-color image decodes into an
-                // alpha channel, and WPF has no keyed format to write back.
-                case "tRNS" when colorType != 3:
-                    return "color-keyed transparency";
+                return loss;
             }
 
-            // An upper-case first letter is a chunk the image cannot be
-            // read without; an upper-case last letter is one PNG says an
-            // editor must drop once the pixels change. Unknown, either one
-            // would be lost or left wrong.
-            if (!SurvivesATurn.Contains(chunk.Name) && (char.IsAsciiLetterUpper(chunk.Name[0]) || char.IsAsciiLetterUpper(chunk.Name[3])))
+            if (chunk.Is("IEND"u8))
             {
-                return $"chunk {chunk.Name}";
+                // WPF has no gray-with-alpha format either: it would come back RGBA.
+                return colorType == 4 ? "gray with alpha" : null;
             }
         }
 
-        // WPF has no gray-with-alpha format either: it would come back RGBA.
-        return colorType == 4 ? "gray with alpha" : null;
+        return "not a readable png";
     }
 
-    /// <summary>Bit depth and color type, the two header fields that say how a pixel is stored.</summary>
-    private static bool SamePixelFormat(byte[] sourceHeader, byte[] encodedHeader) =>
-        encodedHeader.Length == 13 && sourceHeader[8] == encodedHeader[8] && sourceHeader[9] == encodedHeader[9];
+    /// <summary>What a rotation would cost the file for this one chunk, or null when it costs nothing.</summary>
+    private static string? Loss(Chunk chunk, byte colorType)
+    {
+        if (chunk.Is("IHDR"u8) || chunk.Is("IDAT"u8) || chunk.Is("IEND"u8))
+        {
+            return null;
+        }
+
+        if (chunk.Is("acTL"u8) || chunk.Is("fcTL"u8) || chunk.Is("fdAT"u8))
+        {
+            return "animated";
+        }
+
+        // A color key on a gray or true-color image decodes into an
+        // alpha channel, and WPF has no keyed format to write back.
+        if (chunk.Is("tRNS"u8) && colorType != 3)
+        {
+            return "color-keyed transparency";
+        }
+
+        // An upper-case first letter is a chunk the image cannot be
+        // read without; an upper-case last letter is one PNG says an
+        // editor must drop once the pixels change. Unknown, either one
+        // would be lost or left wrong.
+        var unknown = !SurvivesATurn.Contains(chunk.Name)
+            && (char.IsAsciiLetterUpper((char)(chunk.Name >> 24)) || char.IsAsciiLetterUpper((char)(byte)chunk.Name));
+        return unknown ? $"chunk {chunk.Text}" : null;
+    }
+
+    /// <summary>
+    /// Bit depth and color type, the two header fields that say how a pixel
+    /// is stored. Both files open with a 13-byte IHDR, so the two bytes sit
+    /// at the same place in each.
+    /// </summary>
+    private static bool SamePixelFormat(Stream source, Stream encoded)
+    {
+        Span<byte> stored = stackalloc byte[2];
+        Span<byte> written = stackalloc byte[2];
+        if (!new ChunkReader(encoded, Signature.Length).TryNext(out var header) || !header.Is("IHDR"u8) || header.Length != 13)
+        {
+            return false;
+        }
+
+        source.Position = encoded.Position = header.Start + 8 + 8;
+        source.ReadExactly(stored);
+        encoded.ReadExactly(written);
+        return stored.SequenceEqual(written);
+    }
 
     /// <summary>
     /// The encoder shrinks an indexed image to the fewest bits its palette
@@ -248,42 +365,70 @@ internal static class PngRotation
     /// <summary>
     /// The new file is the old one with its header and image data replaced
     /// and its resolution turned. Every other byte is copied, checksums
-    /// included, and stays where it was.
+    /// included, and stays where it was: the stretch between two replaced
+    /// chunks goes across in one piece, however many chunks it holds.
     /// </summary>
-    private static void Splice(Stream source, List<Chunk> chunks, Stream encoded, List<Chunk> pixels, Stream target, bool swapAxes)
+    private static void Splice(Stream source, Stream encoded, Stream target, bool swapAxes)
     {
         target.Write(Signature);
+
+        // Source bytes before this are in the target already, or were replaced.
+        var copied = (long)Signature.Length;
         var wroteImageData = false;
-        foreach (var chunk in chunks)
+        var reader = new ChunkReader(source, copied);
+        while (reader.TryNext(out var chunk) && !chunk.Is("IEND"u8))
         {
-            switch (chunk.Name)
+            var turnsResolution = swapAxes && chunk.Is("pHYs"u8) && chunk.Length == 9;
+            if (!chunk.Is("IHDR"u8) && !chunk.Is("IDAT"u8) && !turnsResolution)
             {
-                case "IHDR":
-                    Copy(encoded, pixels[0].Start, pixels[0].Size, target);
-                    break;
-                case "IDAT":
-                    if (!wroteImageData)
-                    {
-                        foreach (var data in pixels.Where(candidate => candidate.Name == "IDAT"))
-                        {
-                            Copy(encoded, data.Start, data.Size, target);
-                        }
+                continue;
+            }
 
-                        wroteImageData = true;
-                    }
-
-                    break;
-                case "pHYs" when swapAxes && chunk.Length == 9:
-                    WriteTurnedResolution(ReadData(source, chunk), target);
-                    break;
-                default:
-                    Copy(source, chunk.Start, chunk.Size, target);
-                    break;
+            Copy(source, copied, chunk.Start - copied, target);
+            copied = chunk.End;
+            if (turnsResolution)
+            {
+                WriteTurnedResolution(ReadData(source, chunk), target);
+            }
+            else if (chunk.Is("IHDR"u8))
+            {
+                Copy(encoded, Signature.Length, chunk.Size, target);
+            }
+            else if (!wroteImageData)
+            {
+                CopyImageData(encoded, target);
+                wroteImageData = true;
             }
         }
 
-        // Whatever a tool left after the image's end is still the user's.
-        Copy(source, chunks[^1].End, source.Length - chunks[^1].End, target);
+        // The chunks behind the pixels, and whatever a tool left after the
+        // image's end, are still the user's.
+        Copy(source, copied, source.Length - copied, target);
+    }
+
+    /// <summary>The encoder's image data, each run of it in one piece.</summary>
+    private static void CopyImageData(Stream encoded, Stream target)
+    {
+        long start = 0;
+        long end = 0;
+        var reader = new ChunkReader(encoded, Signature.Length);
+        while (reader.TryNext(out var chunk) && !chunk.Is("IEND"u8))
+        {
+            if (!chunk.Is("IDAT"u8))
+            {
+                continue;
+            }
+
+            if (chunk.Start != end)
+            {
+                Copy(encoded, start, end - start, target);
+                start = chunk.Start;
+            }
+
+            end = chunk.End;
+        }
+
+        Copy(encoded, start, end - start, target);
     }
 
     /// <summary>pHYs is pixels per unit across, then down, then the unit. A quarter turn swaps the first two.</summary>
@@ -355,9 +500,10 @@ internal static class PngRotation
             return false;
         }
 
-        // In bands, so a large image is never held a third and fourth time.
+        // In bands, so a large image is never held a third and fourth time,
+        // and no taller than the image, so a small one costs a small buffer.
         var stride = Stride(expected);
-        var rows = Math.Max(1, (4 << 20) / stride);
+        var rows = Math.Min(expected.PixelHeight, Math.Max(1, (4 << 20) / stride));
         var actualBand = new byte[stride * rows];
         var expectedBand = new byte[stride * rows];
         for (var top = 0; top < expected.PixelHeight; top += rows)

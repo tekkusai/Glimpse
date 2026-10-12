@@ -23,10 +23,20 @@ internal enum RotationPersistence
     CannotCarry
 }
 
-/// <summary>What became of a rotation handed to the disk. Anything but <see cref="Saved"/> left the file as it was.</summary>
+/// <summary>
+/// What became of a rotation handed to the disk. Anything but
+/// <see cref="Saved"/> and <see cref="SavedAside"/> left the file as it was.
+/// </summary>
 internal enum RotationSaveResult
 {
     Saved,
+
+    /// <summary>
+    /// The turned picture is whole, but under its working file's name: the
+    /// swap lost the picture's own name and the turned copy could not take
+    /// it. Nothing is under the old name, and the user has to be told.
+    /// </summary>
+    SavedAside,
 
     /// <summary>The file cannot hold a rotation without losing something of its own. Trying again changes nothing.</summary>
     CannotCarry,
@@ -47,7 +57,10 @@ internal enum RotationSaveResult
 /// orientation for JPEG/TIFF, the pixels themselves turned for PNG/BMP with
 /// everything else the file holds carried across byte for byte, and
 /// view-only wherever a write would lose something. A write that does not
-/// land says which way it failed, and the original file is never at risk.
+/// land says which way it failed. A file that is rewritten is built beside
+/// the original and swapped in, and through every way that swap can end
+/// the picture is still there, under its own name or under one the user is
+/// told.
 /// </summary>
 internal static class ImageRotationService
 {
@@ -62,7 +75,11 @@ internal static class ImageRotationService
     public static bool Saves(RotationPersistence persistence) =>
         persistence is RotationPersistence.ExifTag or RotationPersistence.Reencode;
 
-    public static RotationPersistence Classify(string path)
+    /// <summary>
+    /// How a turn of this file would be saved, or why it would not. A PNG is
+    /// read as far as its pixels, which <paramref name="token"/> calls off.
+    /// </summary>
+    public static RotationPersistence Classify(string path, CancellationToken token = default)
     {
         try
         {
@@ -77,7 +94,7 @@ internal static class ImageRotationService
             var persistence = Path.GetExtension(path).ToLowerInvariant() switch
             {
                 ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => RotationPersistence.ExifTag,
-                ".png" => PngRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.CannotCarry,
+                ".png" => PngRotation.CanCarry(path, token) ? RotationPersistence.Reencode : RotationPersistence.CannotCarry,
                 ".bmp" => BmpRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.CannotCarry,
                 _ => RotationPersistence.ViewOnly
             };
@@ -88,7 +105,7 @@ internal static class ImageRotationService
                 ? RotationPersistence.ReadOnly
                 : persistence;
         }
-        catch
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return RotationPersistence.ViewOnly;
         }
@@ -98,7 +115,14 @@ internal static class ImageRotationService
     /// Applies <paramref name="quarterTurnsCw"/> to the file on disk. Runs on
     /// a worker thread, and may hold it for <see cref="InUsePatience"/>.
     /// </summary>
-    public static RotationSaveResult SaveQuarterTurns(string path, int quarterTurnsCw)
+    public static RotationSaveResult SaveQuarterTurns(string path, int quarterTurnsCw) =>
+        SaveQuarterTurns(path, quarterTurnsCw, ReplaceFile);
+
+    /// <summary>
+    /// <paramref name="replace"/> is the call that swaps a rewritten file
+    /// in: Windows' own, or a test's stand-in for the ways it can fail.
+    /// </summary>
+    internal static RotationSaveResult SaveQuarterTurns(string path, int quarterTurnsCw, Action<string, string> replace)
     {
         var turns = ((quarterTurnsCw % 4) + 4) % 4;
         if (turns == 0)
@@ -113,7 +137,7 @@ internal static class ImageRotationService
         {
             try
             {
-                var result = SaveOnce(path, turns);
+                var result = SaveOnce(path, turns, replace);
                 if (firstRefusal != 0)
                 {
                     DiagnosticLog.Write(
@@ -147,7 +171,7 @@ internal static class ImageRotationService
         return Stopwatch.GetElapsedTime(firstRefusal) < InUsePatience;
     }
 
-    private static RotationSaveResult SaveOnce(string path, int turns)
+    private static RotationSaveResult SaveOnce(string path, int turns, Action<string, string> replace)
     {
         // A file made read-only or removed since it opened is a failed
         // save, not a format that cannot be saved.
@@ -166,11 +190,128 @@ internal static class ImageRotationService
 
         return Path.GetExtension(path).ToLowerInvariant() switch
         {
-            ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => SaveExifOrientation(path, turns),
-            ".png" => PngRotation.Save(path, turns),
-            ".bmp" => BmpRotation.Save(path, turns),
+            ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => SaveExifOrientation(path, turns, replace),
+            ".png" => Rewrite(path, $"re-encode {turns * 90} deg", replace, temp => PngRotation.Write(path, turns, temp)),
+            ".bmp" => Rewrite(path, $"re-encode {turns * 90} deg", replace, temp => BmpRotation.Write(path, turns, temp)),
             _ => RotationSaveResult.CannotCarry
         };
+    }
+
+    /// <summary>
+    /// Saves by building the turned file beside the original and putting it
+    /// in the original's place. <paramref name="write"/> builds it, and says
+    /// whether what it built is the picture. Every format that is rewritten
+    /// comes through here, so the swap and what follows a failed one are
+    /// written once. The working file goes however this ends, unless it has
+    /// become the only copy of the picture.
+    /// </summary>
+    private static RotationSaveResult Rewrite(string path, string how, Action<string, string> replace, Func<string, bool> write)
+    {
+        var tempPath = TempPathFor(path);
+        try
+        {
+            if (!write(tempPath))
+            {
+                return RotationSaveResult.CannotCarry;
+            }
+
+            var result = SwapIn(tempPath, path, replace);
+            if (result == RotationSaveResult.Saved)
+            {
+                DiagnosticLog.Write($"rotate saved ({how}) {path}");
+            }
+
+            return result;
+        }
+        finally
+        {
+            DeleteTemp(tempPath, path);
+        }
+    }
+
+    private static void ReplaceFile(string tempPath, string path) =>
+        File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
+
+    /// <summary>
+    /// Puts the finished working file in the picture's place. A replace can
+    /// fail with the picture's own name already gone: Windows documents it
+    /// for ReplaceFile (ERROR_UNABLE_TO_MOVE_REPLACEMENT with no backup
+    /// name), and a file deleted in the moment between the write and the
+    /// swap leaves the same thing. The working file is then the only copy
+    /// of the picture. It takes the picture's name, and that is the save,
+    /// not a failure. If it cannot, it stays where it is and the result
+    /// says so.
+    /// </summary>
+    private static RotationSaveResult SwapIn(string tempPath, string path, Action<string, string> replace)
+    {
+        try
+        {
+            replace(tempPath, path);
+            return RotationSaveResult.Saved;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && !IsThere(path) && File.Exists(tempPath))
+        {
+            DiagnosticLog.Write($"rotate replace lost the original ({ex.GetType().Name} 0x{ex.HResult:X8}) {path}");
+        }
+
+        // A name held by a file on its way out frees when the last program
+        // lets go of it, and nothing says when: it gets the patience a file
+        // in use gets.
+        long firstRefusal = 0;
+        while (true)
+        {
+            try
+            {
+                // A move never lands on a file: if one has the name again,
+                // this fails and nothing is overwritten.
+                File.Move(tempPath, path);
+                DiagnosticLog.Write($"rotate turned copy took the picture's name {path}");
+                return RotationSaveResult.Saved;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                if (StillPatient(ref firstRefusal))
+                {
+                    Thread.Sleep(InUseRetryStep);
+                    continue;
+                }
+
+                // A file has the name again, so the picture is there, or the
+                // turned copy itself is gone: either way there is no copy
+                // to name, and this is a save that failed like any other.
+                if (IsThere(path) || !File.Exists(tempPath))
+                {
+                    throw;
+                }
+
+                DiagnosticLog.Write($"rotate left the turned copy beside the picture ({ex.GetType().Name} 0x{ex.HResult:X8}) {tempPath}");
+                return RotationSaveResult.SavedAside;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the picture is under its own name and staying there. A file
+    /// being deleted while a program still has it open keeps its name until
+    /// that program lets go, and File.Exists says yes to it. It cannot be
+    /// opened, and that is what tells the two apart. A file another program
+    /// has to itself is there.
+    /// </summary>
+    internal static bool IsThere(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return true;
+        }
+        catch (IOException ex) when (IsSharingViolation(ex))
+        {
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     /// <summary>The Win32 error inside an I/O failure names what the user can do about it.</summary>
@@ -191,7 +332,7 @@ internal static class ImageRotationService
         _ => RotationSaveResult.CannotCarry
     };
 
-    private static RotationSaveResult SaveExifOrientation(string path, int turns)
+    private static RotationSaveResult SaveExifOrientation(string path, int turns, Action<string, string> replace)
     {
         var query = ImageOrientation.MetadataQueryFor(path);
         if (query is null)
@@ -223,10 +364,13 @@ internal static class ImageRotationService
         // No room to patch in place. A JPEG with no EXIF block at all can
         // take a spliced minimal segment: a byte-level insert, still zero
         // pixel work. Anything else stays view-only rather than re-encode.
-        if (IsJpeg(path) && !HasExifSegment(path) && TrySpliceJpegExifOrientation(path, target))
+        if (IsJpeg(path) && !HasExifSegment(path))
         {
-            DiagnosticLog.Write($"rotate saved (exif spliced {target}) {path}");
-            return RotationSaveResult.Saved;
+            var spliced = Rewrite(path, $"exif spliced {target}", replace, temp => TrySpliceJpegExifOrientation(path, target, temp));
+            if (spliced != RotationSaveResult.CannotCarry)
+            {
+                return spliced;
+            }
         }
 
         DiagnosticLog.Write($"rotate not persisted (no exif room) {path}");
@@ -352,68 +496,55 @@ internal static class ImageRotationService
     }
 
     /// <summary>
-    /// Inserts a minimal EXIF APP1 segment (orientation only) into a JPEG
-    /// that has none. Pure byte splice through a temp file; the original is
-    /// replaced only after the copy is complete. False means the file's
-    /// structure will not take the splice; a disk or sharing failure throws,
-    /// so the caller can name it.
+    /// Writes the JPEG to <paramref name="tempPath"/> with a minimal EXIF
+    /// APP1 segment (orientation only) inserted: a pure byte splice of a
+    /// file that has none. False means the file's structure will not take
+    /// the splice; a disk or sharing failure throws, so the caller can name
+    /// it.
     /// </summary>
-    private static bool TrySpliceJpegExifOrientation(string path, int orientation)
+    private static bool TrySpliceJpegExifOrientation(string path, int orientation, string tempPath)
     {
-        var tempPath = TempPathFor(path);
-        try
+        using var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var target = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        Span<byte> soi = stackalloc byte[2];
+        source.ReadExactly(soi);
+        if (soi[0] != 0xFF || soi[1] != 0xD8)
         {
-            using (var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-            using (var target = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            return false;
+        }
+
+        target.Write(soi);
+
+        // JFIF convention keeps APP0 first; copy any leading APP0
+        // segments through, then splice the EXIF APP1 before whatever
+        // comes next. Fill bytes ride along with their marker so the
+        // copied stream stays byte-identical around the insert.
+        Span<byte> lengthBytes = stackalloc byte[2];
+        while (true)
+        {
+            if (!TryReadMarker(source, out var marker, out var fillBytes))
             {
-                Span<byte> soi = stackalloc byte[2];
-                source.ReadExactly(soi);
-                if (soi[0] != 0xFF || soi[1] != 0xD8)
-                {
-                    return false;
-                }
-
-                target.Write(soi);
-
-                // JFIF convention keeps APP0 first; copy any leading APP0
-                // segments through, then splice the EXIF APP1 before whatever
-                // comes next. Fill bytes ride along with their marker so the
-                // copied stream stays byte-identical around the insert.
-                Span<byte> lengthBytes = stackalloc byte[2];
-                while (true)
-                {
-                    if (!TryReadMarker(source, out var marker, out var fillBytes))
-                    {
-                        return false;
-                    }
-
-                    if (marker != 0xE0)
-                    {
-                        target.Write(BuildExifApp1((ushort)orientation));
-                        WriteMarker(target, marker, fillBytes);
-                        source.CopyTo(target);
-                        break;
-                    }
-
-                    WriteMarker(target, marker, fillBytes);
-                    source.ReadExactly(lengthBytes);
-                    var length = (lengthBytes[0] << 8) | lengthBytes[1];
-                    if (length < 2)
-                    {
-                        return false;
-                    }
-
-                    target.Write(lengthBytes);
-                    CopyExactly(source, target, length - 2);
-                }
+                return false;
             }
 
-            File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-            return true;
-        }
-        finally
-        {
-            DeleteTemp(tempPath);
+            if (marker != 0xE0)
+            {
+                target.Write(BuildExifApp1((ushort)orientation));
+                WriteMarker(target, marker, fillBytes);
+                source.CopyTo(target);
+                return true;
+            }
+
+            WriteMarker(target, marker, fillBytes);
+            source.ReadExactly(lengthBytes);
+            var length = (lengthBytes[0] << 8) | lengthBytes[1];
+            if (length < 2)
+            {
+                return false;
+            }
+
+            target.Write(lengthBytes);
+            CopyExactly(source, target, length - 2);
         }
     }
 
@@ -424,12 +555,16 @@ internal static class ImageRotationService
     internal static bool SavesThroughATemp(string path) =>
         IsJpeg(path) || Path.GetExtension(path).ToLowerInvariant() is ".png" or ".bmp";
 
-    /// <summary>True when there was a file and it is gone.</summary>
-    internal static bool DeleteTemp(string tempPath)
+    /// <summary>
+    /// Removes a save's working file, but only while the picture is known
+    /// to be there under its own name: when it is not, the working file is
+    /// the only copy, and stays. True when there was a file and it is gone.
+    /// </summary>
+    internal static bool DeleteTemp(string tempPath, string path)
     {
         try
         {
-            if (File.Exists(tempPath))
+            if (File.Exists(tempPath) && IsThere(path))
             {
                 File.Delete(tempPath);
                 return true;
@@ -437,7 +572,7 @@ internal static class ImageRotationService
         }
         catch
         {
-            // A stranded temp file is cosmetic; the original is intact.
+            // A stranded working file is cosmetic; the picture is intact.
         }
 
         return false;

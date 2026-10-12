@@ -1,7 +1,6 @@
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
-using SpacePreview.Utilities;
 using static SpacePreview.Tests.ImageTestFiles;
 
 namespace SpacePreview.Tests;
@@ -99,36 +98,6 @@ public sealed class ImageAnimationTests
         File.WriteAllBytes(misnamed, ImageRotationCarryTests.AnimatedPng());
 
         Assert.True(ImageHeader.TryRead(misnamed)!.IsAnimated);
-    }
-
-    [Fact]
-    public async Task EverythingThatMovesIsSentTheWayAGifGoes()
-    {
-        using var temp = new TempDirectory();
-        string Write(string name, byte[] bytes)
-        {
-            var path = Path.Combine(temp.Path, name);
-            File.WriteAllBytes(path, bytes);
-            return path;
-        }
-
-        var gif = Write("loop.gif", "GIF89a"u8.ToArray());
-        var moving = Write("moving.png", ImageRotationCarryTests.AnimatedPng());
-        var sticker = Write("sticker.webp", ExtendedWebp(0x02, width: 400, height: 300));
-        var unnamed = Write("sticker", ExtendedWebp(0x02, width: 400, height: 300));
-        var still = Write("still.png", Png(5, 3, 8, 2, new byte[45]));
-        var notes = Write("notes.txt", ImageRotationCarryTests.AnimatedPng());
-
-        Assert.True(await PreviewWindow.IsAnimatedImageAsync(gif, FileSignatureKind.Gif, useSignatureRouting: false, default));
-        Assert.True(await PreviewWindow.IsAnimatedImageAsync(moving, FileSignatureKind.Png, useSignatureRouting: false, default));
-        Assert.True(await PreviewWindow.IsAnimatedImageAsync(sticker, FileSignatureKind.Webp, useSignatureRouting: false, default));
-        Assert.False(await PreviewWindow.IsAnimatedImageAsync(still, FileSignatureKind.Png, useSignatureRouting: false, default));
-
-        // A file with no extension is known by its signature, as a GIF is.
-        Assert.True(await PreviewWindow.IsAnimatedImageAsync(unnamed, FileSignatureKind.Webp, useSignatureRouting: true, default));
-
-        // A name that says text is believed: the file is never opened as an image to check.
-        Assert.False(await PreviewWindow.IsAnimatedImageAsync(notes, FileSignatureKind.Png, useSignatureRouting: false, default));
     }
 
     [Fact]

@@ -30,60 +30,45 @@ public partial class PreviewWindow
         ImageFileStamp? Stamp,
         int CacheGeneration);
 
-    // The header read on the way to placing the window, and the load it
-    // was read for.
-    private (long Version, ImageHeader Header)? _stageHeader;
-
     /// <summary>
-    /// The one read of an image's header, made where the stage takes its
-    /// shape, and kept for the decode of the same load. It is not kept
-    /// while a rotation of the file is on its way to disk: by the time the
-    /// decode asked, the file would no longer be the one it describes.
+    /// The read of an image's header that shapes the stage, made at a
+    /// glance on the UI thread. It answers nothing while a rotation of the
+    /// file is on its way to disk: the file is about to change, and the
+    /// decode, which waits for the write, names the shape and the size.
+    /// The decode asks for the header again by the file's stamp, so this
+    /// read is used a second time only for the file it described.
     /// </summary>
-    private ImageHeader? ReadStageHeader(string path, long version)
-    {
-        var settled = ImageRotationSession.WhenSaved(path).IsCompleted;
-        var header = ImageHeader.TryRead(path);
-        _stageHeader = settled && header is not null ? (version, header) : null;
-        return header;
-    }
+    private static ImageHeader? ReadStageHeader(string path) =>
+        ImageRotationSession.WhenSaved(path).IsCompleted ? ImageHeader.TryRead(path, atAGlance: true) : null;
 
-    /// <summary>The header the stage read for this load, or null when it read none.</summary>
-    private ImageHeader? StageHeader(long version) =>
-        _stageHeader is { } read && read.Version == version ? read.Header : null;
+    /// <summary>An image's pixel size as the details line gives it: as displayed, after the EXIF turn.</summary>
+    private static string PixelSize(ImageHeader header) => $"{header.Width}×{header.Height}";
 
-    /// <summary>
-    /// <paramref name="known"/> is the header the stage read for this load
-    /// (<see cref="StageHeader"/>), and it is not read a second time. Null
-    /// when the stage read none, as for a file whose bytes are not at hand:
-    /// then it is read here, off the UI thread.
-    /// </summary>
-    private async Task<FrameworkElement?> TryBuildImagePreviewAsync(
-        string path,
-        long version,
-        CancellationToken token,
-        ImageHeader? known)
+    private async Task<FrameworkElement?> TryBuildImagePreviewAsync(string path, long version, CancellationToken token)
     {
         // A rotation of this same file still on its way to disk lands
         // first, so the preview opens on what the file is and not on what
-        // it was a moment ago. What was read before the write is stale.
+        // it was a moment ago.
         var saved = ImageRotationSession.WhenSaved(path);
         if (!saved.IsCompleted)
         {
             await saved.WaitAsync(token);
-            known = null;
         }
 
         var stage = StageContentPixels();
         var (header, decoded, persistence) = await Task.Run(() =>
         {
             // A save cut short by the app's end left its working file
-            // beside the picture. Opening the picture removes it, at the
-            // cost of one file stat.
+            // beside the picture. Opening the picture queues its removal.
             ImageRotationSession.RemoveStrandedTemp(path);
-            var read = known ?? ImageHeader.TryRead(path);
-            var first = DecodeImageFirstFrame(path, read, stage);
-            return (read, first, first is null ? RotationPersistence.ViewOnly : ImageRotationService.Classify(path));
+
+            // One stamp names the file for the header and for the decode.
+            // The header the stage read answers from memory when the file
+            // is still the one it described, and is read again when not.
+            ImageFileStamp? stamp = ImageFileStamp.TryCreate(path, out var taken) ? taken : null;
+            var read = stamp is { } current ? ImageHeader.TryRead(current, token: token) : null;
+            var first = DecodeImageFirstFrame(path, read, stamp, stage);
+            return (read, first, first is null ? RotationPersistence.ViewOnly : ImageRotationService.Classify(path, token));
         }, token);
         if (decoded is null)
         {
@@ -107,16 +92,44 @@ public partial class PreviewWindow
             session.FullDecode = CompleteLargeImageDecodeAsync(path, header, decoded, session, version, token);
         }
 
-        // The header is the geometry truth, and a local image gave it to the
-        // stage before decoding. A first frame may be a downsampled stand-in,
-        // so it sizes the stage only when nothing else did.
-        if (_stageFitVersion != version)
+        // The header the picture was decoded under is the geometry truth.
+        // A local image gave it to the stage before decoding. Where that
+        // read was skipped (a rotation still being written, a file whose
+        // bytes were not at hand) or described a file that has changed
+        // since, the stage and the details line take it here. A first frame
+        // may be a downsampled stand-in, so with no header it sizes the
+        // stage only when nothing else did.
+        var staged = _stageFitVersion == version ? _stageFitHint : null;
+        if (header is null)
         {
-            SetStageFitHint(
-                header is null
-                    ? StageFitHint.ImagePixels(session.CurrentBitmap.PixelWidth, session.CurrentBitmap.PixelHeight)
-                    : StageFitHint.ImagePixels(header.Width, header.Height),
-                version);
+            if (staged is null)
+            {
+                SetStageFitHint(StageFitHint.ImagePixels(session.CurrentBitmap.PixelWidth, session.CurrentBitmap.PixelHeight), version);
+            }
+        }
+        else if (version == _loadVersion)
+        {
+            if (staged is not { Kind: StageFitHint.FitKind.ImagePixels } shape || shape.Width != header.Width || shape.Height != header.Height)
+            {
+                SetStageFitHint(StageFitHint.ImagePixels(header.Width, header.Height), version);
+            }
+
+            // The details line was written as the window opened. When the
+            // file has been written since, its size and time there are
+            // from before, and are read again along with its pixels.
+            var written = decoded.Stamp is { } now
+                && _headerItem is FileInfo { Exists: true } then
+                && string.Equals(then.FullName, now.Path, StringComparison.OrdinalIgnoreCase)
+                && (then.Length != now.Length || then.LastWriteTimeUtc.Ticks != now.LastWriteUtcTicks);
+            if (written)
+            {
+                _headerItem = null;
+            }
+
+            if (written || _headerFact != PixelSize(header))
+            {
+                ShowHeaderFact(PixelSize(header), version);
+            }
         }
 
         var viewer = new ImageViewer(session.CurrentBitmap, header?.LongSide ?? 0, session);
@@ -125,15 +138,12 @@ public partial class PreviewWindow
         return viewer.Element;
     }
 
-    /// <summary>As for an image: <paramref name="known"/> is the header the stage read, or null.</summary>
-    private async Task<FrameworkElement?> TryBuildPsdPreviewAsync(
-        string path,
-        long version,
-        CancellationToken token,
-        ImageHeader? known)
+    private async Task<FrameworkElement?> TryBuildPsdPreviewAsync(string path, long version, CancellationToken token)
     {
+        // The header the stage read answers from memory, while the file is
+        // still the one it described.
         var (header, composite) = await Task.Run(
-            () => (known ?? ImageHeader.TryRead(path), PsdPreviewLoader.TryLoad(path, token)),
+            () => (ImageHeader.TryRead(path, token: token), PsdPreviewLoader.TryLoad(path, token)),
             token);
         if (composite is null)
         {
@@ -174,12 +184,13 @@ public partial class PreviewWindow
     /// cap) first shows the quickest picture that is sharp at the stage:
     /// Explorer's cached thumbnail when it covers the stage, otherwise a
     /// JPEG decoded straight to stage size. Everything else decodes once,
-    /// in full.
+    /// in full. <paramref name="fileStamp"/> is the file as it was when
+    /// <paramref name="header"/> was asked for, and a decode is kept and
+    /// found again under it.
     /// </summary>
-    private ImageFirstFrame? DecodeImageFirstFrame(string path, ImageHeader? header, Size stagePixels)
+    private ImageFirstFrame? DecodeImageFirstFrame(string path, ImageHeader? header, ImageFileStamp? fileStamp, Size stagePixels)
     {
-        var hasStamp = ImageFileStamp.TryCreate(path, out var stamp);
-        if (hasStamp && _imageDecodeCache.TryGet(stamp, out var cached) && cached is not null)
+        if (fileStamp is { } stamp && _imageDecodeCache.TryGet(stamp, out var cached) && cached is not null)
         {
             DiagnosticLog.Write($"image decode cache hit {path}");
             return new ImageFirstFrame(
@@ -187,12 +198,11 @@ public partial class PreviewWindow
                 cached.Orientation,
                 IsFullDecode: true,
                 CoversStage: true,
-                stamp,
+                fileStamp,
                 _imageDecodeCache.CaptureGeneration());
         }
 
         var cacheGeneration = _imageDecodeCache.CaptureGeneration();
-        ImageFileStamp? fileStamp = hasStamp ? stamp : null;
         var needed = header is null
             ? 0
             : (int)Math.Ceiling(header.LongSide * Math.Min(1, ZoomGestures.Fit(new Size(header.Width, header.Height), stagePixels)));
@@ -241,10 +251,10 @@ public partial class PreviewWindow
         }
 
         var orientation = header?.Orientation ?? ImageOrientation.Normal;
-        if (hasStamp)
+        if (fileStamp is { } decodedUnder)
         {
             _imageDecodeCache.Store(
-                stamp,
+                decodedUnder,
                 new CachedImageDecode(bitmap, orientation),
                 cacheGeneration);
         }
@@ -440,49 +450,58 @@ public partial class PreviewWindow
     /// <summary>
     /// A rotation that did not reach its file. While its preview is up the
     /// view has turned back and the image says why; once the preview has
-    /// closed or moved on, the tray says it.
+    /// closed or moved on, the tray says it. A picture left under another
+    /// name is said in both places: the sentence on the image is gone in
+    /// four seconds, and the name is what the user needs to find it.
     /// </summary>
     private void OnRotationNotSaved(ImageRotationSession session, ImageViewer viewer, RotationSaveResult result)
     {
         DiagnosticLog.Write($"rotate not saved result={result} left={session.HasLeft} path={session.Path}");
-        if (session.HasLeft)
+        if (session.HasLeft || result == RotationSaveResult.SavedAside)
         {
             var (title, text) = RotationNotSavedTrayNotice(session.Path, result);
             RotationNotSavedUnseen?.Invoke(title, text);
+        }
+
+        if (session.HasLeft)
+        {
             return;
         }
 
         // A file found unable to carry a rotation is view-only from here,
         // and the tooltips say so.
         UpdateRotateButtons();
-        viewer.ShowNotice(RotationNotSavedNotice(result));
+        viewer.ShowNotice(RotationNotSavedNotice(session.Path, result));
     }
 
     /// <summary>
-    /// A rotation failed to save after its preview had closed or moved on.
-    /// Carries a title and one line for the tray's quiet notice.
+    /// A rotation that the user cannot be told about in its preview, or not
+    /// well enough there: it failed after the preview had closed or moved
+    /// on, or it left the picture under another name. Carries a title and
+    /// one line for the tray's quiet notice.
     /// </summary>
     internal static event Action<string, string>? RotationNotSavedUnseen;
 
     /// <summary>What happened, then what to do (docs/DESIGN.md, Words).</summary>
-    internal static string RotationNotSavedNotice(RotationSaveResult result) => result switch
+    internal static string RotationNotSavedNotice(string path, RotationSaveResult result) => result switch
     {
         RotationSaveResult.InUse => "Rotation not saved. Close the app using this file, then rotate again.",
         RotationSaveResult.ReadOnly => "Rotation not saved. This file is read-only.",
         RotationSaveResult.DiskFull => "Rotation not saved. Free up disk space, then rotate again.",
         RotationSaveResult.CannotCarry => "Rotation not saved. This file can't store it.",
+        RotationSaveResult.SavedAside => SavedAsideNotice(path),
         _ => "Rotation not saved. This file can't be changed."
     };
 
     /// <summary>The same for a file no longer on screen, which needs its name.</summary>
     internal static (string Title, string Text) RotationNotSavedTrayNotice(string path, RotationSaveResult result)
     {
-        var name = Path.GetFileName(path);
-        if (name.Length > 48)
+        if (result == RotationSaveResult.SavedAside)
         {
-            name = $"{name[..30]}\u2026{name[^15..]}";
+            return ("Rotation saved under another name", SavedAsideNotice(path));
         }
 
+        var name = ShortName(path);
         return ("Rotation not saved", result switch
         {
             RotationSaveResult.InUse => $"Close the app using {name}, then rotate it again.",
@@ -494,9 +513,26 @@ public partial class PreviewWindow
     }
 
     /// <summary>
+    /// The one sentence for a picture whose own name was lost in the swap:
+    /// where the turned picture is now, and how to put it back.
+    /// </summary>
+    private static string SavedAsideNotice(string path) =>
+        $"The rotated picture was saved as \"{ShortName(ImageRotationService.TempPathFor(path))}\" in the same folder. Rename it to \"{ShortName(path)}\".";
+
+    /// <summary>A file's name, cut in the middle when it would push the sentence out of the notice.</summary>
+    private static string ShortName(string path)
+    {
+        var name = Path.GetFileName(path);
+        return name.Length > 48 ? $"{name[..30]}\u2026{name[^15..]}" : name;
+    }
+
+    /// <summary>
     /// Whether this image moves: a GIF by its name or signature, a PNG or a
     /// WebP by what its header says. WPF freezes an animation on its first
-    /// frame, so all three take one route, to the browser image page.
+    /// frame, so all three take one route, to the browser image page. The
+    /// header is read in full here, off the UI thread: where the glance
+    /// that shaped the stage stopped short of a PNG's pixels, this walks
+    /// the rest.
     /// </summary>
     internal static async Task<bool> IsAnimatedImageAsync(
         string path,
@@ -510,7 +546,7 @@ public partial class PreviewWindow
         }
 
         return (FileKinds.IsImage(path) || (useSignatureRouting && FileSignatures.IsImage(signature)))
-            && await Task.Run(() => ImageHeader.TryRead(path)?.IsAnimated == true, token);
+            && await Task.Run(() => ImageHeader.TryRead(path, token: token)?.IsAnimated == true, token);
     }
 
     private FrameworkElement BuildBrowserImagePreview(string path)

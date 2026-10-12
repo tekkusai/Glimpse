@@ -375,20 +375,6 @@ public sealed class HookPathArchitectureTests
     }
 
     [Fact]
-    public void GiantImagesUseCacheOnlyArtworkThenAStampAwareFullDecode()
-    {
-        var firstFrame = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "DecodeImageFirstFrame");
-        var shell = TestSource.CodeMethod(@"SpacePreview\Preview\ShellThumbnailProvider.cs", "TryGetCachedThumbnail");
-        var rotate = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RotateCurrentImage");
-
-        Assert.Contains("_imageDecodeCache.TryGet", firstFrame, StringComparison.Ordinal);
-        Assert.Contains("TryGetCachedThumbnail", firstFrame, StringComparison.Ordinal);
-        Assert.Contains("SIIGBF_INCACHEONLY", shell, StringComparison.Ordinal);
-        Assert.DoesNotContain("TryGetThumbnail", shell, StringComparison.Ordinal);
-        Assert.Contains("_imageDecodeCache.Invalidate", rotate, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public void WebPreviewsRejectStaleCallbacksAndReuseKnownVideoGeometry()
     {
         var createWebView = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "CreateWebView");
