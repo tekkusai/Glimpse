@@ -33,16 +33,30 @@ internal static class MeshPreviewLoader
     /// <summary>The most triangles the viewport gets; Viewport3D still rotates smoothly here.</summary>
     internal const int MaxRenderedTriangles = 250_000;
 
-    // GLB nodes and 3MF build items place their mesh again for every
-    // instance, so a small file can ask for geometry without end. The totals
-    // hold a large scan; past them the file gets its card.
+    // Two ceilings, because a file can ask for geometry in two ways. GLB
+    // nodes and 3MF build items place their mesh again for every instance,
+    // so a small file can ask without end: what instancing places stops at
+    // the placed totals. Geometry the file stores itself costs memory in
+    // step with the file's own bytes, so it gets the higher stored totals,
+    // which hold a scan of many millions of triangles. Past either, the
+    // file gets its card.
     internal const int MaxPlacedVertices = 4_000_000;
     internal const int MaxPlacedTriangles = 4_000_000;
+    internal const int MaxStoredVertices = 16_000_000;
+    internal const int MaxStoredTriangles = 16_000_000;
+
+    // A surface fills about one cell for every two triangles it keeps. Tiny
+    // triangles far apart fill a cell each and keep none, so a simplifying
+    // pass's table would grow with the file and not with the result. This
+    // many cells for each triangle the viewport may draw is the ceiling; at
+    // the viewport's own cap it is the placed vertex total.
+    private const int MaxCellsPerRenderedTriangle = MaxPlacedVertices / MaxRenderedTriangles;
 
     private const long MaxTextMeshBytes = 256L * 1024 * 1024;
     private const long Max3MfModelBytes = 32L * 1024 * 1024;
     private const long MaxGlbJsonBytes = 64L * 1024 * 1024;
     private const int MaxPolygonCorners = 1024;
+    private const int MaxPlyHeaderLineChars = 4096;
 
     // Faces that turn less than about 45 degrees from each other share a
     // smoothed normal; a sharper turn stays a crease.
@@ -276,8 +290,17 @@ internal static class MeshPreviewLoader
             return null;
         }
 
+        // Nothing is held for a file that does not start as a PLY does.
+        Span<byte> magic = stackalloc byte[3];
+        if (stream.ReadAtLeast(magic, magic.Length, throwOnEndOfStream: false) < magic.Length
+            || !magic.SequenceEqual("ply"u8))
+        {
+            return null;
+        }
+
         // The header is ASCII regardless of body format; read it byte-wise so
         // the stream lands at the start of a binary body.
+        stream.Position = 0;
         var headerLines = new List<string>();
         var lineBuilder = new StringBuilder();
         while (true)
@@ -304,6 +327,12 @@ internal static class MeshPreviewLoader
                 }
 
                 continue;
+            }
+
+            // A header line is a few words. One with no end is not a header.
+            if (lineBuilder.Length == MaxPlyHeaderLineChars)
+            {
+                return null;
             }
 
             lineBuilder.Append((char)value);
@@ -383,10 +412,26 @@ internal static class MeshPreviewLoader
         }
         else
         {
-            using var reader = new BinaryReader(new BufferedStream(stream, 1 << 16), Encoding.ASCII, leaveOpen: true);
+            var body = new BufferedStream(stream, 1 << 16);
+            using var reader = new BinaryReader(body, Encoding.ASCII, leaveOpen: true);
             var indices = new int[MaxPolygonCorners];
             foreach (var element in elements)
             {
+                // The count is the file's claim. A row of no bytes holds
+                // nothing, and looping over such rows would read nothing
+                // however many are declared. Rows of some bytes must fit in
+                // what is left of the file.
+                var rowBytes = element.Count == 0 ? 0 : PlyRowBytes(element);
+                if (rowBytes == 0)
+                {
+                    continue;
+                }
+
+                if (element.Count > (stream.Length - body.Position) / rowBytes)
+                {
+                    throw new InvalidDataException("PLY declares more rows than the file holds.");
+                }
+
                 for (var row = 0; row < element.Count; row++)
                 {
                     if ((row & 4095) == 0)
@@ -543,6 +588,17 @@ internal static class MeshPreviewLoader
         "double" or "float64" => reader.ReadDouble(),
         _ => throw new InvalidDataException($"Unknown PLY type {type}")
     };
+
+    /// <summary>The fewest bytes one binary row takes: every scalar, and each list's count.</summary>
+    private static int PlyRowBytes(PlyElement element) =>
+        element.Properties.Sum(property => (property.ListCountType ?? property.Type) switch
+        {
+            "char" or "int8" or "uchar" or "uint8" => 1,
+            "short" or "int16" or "ushort" or "uint16" => 2,
+            "int" or "int32" or "uint" or "uint32" or "float" or "float32" => 4,
+            "double" or "float64" => 8,
+            var type => throw new InvalidDataException($"Unknown PLY type {type}")
+        });
 
     // -------------------------------------------------------------- GLB --
 
@@ -994,7 +1050,7 @@ internal static class MeshPreviewLoader
             var relationships = CollectStepRelationships(entities);
             if (relationships.Count > 0)
             {
-                EmitAssembly(entities, relationships, GetEdgePolyline, polylines);
+                EmitAssembly(entities, relationships, GetEdgePolyline, polylines, token);
             }
 
             if (polylines.Count < 8)
@@ -1018,23 +1074,17 @@ internal static class MeshPreviewLoader
 
             // Bounds drive both the viewport normalization and the strut
             // thickness that keeps the wireframe legible at any scale.
-            var bounds = BoundsAccumulator.Empty;
+            var extent = Rect3D.Empty;
             var totalSegments = 0;
             foreach (var polyline in polylines)
             {
                 totalSegments += polyline.Count - 1;
                 foreach (var point in polyline)
                 {
-                    bounds.Include(point);
+                    extent.Union(point);
                 }
             }
 
-            if (!bounds.HasValue)
-            {
-                return null;
-            }
-
-            var extent = bounds.ToRect3D();
             var maxDimension = Math.Max(extent.SizeX, Math.Max(extent.SizeY, extent.SizeZ));
             if (maxDimension <= 0 || !double.IsFinite(maxDimension))
             {
@@ -1098,7 +1148,8 @@ internal static class MeshPreviewLoader
         Dictionary<int, (string Type, string Args)> entities,
         List<StepRelationship> relationships,
         Func<int, List<Point3D>?> getEdgePolyline,
-        List<List<Point3D>> polylines)
+        List<List<Point3D>> polylines,
+        CancellationToken token)
     {
         var representations = new List<int>();
         foreach (var (id, entity) in entities)
@@ -1113,7 +1164,7 @@ internal static class MeshPreviewLoader
         var edgesByRep = new Dictionary<int, List<int>>();
         foreach (var rep in representations)
         {
-            edgesByRep[rep] = CollectRepresentationEdges(entities, rep);
+            edgesByRep[rep] = CollectRepresentationEdges(entities, rep, token);
         }
 
         var childSet = new HashSet<int>();
@@ -1200,7 +1251,10 @@ internal static class MeshPreviewLoader
     /// representations are not entered: components arrive through
     /// relationships with their placement, never by containment.
     /// </summary>
-    private static List<int> CollectRepresentationEdges(Dictionary<int, (string Type, string Args)> entities, int repId)
+    private static List<int> CollectRepresentationEdges(
+        Dictionary<int, (string Type, string Args)> entities,
+        int repId,
+        CancellationToken token)
     {
         var edges = new List<int>();
         var visited = new HashSet<int> { repId };
@@ -1213,8 +1267,16 @@ internal static class MeshPreviewLoader
             }
         }
 
+        // Every representation walks again whatever it shares with the
+        // others, so the walks together can far outlast the parse.
+        var walked = 0;
         while (queue.Count > 0)
         {
+            if ((walked++ & 4095) == 0)
+            {
+                token.ThrowIfCancellationRequested();
+            }
+
             var id = queue.Dequeue();
             if (!entities.TryGetValue(id, out var entity))
             {
@@ -1872,7 +1934,11 @@ internal static class MeshPreviewLoader
 
     private const string TooMuchGeometry = "The model places more geometry than a preview holds.";
 
-    /// <summary>Refuses an instance that would carry the mesh past the placed totals.</summary>
+    /// <summary>
+    /// Refuses an instance that would carry the mesh past the placed totals,
+    /// before any of it is placed. The mesh's own ceiling is the higher
+    /// stored one, so this is what bounds instancing.
+    /// </summary>
     private static void Place(IndexedMesh mesh, long vertices, long triangles)
     {
         if (mesh.VertexCount + vertices > MaxPlacedVertices || mesh.TriangleCount + triangles > MaxPlacedTriangles)
@@ -2009,26 +2075,27 @@ internal static class MeshPreviewLoader
             cell = longest / 512;
         }
 
-        var shape = ClusterOnce(source, min, cell, token);
+        var shape = ClusterOnce(source, min, cell, cap, token);
         if (shape.TriangleCount < cap / 3)
         {
             cell = Math.Max(floor, cell * Math.Sqrt(shape.TriangleCount / (0.8 * cap)));
-            shape = ClusterOnce(source, min, cell, token);
+            shape = ClusterOnce(source, min, cell, cap, token);
         }
 
         // Each pass widens the cells by at least 17 percent, so this ends.
         while (shape.TriangleCount > cap * 1.1)
         {
             cell *= Math.Sqrt(shape.TriangleCount / (0.8 * cap));
-            shape = ClusterOnce(source, min, cell, token);
+            shape = ClusterOnce(source, min, cell, cap, token);
         }
 
         return shape;
     }
 
-    private static MeshShape ClusterOnce(TriangleStream source, Vector3 origin, double cell, CancellationToken token)
+    private static MeshShape ClusterOnce(TriangleStream source, Vector3 origin, double cell, int cap, CancellationToken token)
     {
         const long axisCells = 1L << 21;
+        var maxCells = (long)cap * MaxCellsPerRenderedTriangle;
         var inverse = 1 / cell;
         var cells = new Dictionary<long, int>();
         var sums = new List<(double X, double Y, double Z, int Count)>();
@@ -2041,6 +2108,11 @@ internal static class MeshPreviewLoader
             var key = (x * axisCells + y) * axisCells + z;
             if (!cells.TryGetValue(key, out var id))
             {
+                if (sums.Count >= maxCells)
+                {
+                    throw new InvalidDataException(TooMuchGeometry);
+                }
+
                 id = sums.Count;
                 cells[key] = id;
                 sums.Add(default);
@@ -2195,7 +2267,11 @@ internal static class MeshPreviewLoader
         return geometry;
     }
 
-    /// <summary>Triangles held in memory: float positions and the corners that index them.</summary>
+    /// <summary>
+    /// Triangles held in memory: float positions and the corners that index
+    /// them. It stops at the stored totals itself, so every format that
+    /// fills one is bounded, the next one added included.
+    /// </summary>
     private sealed class IndexedMesh
     {
         private Vector3[] _positions = new Vector3[1024];
@@ -2208,6 +2284,11 @@ internal static class MeshPreviewLoader
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
         public int AddVertex(Vector3 position)
         {
+            if (VertexCount == MaxStoredVertices)
+            {
+                throw new InvalidDataException(TooMuchGeometry);
+            }
+
             if (VertexCount == _positions.Length)
             {
                 Array.Resize(ref _positions, _positions.Length * 2);
@@ -2226,6 +2307,11 @@ internal static class MeshPreviewLoader
             if ((uint)a >= (uint)VertexCount || (uint)b >= (uint)VertexCount || (uint)c >= (uint)VertexCount)
             {
                 return;
+            }
+
+            if (TriangleCount == MaxStoredTriangles)
+            {
+                throw new InvalidDataException(TooMuchGeometry);
             }
 
             var at = TriangleCount * 3;
@@ -2312,39 +2398,5 @@ internal static class MeshPreviewLoader
 
         vector = new Vector3((float)x, (float)y, (float)z);
         return true;
-    }
-
-    private struct BoundsAccumulator
-    {
-        public static BoundsAccumulator Empty => new()
-        {
-            MinX = double.PositiveInfinity,
-            MinY = double.PositiveInfinity,
-            MinZ = double.PositiveInfinity,
-            MaxX = double.NegativeInfinity,
-            MaxY = double.NegativeInfinity,
-            MaxZ = double.NegativeInfinity
-        };
-
-        public double MinX;
-        public double MinY;
-        public double MinZ;
-        public double MaxX;
-        public double MaxY;
-        public double MaxZ;
-
-        public bool HasValue => !double.IsInfinity(MinX);
-
-        public void Include(Point3D point)
-        {
-            MinX = Math.Min(MinX, point.X);
-            MinY = Math.Min(MinY, point.Y);
-            MinZ = Math.Min(MinZ, point.Z);
-            MaxX = Math.Max(MaxX, point.X);
-            MaxY = Math.Max(MaxY, point.Y);
-            MaxZ = Math.Max(MaxZ, point.Z);
-        }
-
-        public Rect3D ToRect3D() => new(MinX, MinY, MinZ, MaxX - MinX, MaxY - MinY, MaxZ - MinZ);
     }
 }
