@@ -32,7 +32,7 @@ public partial class PreviewWindow
             return null;
         }
 
-        var list = new EntryList(ArchiveRootCap, ArchiveChildrenCap, meters: true);
+        var list = new EntryList(ArchiveRootCap, ArchiveChildrenCap);
         list.Show(ArchiveRows(listing.Roots, listing.Roots.Count == 0 ? 0 : listing.Roots.Max(node => node.Size)));
         return BuildListingCard(BuildCardVisual(image, dpi), Path.GetFileName(path), FactLine(ArchivePreviewLoader.Describe(listing), 0), list);
     }

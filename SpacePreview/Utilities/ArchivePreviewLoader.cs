@@ -44,7 +44,7 @@ internal static class ArchivePreviewLoader
         {
             // ArchiveFactory reads a compressed tar as a seekable archive and
             // can stop after the first entry without an error, so a tar
-            // inside gzip, bzip2, xz or zstd is always walked forward instead.
+            // inside gzip, bzip2 or xz is always walked forward instead.
             if (CompressionSuffix(path) is not null)
             {
                 var walked = TryWalkCompressedTar(path, compressedTarBudget, token);
@@ -93,8 +93,7 @@ internal static class ArchivePreviewLoader
             return "Empty archive";
         }
 
-        // Size first, as on a folder's card: the two read as one card.
-        var summary = $"{FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed · {FolderScanner.Count(listing.TotalEntries, "file", "files")}";
+        var summary = $"{FolderScanner.Count(listing.TotalEntries, "file", "files")} · {FileKinds.FormatSize(listing.TotalUncompressed)} uncompressed";
         if (listing.Stopped)
         {
             return $"At least {summary}";
@@ -202,17 +201,7 @@ internal static class ArchivePreviewLoader
             return "BZ2";
         }
 
-        if (header.StartsWith(new byte[] { 0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00 }))
-        {
-            return "XZ";
-        }
-
-        if (header.StartsWith(new byte[] { 0x28, 0xB5, 0x2F, 0xFD }))
-        {
-            return "ZST";
-        }
-
-        return header.StartsWith("LZIP"u8) ? "LZ" : null;
+        return header.StartsWith(new byte[] { 0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00 }) ? "XZ" : null;
     }
 
     private sealed class TreeBuilder

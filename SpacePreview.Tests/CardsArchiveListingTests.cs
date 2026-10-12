@@ -29,7 +29,7 @@ public sealed class CardsArchiveListingTests
         Assert.Equal("src", src.Name);
         // Largest first, folders and files alike, as a folder ranks its rows.
         Assert.Equal(["b.md", "sub", "a.txt"], src.Children.Select(child => child.Name));
-        Assert.Equal("26 B uncompressed · 3 files", ArchivePreviewLoader.Describe(listing));
+        Assert.Equal("3 files · 26 B uncompressed", ArchivePreviewLoader.Describe(listing));
     }
 
     [Fact]
@@ -91,7 +91,7 @@ public sealed class CardsArchiveListingTests
 
         Assert.NotNull(listing);
         Assert.Equal(1, listing!.TotalEntries);
-        Assert.EndsWith(" · 1 file", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
+        Assert.StartsWith("1 file · ", ArchivePreviewLoader.Describe(listing), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -107,7 +107,7 @@ public sealed class CardsArchiveListingTests
 
         var listing = ArchivePreviewLoader.TryLoad(path);
 
-        Assert.Equal("4 B uncompressed · 1 file", ArchivePreviewLoader.Describe(listing!));
+        Assert.Equal("1 file · 4 B uncompressed", ArchivePreviewLoader.Describe(listing!));
     }
 
     [Fact]
@@ -122,7 +122,6 @@ public sealed class CardsArchiveListingTests
     [InlineData(new byte[] { 0x1F, 0x8B, 0x08 }, "GZ")]
     [InlineData(new byte[] { (byte)'B', (byte)'Z', (byte)'h', (byte)'9' }, "BZ2")]
     [InlineData(new byte[] { 0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00 }, "XZ")]
-    [InlineData(new byte[] { 0x28, 0xB5, 0x2F, 0xFD }, "ZST")]
     [InlineData(new byte[] { 0x50, 0x4B, 0x03, 0x04 }, null)]
     public void OuterCompressionIsReadFromTheMagicNumber(byte[] header, string? expected)
     {

@@ -21,15 +21,17 @@ internal sealed record FolderScan(
     int SkippedFolders,
     bool RootUnreadable)
 {
-    /// <summary>Totals are a floor: the budget ran out or a subfolder refused to open.</summary>
+    /// <summary>Totals are a floor: the clock ran out or a subfolder refused to open.</summary>
     public bool IsLowerBound => Stopped || SkippedFolders > 0;
 }
 
 /// <summary>
-/// Sizes a folder honestly within a budget. The top level is listed first,
+/// Sizes a folder honestly within its clock. The top level is listed first,
 /// by name, so rows exist before any size does; then each subfolder is
-/// walked in turn. Whatever the budget does not reach stays unknown rather
-/// than pretending to be small. No UI types: the card renders the result.
+/// walked in turn. Whatever the clock does not reach stays unknown rather
+/// than pretending to be small. It remembers a fixed number of rows and
+/// one open listing per level of depth, however many entries it counts.
+/// No UI types: the card renders the result.
 /// </summary>
 internal static class FolderScanner
 {
@@ -45,57 +47,177 @@ internal static class FolderScanner
         ReturnSpecialDirectories = false
     };
 
+    /// <param name="maxChildren">
+    /// Top-level rows to remember. Entries past them are still counted and
+    /// sized, so the totals stay whole; only the rows stop.
+    /// </param>
     public static FolderScan Scan(
         string path,
-        int entryBudget,
+        int maxChildren,
         TimeSpan timeBudget,
         Action<FolderScan>? progress,
         CancellationToken token)
     {
         var clock = Stopwatch.StartNew();
+        return Scan(path, maxChildren, () => clock.Elapsed >= timeBudget, progress, token);
+    }
+
+    /// <param name="outOfTime">Asked once for every entry read. The first true ends the scan.</param>
+    internal static FolderScan Scan(
+        string path,
+        int maxChildren,
+        Func<bool> outOfTime,
+        Action<FolderScan>? progress,
+        CancellationToken token)
+    {
         var lastReport = Stopwatch.StartNew();
-        var entries = 0;
         var stopped = false;
         var skipped = 0;
         long bytes = 0;
         var files = 0;
         var folders = 0;
 
-        bool OverBudget()
+        bool OutOfTime()
         {
-            if (++entries <= entryBudget && clock.Elapsed < timeBudget)
+            token.ThrowIfCancellationRequested();
+            stopped = stopped || outOfTime();
+            return stopped;
+        }
+
+        // Depth first, with each level's listing held open while the level
+        // below is read. Memory follows the tree's depth and not its width:
+        // a folder of a million subfolders never queues a million paths.
+        var open = new Stack<IEnumerator<FileSystemInfo>>();
+
+        void Enter(string directory)
+        {
+            try
             {
-                return false;
+                open.Push(new DirectoryInfo(directory).EnumerateFileSystemInfos("*", OneLevel).GetEnumerator());
+            }
+            catch (Exception ex) when (IsReadFailure(ex))
+            {
+                skipped++;
+            }
+        }
+
+        long Walk(string directory)
+        {
+            long total = 0;
+            try
+            {
+                Enter(directory);
+                while (open.Count > 0)
+                {
+                    FileSystemInfo entry;
+                    try
+                    {
+                        if (!open.Peek().MoveNext())
+                        {
+                            open.Pop().Dispose();
+                            continue;
+                        }
+
+                        entry = open.Peek().Current;
+                    }
+                    catch (Exception ex) when (IsReadFailure(ex))
+                    {
+                        skipped++;
+                        open.Pop().Dispose();
+                        continue;
+                    }
+
+                    if (OutOfTime())
+                    {
+                        break;
+                    }
+
+                    if (entry is FileInfo file)
+                    {
+                        files++;
+                        total += file.Length;
+                    }
+                    else
+                    {
+                        folders++;
+
+                        // A junction is followed by explicit recursion even
+                        // when enumeration skips reparse points, and one
+                        // pointing up the tree would walk forever. It is
+                        // counted, never entered.
+                        if ((entry.Attributes & FileAttributes.ReparsePoint) == 0)
+                        {
+                            Enter(entry.FullName);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                while (open.Count > 0)
+                {
+                    open.Pop().Dispose();
+                }
             }
 
-            stopped = true;
-            return true;
+            return total;
         }
 
         var children = new List<FolderChild>();
         var listedEveryChild = true;
+        var rowsReported = false;
+
+        FolderScan Snapshot() => new(children.ToArray(), bytes, files, folders, stopped, listedEveryChild, skipped, RootUnreadable: false);
+
+        // The rows go out once, by name, when no more will join them.
+        void ReportRows()
+        {
+            children.Sort(FoldersThenByName);
+            progress?.Invoke(Snapshot());
+            lastReport.Restart();
+            rowsReported = true;
+        }
+
         try
         {
             foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos("*", OneLevel))
             {
-                token.ThrowIfCancellationRequested();
-                if (OverBudget())
+                if (OutOfTime())
                 {
                     listedEveryChild = false;
                     break;
+                }
+
+                // Past the rows that are kept, entries are only counted: the
+                // rows are shown first, then the rest is sized as it is read.
+                var listed = children.Count < maxChildren;
+                if (!listed && listedEveryChild)
+                {
+                    listedEveryChild = false;
+                    ReportRows();
                 }
 
                 if (entry is FileInfo file)
                 {
                     files++;
                     bytes += file.Length;
-                    children.Add(new FolderChild(file.Name, IsDirectory: false, IsLink: false, file.Length, Partial: false));
+                    if (listed)
+                    {
+                        children.Add(new FolderChild(file.Name, IsDirectory: false, IsLink: false, file.Length, Partial: false));
+                    }
                 }
                 else
                 {
                     folders++;
                     var isLink = (entry.Attributes & FileAttributes.ReparsePoint) != 0;
-                    children.Add(new FolderChild(entry.Name, IsDirectory: true, isLink, Bytes: null, Partial: false));
+                    if (listed)
+                    {
+                        children.Add(new FolderChild(entry.Name, IsDirectory: true, isLink, Bytes: null, Partial: false));
+                    }
+                    else if (!isLink)
+                    {
+                        bytes += Walk(entry.FullName);
+                    }
                 }
             }
         }
@@ -111,69 +233,35 @@ internal static class FolderScanner
             listedEveryChild = false;
         }
 
-        children.Sort(static (a, b) => a.IsDirectory != b.IsDirectory
-            ? (a.IsDirectory ? -1 : 1)
-            : StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name));
+        // A junction is listed, never entered (see Walk).
+        static bool Walkable(FolderChild child) => child.IsDirectory && !child.IsLink;
 
-        FolderScan Snapshot() => new(children.ToArray(), bytes, files, folders, stopped, listedEveryChild, skipped, RootUnreadable: false);
+        if (!rowsReported)
+        {
+            // Rows by name are for a walk still to come. With nothing left
+            // to walk the listing is the result, and nothing goes ahead of it.
+            if (!stopped && children.Exists(Walkable))
+            {
+                ReportRows();
+            }
+            else
+            {
+                children.Sort(FoldersThenByName);
+            }
+        }
 
-        progress?.Invoke(Snapshot());
-        lastReport.Restart();
-
-        var pending = new Stack<string>();
         for (var index = 0; index < children.Count && !stopped; index++)
         {
             var child = children[index];
-
-            // A junction is followed by explicit recursion even when
-            // enumeration skips reparse points, and one pointing up the tree
-            // would walk forever. It is listed, never entered.
-            if (!child.IsDirectory || child.IsLink)
+            if (!Walkable(child))
             {
                 continue;
             }
 
-            long childBytes = 0;
-            var childSkipped = 0;
-            pending.Clear();
-            pending.Push(Path.Combine(path, child.Name));
-            while (pending.Count > 0 && !stopped)
-            {
-                var current = pending.Pop();
-                try
-                {
-                    foreach (var entry in new DirectoryInfo(current).EnumerateFileSystemInfos("*", OneLevel))
-                    {
-                        token.ThrowIfCancellationRequested();
-                        if (OverBudget())
-                        {
-                            break;
-                        }
-
-                        if (entry is FileInfo file)
-                        {
-                            files++;
-                            childBytes += file.Length;
-                        }
-                        else
-                        {
-                            folders++;
-                            if ((entry.Attributes & FileAttributes.ReparsePoint) == 0)
-                            {
-                                pending.Push(entry.FullName);
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex) when (IsReadFailure(ex))
-                {
-                    childSkipped++;
-                }
-            }
-
-            skipped += childSkipped;
+            var skippedBefore = skipped;
+            var childBytes = Walk(Path.Combine(path, child.Name));
             bytes += childBytes;
-            children[index] = child with { Bytes = childBytes, Partial = stopped || childSkipped > 0 };
+            children[index] = child with { Bytes = childBytes, Partial = stopped || skipped > skippedBefore };
 
             if (lastReport.Elapsed >= ProgressInterval)
             {
@@ -235,6 +323,10 @@ internal static class FolderScanner
 
     public static string Count(long count, string one, string many) =>
         $"{count:N0} {(count == 1 ? one : many)}";
+
+    private static int FoldersThenByName(FolderChild a, FolderChild b) => a.IsDirectory != b.IsDirectory
+        ? (a.IsDirectory ? -1 : 1)
+        : StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name);
 
     private static bool IsReadFailure(Exception ex) =>
         ex is UnauthorizedAccessException or IOException or SecurityException;

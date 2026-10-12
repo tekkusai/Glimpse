@@ -137,8 +137,6 @@ internal static partial class FileKinds
 
     public static bool IsIllustrator(string path) => Path.GetExtension(path).Equals(".ai", StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsStl(string path) => Path.GetExtension(path).Equals(".stl", StringComparison.OrdinalIgnoreCase);
-
     private static readonly HashSet<string> MeshExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".stl", ".obj", ".ply", ".3mf", ".glb"

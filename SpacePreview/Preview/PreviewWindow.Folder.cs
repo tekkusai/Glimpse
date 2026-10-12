@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Effects;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using SpacePreview.Services;
 using SpacePreview.Utilities;
 
@@ -19,8 +20,10 @@ public partial class PreviewWindow
     // Three rows: at the smallest stage the list fits without lifting the card.
     private const double ListingMinHeight = 84;
     private const int FolderBreakdownRowsCap = 300;
-    private const int FolderSizeScanEntryBudget = 25000;
-    private static readonly TimeSpan FolderSizeScanStartDelay = TimeSpan.FromMilliseconds(220);
+
+    // The rows the walk remembers, so the largest can be found among them
+    // once they are sized. Past these it still counts and sizes.
+    private const int FolderRowsRemembered = 25000;
     private static readonly TimeSpan FolderSizeScanTimeBudget = TimeSpan.FromSeconds(2.5);
 
     /// <summary>
@@ -41,7 +44,6 @@ public partial class PreviewWindow
 
         var list = new EntryList(
             FolderBreakdownRowsCap,
-            meters: true,
             activate: (node, _) => OpenFolderChild(Path.Combine(path, node.Name), node.IsDirectory),
             enter: (node, row) => _folderHover?.OnRowEnter(row, Path.Combine(path, node.Name), node.IsDirectory),
             leave: (_, row) => _folderHover?.OnRowLeave(row));
@@ -68,7 +70,19 @@ public partial class PreviewWindow
             hoveredIsDirectory = isDirectory;
             Render();
         }, folderPixels, DevicePixels(CardIconSide, dpi));
-        card.Loaded += (_, _) => _folderHover = hover;
+
+        // The walk starts when the card is on screen, never for a card that
+        // was passed over, and once however often the card is re-hosted.
+        var walking = false;
+        card.Loaded += (_, _) =>
+        {
+            _folderHover = hover;
+            if (!walking)
+            {
+                walking = true;
+                StartFolderSizeScan(path, sizeLine, list, token);
+            }
+        };
         card.Unloaded += (_, _) =>
         {
             if (ReferenceEquals(_folderHover, hover))
@@ -78,7 +92,6 @@ public partial class PreviewWindow
             }
         };
 
-        StartFolderSizeScan(path, sizeLine, list, token);
         return card;
     }
 
@@ -137,37 +150,40 @@ public partial class PreviewWindow
         var entered = false;
         try
         {
-            // The first frame wins. Disk enumeration starts only after the
-            // swap and reveal have had an uncontested dispatcher turn.
-            await Task.Delay(FolderSizeScanStartDelay, token);
             await _folderSizeScanGate.WaitAsync(token);
             entered = true;
 
+            // The walk is off the dispatcher, so nothing waits for it: its
+            // rows are posted as soon as the top level is listed. They wait
+            // behind rendering and input, and the result does not, so a walk
+            // that is over by their turn has already shown its own rows.
             var dispatcher = sizeLine.Dispatcher;
             var listed = false;
-            var finished = false;
-            var scan = await Task.Run(
+            Task<FolderScan>? walk = null;
+            walk = Task.Run(
                 () => FolderScanner.Scan(
                     path,
-                    FolderSizeScanEntryBudget,
+                    FolderRowsRemembered,
                     FolderSizeScanTimeBudget,
-                    progress => dispatcher.BeginInvoke(() =>
-                    {
-                        // The await below may resume ahead of queued
-                        // progress; a late snapshot never undoes the result.
-                        if (finished || token.IsCancellationRequested)
+                    progress => dispatcher.BeginInvoke(
+                        () =>
                         {
-                            return;
-                        }
+                            // Rows the finished walk overtook are never
+                            // built, and a late snapshot never undoes the result.
+                            if (walk!.IsCompleted || token.IsCancellationRequested)
+                            {
+                                return;
+                            }
 
-                        sizeLine.Text = FolderScanner.DescribeProgress(progress);
-                        ShowFolderRows(list, progress, rebuild: !listed);
-                        listed = true;
-                    }),
+                            sizeLine.Text = FolderScanner.DescribeProgress(progress);
+                            ShowFolderRows(list, progress, rebuild: !listed);
+                            listed = true;
+                        },
+                        DispatcherPriority.Background),
                     token),
                 token);
 
-            finished = true;
+            var scan = await walk;
             sizeLine.Text = FolderScanner.Describe(scan);
             if (!scan.RootUnreadable)
             {

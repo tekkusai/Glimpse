@@ -24,6 +24,14 @@ public sealed class CardsListingTests
         File.WriteAllBytes(Path.Combine(temp.Path, "a.bin"), new byte[1000]);
         var earlier = ForeverClocks();
         var window = OpenStage(900, 650);
+
+        // One walker owns the disk at a time. With its turn taken here the
+        // walk waits, however small the folder, and its pulse can be seen.
+        var turn = (SemaphoreSlim)typeof(PreviewWindow)
+            .GetField("_folderSizeScanGate", BindingFlags.NonPublic | BindingFlags.Instance)!
+            .GetValue(window)!;
+        await turn.WaitAsync();
+        var waiting = true;
         try
         {
             window.ShowPreview(temp.Path, IntPtr.Zero);
@@ -34,13 +42,22 @@ public sealed class CardsListingTests
                 Assert.NotEmpty(ForeverClocks().Except(earlier));
             }
 
+            turn.Release();
+            waiting = false;
+
             // The walk ends within its budget; its pulse ends with it, and no
             // clock is left ticking for a line that no longer moves.
-            await WaitUntilAsync(() => !ForeverClocks().Except(earlier).Any(), TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => Texts(window).Contains("1000 B · 1 file"), TimeSpan.FromSeconds(5));
+            Assert.Contains("1000 B · 1 file", Texts(window));
             Assert.Empty(ForeverClocks().Except(earlier));
         }
         finally
         {
+            if (waiting)
+            {
+                turn.Release();
+            }
+
             window.Close();
         }
     });
@@ -78,7 +95,7 @@ public sealed class CardsListingTests
             // The archive's name as the title, what it holds as the one fact.
             var texts = Texts(window);
             Assert.Contains("bundle.zip", texts);
-            Assert.Contains("2.3 KB uncompressed · 4 files", texts);
+            Assert.Contains("4 files · 2.3 KB uncompressed", texts);
 
             // The folder's rows, largest first, each with its size and bar;
             // the folder inside opens to its own rows.

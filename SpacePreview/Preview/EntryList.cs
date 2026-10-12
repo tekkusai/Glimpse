@@ -37,25 +37,21 @@ internal sealed class EntryList
 
     private readonly int _rootCap;
     private readonly int _childCap;
-    private readonly bool _meters;
     private readonly Action<EntryNode, FrameworkElement>? _activate;
     private readonly Action<EntryNode, FrameworkElement>? _enter;
     private readonly Action<EntryNode, FrameworkElement>? _leave;
     private readonly List<Row> _rows = [];
 
     /// <param name="childCap">Rows per expanded folder; 0 makes a flat list.</param>
-    /// <param name="meters">Draw a size meter beside each row's detail.</param>
     public EntryList(
         int rootCap,
         int childCap = 0,
-        bool meters = false,
         Action<EntryNode, FrameworkElement>? activate = null,
         Action<EntryNode, FrameworkElement>? enter = null,
         Action<EntryNode, FrameworkElement>? leave = null)
     {
         _rootCap = rootCap;
         _childCap = childCap;
-        _meters = meters;
         _activate = activate;
         _enter = enter;
         _leave = leave;
@@ -98,10 +94,7 @@ internal sealed class EntryList
 
         var row = _rows[index];
         row.Detail.Text = detail;
-        if (row.Meter is { } meter)
-        {
-            SetMeter(meter, share);
-        }
+        SetMeter(row.Meter, share);
     }
 
     private Row AddRow(Panel host, EntryNode node, int depth)
@@ -116,7 +109,7 @@ internal sealed class EntryList
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = _meters ? new GridLength(MeterDetailWidth) : GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(MeterDetailWidth) });
 
         var children = node.IsDirectory ? node.Children : null;
         TextBlock? chevron = null;
@@ -158,26 +151,22 @@ internal sealed class EntryList
         Grid.SetColumn(name, column + 1);
         grid.Children.Add(name);
 
-        Border? meter = null;
-        if (_meters)
+        var meter = new Border
         {
-            meter = new Border
+            Width = MeterWidth,
+            Height = 4,
+            Margin = new Thickness(16, 0, 0, 0),
+            CornerRadius = new CornerRadius(2),
+            VerticalAlignment = VerticalAlignment.Center,
+            Child = new Border
             {
-                Width = MeterWidth,
-                Height = 4,
-                Margin = new Thickness(16, 0, 0, 0),
-                CornerRadius = new CornerRadius(2),
-                VerticalAlignment = VerticalAlignment.Center,
-                Child = new Border
-                {
-                    HorizontalAlignment = HorizontalAlignment.Left,
-                    CornerRadius = new CornerRadius(2)
-                }.Themed(Border.BackgroundProperty, "Theme.Accent")
-            }.Themed(Border.BackgroundProperty, "Theme.RaisedBorder");
-            SetMeter(meter, node.Share);
-            Grid.SetColumn(meter, column + 2);
-            grid.Children.Add(meter);
-        }
+                HorizontalAlignment = HorizontalAlignment.Left,
+                CornerRadius = new CornerRadius(2)
+            }.Themed(Border.BackgroundProperty, "Theme.Accent")
+        }.Themed(Border.BackgroundProperty, "Theme.RaisedBorder");
+        SetMeter(meter, node.Share);
+        Grid.SetColumn(meter, column + 2);
+        grid.Children.Add(meter);
 
         var detail = new TextBlock
         {
@@ -322,5 +311,5 @@ internal sealed class EntryList
         ((Border)meter.Child).Width = share <= 0 ? 0 : Math.Max(4, MeterWidth * Math.Min(1, share));
     }
 
-    private sealed record Row(TextBlock Detail, Border? Meter, Action? Toggle);
+    private sealed record Row(TextBlock Detail, Border Meter, Action? Toggle);
 }

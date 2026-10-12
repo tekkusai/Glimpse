@@ -38,8 +38,87 @@ public sealed class CardsFolderScanTests
         Assert.Equal("11 B · 2 folders · 4 files", FolderScanner.Describe(scan));
     }
 
+    // Rows by name are for a walk still running. With no subfolder to walk
+    // the listing is the result, and the card builds its rows once.
     [Fact]
-    public void ABudgetStopLeavesUnscannedRowsBlankAndMarksTheCutChild()
+    public void AFolderWithNothingToWalkSendsNoRowsAheadOfItsResult()
+    {
+        using var temp = new TempDirectory();
+        temp.CreateFile("b.txt", "12");
+        temp.CreateFile("a.txt", "1");
+        var snapshots = new List<FolderScan>();
+
+        var scan = FolderScanner.Scan(temp.Path, 1000, Plenty, snapshots.Add, CancellationToken.None);
+
+        Assert.Empty(snapshots);
+        Assert.Equal("3 B · 2 files", FolderScanner.Describe(scan));
+    }
+
+    // The rows it remembers are bounded; what it counts is not. Entries
+    // past the rows, a subfolder among them, still reach the totals.
+    [Fact]
+    public void EntriesPastTheRememberedRowsAreStillCountedAndSized()
+    {
+        using var temp = new TempDirectory();
+        File.WriteAllText(Path.Combine(temp.CreateDirectory("a"), "one.txt"), "12345");
+        temp.CreateFile("b.txt", "12");
+        File.WriteAllText(Path.Combine(temp.CreateDirectory("c"), "two.txt"), "1234567");
+        temp.CreateFile("d.txt", "123");
+        var snapshots = new List<FolderScan>();
+
+        var scan = FolderScanner.Scan(temp.Path, 2, Plenty, snapshots.Add, CancellationToken.None);
+
+        // The rows go out as soon as they are full, before the rest is read.
+        Assert.Equal(["a", "b.txt"], snapshots[0].Children.Select(child => child.Name));
+        Assert.Equal(["a", "b.txt"], scan.Children.Select(child => child.Name));
+        Assert.False(scan.ListedEveryChild);
+        Assert.Equal(5, scan.Children[0].Bytes);
+        Assert.False(scan.IsLowerBound);
+        Assert.Equal("17 B · 2 folders · 4 files", FolderScanner.Describe(scan));
+    }
+
+    // A wide tree and a deep one: every level's listing is read through
+    // while the level below it is walked.
+    [Fact]
+    public void AWalkThatDescendsMidListingMissesNothing()
+    {
+        using var temp = new TempDirectory();
+        var wide = temp.CreateDirectory("wide");
+        for (var i = 0; i < 40; i++)
+        {
+            File.WriteAllText(Path.Combine(Directory.CreateDirectory(Path.Combine(wide, $"d{i:00}")).FullName, "f.txt"), "12");
+            File.WriteAllText(Path.Combine(wide, $"f{i:00}.txt"), "1");
+        }
+
+        var deep = temp.CreateDirectory("deep");
+        for (var i = 0; i < 30; i++)
+        {
+            deep = Directory.CreateDirectory(Path.Combine(deep, "n")).FullName;
+            File.WriteAllText(Path.Combine(deep, "f.txt"), "123");
+        }
+
+        var scan = FolderScanner.Scan(temp.Path, 1000, Plenty, null, CancellationToken.None);
+
+        Assert.Equal(90, scan.Children.Single(child => child.Name == "deep").Bytes);
+        Assert.Equal(120, scan.Children.Single(child => child.Name == "wide").Bytes);
+        Assert.Equal("210 B · 72 folders · 110 files", FolderScanner.Describe(scan));
+    }
+
+    [Fact]
+    public void AScanOutOfTimeBeforeItListsAnythingIsAFloor()
+    {
+        using var temp = new TempDirectory();
+        temp.CreateFile("a.txt", "abc");
+
+        var scan = FolderScanner.Scan(temp.Path, 1000, TimeSpan.Zero, null, CancellationToken.None);
+
+        Assert.True(scan.Stopped);
+        Assert.False(scan.ListedEveryChild);
+        Assert.StartsWith("At least ", FolderScanner.Describe(scan), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AStopLeavesUnscannedRowsBlankAndMarksTheCutChild()
     {
         using var temp = new TempDirectory();
         foreach (var name in new[] { "a", "b", "c" })
@@ -52,7 +131,8 @@ public sealed class CardsFolderScanTests
         }
 
         // Three entries list the top level; three more reach into "a".
-        var scan = FolderScanner.Scan(temp.Path, 6, Plenty, null, CancellationToken.None);
+        var entries = 0;
+        var scan = FolderScanner.Scan(temp.Path, 1000, () => ++entries > 6, null, CancellationToken.None);
 
         Assert.True(scan.Stopped);
         Assert.True(scan.Children[0].Partial);

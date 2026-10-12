@@ -125,7 +125,9 @@ public sealed class HookPathArchitectureTests
 
     /// <summary>
     /// A folder's first frame is local UI: the shell icon and the size walk
-    /// start from their own async methods, after the reveal.
+    /// start from their own async methods. The walk starts when the card
+    /// loads and runs off the dispatcher, so no fixed delay stands in front
+    /// of it.
     /// </summary>
     [Fact]
     public void FolderCardRevealDoesNotWaitForAThumbnailOrItemEnumeration()
@@ -143,7 +145,9 @@ public sealed class HookPathArchitectureTests
         Assert.DoesNotContain("EnumerateFileSystemInfos", cardBuilder, StringComparison.Ordinal);
         Assert.Contains("UpdateFolderArtworkAsync", cardBuilder, StringComparison.Ordinal);
         Assert.Contains("StartFolderSizeScan", cardBuilder, StringComparison.Ordinal);
-        Assert.Contains("Task.Delay(FolderSizeScanStartDelay, token)", scanRunner, StringComparison.Ordinal);
+        Assert.Contains("card.Loaded +=", cardBuilder, StringComparison.Ordinal);
+        Assert.DoesNotContain("Task.Delay", scanRunner, StringComparison.Ordinal);
+        Assert.Contains("Task.Run(", scanRunner, StringComparison.Ordinal);
         Assert.Contains("_folderSizeScanGate.WaitAsync(token)", scanRunner, StringComparison.Ordinal);
         Assert.Contains("DispatcherPriority.Render", revealScheduler, StringComparison.Ordinal);
     }
