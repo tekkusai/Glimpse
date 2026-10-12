@@ -592,10 +592,12 @@ internal sealed class SpacePreviewController : IDisposable
 
         // A key typed into a text box is the text box's and means nothing
         // to a preview, whatever the dispatcher knows by its turn, so
-        // nothing is posted for it. What this thread keeps for itself is
-        // done by here: the Space latch above, and at the top the end of a
-        // picker Space that still waited.
-        if (facts.Typing)
+        // nothing is posted for it. The one that does mean something, the
+        // Enter that ends the owner's glance, carries an action and goes
+        // on. What this thread keeps for itself is done by here: the Space
+        // latch above, and at the top the end of a picker Space that still
+        // waited.
+        if (facts.Typing && decision.Action == KeyAction.None)
         {
             _downPosted[vk] = false;
             return false;

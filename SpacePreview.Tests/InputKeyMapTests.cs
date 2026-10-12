@@ -101,18 +101,25 @@ public sealed class InputKeyMapTests
         ("Arrows in a picker's name box are left alone", PickerOwner(Down) with { PickerListFocus = false }, false, KeyAction.None),
         ("Arrows in an unrelated app are left alone", Elsewhere(Left, null), false, KeyAction.None),
 
-        // Typing: a text box in the window the key is going to owns every
-        // key. The rule names no keys, so these are examples, not a list.
+        // Text boxes keep their keys; committing a rename ends the glance.
         ("Space typed into a search box with nothing open opens nothing", Idle(Space, ExplorerWindow) with { Typing = true }, false, KeyAction.None),
         ("Esc in a rename cancels the rename and the glance stays", Owner(Esc) with { Typing = true }, false, KeyAction.None),
-        ("Enter in a rename commits the rename and the glance stays", Owner(Enter) with { Typing = true }, false, KeyAction.None),
+        ("Enter in a rename commits the rename and ends the glance", Owner(Enter) with { Typing = true }, false, KeyAction.Hide),
+        ("Enter in a rename with no glance does nothing", Idle(Enter, ExplorerWindow) with { Typing = true }, false, KeyAction.None),
+        ("Enter in another window's rename leaves the glance alone", Elsewhere(Enter, OtherExplorerWindow) with { Typing = true }, false, KeyAction.None),
+        ("Shift+Enter in a rename ends the glance without taking the key", Owner(Enter) with { Shift = true, Typing = true }, false, KeyAction.Hide),
+        ("Alt+Enter in a rename leaves the glance alone", Owner(Enter) with { Alt = true, Typing = true }, false, KeyAction.None),
+        ("Win+Enter in a rename leaves the glance alone", Owner(Enter) with { Win = true, Typing = true }, false, KeyAction.None),
+        ("Enter in a rename over the index sheet ends the glance without committing the sheet", Owner(Enter) with { GridOpen = true, Typing = true }, false, KeyAction.Hide),
+        ("Sign mode: Enter in a rename leaves the glance alone", Owner(Enter) with { FillSign = true, Typing = true }, false, KeyAction.None),
+        ("A letter in a rename leaves the glance alone", Owner(NativeMethods.VK_F) with { Typing = true }, false, KeyAction.None),
         ("Down in the address bar is the address bar's and nothing is followed", Owner(Down) with { Typing = true }, false, KeyAction.None),
         ("F11 while typing is Explorer's", Owner(NativeMethods.VK_F11) with { Typing = true }, false, KeyAction.None),
         ("Ctrl+Plus while typing is the text box's", Owner(NativeMethods.VK_OEM_PLUS) with { Ctrl = true, HeaderZoom = true, Typing = true }, false, KeyAction.None),
         ("Ctrl+Enter while typing never toggles the sheet", Owner(Enter) with { Ctrl = true, MultiSelection = true, Typing = true }, false, KeyAction.None),
         ("Esc over the index sheet is still the text box's first", Owner(Esc) with { EscapeLayer = true, Typing = true }, false, KeyAction.None),
         ("Esc in a picker's name box is the dialog's", PickerOwner(Esc) with { PickerListFocus = false, Typing = true }, false, KeyAction.None),
-        ("Enter in a picker's name box is the dialog's", PickerOwner(Enter) with { PickerListFocus = false, Typing = true }, false, KeyAction.None),
+        ("Enter in a picker's name box reaches the dialog and ends the glance", PickerOwner(Enter) with { PickerListFocus = false, Typing = true }, false, KeyAction.Hide),
         ("Space typed into another window's search box leaves the glance alone", Elsewhere(Space, OtherExplorerWindow) with { Typing = true }, false, KeyAction.None),
         ("Sign mode: Esc typed into a rename in Explorer is the rename's", Owner(Esc) with { FillSign = true, Typing = true }, false, KeyAction.None),
 

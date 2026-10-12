@@ -5,10 +5,8 @@ using SpacePreview.Services;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// "When you are typing, Glimpse is not listening." A key typed into a text
-/// box is answered on the hook thread and that is the end of it: nothing is
-/// posted to the dispatcher for the press or for its release. What the hook
-/// thread keeps for itself still runs.
+/// Text boxes keep their keys. Only an Enter that ends the owner's glance
+/// is posted to the dispatcher. What the hook thread keeps for itself still runs.
 /// </summary>
 public sealed class InputTypingPassTests
 {
@@ -57,6 +55,37 @@ public sealed class InputTypingPassTests
         }
 
         return Task.CompletedTask;
+    });
+
+    [Fact]
+    public Task EnterInARenamePostsAndEndsTheGlanceButALetterPostsNothing() => WithController(async controller =>
+    {
+        Fields.Set(controller, "_previewVisible", true);
+        Fields.Set(controller, "_previewOwnerRootHwnd", Owner);
+        Fields.Call(controller, "PublishKeyState");
+
+        var posts = 0;
+        DispatcherHookEventHandler count = (_, _) => Interlocked.Increment(ref posts);
+        var hooks = Dispatcher.CurrentDispatcher.Hooks;
+        hooks.OperationPosted += count;
+        try
+        {
+            Assert.False(HookThread.KeyDown(controller, Typed(NativeMethods.VK_F)));
+            HookThread.KeyUp(controller, NativeMethods.VK_F);
+            Assert.Equal(0, Volatile.Read(ref posts));
+            Assert.False(controller.NoPreviewOpen);
+
+            Assert.False(HookThread.KeyDown(controller, Typed(NativeMethods.VK_RETURN)));
+            Assert.Equal(1, Volatile.Read(ref posts));
+            Assert.False(controller.NoPreviewOpen);
+        }
+        finally
+        {
+            hooks.OperationPosted -= count;
+        }
+
+        await HookThread.Idle();
+        Assert.True(controller.NoPreviewOpen);
     });
 
     /// <summary>

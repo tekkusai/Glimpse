@@ -362,10 +362,17 @@ internal static class PreviewKeyMap
     {
         // When the user is typing, Glimpse is not listening. Every key is
         // the text box's, and one that ends the typing (Esc on a rename)
-        // leaves the next one to the glance: innermost thing first.
+        // leaves the next one to the glance: innermost thing first. Enter
+        // is heard and never taken. It commits the rename or the path, and
+        // the glance over that window would go on showing a file under a
+        // name, or in a folder, it has left. 3.0.0 closed it there.
         if (f.Typing)
         {
-            return Pass;
+            return f.Vk == NativeMethods.VK_RETURN
+                && !f.Ctrl && !f.Alt && !f.Win
+                && f.PreviewVisible && f.Target == KeyTarget.Owner && !f.FillSign
+                    ? Let(KeyAction.Hide)
+                    : Pass;
         }
 
         // Esc with Ctrl, Alt or Win is the shell's: Task Manager, Start,

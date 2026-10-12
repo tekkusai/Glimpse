@@ -73,9 +73,17 @@ public sealed class InputKeyStateTests
         ("Left in a rename moves the caret", At(Owner, Left) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Down over the owner stays Explorer's and the glance follows", At(Owner, Down), Showing, false, KeyAction.FollowExplorer),
 
-        // Typing: a text box in the window in front owns every key.
+        // Text boxes keep their keys; committing a rename ends the glance.
         ("Esc in a rename cancels the rename and the glance stays", At(Owner, Esc) with { RootTyping = true }, Showing, false, KeyAction.None),
-        ("Enter in a rename commits the rename and the glance stays", At(Owner, Enter) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Enter in a rename commits the rename and ends the glance", At(Owner, Enter) with { RootTyping = true }, Showing, false, KeyAction.Hide),
+        ("Enter in a rename with no glance does nothing", At(Owner, Enter) with { RootTyping = true }, Idle, false, KeyAction.None),
+        ("Enter in another window's rename leaves the glance alone", At(OtherExplorer, Enter) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Shift+Enter in a rename ends the glance without taking the key", At(Owner, Enter) with { Shift = true, RootTyping = true }, Showing, false, KeyAction.Hide),
+        ("Alt+Enter in a rename leaves the glance alone", At(Owner, Enter) with { Alt = true, RootTyping = true }, Showing, false, KeyAction.None),
+        ("Win+Enter in a rename leaves the glance alone", At(Owner, Enter) with { Win = true, RootTyping = true }, Showing, false, KeyAction.None),
+        ("Enter in a rename over the index sheet ends the glance without committing the sheet", At(Owner, Enter) with { RootTyping = true }, Window(grid: true), false, KeyAction.Hide),
+        ("Sign mode: Enter in a rename leaves the glance alone", At(Owner, Enter) with { RootTyping = true }, Window(fillSign: true), false, KeyAction.None),
+        ("A letter in a rename leaves the glance alone", At(Owner, NativeMethods.VK_F) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Home in a rename moves the caret and nothing is read again", At(Owner, Home) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Right in the address bar moves the caret", At(Owner, Right) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("F11 while typing is Explorer's", At(Owner, NativeMethods.VK_F11) with { RootTyping = true }, Showing, false, KeyAction.None),
@@ -83,7 +91,7 @@ public sealed class InputKeyStateTests
         ("Ctrl+Enter while typing never toggles the sheet", At(Owner, Enter) with { Ctrl = true, RootTyping = true }, Showing with { MultiSelection = true }, false, KeyAction.None),
         ("Esc in a rename is the rename's in sign mode too", At(Owner, Esc) with { RootTyping = true }, Window(fillSign: true), false, KeyAction.None),
         ("Esc in a picker's name box is the dialog's", InPicker(Esc) with { RootTyping = true }, PickerShowing, false, KeyAction.None),
-        ("Enter in a picker's name box is the dialog's", InPicker(Enter) with { RootTyping = true }, PickerShowing, false, KeyAction.None),
+        ("Enter in a picker's name box reaches the dialog and ends the glance", InPicker(Enter) with { RootTyping = true }, PickerShowing, false, KeyAction.Hide),
         ("Space typed into Explorer's search box opens nothing", At(Owner, Space) with { RootTyping = true }, Idle, false, KeyAction.None),
         ("Space typed into another window's search box leaves the glance alone", At(OtherExplorer, Space) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Esc typed into a text box does not cancel an open on its way", At(Owner, Esc) with { RootTyping = true }, Opening, false, KeyAction.None),
