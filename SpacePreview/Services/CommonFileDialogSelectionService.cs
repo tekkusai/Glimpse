@@ -30,13 +30,20 @@ internal static class CommonFileDialogSelectionService
         "AddressBandRoot"
     ];
 
-    private static readonly string[] FileNameAutomationIds =
-    [
-        "1148",
-        "FileNameControlHost"
-    ];
+    // The Type column, by the property the shell fills it from. Details
+    // and tiles views carry it; list and icon views do not.
+    private const string TypeCellAutomationId = "System.ItemTypeText";
 
-    internal readonly record struct SelectionCandidate(string Name, IReadOnlyList<string> Values);
+    // The most entries one search reads for one row.
+    internal const int SearchLimit = 1024;
+
+    /// <summary>
+    /// What a selected row says of itself: the shell's display name for the
+    /// item, and the text of its Type column where the view shows one. The
+    /// type is a second read across processes, made only when the name alone
+    /// does not settle the row.
+    /// </summary>
+    internal readonly record struct SelectionCandidate(string Name, Func<string?> ReadType);
 
     public static bool HasDialogWindowClass(IntPtr root) =>
         root != IntPtr.Zero
@@ -143,19 +150,10 @@ internal static class CommonFileDialogSelectionService
                 var addressValues = ReadValuesInsideAutomationIds(
                     dialogAutomationRoot,
                     AddressAutomationIds);
-                folderPath = ResolveExistingDirectory(addressValues)
-                    ?? ResolveParentDirectory(candidates);
+                folderPath = ResolveExistingDirectory(addressValues);
             }
 
             var paths = ResolveExistingEntries(folderPath, candidates);
-            if (paths.Count == 0)
-            {
-                var fileNameValues = ReadValuesInsideAutomationIds(
-                    dialogAutomationRoot,
-                    FileNameAutomationIds);
-                folderPath ??= ResolveExistingDirectory(fileNameValues);
-                paths = ResolveExistingEntries(folderPath, candidates, fileNameValues);
-            }
             if (paths.Count == 0)
             {
                 DiagnosticLog.Write(
@@ -191,84 +189,122 @@ internal static class CommonFileDialogSelectionService
 
     internal static IReadOnlyList<string> ResolveExistingEntries(
         string? folderPath,
-        IEnumerable<SelectionCandidate> selections,
-        IEnumerable<string>? fileNameValues = null)
+        IEnumerable<SelectionCandidate> selections)
     {
         var resolved = new List<string>();
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var selectionCount = 0;
-
-        foreach (var selection in selections)
+        if (string.IsNullOrWhiteSpace(folderPath))
         {
-            selectionCount++;
-            var before = resolved.Count;
-            foreach (var value in selection.Values)
-            {
-                TryAddExistingEntry(value, resolved, seen);
-            }
-
-            TryAddExistingEntry(selection.Name, resolved, seen);
-            if (resolved.Count == before && TryCombineWithFolder(folderPath, selection.Name, out var combined))
-            {
-                TryAddExistingEntry(combined, resolved, seen);
-            }
+            return resolved;
         }
 
-        if (fileNameValues is not null && (selectionCount == 0 || resolved.Count < selectionCount))
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var selection in selections)
         {
-            foreach (var value in fileNameValues)
+            var path = ResolveEntry(folderPath, selection);
+            if (path is not null && seen.Add(path))
             {
-                foreach (var name in SplitDialogFileNames(value))
-                {
-                    TryAddExistingEntry(name, resolved, seen);
-                    if (TryCombineWithFolder(folderPath, name, out var combined))
-                    {
-                        TryAddExistingEntry(combined, resolved, seen);
-                    }
-                }
+                resolved.Add(path);
             }
         }
 
         return resolved;
     }
 
-    internal static IReadOnlyList<string> SplitDialogFileNames(string? value)
+    /// <summary>
+    /// A row is named as the shell displays the item, not as the file is
+    /// named: Windows drops the extension of every known type unless told
+    /// to show it, and of a shortcut always. So the row means the entry of
+    /// the dialog's folder to which the shell gives that name, and the
+    /// shell is asked; its rules are not rebuilt here. Two entries can bear
+    /// one name ("report" for report.docx and report.pdf, or a folder
+    /// beside them). Then the Type column decides, and in a view without
+    /// one nothing resolves: a wrong file is worse than no preview.
+    /// </summary>
+    private static string? ResolveEntry(string folderPath, SelectionCandidate selection)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        var name = selection.Name;
+        if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         {
-            return [];
+            return null;
         }
 
-        var trimmed = value.Trim();
-        if (!trimmed.Contains('"'))
+        var bearers = new List<(string Name, FileAttributes Attributes, string Type)>();
+        foreach (var entry in FindEntries(Path.Combine(folderPath, name + ".*")))
         {
-            return [trimmed];
-        }
-
-        var names = new List<string>();
-        var start = -1;
-        for (var i = 0; i < trimmed.Length; i++)
-        {
-            if (trimmed[i] != '"')
+            // The name itself, or the name and the one extension the shell
+            // may have dropped. Nothing else in the folder can bear it.
+            if (entry.Name.Length > name.Length && entry.Name.IndexOf('.', name.Length + 1) >= 0)
             {
                 continue;
             }
 
-            if (start < 0)
+            var info = default(ShellFileInfo);
+            var kind = (entry.Attributes & FileAttributes.Directory) != 0 ? FileAttributes.Directory : FileAttributes.Normal;
+            if (SHGetFileInfoW(entry.Name, kind, ref info, Marshal.SizeOf<ShellFileInfo>(), ShellDisplayAndTypeOfName) != IntPtr.Zero
+                && string.Equals(info.DisplayName, name, StringComparison.Ordinal))
             {
-                start = i + 1;
-                continue;
+                bearers.Add((entry.Name, entry.Attributes, info.TypeName));
             }
-
-            if (i > start)
-            {
-                names.Add(trimmed[start..i]);
-            }
-
-            start = -1;
         }
 
-        return names;
+        if (bearers.Count > 1)
+        {
+            var type = selection.ReadType();
+            bearers.RemoveAll(bearer => !string.Equals(bearer.Type, type, StringComparison.Ordinal));
+        }
+
+        // Every bearer of the name is counted before the cloud check, or the
+        // row of a cloud-only file would open the local file beside it.
+        return bearers.Count == 1 && IsAvailableLocalEntryAttributes(bearers[0].Attributes)
+            ? Path.Combine(folderPath, bearers[0].Name)
+            : null;
+    }
+
+    /// <summary>
+    /// The entries a pattern names, filtered by the file system or the file
+    /// server and not here, so the cost is the matches and not the folder.
+    /// Past <see cref="SearchLimit"/> matches the search stops and names
+    /// nothing: every bearer of a name has to be seen to choose one, and a
+    /// slow share must not be read without end.
+    /// </summary>
+    private static List<(string Name, FileAttributes Attributes)> FindEntries(string pattern)
+    {
+        var entries = new List<(string, FileAttributes)>();
+
+        // Past MAX_PATH the Win32 search wants the extended form.
+        var search = pattern.Length < 260 ? pattern
+            : pattern.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + pattern[2..]
+            : @"\\?\" + pattern;
+        var find = FindFirstFileExW(search, FindExInfoBasic, out var data, 0, IntPtr.Zero, FindFirstExLargeFetch);
+        if (find == new IntPtr(-1))
+        {
+            return entries;
+        }
+
+        try
+        {
+            do
+            {
+                if (data.Name is "." or "..")
+                {
+                    continue;
+                }
+
+                if (entries.Count == SearchLimit)
+                {
+                    return [];
+                }
+
+                entries.Add((data.Name, data.Attributes));
+            }
+            while (FindNextFileW(find, out data));
+        }
+        finally
+        {
+            FindClose(find);
+        }
+
+        return entries;
     }
 
     internal static string NormalizeBreadcrumbFolderText(string? value)
@@ -449,33 +485,37 @@ internal static class CommonFileDialogSelectionService
 
     private static SelectionCandidate ReadSelectionCandidate(AutomationElement element)
     {
-        var values = new List<string>();
-        string name;
         try
         {
-            var current = element.Current;
-            name = current.Name ?? string.Empty;
-            AddValue(values, current.HelpText);
-            AddValue(values, current.ItemStatus);
+            return new SelectionCandidate(element.Current.Name ?? string.Empty, () => ReadTypeCell(element));
         }
         catch (ElementNotAvailableException)
         {
-            return new SelectionCandidate(string.Empty, []);
+            return new SelectionCandidate(string.Empty, () => null);
         }
+    }
 
+    private static string? ReadTypeCell(AutomationElement row)
+    {
         try
         {
-            if (element.TryGetCurrentPattern(ValuePattern.Pattern, out var valuePattern)
-                && valuePattern is ValuePattern value)
-            {
-                AddValue(values, value.Current.Value);
-            }
+            var cell = row.FindFirst(
+                TreeScope.Children,
+                new PropertyCondition(AutomationElement.AutomationIdProperty, TypeCellAutomationId));
+            return cell is not null
+                && cell.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern)
+                && pattern is ValuePattern type
+                    ? type.Current.Value
+                    : null;
+        }
+        catch (ElementNotAvailableException)
+        {
+            return null;
         }
         catch (InvalidOperationException)
         {
+            return null;
         }
-
-        return new SelectionCandidate(name, values);
     }
 
     private static IReadOnlyList<string> ReadValuesInsideAutomationIds(
@@ -533,28 +573,6 @@ internal static class CommonFileDialogSelectionService
         }
     }
 
-    private static string? ResolveParentDirectory(IEnumerable<SelectionCandidate> candidates)
-    {
-        foreach (var candidate in candidates)
-        {
-            foreach (var value in candidate.Values.Prepend(candidate.Name))
-            {
-                if (!TryNormalizeRootedPath(value, out var path) || !IsExistingLocalEntry(path))
-                {
-                    continue;
-                }
-
-                var parent = Path.GetDirectoryName(path);
-                if (!string.IsNullOrWhiteSpace(parent) && Directory.Exists(parent))
-                {
-                    return parent;
-                }
-            }
-        }
-
-        return null;
-    }
-
     private static string? ResolveExistingDirectory(IEnumerable<string> values)
     {
         foreach (var value in values)
@@ -567,65 +585,6 @@ internal static class CommonFileDialogSelectionService
         }
 
         return null;
-    }
-
-    private static bool TryCombineWithFolder(string? folderPath, string? name, out string combined)
-    {
-        combined = string.Empty;
-        if (string.IsNullOrWhiteSpace(folderPath) || string.IsNullOrWhiteSpace(name))
-        {
-            return false;
-        }
-
-        var trimmed = name.Trim().Trim('"');
-        if (Path.IsPathFullyQualified(trimmed)
-            || trimmed.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]) >= 0
-            || trimmed.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-        {
-            return false;
-        }
-
-        try
-        {
-            combined = Path.Combine(folderPath, trimmed);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static void TryAddExistingEntry(
-        string? value,
-        List<string> resolved,
-        HashSet<string> seen)
-    {
-        if (!TryNormalizeRootedPath(value, out var path)
-            || !IsExistingLocalEntry(path)
-            || !seen.Add(path))
-        {
-            return;
-        }
-
-        resolved.Add(path);
-    }
-
-    private static bool IsExistingLocalEntry(string path)
-    {
-        try
-        {
-            if (!File.Exists(path) && !Directory.Exists(path))
-            {
-                return false;
-            }
-
-            return IsAvailableLocalEntryAttributes(File.GetAttributes(path));
-        }
-        catch
-        {
-            return false;
-        }
     }
 
     internal static bool IsAvailableLocalEntryAttributes(FileAttributes attributes)
@@ -699,5 +658,72 @@ internal static class CommonFileDialogSelectionService
         }
 
         return -1;
+    }
+
+    // FindExInfoBasic: the search skips the 8.3 name it would otherwise fetch.
+    // FIND_FIRST_EX_LARGE_FETCH: a large answer comes in few round trips.
+    private const int FindExInfoBasic = 1;
+    private const int FindFirstExLargeFetch = 2;
+
+    // SHGFI_DISPLAYNAME | SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES: the shell
+    // names the entry from its name and kind alone and reads nothing on disk.
+    private const uint ShellDisplayAndTypeOfName = 0x200 | 0x400 | 0x10;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindFirstFileExW(
+        string lpFileName,
+        int fInfoLevelId,
+        out FindData lpFindFileData,
+        int fSearchOp,
+        IntPtr lpSearchFilter,
+        int dwAdditionalFlags);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindNextFileW(IntPtr hFindFile, out FindData lpFindFileData);
+
+    [DllImport("kernel32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool FindClose(IntPtr hFindFile);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr SHGetFileInfoW(
+        string pszPath,
+        FileAttributes dwFileAttributes,
+        ref ShellFileInfo psfi,
+        int cbFileInfo,
+        uint uFlags);
+
+    // WIN32_FIND_DATAW. Its times are pairs of DWORDs, hence the packing.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode, Pack = 4)]
+    private struct FindData
+    {
+        public FileAttributes Attributes;
+        public long CreationTime;
+        public long LastAccessTime;
+        public long LastWriteTime;
+        public long Size;
+        public long Reserved;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string Name;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 14)]
+        public string ShortName;
+    }
+
+    // SHFILEINFOW.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ShellFileInfo
+    {
+        public IntPtr Icon;
+        public int IconIndex;
+        public uint Attributes;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string DisplayName;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+        public string TypeName;
     }
 }

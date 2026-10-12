@@ -5,58 +5,26 @@ namespace SpacePreview.Tests;
 
 public sealed class CommonFileDialogSelectionTests
 {
-    [Fact]
-    public void SelectedElementPathOutranksTheDialogEditFallback()
+    // The row is whatever the shell shows for the file on this PC, with its
+    // extension or without. The resolver has to find the file either way.
+    [Theory]
+    [InlineData("upload.bin")]
+    [InlineData("notes.txt")]
+    [InlineData("report.docx")]
+    [InlineData("photo.jpg")]
+    [InlineData("archive.tar.gz")]
+    [InlineData("README")]
+    public void DisplayNameResolvesAgainstTheVerifiedAddressFolder(string fileName)
     {
         using var fixture = new TempDirectory();
-        var selected = fixture.CreateFile("selected.txt");
-        var staleEdit = fixture.CreateFile("stale.txt");
-        var candidates = new[]
-        {
-            new CommonFileDialogSelectionService.SelectionCandidate(
-                "selected.txt",
-                [$"Selected item: {selected}"])
-        };
+        var selected = fixture.CreateFile(fileName);
+        var shown = ShellNames.Shown(selected);
 
         var resolved = CommonFileDialogSelectionService.ResolveExistingEntries(
             fixture.Path,
-            candidates,
-            [staleEdit]);
+            [new CommonFileDialogSelectionService.SelectionCandidate(shown.Name, () => shown.Type)]);
 
-        Assert.Equal(selected, resolved[0], ignoreCase: true);
-    }
-
-    [Fact]
-    public void DisplayNameResolvesAgainstTheVerifiedAddressFolder()
-    {
-        using var fixture = new TempDirectory();
-        var selected = fixture.CreateFile("upload.bin");
-        var candidates = new[]
-        {
-            new CommonFileDialogSelectionService.SelectionCandidate("upload.bin", [])
-        };
-
-        var resolved = CommonFileDialogSelectionService.ResolveExistingEntries(
-            fixture.Path,
-            candidates);
-
-        Assert.Single(resolved);
-        Assert.Equal(selected, resolved[0], ignoreCase: true);
-    }
-
-    [Fact]
-    public void QuotedMultiSelectionEditValuePreservesDialogOrder()
-    {
-        using var fixture = new TempDirectory();
-        var first = fixture.CreateFile("first image.png");
-        var second = fixture.CreateFile("second image.png");
-
-        var resolved = CommonFileDialogSelectionService.ResolveExistingEntries(
-            fixture.Path,
-            [],
-            ["\"first image.png\" \"second image.png\""]);
-
-        Assert.Equal([first, second], resolved, StringComparer.OrdinalIgnoreCase);
+        Assert.Equal([selected], resolved, StringComparer.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -65,15 +33,12 @@ public sealed class CommonFileDialogSelectionTests
         using var fixture = new TempDirectory();
         var candidates = new[]
         {
-            new CommonFileDialogSelectionService.SelectionCandidate("Cloud placeholder", ["shell:Downloads"]),
-            new CommonFileDialogSelectionService.SelectionCandidate("missing.xyz", [])
+            new CommonFileDialogSelectionService.SelectionCandidate("Cloud placeholder", () => "File folder"),
+            new CommonFileDialogSelectionService.SelectionCandidate("missing.xyz", () => null)
         };
 
-        var resolved = CommonFileDialogSelectionService.ResolveExistingEntries(
-            fixture.Path,
-            candidates);
-
-        Assert.Empty(resolved);
+        Assert.Empty(CommonFileDialogSelectionService.ResolveExistingEntries(fixture.Path, candidates));
+        Assert.Empty(CommonFileDialogSelectionService.ResolveExistingEntries(null, candidates));
     }
 
     [Theory]
@@ -86,15 +51,6 @@ public sealed class CommonFileDialogSelectionTests
     public void OfflineAndCloudOnlyAttributesAreRejected(FileAttributes attributes, bool expected)
     {
         Assert.Equal(expected, CommonFileDialogSelectionService.IsAvailableLocalEntryAttributes(attributes));
-    }
-
-    [Theory]
-    [InlineData("one.txt", new[] { "one.txt" })]
-    [InlineData("\"one.txt\" \"two words.txt\"", new[] { "one.txt", "two words.txt" })]
-    [InlineData("", new string[0])]
-    public void DialogFileNameParserHandlesSingleAndQuotedSets(string value, string[] expected)
-    {
-        Assert.Equal(expected, CommonFileDialogSelectionService.SplitDialogFileNames(value));
     }
 
     [Theory]
@@ -143,7 +99,7 @@ public sealed class CommonFileDialogSelectionTests
 
         var resolved = CommonFileDialogSelectionService.ResolveExistingEntries(
             fixture.Path,
-            [new CommonFileDialogSelectionService.SelectionCandidate("Nested", [])]);
+            [new CommonFileDialogSelectionService.SelectionCandidate("Nested", () => null)]);
 
         Assert.Equal([nested], resolved, StringComparer.OrdinalIgnoreCase);
     }
