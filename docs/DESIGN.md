@@ -179,6 +179,11 @@ While browsing with the current item still on screen, only a poster takes
 its place at 120 ms. A ghost page waits until 1 s: a picture does not give
 way to a blank rectangle.
 
+A long document shows its first pages while the rest converts. When the rest
+arrives the viewer changes to the whole document only if it still stands
+where it opened. A reader who has scrolled, zoomed or clicked keeps their
+place, and the rail says the rest is ready.
+
 Posters come from, in order: the PDF rail cache's first page, the Office file's
 embedded thumbnail, Explorer's cached thumbnail. A ghost page is `RaisedBg`
 with a `RaisedBorder` hairline at the page's aspect, placed where the real page

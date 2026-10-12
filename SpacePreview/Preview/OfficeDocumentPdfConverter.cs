@@ -33,14 +33,26 @@ internal sealed record OfficeProgressiveConversionPlan(int FirstPageCount, int E
 internal sealed record OfficeRunRequest(string SourcePath, string ConvertTo, string OutputDirectory, OfficeRunControl Control);
 
 /// <summary>
-/// The running engine's priority. Work no preview is blocked on (the rest
-/// of a document whose first pages show) drops to BelowNormal; soffice.exe
-/// is only a launcher, so the change has to reach its soffice.bin child too.
+/// The running engine as the lane steers it: its priority, how long it may
+/// take, and its end. soffice.exe is only a launcher, so all three have to
+/// reach the soffice.bin it starts. Work no preview is blocked on (the rest
+/// of a document whose first pages show, a neighbor's warm-up) drops to
+/// BelowNormal and gets the long limit.
 /// </summary>
 internal sealed class OfficeRunControl
 {
+    // A preview gives up and shows the text-only page. Work nobody is
+    // blocked on is slow by design, so its limit only stops a stuck engine.
+    private static readonly TimeSpan ForegroundLimit = TimeSpan.FromSeconds(75);
+    private static readonly TimeSpan BackgroundLimit = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan EndPatience = TimeSpan.FromSeconds(5);
+
     private readonly object _gate = new();
     private Process? _process;
+    private ChildJob? _job;
+    private bool _inJob;
+    private CancellationTokenSource? _limit;
+    private long _started;
 
     public bool Background { get; private set; }
 
@@ -54,23 +66,152 @@ internal sealed class OfficeRunControl
             }
 
             Background = background;
-            Apply();
+            ApplyPriority();
+            ApplyLimit();
         }
     }
 
+    /// <summary>The run begins: <paramref name="limit"/> is cancelled when its time is up.</summary>
+    public void StartClock(CancellationTokenSource limit)
+    {
+        lock (_gate)
+        {
+            _limit = limit;
+            _started = Stopwatch.GetTimestamp();
+            ApplyLimit();
+        }
+    }
+
+    /// <summary>
+    /// Takes the started engine into a job of its own, which ends it with
+    /// the run, and with the app however the app ends.
+    /// </summary>
     public void Attach(Process process)
     {
         lock (_gate)
         {
             _process = process;
+            _job = new ChildJob();
+            _inJob = _job.Add(process);
+            if (_inJob)
+            {
+                // A soffice.bin the launcher started before the job took
+                // the launcher is outside it; whatever starts later is in.
+                foreach (var child in ProcessTree.ChildrenOf(process))
+                {
+                    using (child)
+                    {
+                        _job.Add(child);
+                    }
+                }
+            }
+            else
+            {
+                DiagnosticLog.Write("office engine is outside its job");
+            }
+
             if (Background)
             {
-                Apply();
+                ApplyPriority();
             }
         }
     }
 
-    private void Apply()
+    /// <summary>
+    /// Ends whatever the run started and returns once it is gone. A live
+    /// soffice.bin holds the profile the next run needs, and the lu*.tmp
+    /// files in the staging folder that is deleted next.
+    /// </summary>
+    public void End()
+    {
+        ChildJob? job;
+        Process? process;
+        bool inJob;
+        lock (_gate)
+        {
+            job = _job;
+            process = _process;
+            inJob = _inJob;
+            _job = null;
+            _process = null;
+            _limit = null;
+        }
+
+        if (job is null || process is null)
+        {
+            return;
+        }
+
+        using (job)
+        {
+            // A launcher that exited by itself waited for soffice.bin first.
+            // One that is stopped leaves soffice.bin to wait for: the job's
+            // own count is zero before its processes have closed their files.
+            var engine = new List<Process>();
+            try
+            {
+                if (!process.HasExited)
+                {
+                    engine = ProcessTree.ChildrenOf(process);
+                    if (!inJob)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+
+                job.Terminate();
+                var clock = Stopwatch.StartNew();
+                foreach (var part in engine.Prepend(process))
+                {
+                    var left = EndPatience - clock.Elapsed;
+                    if (left <= TimeSpan.Zero || !part.WaitForExit(left))
+                    {
+                        DiagnosticLog.Write("office engine still running after its run ended");
+                        break;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"office engine end failed: {ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                engine.ForEach(part => part.Dispose());
+            }
+        }
+    }
+
+    /// <summary>
+    /// How long a run that has taken <paramref name="elapsed"/> may still
+    /// take. A preview waits the foreground limit from the moment it starts
+    /// waiting, also on a run that began as a warm-up.
+    /// </summary>
+    internal static TimeSpan TimeLeft(bool background, TimeSpan elapsed)
+    {
+        var left = BackgroundLimit - elapsed;
+        return background || left < ForegroundLimit ? left : ForegroundLimit;
+    }
+
+    private void ApplyLimit()
+    {
+        if (_limit is null)
+        {
+            return;
+        }
+
+        var left = TimeLeft(Background, Stopwatch.GetElapsedTime(_started));
+        try
+        {
+            _limit.CancelAfter(left > TimeSpan.Zero ? left : TimeSpan.Zero);
+        }
+        catch (ObjectDisposedException)
+        {
+            // The run ended between the lane's decision and this.
+        }
+    }
+
+    private void ApplyPriority()
     {
         if (_process is null)
         {
@@ -81,10 +222,12 @@ internal sealed class OfficeRunControl
         try
         {
             _process.PriorityClass = priority;
-            foreach (var childId in ProcessTree.ChildrenOf(_process.Id))
+            foreach (var child in ProcessTree.ChildrenOf(_process))
             {
-                using var child = Process.GetProcessById(childId);
-                child.PriorityClass = priority;
+                using (child)
+                {
+                    child.PriorityClass = priority;
+                }
             }
         }
         catch
@@ -98,7 +241,48 @@ internal sealed class OfficeRunControl
     {
         private const uint SnapProcess = 0x00000002;
 
-        public static List<int> ChildrenOf(int parentId)
+        /// <summary>
+        /// Windows reuses process ids, so a stranger can name a dead parent
+        /// that had this one. Only a process started after
+        /// <paramref name="parent"/> is its child.
+        /// </summary>
+        public static List<Process> ChildrenOf(Process parent)
+        {
+            var children = new List<Process>();
+            try
+            {
+                var born = parent.StartTime;
+                foreach (var childId in ChildIdsOf(parent.Id))
+                {
+                    Process? child = null;
+                    try
+                    {
+                        child = Process.GetProcessById(childId);
+                        if (child.StartTime >= born)
+                        {
+                            children.Add(child);
+                            child = null;
+                        }
+                    }
+                    catch
+                    {
+                        // Gone already, or another user's: not ours either way.
+                    }
+                    finally
+                    {
+                        child?.Dispose();
+                    }
+                }
+            }
+            catch
+            {
+                // The parent has exited; nothing is left to find.
+            }
+
+            return children;
+        }
+
+        private static List<int> ChildIdsOf(int parentId)
         {
             var children = new List<int>();
             var snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
@@ -196,13 +380,15 @@ internal sealed class OfficeConversionJob
     // A preview showed the first pages while the rest converts.
     internal bool Finishing;
     internal bool Finished;
+    // The whole document reached the cache, so its first pages can go.
+    internal bool Landed;
     internal string? PartialDirectory;
     internal int PartialHolds;
     internal readonly List<CancellationTokenRegistration> Registrations = [];
 
     /// <summary>
     /// A viewer showing the partial keeps its folder alive until it lets go.
-    /// False when the folder is already gone; show Complete instead.
+    /// False when the whole document replaced it; show Complete instead.
     /// </summary>
     public bool TryHoldPartial() => OfficeDocumentPdfConverter.TryHoldPartial(this);
 
@@ -219,7 +405,6 @@ internal sealed class OfficeConversionJob
 
 internal static class OfficeDocumentPdfConverter
 {
-    private const int ConversionTimeoutSeconds = 75;
     private const int ProgressiveFirstPages = 6;
     private const int ProgressivePresentationSlideThreshold = 10;
     private const int ProgressiveDocumentPageThreshold = 25;
@@ -234,6 +419,13 @@ internal static class OfficeDocumentPdfConverter
 
     // The cache key of a big document's first pages, beside its whole-document formats.
     private const string PartialFormat = "first-pages";
+
+    // A conversion the engine could not finish leaves this file in the
+    // document's cache entry, and is not tried again for a day. The entry
+    // is keyed by the file's length and time, so a changed file is tried
+    // at once; the day is for what passes, like a machine that slept.
+    private const string FailureMark = "failed";
+    private static readonly TimeSpan FailureMemory = TimeSpan.FromDays(1);
 
     private static readonly XNamespace OfficeRegistry = "http://openoffice.org/2001/registry";
 
@@ -250,8 +442,6 @@ internal static class OfficeDocumentPdfConverter
     internal static Func<OfficeRunRequest, CancellationToken, string?> Runner { get; set; } = RunSoffice;
 
     public static bool IsAvailable => FindSoffice() is not null;
-
-    public static string? EnginePath => FindSoffice();
 
     /// <summary>The engine's display name, for "Converting with LibreOffice". Null without one.</summary>
     public static string? EngineName => FindSoffice() is { } path
@@ -344,31 +534,6 @@ internal static class OfficeDocumentPdfConverter
         return job;
     }
 
-    /// <summary>Blocking form for callers that only want the finished document.</summary>
-    public static ConvertedOfficeDocument? TryConvert(string path, CancellationToken cancellationToken)
-    {
-        var kind = FileKinds.GetOfficeKind(path);
-        if (kind == OfficeKind.None)
-        {
-            return null;
-        }
-
-        if (TryGetCached(path, kind) is { } cached)
-        {
-            return cached;
-        }
-
-        try
-        {
-            var job = Convert(path, kind, cancellationToken);
-            return job.Complete.WaitAsync(cancellationToken).GetAwaiter().GetResult();
-        }
-        catch (Exception ex) when (ex is OperationCanceledException or IOException or UnauthorizedAccessException)
-        {
-            return null;
-        }
-    }
-
     public static OfficeProgressiveConversionPlan? TryCreateProgressivePlan(string path, OfficeKind kind)
     {
         var size = SafeFileLength(path);
@@ -414,6 +579,9 @@ internal static class OfficeDocumentPdfConverter
                 return;
             }
 
+            // What the engine could not finish today it is not asked again.
+            // First pages it did finish are still the preview.
+            var failedEarlier = FailedEarlier(job.Key);
             var restStage = false;
             if (TryCreateProgressivePlan(job.SourcePath, job.Kind) is { } plan)
             {
@@ -425,6 +593,10 @@ internal static class OfficeDocumentPdfConverter
                 if (File.Exists(partial))
                 {
                     TryTouch(partialDirectory);
+                }
+                else if (failedEarlier)
+                {
+                    partial = null;
                 }
                 else
                 {
@@ -464,7 +636,7 @@ internal static class OfficeDocumentPdfConverter
                         job.Finishing = job.ForegroundWaiters > 0;
                     }
 
-                    DiagnosticLog.Write($"office progressive partial ready {job.SourcePath} pages={pages ?? plan.FirstPageCount}/{plan.ExpectedPageCount}");
+                    DiagnosticLog.Write($"office progressive partial ready pages={pages ?? plan.FirstPageCount}/{plan.ExpectedPageCount} {job.SourcePath}");
                     job.PublishFirst(new ConvertedOfficeDocument(
                         partial,
                         PartialPages: pages ?? plan.FirstPageCount,
@@ -473,6 +645,13 @@ internal static class OfficeDocumentPdfConverter
                 }
             }
 
+            if (failedEarlier)
+            {
+                DiagnosticLog.Write($"office job not run, it failed earlier today {job.SourcePath}");
+                return;
+            }
+
+            var engineFailed = true;
             foreach (var format in Formats(job.Kind))
             {
                 var directory = GetCacheDirectory(job.SourcePath, format);
@@ -492,12 +671,20 @@ internal static class OfficeDocumentPdfConverter
                         {
                             return;
                         }
+
+                        // The engine did its part; the cache could not take it.
+                        engineFailed = false;
                     }
                 }
                 finally
                 {
                     TryDeleteDirectory(staging);
                 }
+            }
+
+            if (engineFailed)
+            {
+                RememberFailure(job.Key);
             }
         }
         catch (Exception ex)
@@ -568,7 +755,7 @@ internal static class OfficeDocumentPdfConverter
                 return (null, true);
             }
 
-            DiagnosticLog.Write($"office job preempted {job.SourcePath} requeued");
+            DiagnosticLog.Write($"office job preempted, requeued {job.SourcePath}");
         }
     }
 
@@ -737,12 +924,10 @@ internal static class OfficeDocumentPdfConverter
             job.Registrations.Clear();
 
             // First pages give way to the whole document once nobody shows
-            // them. Without it they are what a revisit shows, so they stay.
-            if (complete is null)
-            {
-                job.PartialDirectory = null;
-            }
-            else if (job.PartialHolds == 0)
+            // them. Without it they are the preview, now and on a revisit,
+            // so they stay and a viewer can still take hold of them.
+            job.Landed = complete is not null;
+            if (job.Landed && job.PartialHolds == 0)
             {
                 partialToDelete = job.PartialDirectory;
                 job.PartialDirectory = null;
@@ -783,7 +968,7 @@ internal static class OfficeDocumentPdfConverter
         lock (Lane)
         {
             job.PartialHolds = Math.Max(0, job.PartialHolds - 1);
-            if (job.Finished && job.PartialHolds == 0)
+            if (job.Landed && job.PartialHolds == 0)
             {
                 partialToDelete = job.PartialDirectory;
                 job.PartialDirectory = null;
@@ -864,8 +1049,9 @@ internal static class OfficeDocumentPdfConverter
 
     /// <summary>
     /// The production runner: one soffice per conversion, network-isolated
-    /// three ways (sanitized source, blocked-proxy profile, blocked-proxy
-    /// environment), killed with its whole tree when cancelled.
+    /// three ways (sanitized source, a profile that follows no links and
+    /// has a dead proxy, the same proxy in the environment), and gone with
+    /// everything it started before the run returns.
     /// </summary>
     private static string? RunSoffice(OfficeRunRequest request, CancellationToken kill)
     {
@@ -877,7 +1063,7 @@ internal static class OfficeDocumentPdfConverter
         }
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(kill);
-        timeout.CancelAfter(TimeSpan.FromSeconds(ConversionTimeoutSeconds));
+        request.Control.StartClock(timeout);
         try
         {
             using var preparedSource = OfficePreviewSourceSanitizer.Prepare(request.SourcePath, request.OutputDirectory, timeout.Token);
@@ -897,28 +1083,22 @@ internal static class OfficeDocumentPdfConverter
 
             DiagnosticLog.Write($"office conversion start {request.SourcePath}");
             process.Start();
-            // Set before soffice.exe spawns soffice.bin, so the child inherits it.
-            request.Control.Attach(process);
-            var outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
-            var errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
+            Task<string> outputTask;
+            Task<string> errorTask;
             try
             {
+                // Before soffice.exe starts soffice.bin, so the child is
+                // born in the job and at the run's priority.
+                request.Control.Attach(process);
+                outputTask = process.StandardOutput.ReadToEndAsync(timeout.Token);
+                errorTask = process.StandardError.ReadToEndAsync(timeout.Token);
                 process.WaitForExitAsync(timeout.Token).GetAwaiter().GetResult();
             }
-            catch (OperationCanceledException)
+            finally
             {
-                // soffice.exe is a launcher: disposing it leaves soffice.bin
-                // converting, and holding the profile, long after we left.
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch
-                {
-                    // It may have exited between the cancel and the kill.
-                }
-
-                throw;
+                // soffice.exe is a launcher: stopped alone, it leaves
+                // soffice.bin converting and holding the profile.
+                request.Control.End();
             }
 
             var log = (outputTask.GetAwaiter().GetResult() + Environment.NewLine + errorTask.GetAwaiter().GetResult()).Trim();
@@ -1012,47 +1192,62 @@ internal static class OfficeDocumentPdfConverter
                 new XElement(OfficeRegistry + "items", new XAttribute(XNamespace.Xmlns + "oor", OfficeRegistry)));
 
         var root = document.Root ?? throw new InvalidDataException("LibreOffice profile has no settings root.");
-        const string settingsNode = "/org.openoffice.Inet/Settings";
         var port = BlockedProxyPort.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        var values = new (string Name, string Value)[]
+        var settings = new (string Node, (string Name, string Value)[] Values)[]
         {
-            ("ooInetProxyType", "2"),
-            ("ooInetHTTPProxyName", BlockedProxyHost),
-            ("ooInetHTTPProxyPort", port),
-            ("ooInetHTTPSProxyName", BlockedProxyHost),
-            ("ooInetHTTPSProxyPort", port),
-            ("ooInetNoProxy", string.Empty)
+            ("/org.openoffice.Inet/Settings",
+            [
+                ("ooInetProxyType", "2"),
+                ("ooInetHTTPProxyName", BlockedProxyHost),
+                ("ooInetHTTPProxyPort", port),
+                ("ooInetHTTPSProxyName", BlockedProxyHost),
+                ("ooInetHTTPSProxyPort", port),
+                ("ooInetNoProxy", string.Empty)
+            ]),
+
+            // The proxy stops http. A picture linked by file path or from a
+            // share (\\host\share, which starts a Windows sign-in to that
+            // host) is stopped by this switch: no profile location is
+            // trusted, so every document's links are blocked.
+            ("/org.openoffice.Office.Common/Security/Scripting",
+            [
+                ("BlockUntrustedRefererLinks", "true")
+            ])
         };
 
-        var protectedNames = values.Select(value => value.Name).ToHashSet(StringComparer.Ordinal);
-        foreach (var item in root.Elements("item")
-                     .Where(item => (string?)item.Attribute(OfficeRegistry + "path") == settingsNode)
-                     .ToList())
+        foreach (var (node, values) in settings)
         {
-            foreach (var property in item.Elements("prop")
-                         .Where(property => protectedNames.Contains((string?)property.Attribute(OfficeRegistry + "name") ?? string.Empty))
+            var protectedNames = values.Select(value => value.Name).ToHashSet(StringComparer.Ordinal);
+            foreach (var item in root.Elements("item")
+                         .Where(item => (string?)item.Attribute(OfficeRegistry + "path") == node)
                          .ToList())
             {
-                property.Remove();
+                foreach (var property in item.Elements("prop")
+                             .Where(property => protectedNames.Contains((string?)property.Attribute(OfficeRegistry + "name") ?? string.Empty))
+                             .ToList())
+                {
+                    property.Remove();
+                }
+
+                if (!item.Elements().Any())
+                {
+                    item.Remove();
+                }
             }
 
-            if (!item.Elements().Any())
+            var ours = new XElement("item", new XAttribute(OfficeRegistry + "path", node));
+            foreach (var (name, value) in values)
             {
-                item.Remove();
+                ours.Add(new XElement(
+                    "prop",
+                    new XAttribute(OfficeRegistry + "name", name),
+                    new XAttribute(OfficeRegistry + "op", "fuse"),
+                    new XElement("value", value)));
             }
+
+            root.Add(ours);
         }
 
-        var networkItem = new XElement("item", new XAttribute(OfficeRegistry + "path", settingsNode));
-        foreach (var (name, value) in values)
-        {
-            networkItem.Add(new XElement(
-                "prop",
-                new XAttribute(OfficeRegistry + "name", name),
-                new XAttribute(OfficeRegistry + "op", "fuse"),
-                new XElement("value", value)));
-        }
-
-        root.Add(networkItem);
         var tempPath = settingsPath + ".tmp";
         document.Save(tempPath);
         File.Move(tempPath, settingsPath, overwrite: true);
@@ -1206,6 +1401,32 @@ internal static class OfficeDocumentPdfConverter
         catch
         {
             return 0;
+        }
+    }
+
+    private static bool FailedEarlier(string cacheDirectory)
+    {
+        try
+        {
+            var mark = new FileInfo(Path.Combine(cacheDirectory, FailureMark));
+            return mark.Exists && DateTime.UtcNow - mark.LastWriteTimeUtc < FailureMemory;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void RememberFailure(string cacheDirectory)
+    {
+        try
+        {
+            Directory.CreateDirectory(cacheDirectory);
+            File.WriteAllBytes(Path.Combine(cacheDirectory, FailureMark), []);
+        }
+        catch
+        {
+            // Not remembered: the next look asks the engine again.
         }
     }
 

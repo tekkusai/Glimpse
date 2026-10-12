@@ -438,10 +438,6 @@ internal static partial class GeneratedHtmlPreview
 </html>
 """;
 
-    // MERGE: OfficeOpenXmlPreview.Shell still passes a palette, and that file
-    // is another lane's. This goes with that call's second argument.
-    internal static string BuildShell(string body, ThemePalette palette) => BuildShell(body);
-
     private static string StableToken(string path)
     {
         var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(Path.GetFullPath(path).ToUpperInvariant()));

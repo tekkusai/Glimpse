@@ -523,7 +523,7 @@ public sealed class OfficeConversionJobTests
     }
 
     /// <summary>An engine that runs only when the test says so.</summary>
-    private sealed class FakeEngine : IDisposable
+    internal sealed class FakeEngine : IDisposable
     {
         private readonly Func<OfficeRunRequest, CancellationToken, string?> _previous;
         private readonly List<Run> _runs = [];
@@ -616,7 +616,7 @@ public sealed class OfficeConversionJobTests
         }
     }
 
-    private sealed class Run(OfficeRunRequest request)
+    internal sealed class Run(OfficeRunRequest request)
     {
         public OfficeRunRequest Request { get; } = request;
         public TaskCompletionSource<int?> Outcome { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);

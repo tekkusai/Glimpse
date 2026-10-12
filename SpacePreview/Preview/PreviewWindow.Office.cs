@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -53,9 +54,12 @@ public partial class PreviewWindow
             ? await BuildFileCardAsync(path, token)
             : BuildConvertedOfficePreview(page, null, version, token);
 
-        // The machine lacks the engine (as opposed to a conversion failing):
-        // offer the fix in place. Never a notification, one click to act.
-        return OfficeDocumentPdfConverter.IsAvailable ? content : WithLibreOfficeSuggestion(content);
+        // Second best is never shown as if it were the file. With an engine,
+        // the conversion failed, and the line says so. Without one, the fix
+        // is offered in place: never a notification, one click to act.
+        return OfficeDocumentPdfConverter.EngineName is { } failed
+            ? WithOfficeLine(content, $"{failed} couldn't convert this file. Open it in its app instead.", null)
+            : WithOfficeLine(content, "Preview without formatting. Install LibreOffice to see this file as designed.", LibreOfficeFix);
     }
 
     /// <summary>
@@ -141,16 +145,33 @@ public partial class PreviewWindow
 
         if (document.IsPartial && job is not null)
         {
-            var note = BuildArrivingPagesNote(document, job.Kind);
+            var words = new TextBlock
+            {
+                FontSize = Metrics.FontCaption,
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center
+            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary");
+            var note = new Border
+            {
+                BorderThickness = new Thickness(0, 1, 1, 0),
+                Padding = new Thickness(12, 10, 12, 12),
+                Child = words
+            }.Themed(Border.BackgroundProperty, "Theme.ChromeVeil").Themed(Border.BorderBrushProperty, "Theme.Border");
             Grid.SetRow(note, 1);
             railStack.Children.Add(note);
-            // Shown beside the open rail only, and only until the rest lands.
-            railStack.SizeChanged += (_, _) =>
-                note.Visibility = note.IsEnabled && railStack.ActualWidth >= PdfPageRailWidth - 1
+
+            // Shown beside the open rail only, and only while it has words.
+            void PlaceNote() =>
+                note.Visibility = words.Text.Length > 0 && railStack.ActualWidth >= PdfPageRailWidth - 1
                     ? Visibility.Visible
                     : Visibility.Collapsed;
-            FollowProgressiveConversion(document, job, railState, note);
-            _ = LoadPartialOfficeRailAsync(railState, document);
+            railStack.SizeChanged += (_, _) => PlaceNote();
+            FollowProgressiveConversion(document, job, railState, said =>
+            {
+                words.Text = said ?? string.Empty;
+                PlaceNote();
+            });
+            _ = LoadPartialOfficeRailAsync(railState, document, job);
         }
         else
         {
@@ -162,15 +183,20 @@ public partial class PreviewWindow
 
     /// <summary>
     /// The first pages are on screen; the rest is still converting. The rail
-    /// already has a slot for every page, a click on a page that has not
-    /// arrived is kept, and when the whole document lands the viewer swaps
-    /// to it in place, at the page the user is on or asked for.
+    /// already has a slot for every page, and a click on a page that has not
+    /// arrived is kept. When the whole document lands the rail shows it at
+    /// once. The viewer swaps to it in place only while it still stands
+    /// where it opened, because only then is the swap invisible. A reader
+    /// who has scrolled, zoomed or clicked into the pages is never moved:
+    /// choosing a page past the first ones makes the swap, and so does the
+    /// next look at the file. <paramref name="say"/> sets the note under
+    /// the rail; null clears it.
     /// </summary>
     private void FollowProgressiveConversion(
         ConvertedOfficeDocument partial,
         OfficeConversionJob job,
         PdfPageRailState railState,
-        FrameworkElement note)
+        Action<string?> say)
     {
         var holdsPartial = true;
         void ReleasePartial()
@@ -182,7 +208,6 @@ public partial class PreviewWindow
             }
         }
 
-        var showingPartial = true;
         var upgrading = false;
         int? askedPage = null;
         ConvertedOfficeDocument? full = null;
@@ -194,18 +219,15 @@ public partial class PreviewWindow
                 railState,
                 () => PdfViewerSource(full!.DocumentPath, page),
                 full!.DocumentPath,
-                $"office progressive upgrade {full.DocumentPath} page={page}",
+                $"office progressive upgrade page={page} {full.DocumentPath}",
                 "office upgrade",
                 () =>
                 {
-                    showingPartial = false;
                     upgrading = false;
-                    railState.Path = full.DocumentPath;
                     railState.CurrentPage = page;
-                    railState.Document = null;
                     railState.TryHandleJump = null;
+                    say(null);
                     ReleasePartial();
-                    _ = LoadPdfPageRailOutOfProcessAsync(railState);
                     if (askedPage is { } later && later != page)
                     {
                         JumpPdfToPage(railState, later);
@@ -215,7 +237,7 @@ public partial class PreviewWindow
 
         railState.TryHandleJump = (_, page) =>
         {
-            if (!showingPartial || page <= partial.PartialPages)
+            if (page <= partial.PartialPages)
             {
                 return false;
             }
@@ -230,47 +252,79 @@ public partial class PreviewWindow
             return true;
         };
 
+        say(ProgressiveNote(ProgressiveRest.OnTheWay, partial, job.Kind));
         railState.Surface!.Unloaded += (_, _) => ReleasePartial();
         _ = WaitForRestAsync();
 
         async Task WaitForRestAsync()
         {
             var started = DateTime.UtcNow;
+            bool Left() => railState.Version != _loadVersion || railState.Token.IsCancellationRequested;
             try
             {
                 var complete = await job.Complete.WaitAsync(railState.Token);
-                if (railState.Version != _loadVersion || railState.Token.IsCancellationRequested)
+                if (Left())
                 {
                     ReleasePartial();
                     return;
                 }
 
-                note.IsEnabled = false;
-                note.Visibility = Visibility.Collapsed;
                 if (complete is null)
                 {
-                    // The rest failed: the first pages are the preview, and
-                    // the rail stops promising more.
+                    // The rest failed: the first pages are the preview. The
+                    // rail stops promising more, and the note says what to do.
                     DiagnosticLog.Write($"office progressive rest failed {job.SourcePath}");
-                    railState.Document = null;
-                    _ = LoadPdfPageRailOutOfProcessAsync(railState);
-                    return;
-                }
+                    railState.TryHandleJump = null;
+                    say(ProgressiveNote(ProgressiveRest.Failed, partial, job.Kind));
+                    await railState.FirstRailReady.Task.WaitAsync(railState.Token);
+                    if (!Left() && railState.Document is { } promised && promised.Pages.Count > partial.PartialPages)
+                    {
+                        railState.Document = new PdfPreviewDocument([.. promised.Pages.Take(partial.PartialPages)], partial.PartialPages);
+                        RenderPdfPageRail(railState);
+                    }
 
-                // A wheel alone never moves the rail, so the viewer says
-                // where the reader is. A page asked for meanwhile still wins.
-                await ReadPdfPageFromViewerAsync(railState);
-                if (railState.Version != _loadVersion || railState.Token.IsCancellationRequested)
-                {
-                    ReleasePartial();
                     return;
                 }
 
                 full = complete;
-                var target = askedPage ?? Math.Max(1, railState.CurrentPage);
                 DiagnosticLog.Write(
-                    $"office progressive full ready {job.SourcePath} after={(DateTime.UtcNow - started).TotalMilliseconds:0}ms page={target}");
-                Upgrade(target);
+                    $"office progressive full ready after={(DateTime.UtcNow - started).TotalMilliseconds:0}ms {job.SourcePath}");
+                railState.Path = complete.DocumentPath;
+                railState.Document = null;
+                _ = LoadPdfPageRailOutOfProcessAsync(railState);
+
+                // A click into the pages can leave a selection or an open
+                // find bar that a swap would drop, so it settles the matter
+                // without asking the viewer.
+                var atRest = !askedPage.HasValue
+                    && !_userEngagedContent
+                    && !ContentOwnsKeyboard()
+                    && await PdfViewerStandsWhereItOpenedAsync(railState);
+                if (Left())
+                {
+                    ReleasePartial();
+                    return;
+                }
+
+                if (upgrading)
+                {
+                    return;
+                }
+
+                if (askedPage is { } asked)
+                {
+                    Upgrade(asked);
+                }
+                else if (atRest && !_userEngagedContent && !ContentOwnsKeyboard())
+                {
+                    DiagnosticLog.Write($"office progressive upgrade in place {job.SourcePath}");
+                    Upgrade(1);
+                }
+                else
+                {
+                    DiagnosticLog.Write($"office progressive upgrade held, the viewer is in use {job.SourcePath}");
+                    say(ProgressiveNote(ProgressiveRest.Ready, partial, job.Kind));
+                }
             }
             catch (OperationCanceledException)
             {
@@ -282,10 +336,67 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The partial's own thumbnails, then a page-shaped slot for every page
-    /// still converting, so the rail shows the document's real length.
+    /// Whether the viewer still shows the top of the document at fit width,
+    /// which is where a swap to the whole document would put it. The viewer
+    /// itself is asked: a wheel, a touchpad or a pinch moves it without
+    /// passing through this window. Its first answer comes a moment after
+    /// the first question, so the question is repeated until then. No
+    /// answer counts as moved.
     /// </summary>
-    private async Task LoadPartialOfficeRailAsync(PdfPageRailState state, ConvertedOfficeDocument partial)
+    private async Task<bool> PdfViewerStandsWhereItOpenedAsync(PdfPageRailState state)
+    {
+        var hwnd = TryGetPdfAutomationHwnd(state.WebView);
+        if (hwnd == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        // UI Automation crosses into the browser and cannot be cancelled,
+        // so it runs off the dispatcher and is left behind when it is late.
+        var probe = Task.Run(() =>
+        {
+            var scrolls = new System.Windows.Automation.AndCondition(
+                new System.Windows.Automation.PropertyCondition(
+                    System.Windows.Automation.AutomationElement.ControlTypeProperty,
+                    System.Windows.Automation.ControlType.Document),
+                new System.Windows.Automation.PropertyCondition(
+                    System.Windows.Automation.ScrollPattern.VerticallyScrollableProperty,
+                    true));
+            var clock = Stopwatch.StartNew();
+            while (clock.Elapsed < PdfPageAutomationTimeout)
+            {
+                try
+                {
+                    // Of the documents nested in the viewer only the pages
+                    // themselves scroll; its frame and toolbar never do.
+                    if (TryCreatePdfAutomationRoot(hwnd)?.FindFirst(System.Windows.Automation.TreeScope.Descendants, scrolls) is { } pages
+                        && pages.TryGetCurrentPattern(System.Windows.Automation.ScrollPattern.Pattern, out var pattern)
+                        && pattern is System.Windows.Automation.ScrollPattern scroll)
+                    {
+                        var position = scroll.Current;
+                        return position.VerticalScrollPercent <= 0 && !position.HorizontallyScrollable;
+                    }
+                }
+                catch
+                {
+                    // The tree changed under the question; ask again.
+                }
+
+                Thread.Sleep(50);
+            }
+
+            return false;
+        });
+
+        return await Task.WhenAny(probe, Task.Delay(PdfPageAutomationTimeout + TimeSpan.FromSeconds(1))) == probe && await probe;
+    }
+
+    /// <summary>
+    /// The partial's own thumbnails, then a page-shaped slot for every page
+    /// still converting, so the rail shows the document's real length. A
+    /// rest that has already failed gets no slots: nothing is on its way.
+    /// </summary>
+    private async Task LoadPartialOfficeRailAsync(PdfPageRailState state, ConvertedOfficeDocument partial, OfficeConversionJob job)
     {
         try
         {
@@ -303,7 +414,10 @@ public partial class PreviewWindow
             }
 
             var first = rendered.Pages[0];
-            var slots = Math.Min(Math.Max(partial.ExpectedPages, rendered.Pages.Count), PdfPageRailMaxPages);
+            var restFailed = job.Complete is { IsCompletedSuccessfully: true, Result: null };
+            var slots = restFailed
+                ? rendered.Pages.Count
+                : Math.Min(Math.Max(partial.ExpectedPages, rendered.Pages.Count), PdfPageRailMaxPages);
             var ghost = new PdfPreviewPage(BuildGhostPage(first.Width, first.Height), first.Width, first.Height);
             var pages = rendered.Pages.Concat(Enumerable.Repeat(ghost, slots - rendered.Pages.Count)).ToList();
             state.Document = new PdfPreviewDocument(pages, pages.Count);
@@ -343,24 +457,34 @@ public partial class PreviewWindow
         return bitmap;
     }
 
-    private static FrameworkElement BuildArrivingPagesNote(ConvertedOfficeDocument partial, OfficeKind kind)
+    /// <summary>What has become of the pages after the first ones.</summary>
+    internal enum ProgressiveRest
+    {
+        OnTheWay,
+        Ready,
+        Failed
+    }
+
+    /// <summary>
+    /// The note under the rail of a document whose first pages show. Once
+    /// the rest is here or has failed, it counts only the pages on screen:
+    /// the count a file claims for itself is a promise, not a fact.
+    /// </summary>
+    internal static string ProgressiveNote(ProgressiveRest rest, ConvertedOfficeDocument partial, OfficeKind kind)
     {
         var unit = kind == OfficeKind.Presentation ? "slides" : "pages";
-        var text = partial.ExpectedPages > partial.PartialPages
-            ? $"{char.ToUpperInvariant(unit[0])}{unit[1..]} {partial.PartialPages + 1} to {partial.ExpectedPages}"
-            : $"More {unit}";
-        return new Border
+        switch (rest)
         {
-            BorderThickness = new Thickness(0, 1, 1, 0),
-            Padding = new Thickness(12, 10, 12, 12),
-            Child = new TextBlock
-            {
-                Text = text + "\nare on the way",
-                FontSize = Metrics.FontCaption,
-                TextWrapping = TextWrapping.Wrap,
-                TextAlignment = TextAlignment.Center
-            }.Themed(TextBlock.ForegroundProperty, "Theme.TextTertiary")
-        }.Themed(Border.BackgroundProperty, "Theme.ChromeVeil").Themed(Border.BorderBrushProperty, "Theme.Border");
+            case ProgressiveRest.Ready:
+                return $"The {unit} after {partial.PartialPages} are ready. Choose one to continue.";
+            case ProgressiveRest.Failed:
+                return $"Only the first {partial.PartialPages} {unit} can be shown. Open the file for the rest.";
+            default:
+                var arriving = partial.ExpectedPages > partial.PartialPages
+                    ? $"{char.ToUpperInvariant(unit[0])}{unit[1..]} {partial.PartialPages + 1} to {partial.ExpectedPages}"
+                    : $"More {unit}";
+                return arriving + "\nare on the way";
+        }
     }
 
     /// <summary>Links in a converted page open in the browser, as they do in the PDF viewer.</summary>
@@ -487,35 +611,35 @@ public partial class PreviewWindow
     internal static readonly PreviewAction LibreOfficeFix = new("Get LibreOffice", "https://www.libreoffice.org/download/", "Opens libreoffice.org in your browser");
 
     /// <summary>
-    /// The text-only preview says what it is and offers the fix: one line
-    /// and one pill in their own row under the content, never over it.
+    /// A preview that is not the file as designed says so: one line, and
+    /// the fix as one pill when there is one, in their own row under the
+    /// content, never over it.
     /// </summary>
-    private static FrameworkElement WithLibreOfficeSuggestion(FrameworkElement content)
+    private static FrameworkElement WithOfficeLine(FrameworkElement content, string words, PreviewAction? fix)
     {
-        var pill = HousePill.Build(LibreOfficeFix.Label, () => OpenExternalUri(LibreOfficeFix.Uri));
-        pill.Margin = new Thickness(16, 0, 0, 0);
-        pill.ToolTip = LibreOfficeFix.Tooltip;
-        DockPanel.SetDock(pill, Dock.Right);
+        var row = new DockPanel { LastChildFill = true };
+        if (fix is not null)
+        {
+            var pill = HousePill.Build(fix.Label, () => OpenExternalUri(fix.Uri));
+            pill.Margin = new Thickness(16, 0, 0, 0);
+            pill.ToolTip = fix.Tooltip;
+            DockPanel.SetDock(pill, Dock.Right);
+            row.Children.Add(pill);
+        }
+
+        row.Children.Add(new TextBlock
+        {
+            Text = words,
+            FontSize = Metrics.FontBody,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary"));
 
         var bar = new Border
         {
             BorderThickness = new Thickness(0, 1, 0, 0),
             Padding = new Thickness(16, 10, 12, 10),
-            Child = new DockPanel
-            {
-                LastChildFill = true,
-                Children =
-                {
-                    pill,
-                    new TextBlock
-                    {
-                        Text = "Preview without formatting. Install LibreOffice to see this file as designed.",
-                        FontSize = Metrics.FontBody,
-                        TextTrimming = TextTrimming.CharacterEllipsis,
-                        VerticalAlignment = VerticalAlignment.Center
-                    }.Themed(TextBlock.ForegroundProperty, "Theme.TextSecondary")
-                }
-            }
+            Child = row
         }.Themed(Border.BackgroundProperty, "Theme.ChromeBg").Themed(Border.BorderBrushProperty, "Theme.Border");
 
         var host = new Grid { Tag = content.Tag }.Themed(Panel.BackgroundProperty, "Theme.CanvasBg");

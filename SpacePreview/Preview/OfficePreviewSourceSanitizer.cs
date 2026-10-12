@@ -1,5 +1,6 @@
 using System.IO;
 using System.IO.Compression;
+using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using SpacePreview.Utilities;
@@ -44,13 +45,20 @@ internal sealed class PreparedOfficeSource : IDisposable
 /// <summary>
 /// A preview never fetches. OOXML names its remote parts (linked images,
 /// templates, OLE links, external workbooks) as external relationships, and
-/// those are cut from a private copy before the engine sees the file.
-/// Hyperlinks stay: nothing loads them, and the preview keeps them clickable.
+/// OpenDocument names them where they are used, as an xlink:href that
+/// leaves the package. Both are cut from a private copy before the engine
+/// sees the file. Hyperlinks stay: nothing loads them, and the preview
+/// keeps them clickable. Files that are not zips (.doc, .xls, .ppt, .rtf)
+/// reach the engine as they are, and its profile is what stops their links.
 /// </summary>
 internal static class OfficePreviewSourceSanitizer
 {
     private const long MaxRelationshipsBytes = 4L * 1024 * 1024;
     private const int CopyBufferBytes = 128 * 1024;
+    private const string OpenDocumentManifest = "META-INF/manifest.xml";
+    private const string XLink = "http://www.w3.org/1999/xlink";
+    private const string OpenDocumentText = "urn:oasis:names:tc:opendocument:xmlns:text:1.0";
+    private const string OpenDocumentDrawing = "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0";
     private static readonly XNamespace PackageRelationships =
         "http://schemas.openxmlformats.org/package/2006/relationships";
 
@@ -69,16 +77,26 @@ internal static class OfficePreviewSourceSanitizer
 
         // Any zip is checked, whatever its name: a renamed .docx is still OOXML.
         int fetchable;
+        bool openDocument;
         try
         {
             using var source = ZipFile.OpenRead(sourcePath);
+            openDocument = source.GetEntry(OpenDocumentManifest) is not null;
             fetchable = source.Entries
                 .Where(IsRelationshipsEntry)
                 .Sum(entry => FetchableRelationships(LoadRelationships(entry, cancellationToken)).Count());
+            if (openDocument)
+            {
+                foreach (var entry in source.Entries.Where(IsOpenDocumentPart))
+                {
+                    using var part = entry.Open();
+                    fetchable += CutOpenDocumentLinks(part, null, cancellationToken);
+                }
+            }
         }
         catch (InvalidDataException) when (!IsZip(sourcePath))
         {
-            // Legacy binary formats have no package relationships to cut.
+            // Legacy binary formats have no package to cut links from.
             return new PreparedOfficeSource(sourcePath, null, 0);
         }
 
@@ -97,7 +115,10 @@ internal static class OfficePreviewSourceSanitizer
             foreach (var sourceEntry in source.Entries)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var destinationEntry = destination.CreateEntry(sourceEntry.FullName, CompressionLevel.Fastest);
+
+                // An OpenDocument package is known by its first entry, stored as it is.
+                var compression = sourceEntry.FullName == "mimetype" ? CompressionLevel.NoCompression : CompressionLevel.Fastest;
+                var destinationEntry = destination.CreateEntry(sourceEntry.FullName, compression);
                 destinationEntry.LastWriteTime = sourceEntry.LastWriteTime;
                 destinationEntry.ExternalAttributes = sourceEntry.ExternalAttributes;
 
@@ -115,6 +136,12 @@ internal static class OfficePreviewSourceSanitizer
                 }
 
                 using var input = sourceEntry.Open();
+                if (openDocument && IsOpenDocumentPart(sourceEntry))
+                {
+                    CutOpenDocumentLinks(input, output, cancellationToken);
+                    continue;
+                }
+
                 CopyTo(input, output, cancellationToken);
             }
 
@@ -151,6 +178,103 @@ internal static class OfficePreviewSourceSanitizer
 
     private static bool IsRelationshipsEntry(ZipArchiveEntry entry) =>
         entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The parts that carry links: the document's own, and those of each object embedded in it.</summary>
+    private static bool IsOpenDocumentPart(ZipArchiveEntry entry) =>
+        entry.Name is "content.xml" or "styles.xml" or "meta.xml";
+
+    /// <summary>
+    /// Reads one OpenDocument part and counts the links that leave the
+    /// package: a linked picture, section, sheet, object, font or template.
+    /// With an <paramref name="output"/> it also writes the part without
+    /// them. A part that is not well-formed XML throws, and the file never
+    /// reaches the engine, which might read it more forgivingly.
+    /// </summary>
+    private static int CutOpenDocumentLinks(Stream input, Stream? output, CancellationToken cancellationToken)
+    {
+        var cut = 0;
+        using var reader = XmlReader.Create(input, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null });
+        using var writer = output is null
+            ? null
+            : XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false) });
+        while (reader.Read())
+        {
+            switch (reader.NodeType)
+            {
+                case XmlNodeType.Element:
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var hyperlink = reader.LocalName == "a" && reader.NamespaceURI is OpenDocumentText or OpenDocumentDrawing;
+                    var empty = reader.IsEmptyElement;
+                    writer?.WriteStartElement(reader.Prefix, reader.LocalName, reader.NamespaceURI);
+                    while (reader.MoveToNextAttribute())
+                    {
+                        if (!hyperlink
+                            && reader.LocalName == "href"
+                            && reader.NamespaceURI == XLink
+                            && LeavesPackage(reader.Value))
+                        {
+                            cut++;
+                            continue;
+                        }
+
+                        writer?.WriteAttributeString(reader.Prefix, reader.LocalName, reader.NamespaceURI, reader.Value);
+                    }
+
+                    if (empty)
+                    {
+                        writer?.WriteEndElement();
+                    }
+
+                    break;
+                case XmlNodeType.EndElement:
+                    writer?.WriteFullEndElement();
+                    break;
+                case XmlNodeType.Text:
+                    writer?.WriteString(reader.Value);
+                    break;
+                case XmlNodeType.CDATA:
+                    writer?.WriteCData(reader.Value);
+                    break;
+                case XmlNodeType.Whitespace or XmlNodeType.SignificantWhitespace:
+                    writer?.WriteWhitespace(reader.Value);
+                    break;
+                case XmlNodeType.ProcessingInstruction:
+                    writer?.WriteProcessingInstruction(reader.Name, reader.Value);
+                    break;
+                case XmlNodeType.Comment:
+                    writer?.WriteComment(reader.Value);
+                    break;
+            }
+        }
+
+        return cut;
+    }
+
+    /// <summary>
+    /// A reference stays in the package when it is a plain path downward:
+    /// "Pictures/1.png", "./Object 1". Anything with a scheme, a drive, a
+    /// leading slash, a share or a step up is outside, the way the engine
+    /// reads it. The lone ".." is an embedded chart naming the document
+    /// that holds it, and loads nothing.
+    /// </summary>
+    internal static bool LeavesPackage(string reference)
+    {
+        reference = Uri.UnescapeDataString(reference.Trim());
+        if (reference.Length == 0 || reference[0] == '#' || reference == "..")
+        {
+            return false;
+        }
+
+        if (reference[0] is '/' or '\\')
+        {
+            return true;
+        }
+
+        var separator = reference.IndexOfAny(['/', '\\', '?', '#']);
+        var colon = reference.IndexOf(':');
+        return (colon >= 0 && (separator < 0 || colon < separator))
+            || reference.Split('/', '\\').Contains("..");
+    }
 
     private static IEnumerable<XElement> FetchableRelationships(XDocument document) =>
         document.Descendants(PackageRelationships + "Relationship")

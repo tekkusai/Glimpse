@@ -181,7 +181,7 @@ public sealed class OfficeDocumentPdfConverterTests
         ConvertedOfficeDocument? converted;
         try
         {
-            converted = await Task.Run(() => OfficeDocumentPdfConverter.TryConvert(path, CancellationToken.None));
+            converted = await OfficeDocumentPdfConverter.Convert(path, OfficeKind.Document, CancellationToken.None).Complete;
             // A lingering soffice.bin could still reach out after the launcher returns.
             await Task.Delay(300);
         }

@@ -59,7 +59,11 @@ internal sealed class ChildJob : IDisposable
         }
     }
 
-    /// <summary>How many processes in the job are still running. Zero once the handle is closed.</summary>
+    /// <summary>
+    /// How many processes in the job are still running. Zero once the handle
+    /// is closed. It reaches zero a moment before an ended process has let
+    /// go of its files: wait on the process itself for that.
+    /// </summary>
     public int ActiveProcesses
     {
         get
