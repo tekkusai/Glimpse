@@ -293,38 +293,99 @@ begin
     or HasWebView2Key(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'));
 end;
 
-// Ask a resident Glimpse to leave, then wait for its mutex to vanish.
-// Falls back to taskkill for a copy running from somewhere else (portable,
-// dev build) that the installed exe's quit signal has already handled anyway.
-procedure QuitResident(const ExePath: String);
+// Ends every process running from ExePath and waits, up to five seconds,
+// until none is left. Windows is asked by the full path (WMI,
+// Win32_Process.ExecutablePath), never by image name: a developer build or
+// a portable copy runs from another folder and is left alone. False when a
+// process from ExePath is still running. When Windows cannot be asked at
+// all this is True, and QuitResident's look at the mutex decides.
+function EndProcessesAt(const ExePath: String): Boolean;
+var
+  Locator, Service, Running, Item: Variant;
+  Query: String;
+  Found, I, Looks: Integer;
+begin
+  Result := True;
+  // A backslash is the escape character inside a WQL string.
+  Query := ExePath;
+  StringChangeEx(Query, '\', '\\', True);
+  Query := 'SELECT * FROM Win32_Process WHERE ExecutablePath = "' + Query + '"';
+  try
+    Locator := CreateOleObject('WbemScripting.SWbemLocator');
+    Service := Locator.ConnectServer('.', 'root\cimv2');
+    Looks := 0;
+    repeat
+      Running := Service.ExecQuery(Query);
+      Found := Running.Count;
+      if (Found > 0) and (Looks = 0) then
+        Log('Ending ' + IntToStr(Found) + ' process(es) still running from the install folder.');
+      for I := 0 to Found - 1 do
+      begin
+        try
+          Item := Running.ItemIndex(I);
+          Item.Terminate();
+        except
+          // Gone already, or not ours to end. The next look says which.
+        end;
+      end;
+      if Found > 0 then
+        Sleep(250);
+      Looks := Looks + 1;
+    until (Found = 0) or (Looks > 20);
+    Result := (Found = 0);
+    if not Result then
+      Log('A process from the install folder is still running.');
+  except
+    Log('Could not look for processes in the install folder: ' + GetExceptionMessage);
+  end;
+end;
+
+// Ask a resident Glimpse to leave and wait for its mutex to vanish, so
+// unsaved signing work reaches its draft before anything is forced. Then
+// end whatever still runs from the installed exe: a resident that did not
+// leave, and the PDF helpers of 3.0.0 and 2.x. Those are Glimpse.exe too,
+// hold no mutex, can outlive their resident, and keep Glimpse.exe and its
+// DLLs open while Setup replaces them. False when one could not be ended,
+// and False when the mutex is still held after that. Windows may not
+// answer the look for processes, and a Glimpse started as administrator
+// can be neither asked nor seen by a Setup that was not: in both the look
+// ends nothing and reports nothing, and the mutex is what says a resident
+// is still there.
+function QuitResident(const ExePath: String): Boolean;
 var
   ResultCode: Integer;
   Tries: Integer;
 begin
-  if not CheckForMutexes('{#MyMutexName}') then
-    Exit;
-
-  if FileExists(ExePath) then
+  if CheckForMutexes('{#MyMutexName}') and FileExists(ExePath) then
+  begin
     Exec(ExePath, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 
-  Tries := 0;
-  while CheckForMutexes('{#MyMutexName}') and (Tries < 20) do
-  begin
-    Sleep(250);
-    Tries := Tries + 1;
+    Tries := 0;
+    while CheckForMutexes('{#MyMutexName}') and (Tries < 20) do
+    begin
+      Sleep(250);
+      Tries := Tries + 1;
+    end;
   end;
 
-  if CheckForMutexes('{#MyMutexName}') then
+  Result := EndProcessesAt(ExePath);
+  // Only a copy that was asked to leave can have refused. On a first
+  // install there was no installed exe to ask with.
+  if Result and FileExists(ExePath) and CheckForMutexes('{#MyMutexName}') then
   begin
-    Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM {#MyAppExeName}', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Sleep(500);
+    Log('The resident still holds its mutex.');
+    Result := False;
   end;
 end;
 
+// A copy that is still running would leave old and new files mixed, so
+// Setup stops here, before it copies anything. A silent update then ends
+// with exit code 7 and DeinitializeSetup starts the old Glimpse again.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  QuitResident(ExpandConstant('{app}\{#MyAppExeName}'));
   Result := '';
+  if not QuitResident(ExpandConstant('{app}\{#MyAppExeName}')) then
+    Result := '{#MyAppName} is still running and could not be closed. End it in Task Manager, then run Setup again.';
 end;
 
 // The install finished: [Run] starts Glimpse --updated, not the code below.
