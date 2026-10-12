@@ -194,10 +194,18 @@ internal sealed class SpacePreviewController : IDisposable
         uint dwEventThread,
         uint dwmsEventTime)
     {
-        if (eventType == NativeMethods.EVENT_SYSTEM_FOREGROUND)
+        if (eventType != NativeMethods.EVENT_SYSTEM_FOREGROUND)
         {
-            OnForeground(NativeMethods.GetRoot(hwnd == IntPtr.Zero ? NativeMethods.GetForegroundWindow() : hwnd));
+            return;
         }
+
+        // The event says a window was brought forward, not that it got
+        // there: apps raise it for windows that never reach the front, and
+        // one of those took the hook out from under Explorer. Windows is
+        // asked what is in front. Only when it has no answer is the event
+        // taken at its word.
+        var root = _foregroundRoot();
+        OnForeground(root != IntPtr.Zero ? root : NativeMethods.GetRoot(hwnd));
     }
 
     private void OnForeground(IntPtr root)

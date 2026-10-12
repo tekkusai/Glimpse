@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Reflection;
 using System.Windows.Threading;
+using SpacePreview.Native;
 using SpacePreview.Services;
 
 namespace SpacePreview.Tests;
@@ -76,6 +77,49 @@ public sealed class InputPresenceTests
         Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)), "The hook did not come in for a file picker.");
         return Task.CompletedTask;
     });
+
+    /// <summary>
+    /// The fault in 3.0.0: a foreground event names the window an app
+    /// brought forward, and apps raise it for windows that never reach the
+    /// front. On one PC 37 of 82 events did. One of those while Explorer was
+    /// in front took the hook out, and Space did nothing there until the
+    /// user left and came back.
+    /// </summary>
+    [Fact]
+    public Task AForegroundEventForAWindowThatIsNotInFrontChangesNothing() => WithController(controller =>
+    {
+        var windows = new FakeHookDelivery();
+        windows.Attach(Fields.Get<KeyboardHook>(controller, "_keyboardHook"));
+        using var explorer = TestWindow.Root("CabinetWClass");
+        using var elsewhere = TestWindow.Root("GlimpseTestSomeOtherApp");
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => explorer.Handle));
+
+        RaiseForegroundEvent(controller, explorer.Handle);
+        Assert.True(windows.Installed.Wait(TimeSpan.FromSeconds(5)), "The hook was never installed over Explorer.");
+
+        RaiseForegroundEvent(controller, elsewhere.Handle);
+        Assert.True(
+            Fields.Get<bool>(controller, "_keyboardHookWanted"),
+            "An event for a window that is not in front took the hook out from under Explorer.");
+
+        // With nothing in front, the event is all there is to go on.
+        Fields.Set(controller, "_foregroundRoot", (Func<IntPtr>)(() => IntPtr.Zero));
+        RaiseForegroundEvent(controller, elsewhere.Handle);
+        Assert.False(Fields.Get<bool>(controller, "_keyboardHookWanted"));
+        return Task.CompletedTask;
+    });
+
+    private static void RaiseForegroundEvent(SpacePreviewController controller, IntPtr window) =>
+        Fields.Call(
+            controller,
+            "OnForegroundChanged",
+            IntPtr.Zero,
+            NativeMethods.EVENT_SYSTEM_FOREGROUND,
+            window,
+            0,
+            0,
+            0u,
+            0u);
 
     /// <summary>
     /// A dialog takes the foreground while it is still hidden and holds only
