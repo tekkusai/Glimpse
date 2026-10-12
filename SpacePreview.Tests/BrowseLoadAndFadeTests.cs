@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Reflection;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
@@ -15,45 +14,56 @@ public sealed class BrowseLoadAndFadeTests
 {
     /// <summary>
     /// The fault: a step that found the load before it still at work waited
-    /// up to 50 ms for it, held key or not. 3.0.0 waited 20 ms. Both waits
-    /// are measured here on the same machine at the same moment, so a busy
-    /// machine moves them together.
+    /// up to 50 ms for it. 3.0.0 waited 20 ms. The step races a 40 ms timer
+    /// started at the same moment, so a busy machine moves both together:
+    /// a 20 ms wait is always a timer tick ahead of it, a 50 ms wait never.
     /// </summary>
     [Fact]
-    public Task ATapLeavesABusyLoadSoonerThanAHeldKeyDoes() => WpfApp.RunAsync(async () =>
+    public Task AStepGivesABusyLoadNoLongerThan3Point0Did() => WpfApp.RunAsync(async () =>
     {
-        var tap = await StepAsync(busyMilliseconds: 2000, () => false);
-        var held = await StepAsync(busyMilliseconds: 2000, () => true);
+        using var temp = new TempDirectory();
+        var window = new PreviewWindow();
+        try
+        {
+            var busy = Task.Delay(2000);
+            Fields.Set(window, "_loadAtWork", busy);
 
-        Assert.True(held.Waited.TotalMilliseconds >= 49, $"A held key gave up on the busy load after {held.Waited.TotalMilliseconds:0} ms.");
-        Assert.True(
-            tap.Waited.TotalMilliseconds + 5 < held.Waited.TotalMilliseconds,
-            $"A tap waited {tap.Waited.TotalMilliseconds:0} ms for a busy load and a held key {held.Waited.TotalMilliseconds:0} ms.");
+            var longer = Task.Delay(40);
+            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, temp.Path, 1L, CancellationToken.None, true)!;
+            Assert.Same(busy, Fields.Get<Task>(window, "_loadAtWork"));
+            while (ReferenceEquals(Fields.Get<Task>(window, "_loadAtWork"), busy) && !load.IsCompleted)
+            {
+                Assert.False(longer.IsCompleted, "The step was still waiting for the busy load after 40 ms.");
+                await Task.Yield();
+            }
+
+            await load;
+        }
+        finally
+        {
+            window.Close();
+        }
     });
 
     [Fact]
-    public Task AHeldKeyWaitsForTheBusyLoadToLetGo() => WpfApp.RunAsync(async () =>
+    public Task AStepWithNothingAtWorkStartsInsideTheCall() => WpfApp.RunAsync(async () =>
     {
-        var step = await StepAsync(busyMilliseconds: 35, () => true);
+        using var temp = new TempDirectory();
+        var window = new PreviewWindow();
+        try
+        {
+            var idle = Task.CompletedTask;
+            Fields.Set(window, "_loadAtWork", idle);
 
-        Assert.True(step.Waited.TotalMilliseconds >= 34, $"The step left after {step.Waited.TotalMilliseconds:0} ms with the load still at work.");
-    });
+            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, temp.Path, 1L, CancellationToken.None, true)!;
 
-    [Fact]
-    public Task LettingTheKeyGoEndsTheWait() => WpfApp.RunAsync(async () =>
-    {
-        var reads = 0;
-        var step = await StepAsync(busyMilliseconds: 2000, () => ++reads < 2);
-
-        // Read once at 20 ms and found down, read again and found up. A
-        // wait the cap ended would have read the key until the cap.
-        Assert.True(reads == 2 || step.Waited.TotalMilliseconds >= 50, $"The key was read {reads} times in {step.Waited.TotalMilliseconds:0} ms.");
-    });
-
-    [Fact]
-    public Task AStepWithNothingAtWorkNeverAsksTheKeyboard() => WpfApp.RunAsync(async () =>
-    {
-        await StepAsync(busyMilliseconds: 0, () => throw new InvalidOperationException("An idle step read the keyboard."));
+            Assert.NotSame(idle, Fields.Get<Task>(window, "_loadAtWork"));
+            await load;
+        }
+        finally
+        {
+            window.Close();
+        }
     });
 
     [Fact]
@@ -99,41 +109,6 @@ public sealed class BrowseLoadAndFadeTests
             window.Close();
         }
     });
-
-    /// <summary>One browse step onto an empty folder, with the load before it busy for that long.</summary>
-    private static async Task<(TimeSpan Waited, TimeSpan Total)> StepAsync(int busyMilliseconds, Func<bool> held)
-    {
-        using var temp = new TempDirectory();
-        var window = new PreviewWindow();
-        try
-        {
-            var busy = busyMilliseconds == 0 ? Task.CompletedTask : Task.Delay(busyMilliseconds);
-            Fields.Set(window, "_loadAtWork", busy);
-
-            // By name and forgiving, so the same test runs against the code
-            // from before the keyboard was asked.
-            typeof(PreviewWindow)
-                .GetField("_browseKeyHeld", BindingFlags.Instance | BindingFlags.NonPublic)
-                ?.SetValue(window, held);
-
-            var clock = Stopwatch.StartNew();
-            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, temp.Path, 1L, CancellationToken.None, true)!;
-
-            // The step is under way once it has put its own load in place.
-            while (ReferenceEquals(Fields.Get<Task>(window, "_loadAtWork"), busy) && !load.IsCompleted)
-            {
-                await Task.Yield();
-            }
-
-            var waited = clock.Elapsed;
-            await load;
-            return (waited, clock.Elapsed);
-        }
-        finally
-        {
-            window.Close();
-        }
-    }
 
     private static bool IsLayered(IntPtr hwnd) =>
         (NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE).ToInt64() & NativeMethods.WS_EX_LAYERED) != 0;

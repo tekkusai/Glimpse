@@ -118,6 +118,7 @@ public sealed class CardFactsTests
     [InlineData(@"(Left \( right)", "Left ( right")]
     [InlineData(@"(Left\nright)", "Left right")]
     [InlineData(@"(Left\012right)", "Left right")]
+    [InlineData(@"(Pai\156t \162\164\142\146)", "Paint rtbf")]
     [InlineData(@"(Caf\351)", "Caf\u00E9")]
     [InlineData("(Left (middle) right)", "Left (middle) right")]
     [InlineData("(Left) (right)", "Left right")]

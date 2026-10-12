@@ -226,9 +226,17 @@ internal static partial class CardFacts
                     }
 
                     character = (char)(code & 255);
+                    if (char.IsControl(character))
+                    {
+                        character = ' ';
+                    }
+                }
+                else if (character is 'n' or 'r' or 't' or 'b' or 'f')
+                {
+                    character = ' ';
                 }
 
-                text.Append(character is 'n' or 'r' or 't' or 'b' or 'f' || char.IsControl(character) ? ' ' : character);
+                text.Append(character);
                 continue;
             }
 
