@@ -23,6 +23,10 @@ internal static class OfficeOpenXmlPreview
     private const int MaxSheets = 12;
     private const int MaxSheetRows = 500;
     private const int MaxSheetColumns = 52;
+
+    // Twelve full sheets of ordinary cells come to about two million
+    // characters. One long text repeated in every cell came to 852 million.
+    private const int MaxWorkbookTextCharacters = 4_000_000;
     private const long MaxXmlEntryBytes = 8L * 1024 * 1024;
     private const long MaxImageBytes = 8L * 1024 * 1024;
     private const long MaxBookImageBytes = 24L * 1024 * 1024;
@@ -418,10 +422,12 @@ internal static class OfficeOpenXmlPreview
             return false;
         }
 
+        var characters = MaxWorkbookTextCharacters;
         for (var index = 0; index < sheets.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var (table, rows, columns) = SheetTable(LoadXml(archive, sheets[index].Target!), strings);
+            var available = characters;
+            var (table, rows, columns, textCharacters) = SheetTable(LoadXml(archive, sheets[index].Target!), strings, ref characters);
 
             // One notice per cut, under the sheet it was made in. The tabs
             // are the only place the sheet count shows, so every page says it.
@@ -429,6 +435,7 @@ internal static class OfficeOpenXmlPreview
             AppendCutNotice(notices, MaxSheetRows, rows, "rows");
             AppendCutNotice(notices, MaxSheetColumns, columns, "columns");
             AppendCutNotice(notices, MaxSheets, all.Count, "sheets");
+            AppendCutNotice(notices, available - characters, textCharacters, "characters");
             var page = SheetHtml.Page(sheets[index].Name, table + notices);
             // The first sheet is the page; a workbook also gets one page per
             // sheet beside it, which is what the tab strip reads.
@@ -452,12 +459,13 @@ internal static class OfficeOpenXmlPreview
     /// The table stops at the row and column limits; the counts do not, so
     /// a cut can be told from a sheet that simply ends.
     /// </summary>
-    private static (string Table, int Rows, int Columns) SheetTable(XDocument? sheet, IReadOnlyList<string> strings)
+    private static (string Table, int Rows, int Columns, long Characters) SheetTable(XDocument? sheet, IReadOnlyList<string> strings, ref int characters)
     {
         var rows = new SortedDictionary<int, Dictionary<int, (string Text, bool Number)>>();
         var lastColumn = 0;
         var usedRows = 0;
         var usedColumns = 0;
+        long textCharacters = 0;
         var position = 0;
         foreach (var row in sheet?.Descendants(S + "row") ?? [])
         {
@@ -479,7 +487,10 @@ internal static class OfficeOpenXmlPreview
                 usedColumns = Math.Max(usedColumns, column + 1);
                 if (rowIndex <= MaxSheetRows && column < MaxSheetColumns)
                 {
-                    cells[column] = value;
+                    textCharacters += value.Text.Length;
+                    var text = value.Text[..Math.Min(value.Text.Length, characters)];
+                    characters -= text.Length;
+                    cells[column] = (text, value.Number);
                     lastColumn = Math.Max(lastColumn, column);
                 }
             }
@@ -520,7 +531,7 @@ internal static class OfficeOpenXmlPreview
         }
 
         html.Append("</table>");
-        return (html.ToString(), usedRows, usedColumns);
+        return (html.ToString(), usedRows, usedColumns, textCharacters);
     }
 
     /// <summary>
@@ -528,7 +539,7 @@ internal static class OfficeOpenXmlPreview
     /// style of its own, so the line takes its color from the page's label
     /// token and lines up with the table above it.
     /// </summary>
-    private static void AppendCutNotice(StringBuilder html, int shown, int total, string things)
+    private static void AppendCutNotice(StringBuilder html, int shown, long total, string things)
     {
         if (total > shown)
         {

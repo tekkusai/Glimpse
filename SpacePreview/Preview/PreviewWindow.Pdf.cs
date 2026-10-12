@@ -171,7 +171,7 @@ public partial class PreviewWindow
         grid.Tag = railState;
         TrackPdfRailLifetime(grid, railState);
         _ = LoadPdfPageRailOutOfProcessAsync(railState);
-        if (!LooksLikeLocalDrivePath(path))
+        if (!HasBytesAtHand(path))
         {
             _ = HintPdfStageOffThreadAsync(path, version);
         }
@@ -248,6 +248,20 @@ public partial class PreviewWindow
             ? outline
             : CachedPdfOutline(path);
     }
+
+    /// <summary>
+    /// The count the rail starts from. A file with its bytes at hand is
+    /// asked here, so a known count builds the rail before the viewer lays
+    /// out. A share, a mapped drive or an online-only file is asked on the
+    /// pool: its metadata alone takes as long as the network does. Tests
+    /// stand in for the read to see which thread makes it.
+    /// </summary>
+    internal static Task<PdfOutline?> ReadPdfRailOutlineAsync(string path, Func<string, PdfOutline?>? read = null) =>
+        HasBytesAtHand(path)
+            ? Task.FromResult((read ?? KnownPdfOutline)(path))
+            : Task.Run(() => read is not null
+                ? read(path)
+                : PdfPageSizeProbe.Read(path) is { PageCount: > 0 } outline ? outline : CachedPdfOutline(path));
 
     /// <summary>The first rail range's manifest: a few hundred bytes of JSON, no images.</summary>
     private static PdfOutline? CachedPdfOutline(string path)
@@ -407,9 +421,7 @@ public partial class PreviewWindow
 
         // A local file is asked here, so a known count builds the rail
         // before the viewer lays out. A share is asked on the pool.
-        var known = LooksLikeLocalDrivePath(path)
-            ? KnownPdfOutline(path)
-            : await Task.Run(() => PdfPageSizeProbe.Read(path) is { PageCount: > 0 } read ? read : CachedPdfOutline(path));
+        var known = await ReadPdfRailOutlineAsync(path);
         if (!Current())
         {
             return;

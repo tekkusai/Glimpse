@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.RegularExpressions;
 using SpacePreview.Preview;
 using SpacePreview.Utilities;
 
@@ -13,6 +14,46 @@ namespace SpacePreview.Tests;
 /// </summary>
 public sealed class OfficeFallbackCutTests
 {
+    [Theory]
+    [InlineData(1, 30, 20, "Showing the first 4,000,000 of 6,000,000 characters. Open the file for the rest.")]
+    [InlineData(3, 15, 10, "Showing the first 1,000,000 of 1,500,000 characters. Open the file for the rest.")]
+    public void SharedStringsHaveOneTextBudgetForTheWorkbook(int sheets, int rows, int columns, string notice)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "repeated.xlsx");
+        var cells = new StringBuilder();
+        for (var row = 1; row <= rows; row++)
+        {
+            cells.Append($"<row r=\"{row}\">");
+            for (var column = 0; column < columns; column++)
+            {
+                cells.Append($"<c r=\"{SheetHtml.ColumnLetters(column)}{row}\" t=\"s\"><v>0</v></c>");
+            }
+            cells.Append("</row>");
+        }
+
+        WriteWorkbook(path, sheets, cells.ToString());
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+        {
+            Entry(archive, "xl/sharedStrings.xml", $"<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>{new string('x', 10_000)}</t></si></sst>");
+            for (var sheet = 2; sheet <= sheets; sheet++)
+            {
+                archive.GetEntry($"xl/worksheets/sheet{sheet}.xml")!.Delete();
+                Entry(archive, $"xl/worksheets/sheet{sheet}.xml", $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>{cells}</sheetData></worksheet>");
+            }
+        }
+
+        var page = OfficeOpenXmlPreview.TryBuild(path, OfficeKind.Spreadsheet, CancellationToken.None);
+        Assert.NotNull(page);
+        var pages = (page.Sheets?.Select(sheet => sheet.Path) ?? [page.DocumentPath])
+            .Select(File.ReadAllText).ToArray();
+        var text = pages.Sum(html => Regex.Matches(html, "<td(?: [^>]*)?>(x*)</td>")
+            .Sum(cell => cell.Groups[1].Length));
+
+        Assert.Equal(4_000_000, text);
+        Assert.Contains(">" + notice + "</p>", pages[^1], StringComparison.Ordinal);
+    }
+
     [Fact]
     public void AWorkbookSaysWhichSheetsRowsAndColumnsItLeftOut()
     {

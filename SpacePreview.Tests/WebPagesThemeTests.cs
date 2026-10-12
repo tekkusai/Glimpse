@@ -83,6 +83,31 @@ public sealed class WebPagesThemeTests
             });
     });
 
+    // Calc's export can paint its own page color on body, and a one-sheet
+    // workbook is shown as exported. 3.0.0 put the canvas on body too; the
+    // shared stylesheet left it on html alone.
+    [Fact]
+    public Task ASheetWhoseExportPaintsItsBodyStillShowsTheCanvas() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var sheet = temp.CreateFile(
+            "sheet.html",
+            "<html><head></head><body bgcolor=\"#ffffff\" text=\"#000000\"><table><tr><td>1</td></tr></table></body></html>");
+        SheetHtml.Normalize(sheet);
+
+        await HiddenBrowser.LoadAsync(
+            await WebViewEnvironment.GetAsync(),
+            new Uri(sheet),
+            core => core.Profile.PreferredColorScheme = CoreWebView2PreferredColorScheme.Dark,
+            async core =>
+            {
+                Assert.Equal(
+                    Rgb(Theme.Dark.CanvasBg),
+                    await core.ExecuteScriptAsync("getComputedStyle(document.body).backgroundColor"));
+                return 0;
+            });
+    });
+
     private static Task<string> CanvasAsync(CoreWebView2 core) =>
         core.ExecuteScriptAsync("getComputedStyle(document.documentElement).backgroundColor");
 

@@ -415,7 +415,7 @@ internal static class OfficeDocumentPdfConverter
 
     // The pipeline version is the cache's invalidation: bump it whenever
     // conversion or sheet styling changes, or old output keeps being served.
-    private const string PipelineVersion = "v14";
+    private const string PipelineVersion = "v15";
 
     // The cache key of a big document's first pages, beside its whole-document formats.
     private const string PartialFormat = "first-pages";

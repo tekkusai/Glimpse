@@ -119,7 +119,7 @@ internal static partial class SheetHtml
     }
 
     private static string SheetRules(ThemePalette paper) => $$"""
-html, body { height: 100%; margin: 0; overflow: hidden; }
+html, body { height: 100%; margin: 0; overflow: hidden; background: var(--canvas); }
 
 /* Calc exports x-small text against columns sized for 11 pt. */
 body, div, table, thead, tbody, tfoot, tr, th, td, p { font-size: 13px; }
