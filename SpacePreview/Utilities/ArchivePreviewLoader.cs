@@ -276,7 +276,7 @@ internal static class ArchivePreviewLoader
         public string Name { get; }
         public bool IsDirectory { get; private set; }
         public long Size { get; set; }
-        public Dictionary<string, Node> Children { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, Node> Children { get; } = new(StringComparer.Ordinal);
 
         private long? _totalSize;
 

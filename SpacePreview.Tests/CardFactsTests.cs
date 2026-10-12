@@ -112,6 +112,25 @@ public sealed class CardFactsTests
     }
 
     [Theory]
+    [InlineData(@"(Left \) right)", "Left ) right")]
+    [InlineData(@"(Left \\) (right)", "Left \\ right")]
+    [InlineData(@"(Left \051 right)", "Left ) right")]
+    [InlineData(@"(Left \( right)", "Left ( right")]
+    [InlineData(@"(Left\nright)", "Left right")]
+    [InlineData(@"(Left\012right)", "Left right")]
+    [InlineData(@"(Caf\351)", "Caf\u00E9")]
+    [InlineData("(Left (middle) right)", "Left (middle) right")]
+    [InlineData("(Left) (right)", "Left right")]
+    [InlineData("Left \\", "Left \\")]
+    public void AnIllustratorTitleReadsEscapesBeforeParentheses(string title, string expected)
+    {
+        using var temp = new TempDirectory();
+        var path = temp.CreateFile("poster.ai", Illustrator(title));
+
+        Assert.Equal(expected, CardFacts.Illustrator(path)[0]);
+    }
+
+    [Theory]
     [InlineData("(logo.ai)")]
     [InlineData("LOGO")]
     public void AnIllustratorTitleThatIsTheFileNameIsLeftToTheHeader(string title)

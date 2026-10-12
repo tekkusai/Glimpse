@@ -1,4 +1,6 @@
 using System.IO.Compression;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
 using SpacePreview.Utilities;
 
@@ -36,6 +38,29 @@ public sealed class AppPackagePreviewLoaderTests
         Assert.Contains("internetClient", info.Capabilities);
         Assert.Equal(path, info.SourcePath);
         Assert.NotNull(info.Logo);
+    }
+
+    [Fact]
+    public void ANarrowPackageLogoIsNotUpscaledPastItsSourcePixels()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "narrow.msix");
+        CreateMinimalPackage(path);
+        const int width = 32, height = 8192;
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Update))
+        {
+            var encoder = new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(BitmapSource.Create(
+                width, height, 96, 96, PixelFormats.Gray8, null, new byte[width * height], width)));
+            using var stream = archive.CreateEntry("Assets/Logo.png").Open();
+            encoder.Save(stream);
+        }
+
+        var logo = AppPackagePreviewLoader.TryLoad(path)?.Logo;
+
+        Assert.NotNull(logo);
+        Assert.True((long)logo.PixelWidth * logo.PixelHeight <= width * height,
+            $"The {width}x{height} logo decoded to {logo.PixelWidth}x{logo.PixelHeight} pixels.");
     }
 
     [Fact]

@@ -262,7 +262,7 @@ internal static class AppPackagePreviewLoader
             bitmap.BeginInit();
             bitmap.CacheOption = BitmapCacheOption.OnLoad;
             bitmap.StreamSource = new MemoryStream(bytes);
-            bitmap.DecodePixelWidth = LogoDecodeWidth;
+            bitmap.DecodePixelWidth = Math.Min(LogoDecodeWidth, frame.PixelWidth);
             bitmap.EndInit();
             bitmap.Freeze();
             return bitmap;

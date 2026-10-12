@@ -207,8 +207,31 @@ internal static partial class CardFacts
 
         var text = new StringBuilder(value.Length);
         var depth = 0;
-        foreach (var character in value)
+        for (var i = 0; i < value.Length; i++)
         {
+            var character = value[i];
+            // An escape is read before a parenthesis is taken as the end:
+            // \) is a parenthesis in the title, \351 a character by
+            // its code, and the ones that lay text out are a space in a
+            // one-line fact.
+            if (character == '\\' && depth > 0 && i + 1 < value.Length)
+            {
+                character = value[++i];
+                if (character is >= '0' and <= '7')
+                {
+                    var code = character - '0';
+                    for (var digits = 1; digits < 3 && i + 1 < value.Length && value[i + 1] is >= '0' and <= '7'; digits++)
+                    {
+                        code = code * 8 + value[++i] - '0';
+                    }
+
+                    character = (char)(code & 255);
+                }
+
+                text.Append(character is 'n' or 'r' or 't' or 'b' or 'f' || char.IsControl(character) ? ' ' : character);
+                continue;
+            }
+
             if (character == '(')
             {
                 if (depth++ == 0)
