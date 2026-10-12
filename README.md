@@ -105,4 +105,4 @@ Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 
-Glimpse is available under the [MIT License](LICENSE). The Earthrise photo in the screenshots is by NASA (Apollo 8, 1968) and is in the public domain.
+Glimpse is available under the [MIT License](LICENSE). The photographs in the screenshots are NASA's, from Apollo 8 in 1968, and are in the public domain.
