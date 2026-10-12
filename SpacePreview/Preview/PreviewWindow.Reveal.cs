@@ -1326,6 +1326,15 @@ public partial class PreviewWindow
             if (generation != _fadeGeneration)
             {
                 timer.Stop();
+
+                // A browse step ended this fade with the window already
+                // fully in. It is done, and its completion still has the
+                // layered style to remove and the presentation to confirm.
+                if (to == 255 && _windowAlpha == 255)
+                {
+                    onDone();
+                }
+
                 return;
             }
 

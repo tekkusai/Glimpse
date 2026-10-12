@@ -69,8 +69,23 @@ public partial class PreviewWindow : Window
     // that finds it still at work waits for it (see LoadPreviewAsync).
     private Task _loadAtWork = Task.CompletedTask;
 
-    /// <summary>The longest a browse step waits for the load before it to let go.</summary>
+    /// <summary>What a browse step gives a load still at work to let go: the wait 3.0.0 always took.</summary>
+    private static readonly TimeSpan BusyLoadWait = TimeSpan.FromMilliseconds(20);
+
+    /// <summary>The longest it waits while a browse key is still down and another repeat is coming.</summary>
     private static readonly TimeSpan BusyLoadCap = TimeSpan.FromMilliseconds(50);
+
+    // Tests stand in for the keyboard.
+    private Func<bool> _browseKeyHeld = static () =>
+        NativeMethods.IsKeyDown(NativeMethods.VK_LEFT)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_UP)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_RIGHT)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_DOWN)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_NEXT)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_PRIOR)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_HOME)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_END)
+        || NativeMethods.IsKeyDown(NativeMethods.VK_DELETE);
     private readonly SemaphoreSlim _shellIconGate = new(1, 1);
     private readonly SemaphoreSlim _folderSizeScanGate = new(1, 1);
     private readonly SemaphoreSlim _imageDecodeGate = new(1, 1);
@@ -431,16 +446,24 @@ public partial class PreviewWindow : Window
         try
         {
             // A single press starts its load at once. A press that finds the
-            // load before it still reading or decoding means keys are coming
-            // faster than loads finish: it waits for that load to let go,
-            // and by then only the newest press is still wanted. So a held
-            // arrow runs one load at a time, not one per repeat. The wait is
-            // capped, so a load stuck on a dead share holds nothing back. A
-            // fresh open has nothing to coalesce with.
+            // load before it still reading or decoding gives it 20 ms to let
+            // go, and a tap waits no longer than that. While a browse key is
+            // still down another repeat is coming and only the newest press
+            // is wanted, so the wait goes on until the key is let go: a held
+            // arrow runs one load at a time, not one per repeat. The cap ends
+            // it either way, so a load stuck on a dead share holds nothing
+            // back. A fresh open has nothing to coalesce with.
             if (coalesce && !_loadAtWork.IsCompleted)
             {
-                await Task.WhenAny(_loadAtWork, Task.Delay(BusyLoadCap, token));
-                token.ThrowIfCancellationRequested();
+                var waited = Stopwatch.StartNew();
+                var wait = BusyLoadWait;
+                do
+                {
+                    await Task.WhenAny(_loadAtWork, Task.Delay(wait, token));
+                    token.ThrowIfCancellationRequested();
+                    wait = TimeSpan.FromMilliseconds(1);
+                }
+                while (!_loadAtWork.IsCompleted && waited.Elapsed < BusyLoadCap && _browseKeyHeld());
             }
 
             atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
