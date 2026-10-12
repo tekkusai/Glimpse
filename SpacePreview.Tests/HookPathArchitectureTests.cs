@@ -76,9 +76,9 @@ public sealed class HookPathArchitectureTests
                 "CommonFileDialogSelectionService.HasFileListFocus",
                 "DeferredFileDialogPreviewIntentSlot.Cancel",
                 "DiagnosticLog.Write",
-                "ExplorerSelectionService.IsWindowTextEditing",
+                "ExplorerSelectionService.HasTextFocus",
+                "ExplorerSelectionService.IsTyping",
                 "ExplorerSelectionService.TryGetForegroundContext",
-                "ExplorerSelectionService.WindowThreadHasTextEditingFocus",
                 "KeyboardHook.HookCallback",
                 "NativeMethods.CallNextHookEx",
                 "NativeMethods.GetAncestor",
@@ -95,6 +95,7 @@ public sealed class HookPathArchitectureTests
                 "NativeMethods.IsKeyDown",
                 "NativeMethods.IsWindow",
                 "PreviewInputPolicy.IsDesktopWindowClass",
+                "PreviewInputPolicy.IsHeaderIslandClass",
                 "PreviewInputPolicy.IsTextEditingClass",
                 "PreviewInputPolicy.ResolveForegroundContext",
                 "PreviewKeyMap.Claim",
@@ -201,21 +202,44 @@ public sealed class HookPathArchitectureTests
     /// <summary>
     /// The list this replaces named methods by hand and scanned their text.
     /// It passed while a bare Space ran three unlisted methods on the hook
-    /// path that start a task to open a process token. That work is the
-    /// dispatcher's now; the walk has to be able to see it there.
+    /// path that start a task to open a process token. The walk has to be
+    /// able to see that work: it finds it where it lives now, behind the
+    /// picker coming to the front.
     /// </summary>
     [Fact]
     public void TheWalkSeesTheElevationCheckTheHandKeptListMissed()
     {
-        var perform = Method(typeof(SpacePreviewController), "Perform");
+        var observed = Method(typeof(SpacePreviewController), "OnCommonFileDialogObserved");
 
         Assert.Contains(
             "SpacePreviewController.StartElevationMismatchCheck",
-            HookThreadReach.Names(HookThreadReach.From(perform)));
+            HookThreadReach.Names(HookThreadReach.From(observed)));
         Assert.Contains(
             "SpacePreviewController.StartElevationMismatchCheck calls System.Threading.Tasks.Task.Run",
-            Offenses([perform]));
-        Assert.DoesNotContain(perform, HookThreadReach.From([.. KeyboardRoots, .. MouseRoots]));
+            Offenses([observed]));
+        Assert.DoesNotContain(observed, HookThreadReach.From([.. KeyboardRoots, .. MouseRoots]));
+    }
+
+    /// <summary>
+    /// In 3.0.0 a bare Space where nothing offered a selection, and every
+    /// Space in a picker, started that task. Windows never calls this hook
+    /// while an elevated window has the keyboard, so no key could find what
+    /// the task looked for. Nothing a key runs reaches it now, on the hook
+    /// thread or on the dispatcher.
+    /// </summary>
+    [Fact]
+    public void NoKeyStartsTheElevationCheck()
+    {
+        MethodBase[] keyPath =
+        [
+            .. KeyboardRoots,
+            Method(typeof(SpacePreviewController), "OnKeyRouted"),
+            Method(typeof(SpacePreviewController), "OnNavigationKeyUp")
+        ];
+
+        Assert.DoesNotContain(
+            "SpacePreviewController.StartElevationMismatchCheck",
+            HookThreadReach.Names(HookThreadReach.From(keyPath)));
     }
 
     private static List<string> Offenses(MethodBase[] roots)

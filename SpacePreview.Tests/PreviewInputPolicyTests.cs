@@ -7,42 +7,33 @@ public sealed class PreviewInputPolicyTests
     [Theory]
     [InlineData("CabinetWClass")]
     [InlineData("ExploreWClass")]
-    [InlineData("XamlExplorerHostIslandWindow")]
     public void SupportedExplorerRootsResolveToExplorerSelection(string className)
     {
-        var context = PreviewInputPolicy.ResolveForegroundContext(
-            new IntPtr(0x1000),
-            className,
-            ignoreTextEditing: true,
-            rootThreadHasTextEditingFocus: false);
+        var context = PreviewInputPolicy.ResolveForegroundContext(new IntPtr(0x1000), className);
 
         Assert.NotNull(context);
         Assert.Equal(SelectionSource.Explorer, context!.Source);
     }
 
-    [Fact]
-    public void DesktopContextIsSuppressedWhileTextEditingWhenSpaceWouldBeCaptured()
+    [Theory]
+    [InlineData("Progman")]
+    [InlineData("WorkerW")]
+    public void TheDesktopOffersItsSelection(string className)
     {
-        var context = PreviewInputPolicy.ResolveForegroundContext(
-            new IntPtr(0x1000),
-            "WorkerW",
-            ignoreTextEditing: true,
-            rootThreadHasTextEditingFocus: true);
-
-        Assert.Null(context);
-    }
-
-    [Fact]
-    public void DesktopContextStillWorksWhenTextEditingIsNotBeingIgnored()
-    {
-        var context = PreviewInputPolicy.ResolveForegroundContext(
-            new IntPtr(0x1000),
-            "WorkerW",
-            ignoreTextEditing: false,
-            rootThreadHasTextEditingFocus: true);
+        var context = PreviewInputPolicy.ResolveForegroundContext(new IntPtr(0x1000), className);
 
         Assert.NotNull(context);
         Assert.Equal(SelectionSource.Desktop, context!.Source);
+    }
+
+    /// <summary>
+    /// XamlExplorerHostIslandWindow is Explorer's Task View and Alt+Tab
+    /// window. 3.0.0 took it for a file window and claimed a bare Space there.
+    /// </summary>
+    [Fact]
+    public void TaskViewOffersNothing()
+    {
+        Assert.Null(PreviewInputPolicy.ResolveForegroundContext(new IntPtr(0x1000), "XamlExplorerHostIslandWindow"));
     }
 
     [Fact]
@@ -51,30 +42,11 @@ public sealed class PreviewInputPolicyTests
         var context = PreviewInputPolicy.ResolveForegroundContext(
             new IntPtr(0x2000),
             "#32770",
-            ignoreTextEditing: true,
-            rootThreadHasTextEditingFocus: false,
             commonFileDialogListHasFocus: true);
 
         Assert.NotNull(context);
         Assert.True(context!.IsFileDialog);
         Assert.Equal(SelectionSource.CommonFileDialog, context.Source);
-    }
-
-    [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    public void CommonFileDialogYieldsToButtonsAndTextFields(
-        bool rootThreadHasTextEditingFocus,
-        bool commonFileDialogListHasFocus)
-    {
-        var context = PreviewInputPolicy.ResolveForegroundContext(
-            new IntPtr(0x2000),
-            "#32770",
-            ignoreTextEditing: true,
-            rootThreadHasTextEditingFocus,
-            commonFileDialogListHasFocus);
-
-        Assert.Null(context);
     }
 
     [Fact]
@@ -83,8 +55,6 @@ public sealed class PreviewInputPolicyTests
         var context = PreviewInputPolicy.ResolveForegroundContext(
             new IntPtr(0x2000),
             "#32770",
-            ignoreTextEditing: true,
-            rootThreadHasTextEditingFocus: false,
             commonFileDialogListHasFocus: false);
 
         Assert.Null(context);
@@ -93,17 +63,18 @@ public sealed class PreviewInputPolicyTests
     [Theory]
     [InlineData("CabinetWClass", true)]
     [InlineData("ExploreWClass", true)]
-    [InlineData("XamlExplorerHostIslandWindow", true)]
     [InlineData("Progman", true)]
     [InlineData("WorkerW", true)]
-    [InlineData("#32770", true)]
+    // A dialog is served once its windows show a file picker, never by its class.
+    [InlineData("#32770", false)]
+    [InlineData("XamlExplorerHostIslandWindow", false)]
     [InlineData("Chrome_WidgetWin_1", false)]
     [InlineData("Notepad", false)]
     [InlineData("UnrealWindow", false)]
     [InlineData("Shell_TrayWnd", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
-    public void TheKeyboardHookServesOnlySurfacesThatOfferASelection(string? className, bool served)
+    public void TheKeyboardHookServesByClassOnlyExplorerAndTheDesktop(string? className, bool served)
     {
         // Everywhere else Glimpse removes its hook and leaves the input path.
         Assert.Equal(served, PreviewInputPolicy.IsServedSurfaceClass(className));
@@ -142,8 +113,8 @@ public sealed class PreviewInputPolicyTests
     [Theory]
     [InlineData("Edit")]
     [InlineData("RichEdit20W")]
-    [InlineData("Windows.UI.Xaml.Controls.TextBox")]
-    public void KnownTextEditingClassesAreSuppressed(string className)
+    [InlineData("RICHEDIT50W")]
+    public void ClassicTextBoxesAreTextEditingClasses(string className)
     {
         Assert.True(PreviewInputPolicy.IsTextEditingClass(className));
     }
@@ -153,8 +124,21 @@ public sealed class PreviewInputPolicyTests
     [InlineData("")]
     [InlineData("EditorShellWindow")]
     [InlineData("DirectUIHWND")]
+    [InlineData("InputSiteWindowClass")]
     public void UnrelatedClassesAreNotSuppressed(string? className)
     {
         Assert.False(PreviewInputPolicy.IsTextEditingClass(className));
+    }
+
+    [Theory]
+    [InlineData("Microsoft.UI.Content.DesktopChildSiteBridge", true)]
+    [InlineData("InputSiteWindowClass", false)]
+    [InlineData("DirectUIHWND", false)]
+    [InlineData("SHELLDLL_DefView", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void ExplorersHeaderIsKnownByTheWindowItLivesIn(string? className, bool header)
+    {
+        Assert.Equal(header, PreviewInputPolicy.IsHeaderIslandClass(className));
     }
 }

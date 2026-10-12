@@ -122,12 +122,11 @@ internal static class ExplorerSelectionService
     private readonly record struct CensusEntry(object Browser, IntPtr TabHwnd);
 
     public static ExplorerSelection? TryGetForegroundSelection(
-        bool ignoreTextEditing = true,
         ExplorerSelectionLookupTrace? diagnostics = null,
         bool includeViewPosition = true,
         bool includeMultiSelectionPaths = true)
     {
-        var context = TryGetForegroundContext(ignoreTextEditing);
+        var context = TryGetForegroundContext();
         if (context is null)
         {
             return null;
@@ -151,7 +150,7 @@ internal static class ExplorerSelectionService
         };
     }
 
-    public static ForegroundSelectionContext? TryGetForegroundContext(bool ignoreTextEditing = true)
+    public static ForegroundSelectionContext? TryGetForegroundContext()
     {
         // Glimpse's own windows offer nothing to glance at. Sign mode's stamp
         // import is a real file dialog, but a glance from it would replace
@@ -172,8 +171,6 @@ internal static class ExplorerSelectionService
         return PreviewInputPolicy.ResolveForegroundContext(
             root,
             className,
-            ignoreTextEditing,
-            rootThreadHasTextEditingFocus: ignoreTextEditing && WindowThreadHasTextEditingFocus(root),
             commonFileDialogListHasFocus: fileDialogListHasFocus);
     }
 
@@ -404,9 +401,66 @@ internal static class ExplorerSelectionService
         }
     }
 
-    /// <summary>Renaming handles the arrow keys; browsing must stand down.</summary>
-    public static bool IsWindowTextEditing(IntPtr rootHwnd) =>
-        rootHwnd != IntPtr.Zero && WindowThreadHasTextEditingFocus(rootHwnd);
+    /// <summary>
+    /// A text box in the window holds the keyboard, so every key is the text
+    /// box's. Read from Windows alone and nothing here waits, so the hook
+    /// thread asks it at each key.
+    /// </summary>
+    public static bool IsTyping(IntPtr root)
+    {
+        if (root == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        var threadId = NativeMethods.GetWindowThreadProcessId(root, out _);
+        var info = new NativeMethods.GUITHREADINFO
+        {
+            cbSize = Marshal.SizeOf<NativeMethods.GUITHREADINFO>()
+        };
+
+        return threadId != 0
+            && NativeMethods.GetGUIThreadInfo(threadId, ref info)
+            && HasTextFocus(root, info.hwndFocus, info.hwndCaret);
+    }
+
+    /// <summary>The three things that are a text box with the keyboard.</summary>
+    internal static bool HasTextFocus(IntPtr root, IntPtr focus, IntPtr caret)
+    {
+        if (focus == IntPtr.Zero)
+        {
+            return false;
+        }
+
+        // A caret up in this window: a rename, a picker's name box, and the
+        // text boxes that have no window of their own to name them (the
+        // search box of a file dialog). A caret an app left in another of
+        // its windows does not count.
+        if (caret != IntPtr.Zero && NativeMethods.GetRoot(caret) == root)
+        {
+            return true;
+        }
+
+        if (PreviewInputPolicy.IsTextEditingClass(NativeMethods.GetClassNameString(focus)))
+        {
+            return true;
+        }
+
+        // Explorer's header on Windows 11 is one XAML island, a child of
+        // the window itself: the address bar, the search box and the buttons
+        // beside them share it, keep no caret, and Windows cannot say which
+        // of them has the keyboard. The header has it, so its keys are its
+        // own. An island further in is a folder's own view and is not this.
+        var child = focus;
+        for (var parent = NativeMethods.GetParent(child);
+             parent != IntPtr.Zero && parent != root;
+             parent = NativeMethods.GetParent(child))
+        {
+            child = parent;
+        }
+
+        return PreviewInputPolicy.IsHeaderIslandClass(NativeMethods.GetClassNameString(child));
+    }
 
     private static ExplorerSelection? BrowseExplorer(IntPtr explorerHwnd, int delta) =>
         WithExplorerView(explorerHwnd, view => Step(view, explorerHwnd, delta));
@@ -703,31 +757,4 @@ internal static class ExplorerSelectionService
         exception is COMException
             or InvalidComObjectException
             or ObjectDisposedException;
-
-    private static bool WindowThreadHasTextEditingFocus(IntPtr hwnd)
-    {
-        var threadId = NativeMethods.GetWindowThreadProcessId(hwnd, out _);
-        if (threadId == 0)
-        {
-            return false;
-        }
-
-        var info = new NativeMethods.GUITHREADINFO
-        {
-            cbSize = Marshal.SizeOf<NativeMethods.GUITHREADINFO>()
-        };
-
-        if (!NativeMethods.GetGUIThreadInfo(threadId, ref info))
-        {
-            return false;
-        }
-
-        var focusClass = NativeMethods.GetClassNameString(info.hwndFocus);
-        if (string.IsNullOrEmpty(focusClass))
-        {
-            return false;
-        }
-
-        return PreviewInputPolicy.IsTextEditingClass(focusClass);
-    }
 }

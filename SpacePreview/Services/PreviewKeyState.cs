@@ -22,8 +22,11 @@ internal readonly record struct KeyPress
     /// <summary>That window is Progman or WorkerW.</summary>
     public bool RootIsDesktop { get; init; }
 
-    /// <summary>Its thread has a text caret: a rename or the address bar.</summary>
-    public bool RootTextEditing { get; init; }
+    /// <summary>
+    /// A text box in it holds the keyboard: a rename, the address bar, a
+    /// search box, a picker's name box. Read at every key.
+    /// </summary>
+    public bool RootTyping { get; init; }
 
     /// <summary>It is a file picker whose file list holds focus.</summary>
     public bool RootFileListFocus { get; init; }

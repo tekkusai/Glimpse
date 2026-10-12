@@ -11,11 +11,12 @@ internal readonly record struct RefreshSelectionDecision(RefreshSelectionAction 
 
 internal static class PreviewInputPolicy
 {
+    // Explorer's own file windows. Task View and Alt+Tab are an Explorer
+    // window too (XamlExplorerHostIslandWindow), with no files in it.
     private static readonly HashSet<string> ExplorerWindowClasses = new(StringComparer.OrdinalIgnoreCase)
     {
         "CabinetWClass",
-        "ExploreWClass",
-        "XamlExplorerHostIslandWindow"
+        "ExploreWClass"
     };
 
     private static readonly HashSet<string> DesktopWindowClasses = new(StringComparer.OrdinalIgnoreCase)
@@ -24,39 +25,40 @@ internal static class PreviewInputPolicy
         "WorkerW"
     };
 
+    // The window Explorer's header lives in on Windows 11: a XAML island
+    // (Windows App SDK) that holds the tabs, the address bar, the search box
+    // and the command bar, none of which has a window of its own.
+    private const string HeaderIslandClass = "Microsoft.UI.Content.DesktopChildSiteBridge";
+
     internal static bool IsDesktopWindowClass(string? className) =>
         !string.IsNullOrWhiteSpace(className) && DesktopWindowClasses.Contains(className);
 
     /// <summary>
-    /// The roots the keyboard hook serves: Explorer, the desktop and dialogs
-    /// that may be file pickers. Glimpse's own windows count by process.
-    /// Everywhere else the hook is removed and Glimpse is out of the input path.
+    /// The roots the keyboard hook serves by class alone: Explorer and the
+    /// desktop. A dialog is served once its own windows show it to be a file
+    /// picker, and Glimpse's own windows count by process. Everywhere else
+    /// the hook is removed and Glimpse is out of the input path.
     /// </summary>
     internal static bool IsServedSurfaceClass(string? className) =>
         !string.IsNullOrWhiteSpace(className)
-        && (DesktopWindowClasses.Contains(className)
-            || ExplorerWindowClasses.Contains(className)
-            || className.Equals(CommonFileDialogSelectionService.DialogWindowClass, StringComparison.OrdinalIgnoreCase));
+        && (DesktopWindowClasses.Contains(className) || ExplorerWindowClasses.Contains(className));
 
-    // "Edit" is exact and RichEdit is a prefix. XAML islands expose several
-    // TextBox-flavored class names, so that one is intentionally broader.
-    public static bool IsTextEditingClass(string? focusClass)
-    {
-        if (string.IsNullOrWhiteSpace(focusClass))
-        {
-            return false;
-        }
+    /// <summary>A classic text box: an Edit, or any generation of RichEdit.</summary>
+    public static bool IsTextEditingClass(string? focusClass) =>
+        !string.IsNullOrWhiteSpace(focusClass)
+        && (focusClass.Equals("Edit", StringComparison.OrdinalIgnoreCase)
+            || focusClass.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase));
 
-        return focusClass.Equals("Edit", StringComparison.OrdinalIgnoreCase)
-            || focusClass.StartsWith("RichEdit", StringComparison.OrdinalIgnoreCase)
-            || focusClass.Contains("TextBox", StringComparison.OrdinalIgnoreCase);
-    }
+    internal static bool IsHeaderIslandClass(string? className) =>
+        string.Equals(className, HeaderIslandClass, StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// What the window in front offers to open. Whether the user is typing
+    /// there is not asked here: the keymap asks that first, of every key.
+    /// </summary>
     public static ForegroundSelectionContext? ResolveForegroundContext(
         IntPtr root,
         string className,
-        bool ignoreTextEditing,
-        bool rootThreadHasTextEditingFocus,
         bool commonFileDialogListHasFocus = false)
     {
         if (root == IntPtr.Zero)
@@ -66,30 +68,19 @@ internal static class PreviewInputPolicy
 
         if (IsDesktopWindowClass(className))
         {
-            return ignoreTextEditing && rootThreadHasTextEditingFocus
-                ? null
-                : new ForegroundSelectionContext(root, SelectionSource.Desktop, className);
+            return new ForegroundSelectionContext(root, SelectionSource.Desktop, className);
         }
 
         if (className.Equals(CommonFileDialogSelectionService.DialogWindowClass, StringComparison.OrdinalIgnoreCase))
         {
             return commonFileDialogListHasFocus
-                && (!ignoreTextEditing || !rootThreadHasTextEditingFocus)
-                    ? new ForegroundSelectionContext(root, SelectionSource.CommonFileDialog, className)
-                    : null;
+                ? new ForegroundSelectionContext(root, SelectionSource.CommonFileDialog, className)
+                : null;
         }
 
-        if (!ExplorerWindowClasses.Contains(className))
-        {
-            return null;
-        }
-
-        if (ignoreTextEditing && rootThreadHasTextEditingFocus)
-        {
-            return null;
-        }
-
-        return new ForegroundSelectionContext(root, SelectionSource.Explorer, className);
+        return ExplorerWindowClasses.Contains(className)
+            ? new ForegroundSelectionContext(root, SelectionSource.Explorer, className)
+            : null;
     }
 
     public static RefreshSelectionDecision DecideRefresh(ExplorerSelection? selection, string? currentPath)

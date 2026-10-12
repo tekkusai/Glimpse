@@ -26,7 +26,6 @@ internal enum KeyAction
     OpenPicker,
     DeferPickerOpen,
     CancelOpen,
-    CheckElevation,
     Hide,
     HideForPickerCommit,
     ReturnToPicker,
@@ -75,11 +74,15 @@ internal readonly record struct KeyFacts
     public SelectionSource Source { get; init; }
     public bool MultiSelection { get; init; }
 
+    /// <summary>
+    /// A text box in the window the key is going to holds the keyboard: a
+    /// rename, the address bar, a search box, a picker's name box. Never set
+    /// for a preview, whose own text places have their own rules below.
+    /// </summary>
+    public bool Typing { get; init; }
+
     /// <summary>The owner picker's file list holds focus (not its name box or buttons).</summary>
     public bool PickerListFocus { get; init; }
-
-    /// <summary>The owner window has a text caret: a rename or the address bar.</summary>
-    public bool OwnerTextEditing { get; init; }
 
     public bool Browsable { get; init; }
     public bool FillSign { get; init; }
@@ -227,7 +230,7 @@ internal static class PreviewKeyMap
             OpenPending = state.OpenPending,
             Source = state.Source,
             MultiSelection = state.MultiSelection,
-            OwnerTextEditing = target == KeyTarget.Owner && (space || arrow) && key.RootTextEditing,
+            Typing = key.RootTyping && target is not (KeyTarget.Preview or KeyTarget.Pinned),
             PickerListFocus = target == KeyTarget.Owner
                 && state.Source == SelectionSource.CommonFileDialog
                 && (space || IsNavigation(key.Vk))
@@ -295,6 +298,14 @@ internal static class PreviewKeyMap
 
     public static KeyDecision Route(in KeyFacts f)
     {
+        // When the user is typing, Glimpse is not listening. Every key is
+        // the text box's, and one that ends the typing (Esc on a rename)
+        // leaves the next one to the glance: innermost thing first.
+        if (f.Typing)
+        {
+            return Pass;
+        }
+
         // Esc with Ctrl, Alt or Win is the shell's: Task Manager, Start,
         // window cycling. A swallowed down would cost the user a second press.
         if (f.Vk == NativeMethods.VK_ESCAPE && (f.Ctrl || f.Alt || f.Win))
@@ -526,7 +537,7 @@ internal static class PreviewKeyMap
                     return Claim(KeyAction.NudgeMedia);
                 }
             }
-            else if (!vertical && !f.OwnerTextEditing)
+            else if (!vertical)
             {
                 // Explorer's own left/right depends on the view mode, so the
                 // glance steps through the view itself.
@@ -541,11 +552,6 @@ internal static class PreviewKeyMap
 
     private static KeyDecision RouteSpace(in KeyFacts f, bool ours)
     {
-        if (f.Target == KeyTarget.Owner && f.OwnerTextEditing)
-        {
-            return Pass;
-        }
-
         // Space in another window that offers a selection moves the glance
         // there.
         if (!ours)
@@ -590,7 +596,7 @@ internal static class PreviewKeyMap
     {
         if (f.Context is not { } context)
         {
-            return Let(KeyAction.CheckElevation);
+            return Pass;
         }
 
         // The hook never waits for UI Automation and never swallows Space on

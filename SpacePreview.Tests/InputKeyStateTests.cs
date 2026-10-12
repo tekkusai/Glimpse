@@ -20,6 +20,7 @@ public sealed class InputKeyStateTests
     private const int Left = NativeMethods.VK_LEFT;
     private const int Right = NativeMethods.VK_RIGHT;
     private const int Down = NativeMethods.VK_DOWN;
+    private const int Home = NativeMethods.VK_HOME;
 
     private static readonly IntPtr Owner = new(0x2000);
     private static readonly IntPtr OtherExplorer = new(0x3000);
@@ -46,6 +47,11 @@ public sealed class InputKeyStateTests
         Source = SelectionSource.CommonFileDialog
     };
 
+    private static readonly KeyState Zoomable = Showing with
+    {
+        Preview = Showing.Preview with { HeaderZoom = true }
+    };
+
     private static readonly KeyState Pinned = new()
     {
         Pinned = [new WindowKeyState { Hwnd = Pin, Browsable = true }]
@@ -54,7 +60,7 @@ public sealed class InputKeyStateTests
     private static readonly (string Promise, KeyPress Press, KeyState State, bool Swallow, KeyAction Action)[] Decisions =
     [
         ("Space on Explorer with nothing open opens", At(Owner, Space), Idle, true, KeyAction.Open),
-        ("Space where nothing offers a selection passes", At(Stranger, Space), Idle, false, KeyAction.CheckElevation),
+        ("Space where nothing offers a selection passes", At(Stranger, Space), Idle, false, KeyAction.None),
         ("Space in a picker with a verified selection opens it", InPicker(Space) with { PickerCacheReady = true }, Idle, true, KeyAction.OpenPicker),
         ("Space in a picker without one passes and is remembered", InPicker(Space), Idle, false, KeyAction.DeferPickerOpen),
         ("Esc during an open lookup cancels it and still reaches the app", At(Owner, Esc), Opening, false, KeyAction.CancelOpen),
@@ -62,10 +68,29 @@ public sealed class InputKeyStateTests
 
         ("Space over the glance's owner ends the glance", At(Owner, Space), Showing, true, KeyAction.Hide),
         ("Space in the glance ends it", At(Glance, Space), Showing, true, KeyAction.Hide),
-        ("A rename in the owner keeps Space", At(Owner, Space) with { RootTextEditing = true }, Showing, false, KeyAction.None),
+        ("A rename in the owner keeps Space", At(Owner, Space) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Right over the owner browses", At(Owner, Right), Showing, true, KeyAction.Browse),
-        ("Left in a rename moves the caret", At(Owner, Left) with { RootTextEditing = true }, Showing, false, KeyAction.FollowExplorer),
+        ("Left in a rename moves the caret", At(Owner, Left) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Down over the owner stays Explorer's and the glance follows", At(Owner, Down), Showing, false, KeyAction.FollowExplorer),
+
+        // Typing: a text box in the window in front owns every key.
+        ("Esc in a rename cancels the rename and the glance stays", At(Owner, Esc) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Enter in a rename commits the rename and the glance stays", At(Owner, Enter) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Home in a rename moves the caret and nothing is read again", At(Owner, Home) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Right in the address bar moves the caret", At(Owner, Right) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("F11 while typing is Explorer's", At(Owner, NativeMethods.VK_F11) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Ctrl+0 while typing is the text box's", At(Owner, NativeMethods.VK_0) with { Ctrl = true, RootTyping = true }, Zoomable, false, KeyAction.None),
+        ("Ctrl+Enter while typing never toggles the sheet", At(Owner, Enter) with { Ctrl = true, RootTyping = true }, Showing with { MultiSelection = true }, false, KeyAction.None),
+        ("Esc in a rename is the rename's in sign mode too", At(Owner, Esc) with { RootTyping = true }, Window(fillSign: true), false, KeyAction.None),
+        ("Esc in a picker's name box is the dialog's", InPicker(Esc) with { RootTyping = true }, PickerShowing, false, KeyAction.None),
+        ("Enter in a picker's name box is the dialog's", InPicker(Enter) with { RootTyping = true }, PickerShowing, false, KeyAction.None),
+        ("Space typed into Explorer's search box opens nothing", At(Owner, Space) with { RootTyping = true }, Idle, false, KeyAction.None),
+        ("Space typed into another window's search box leaves the glance alone", At(OtherExplorer, Space) with { RootTyping = true }, Showing, false, KeyAction.None),
+        ("Esc typed into a text box does not cancel an open on its way", At(Owner, Esc) with { RootTyping = true }, Opening, false, KeyAction.None),
+
+        // Glimpse's own text places answer for themselves, caret or not.
+        ("Esc in the glance ends it whatever caret Windows reports there", At(Glance, Esc) with { RootTyping = true }, Showing, true, KeyAction.Hide),
+        ("Esc in a pinned window closes it whatever caret Windows reports there", At(Pin, Esc) with { RootTyping = true }, Pinned, true, KeyAction.ClosePinned),
         ("Down in the glance browses", At(Glance, Down), Showing, true, KeyAction.Browse),
         ("Down scrolls content the user clicked into", At(Glance, Down) with { RootChildFocus = true }, Window(engaged: true), false, KeyAction.None),
         ("Down browses when the click is old and focus is back in the chrome", At(Glance, Down), Window(engaged: true), true, KeyAction.Browse),
@@ -82,7 +107,7 @@ public sealed class InputKeyStateTests
         ("Esc closes the index sheet first", At(Owner, Esc), Window(grid: true), true, KeyAction.EscapeLayer),
 
         ("A key racing a foreground change goes where the foreground went: another Explorer window takes the glance", At(OtherExplorer, Space), Showing, true, KeyAction.Open),
-        ("A key racing a foreground change goes where the foreground went: a stranger keeps its Space", At(Stranger, Space), Showing, false, KeyAction.CheckElevation),
+        ("A key racing a foreground change goes where the foreground went: a stranger keeps its Space", At(Stranger, Space), Showing, false, KeyAction.None),
         ("A key racing a foreground change goes where the foreground went: a stranger keeps its arrows", At(Stranger, Right), Showing, false, KeyAction.None),
         ("A key racing a foreground change goes where the foreground went: a stranger keeps its Esc", At(Stranger, Esc), Showing, false, KeyAction.None),
 
@@ -217,7 +242,7 @@ public sealed class InputKeyStateTests
     {
         var everything = new KeyPress
         {
-            RootTextEditing = true,
+            RootTyping = true,
             RootFileListFocus = true,
             RootChildFocus = true
         };
@@ -238,11 +263,15 @@ public sealed class InputKeyStateTests
         Assert.False(Facts(everything with { Vk = Down, Root = Owner }, player).ContentOwnsKeyboard);
         Assert.False(Facts(everything with { Vk = Space, Root = Glance }, player).ContentOwnsKeyboard);
 
-        // A caret matters in the owner, to Space and the arrows.
-        Assert.True(Facts(everything with { Vk = Left, Root = Owner }, Showing).OwnerTextEditing);
-        Assert.False(Facts(everything with { Vk = Enter, Root = Owner }, Showing).OwnerTextEditing);
-        Assert.False(Facts(everything with { Vk = Left, Root = Glance }, Showing).OwnerTextEditing);
-        Assert.False(Facts(everything with { Vk = Left, Root = Stranger }, Showing).OwnerTextEditing);
+        // Typing matters to every key, wherever the key is going, glance
+        // or none. Only Glimpse's own windows answer for themselves.
+        Assert.True(Facts(everything with { Vk = Left, Root = Owner }, Showing).Typing);
+        Assert.True(Facts(everything with { Vk = Enter, Root = Owner }, Showing).Typing);
+        Assert.True(Facts(everything with { Vk = Esc, Root = Owner }, Showing).Typing);
+        Assert.True(Facts(everything with { Vk = Left, Root = Stranger }, Showing).Typing);
+        Assert.True(Facts(everything with { Vk = Space, Root = Owner }, Idle).Typing);
+        Assert.False(Facts(everything with { Vk = Left, Root = Glance }, Showing).Typing);
+        Assert.False(Facts(everything with { Vk = Esc, Root = Pin }, Pinned).Typing);
 
         // List focus matters in a picker that owns the glance.
         Assert.True(Facts(everything with { Vk = Down, Root = Dialog }, PickerShowing).PickerListFocus);

@@ -15,6 +15,7 @@ internal static class CommonFileDialogSelectionService
 {
     internal const string DialogWindowClass = "#32770";
     internal const string ShellViewWindowClass = "SHELLDLL_DefView";
+    internal const string ExplorerFrameWindowClass = "DUIViewWndClassName";
     internal const string BreadcrumbParentWindowClass = "Breadcrumb Parent";
     internal const string BreadcrumbToolbarWindowClass = "ToolbarWindow32";
 
@@ -43,9 +44,16 @@ internal static class CommonFileDialogSelectionService
             DialogWindowClass,
             StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsCommonFileDialogRoot(IntPtr root) =>
+    /// <summary>
+    /// A dialog with files in it: one that holds a shell view, or the
+    /// Explorer frame an Open or Save dialog builds first and puts its view
+    /// in once the folder has opened. A message box, an installer and a
+    /// dialog-based app hold neither. Any process may ask this of any window.
+    /// </summary>
+    public static bool IsFilePicker(IntPtr root) =>
         HasDialogWindowClass(root)
-        && NativeMethods.FindDescendantWindowByClass(root, ShellViewWindowClass) != IntPtr.Zero;
+        && (NativeMethods.FindDescendantWindowByClass(root, ShellViewWindowClass) != IntPtr.Zero
+            || NativeMethods.FindDescendantWindowByClass(root, ExplorerFrameWindowClass) != IntPtr.Zero);
 
     /// <summary>
     /// Hook-path guard: only the shell view may claim Space. The filename
@@ -100,7 +108,7 @@ internal static class CommonFileDialogSelectionService
 
     public static ExplorerSelection? TryGetSelection(IntPtr dialogRoot)
     {
-        if (!IsCommonFileDialogRoot(dialogRoot))
+        if (!HasDialogWindowClass(dialogRoot))
         {
             return null;
         }

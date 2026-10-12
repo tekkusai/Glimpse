@@ -38,7 +38,7 @@ public sealed class InputKeyMapTests
         ("Space on the desktop opens the selection", Idle(Space, Desktop), true, KeyAction.Open),
         ("Space in a picker with a verified selection opens it", Idle(Space, Picker) with { PickerCacheReady = true }, true, KeyAction.OpenPicker),
         ("Space in a picker without one passes and remembers the press", Idle(Space, Picker), false, KeyAction.DeferPickerOpen),
-        ("Space where nothing offers a selection passes", Idle(Space, null), false, KeyAction.CheckElevation),
+        ("Space where nothing offers a selection passes", Idle(Space, null), false, KeyAction.None),
         ("Shift+Space never opens", Idle(Space, ExplorerWindow) with { Shift = true }, false, KeyAction.None),
         ("A held Space opens once", Idle(Space, ExplorerWindow) with { SpaceRepeat = true }, false, KeyAction.None),
         ("Esc during an open lookup cancels it and still reaches the app", Idle(Esc, ExplorerWindow) with { OpenPending = true }, false, KeyAction.CancelOpen),
@@ -51,11 +51,11 @@ public sealed class InputKeyMapTests
         ("A held Space over a player does not machine-gun the toggle", OnPreview(Space) with { Media = true, SpaceRepeat = true }, true, KeyAction.None),
         ("A held Space stays away from Explorer", Owner(Space) with { SpaceRepeat = true }, true, KeyAction.None),
         ("An armed find bar keeps its spaces", OnPreview(Space) with { FindBarArmed = true }, false, KeyAction.None),
-        ("A rename in Explorer keeps Space", Owner(Space) with { OwnerTextEditing = true }, false, KeyAction.None),
+        ("A rename in Explorer keeps Space", Owner(Space) with { Typing = true }, false, KeyAction.None),
         ("A picker's name box keeps Space", PickerOwner(Space) with { PickerListFocus = false }, false, KeyAction.None),
         ("Space in a picker's list ends the glance", PickerOwner(Space), true, KeyAction.Hide),
         ("Space in another Explorer window moves the glance there", Elsewhere(Space, OtherExplorerWindow), true, KeyAction.Open),
-        ("Space in an unrelated app passes", Elsewhere(Space, null), false, KeyAction.CheckElevation),
+        ("Space in an unrelated app passes", Elsewhere(Space, null), false, KeyAction.None),
 
         // Esc.
         ("Esc in Explorer ends the glance", Owner(Esc), true, KeyAction.Hide),
@@ -88,7 +88,7 @@ public sealed class InputKeyMapTests
         ("Right browses from Explorer", Owner(Right), true, KeyAction.Browse),
         ("Down stays native in Explorer and the glance follows", Owner(Down), false, KeyAction.FollowExplorer),
         ("Home stays native in Explorer and the glance follows", Owner(Home), false, KeyAction.FollowExplorer),
-        ("Left in a rename moves the caret", Owner(Left) with { OwnerTextEditing = true }, false, KeyAction.FollowExplorer),
+        ("Left in a rename moves the caret", Owner(Left) with { Typing = true }, false, KeyAction.None),
         ("Down browses from the preview", OnPreview(Down), true, KeyAction.Browse),
         ("Down scrolls content the user clicked into", OnPreview(Down) with { ContentEngaged = true, ContentOwnsKeyboard = true }, false, KeyAction.None),
         ("Right browses even over clicked content", OnPreview(Right) with { ContentEngaged = true, ContentOwnsKeyboard = true }, true, KeyAction.Browse),
@@ -100,6 +100,21 @@ public sealed class InputKeyMapTests
         ("The picker owns its arrows and the glance follows", PickerOwner(Down), false, KeyAction.FollowPicker),
         ("Arrows in a picker's name box are left alone", PickerOwner(Down) with { PickerListFocus = false }, false, KeyAction.None),
         ("Arrows in an unrelated app are left alone", Elsewhere(Left, null), false, KeyAction.None),
+
+        // Typing: a text box in the window the key is going to owns every
+        // key. The rule names no keys, so these are examples, not a list.
+        ("Space typed into a search box with nothing open opens nothing", Idle(Space, ExplorerWindow) with { Typing = true }, false, KeyAction.None),
+        ("Esc in a rename cancels the rename and the glance stays", Owner(Esc) with { Typing = true }, false, KeyAction.None),
+        ("Enter in a rename commits the rename and the glance stays", Owner(Enter) with { Typing = true }, false, KeyAction.None),
+        ("Down in the address bar is the address bar's and nothing is followed", Owner(Down) with { Typing = true }, false, KeyAction.None),
+        ("F11 while typing is Explorer's", Owner(NativeMethods.VK_F11) with { Typing = true }, false, KeyAction.None),
+        ("Ctrl+Plus while typing is the text box's", Owner(NativeMethods.VK_OEM_PLUS) with { Ctrl = true, HeaderZoom = true, Typing = true }, false, KeyAction.None),
+        ("Ctrl+Enter while typing never toggles the sheet", Owner(Enter) with { Ctrl = true, MultiSelection = true, Typing = true }, false, KeyAction.None),
+        ("Esc over the index sheet is still the text box's first", Owner(Esc) with { EscapeLayer = true, Typing = true }, false, KeyAction.None),
+        ("Esc in a picker's name box is the dialog's", PickerOwner(Esc) with { PickerListFocus = false, Typing = true }, false, KeyAction.None),
+        ("Enter in a picker's name box is the dialog's", PickerOwner(Enter) with { PickerListFocus = false, Typing = true }, false, KeyAction.None),
+        ("Space typed into another window's search box leaves the glance alone", Elsewhere(Space, OtherExplorerWindow) with { Typing = true }, false, KeyAction.None),
+        ("Sign mode: Esc typed into a rename in Explorer is the rename's", Owner(Esc) with { FillSign = true, Typing = true }, false, KeyAction.None),
 
         // Sign mode: placed ink is never browsed or dismissed away by a key.
         ("Sign mode: Space reaches the page", OnPreview(Space) with { FillSign = true }, false, KeyAction.None),

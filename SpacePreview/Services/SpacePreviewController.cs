@@ -58,12 +58,14 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _ownerLossTimer;
     private readonly DispatcherTimer _fullscreenRecheckTimer;
 
-    // Tests stand in for the window in front, for the shell's browse and for
-    // what the hook thread reads at a key.
+    // Tests stand in for the window in front, for the shell's browse, for
+    // what the hook thread reads at a key and for the rights of another app.
     private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
     private readonly Func<int, bool, KeyPress> _readKey;
     private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
         (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
+    private readonly Func<IntPtr, PreviewAccessWarningInfo?> _readAccessWarning =
+        window => ProcessIntegrityService.TryGetPreviewAccessWarning(window, out var warning) ? warning : null;
     private readonly uint _processId = (uint)Environment.ProcessId;
     private readonly List<PreviewWindow> _pinnedWindows = [];
     private IntPtr _foregroundHook;
@@ -142,6 +144,7 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor.SelectionChanged += OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted += OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved += OnCommonFileDialogObserved;
+        _commonFileDialogMonitor.DialogShown += OnCommonFileDialogShown;
         _foregroundChanged = OnForegroundChanged;
         _idleTrimTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
         {
@@ -216,15 +219,29 @@ internal sealed class SpacePreviewController : IDisposable
     }
 
     /// <summary>
+    /// A dialog that took the foreground before it was built is on screen
+    /// now. No foreground event says so; to Glimpse it is the same moment.
+    /// </summary>
+    private void OnCommonFileDialogShown(IntPtr dialogRoot)
+    {
+        if (!_disposed && _foregroundRoot() == dialogRoot)
+        {
+            OnForeground(dialogRoot);
+        }
+    }
+
+    /// <summary>
     /// The hook stays installed only while a surface Glimpse serves is in
-    /// front, so every other app's keys never wait on this process.
+    /// front, so every other app's keys never wait on this process: Explorer,
+    /// the desktop, a dialog the picker monitor has confirmed, or Glimpse.
     /// </summary>
     private void SyncKeyboardHook(IntPtr root, uint processId)
     {
         var wanted = _foregroundHook == IntPtr.Zero
             || (root != IntPtr.Zero
                 && (processId == _processId
-                    || PreviewInputPolicy.IsServedSurfaceClass(NativeMethods.GetClassNameString(root))));
+                    || PreviewInputPolicy.IsServedSurfaceClass(NativeMethods.GetClassNameString(root))
+                    || _commonFileDialogMonitor.IsWatching(root)));
         if (wanted != _keyboardHookWanted)
         {
             // Keys went unseen while the hook was out: no latch or key-up
@@ -581,19 +598,19 @@ internal sealed class SpacePreviewController : IDisposable
             SpaceRepeat = spaceRepeat,
             Root = root,
             RootIsDesktop = PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)),
-            RootTextEditing = (space || arrow) && ExplorerSelectionService.IsWindowTextEditing(root),
+            RootTyping = ExplorerSelectionService.IsTyping(root),
             RootFileListFocus = (space || PreviewKeyMap.IsNavigation(vk))
                 && CommonFileDialogSelectionService.HasFileListFocus(root),
             RootChildFocus = (arrow || vk == NativeMethods.VK_RETURN) && HasChildFocus(root)
         };
 
         // Only a fresh Space that could open something asks what is in front.
-        if (!space || spaceRepeat || press.Shift || press.Ctrl || press.Alt || press.Win)
+        if (!space || spaceRepeat || press.RootTyping || press.Shift || press.Ctrl || press.Alt || press.Win)
         {
             return press;
         }
 
-        var context = ExplorerSelectionService.TryGetForegroundContext(ignoreTextEditing: true);
+        var context = ExplorerSelectionService.TryGetForegroundContext();
         return press with
         {
             Context = context,
@@ -695,9 +712,6 @@ internal sealed class SpacePreviewController : IDisposable
                 _openRequestGeneration++;
                 _openPending = false;
                 DiagnosticLog.Write("escape -> open cancelled");
-                return;
-            case KeyAction.CheckElevation:
-                QueueForegroundElevationMismatchCheck();
                 return;
             case KeyAction.Hide:
                 DiagnosticLog.Write(vk switch
@@ -1573,7 +1587,6 @@ internal sealed class SpacePreviewController : IDisposable
                         includeViewPosition: false,
                         includeMultiSelectionPaths: includeMultiSelectionPaths)
                     : ExplorerSelectionService.TryGetForegroundSelection(
-                        ignoreTextEditing: false,
                         diagnostics: diagnostics,
                         includeViewPosition: false,
                         includeMultiSelectionPaths: includeMultiSelectionPaths);
@@ -1671,7 +1684,6 @@ internal sealed class SpacePreviewController : IDisposable
     {
         var generation = ++_openRequestGeneration;
         DiagnosticLog.Write($"space -> queued selection lookup class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
-        QueueElevationMismatchCheck(context.Hwnd);
         ClearPendingFileDialogPreview();
         _dispatcher.BeginInvoke(() => ShowCommonFileDialogPreview(context, generation, inputStamp));
     }
@@ -1682,7 +1694,6 @@ internal sealed class SpacePreviewController : IDisposable
     private void DeferPickerOpen(ForegroundSelectionContext context, long inputStamp)
     {
         var generation = ++_openRequestGeneration;
-        QueueElevationMismatchCheck(context.Hwnd);
         ArmPendingFileDialogPreview(context.Hwnd, generation, inputStamp);
         _commonFileDialogMonitor.RequestRefresh(context.Hwnd, settleMilliseconds: 0);
         DiagnosticLog.Write("space -> file dialog selection not ready, deferred and passed through");
@@ -1801,15 +1812,7 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void ClearPendingFileDialogPreview() => _pendingFileDialogPreview.Cancel();
 
-    private void QueueForegroundElevationMismatchCheck()
-    {
-        var root = NativeMethods.GetForegroundRoot();
-        if (CommonFileDialogSelectionService.HasDialogWindowClass(root))
-        {
-            QueueElevationMismatchCheck(root);
-        }
-    }
-
+    /// <summary>A preview could not be put up over this picker: say so if the app's rights are why.</summary>
     private void QueueElevationMismatchCheck(IntPtr dialogRoot)
     {
         if (_disposed
@@ -1821,13 +1824,17 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        // Capture identity in the key's own turn, before the preview opens.
-        // A check queued behind the open rechecked the foreground later and
-        // could silently abandon the warning it was meant to show.
         var processId = NativeMethods.GetWindowProcessId(dialogRoot);
         StartElevationMismatchCheck(dialogRoot, processId);
     }
 
+    /// <summary>
+    /// A file picker came to the front. The access notice starts here, and
+    /// nowhere a key can reach: Windows calls no low-level hook of ours
+    /// while a window with higher rights has the keyboard, so a key pressed
+    /// in an elevated app's picker never arrives. The foreground change
+    /// does, and a picker's windows can be read from any process.
+    /// </summary>
     private void OnCommonFileDialogObserved(IntPtr dialogRoot)
     {
         if (_disposed
@@ -1876,10 +1883,7 @@ internal sealed class SpacePreviewController : IDisposable
                     return;
                 }
 
-                var detected = ProcessIntegrityService.TryGetPreviewAccessWarning(
-                    dialogRoot,
-                    out var warning);
-                if (detected && warning is not null)
+                if (_readAccessWarning(dialogRoot) is { } warning)
                 {
                     _dispatcher.BeginInvoke(() => CompletePreviewAccessCheck(
                         dialogRoot,
@@ -2403,6 +2407,7 @@ internal sealed class SpacePreviewController : IDisposable
         _commonFileDialogMonitor.SelectionChanged -= OnCommonFileDialogSelectionChanged;
         _commonFileDialogMonitor.RefreshCompleted -= OnCommonFileDialogRefreshCompleted;
         _commonFileDialogMonitor.DialogObserved -= OnCommonFileDialogObserved;
+        _commonFileDialogMonitor.DialogShown -= OnCommonFileDialogShown;
         ClearPendingFileDialogPreview();
         _commonFileDialogMonitor.Dispose();
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;
