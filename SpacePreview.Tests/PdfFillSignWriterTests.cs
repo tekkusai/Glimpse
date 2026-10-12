@@ -36,7 +36,7 @@ public sealed class PdfFillSignWriterTests
         Assert.Contains("/Annots", written, StringComparison.Ordinal);
         Assert.Contains("/Rect [20 40 80 80]", written, StringComparison.Ordinal);
         Assert.Contains("/Prev ", written, StringComparison.Ordinal);
-        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None));
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0));
     }
 
     [Fact]
@@ -58,7 +58,7 @@ public sealed class PdfFillSignWriterTests
         Assert.Contains("/Subtype /Stamp", written, StringComparison.Ordinal);
         Assert.Contains("/Subtype /Image", written, StringComparison.Ordinal);
         Assert.Contains("/SMask", written, StringComparison.Ordinal);
-        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None));
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(output, 0));
     }
 
     [Theory]
@@ -117,7 +117,7 @@ public sealed class PdfFillSignWriterTests
             trailerExtra: "/Encrypt 9 0 R");
         var original = File.ReadAllBytes(source);
 
-        Assert.Throws<InvalidOperationException>(() =>
+        Assert.Throws<SignRefusalException>(() =>
             PdfFillSignWriter.WriteSignedCopy(
                 source,
                 output,
@@ -175,7 +175,7 @@ public sealed class PdfFillSignWriterTests
             .Save(source);
 
         // The viewer reads the tree: page 1 is the wide one.
-        var first = PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None);
+        var first = PdfPreviewRenderer.TryRenderPage(source, 0);
         Assert.NotNull(first);
         Assert.True(first!.Width > first.Height, "the fixture's first page is the wide one");
 
@@ -205,7 +205,7 @@ public sealed class PdfFillSignWriterTests
             .XrefStream(6, "/Size 10 /Root 1 0 R")
             .Save(source);
 
-        var first = PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None);
+        var first = PdfPreviewRenderer.TryRenderPage(source, 0);
         Assert.NotNull(first);
         Assert.True(first!.Height > first.Width, "the fixture's first page is the packed, tall one");
 
@@ -477,23 +477,31 @@ public sealed class PdfFillSignWriterTests
             .XrefStream(5, "/Size 6 /Root 1 0 R", 0, 1, 2, 3, 4, 5)
             .StartAt(10));
 
-        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(source, 0, CancellationToken.None));
+        Assert.NotNull(PdfPreviewRenderer.TryRenderPage(source, 0));
         var stamp = BlackStamp(0);
         PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
         AssertInkWherePlaced(output, stamp);
     }
 
-    [Fact]
-    public void ARotationBetweenQuarterTurnsIsRefused()
+    // The viewer turns by whole quarters, rounding toward zero: /Rotate 135
+    // shows as one quarter turn and /Rotate 45 as none. The writer used to
+    // refuse both; it now turns the ink the same way.
+    [Theory]
+    [InlineData("135")]
+    [InlineData("45")]
+    [InlineData("-90")]
+    [InlineData("90.5")]
+    public void ARotationBetweenQuarterTurnsSignsAsTheViewerTurnsIt(string rotate)
     {
         using var temp = new TempDirectory();
         var source = Path.Combine(temp.Path, "askew.pdf");
+        var output = Path.Combine(temp.Path, "askew-signed.pdf");
+        WritePdf(source, $"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Rotate {rotate} /Resources << >> /Contents 4 0 R >>");
 
-        // The viewer shows /Rotate 135 as a quarter turn; the writer would
-        // have placed ink as though the page were upright.
-        WritePdf(source, "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Rotate 135 /Resources << >> /Contents 4 0 R >>");
-
-        AssertRefusedBeforeWriting(temp, source, PdfFillSignWriter.UnsupportedStructure);
+        Assert.Equal(new PdfSignCheck(1, null), PdfFillSignWriter.Preflight(source));
+        var stamp = BlackStamp(0);
+        PdfFillSignWriter.WriteSignedCopy(source, output, [stamp]);
+        AssertInkWherePlaced(output, stamp);
     }
 
     // ------------------------------------------------------------------
@@ -510,7 +518,7 @@ public sealed class PdfFillSignWriterTests
         var output = Path.Combine(temp.Path, "refused-signed.pdf");
 
         Assert.Equal(problem, PdfFillSignWriter.Preflight(source).Problem);
-        var error = Assert.Throws<InvalidOperationException>(() =>
+        var error = Assert.Throws<SignRefusalException>(() =>
             PdfFillSignWriter.WriteSignedCopy(source, output, [BlackStamp(0)]));
         Assert.Equal(problem, error.Message);
         Assert.False(File.Exists(output));
@@ -520,7 +528,7 @@ public sealed class PdfFillSignWriterTests
     /// <summary>The saved page, as the viewer draws it: dark ink filling the placed frame and nowhere else.</summary>
     private static void AssertInkWherePlaced(string output, SignPlacement placement)
     {
-        var page = PdfPreviewRenderer.TryRenderPage(output, placement.PageIndex, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(output, placement.PageIndex);
         Assert.NotNull(page);
         var frame = new Rect(
             placement.X * page!.Width,

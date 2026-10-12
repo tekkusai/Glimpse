@@ -7,21 +7,29 @@ namespace SpacePreview.Tests;
 
 public sealed class PdfPreviewRendererTests
 {
+    // Rewritten for 3.0.1: the in-memory thumbnail call it used was only
+    // ever called by tests, and is gone. A one-page document still counts
+    // without drawing, and now also names page one's shape: a one-page PDF
+    // the probe could not read had no other way to open page-shaped.
     [Fact]
-    public void SinglePageRailProbeCountsWithoutRasterizing()
+    public void ASinglePageDocumentCountsAndNamesItsShapeWithoutRasterizing()
     {
         using var temp = new TempDirectory();
         var pdfPath = Path.Combine(temp.Path, "one-page.pdf");
-        WriteBlankPdf(pdfPath, 1);
+        WriteBlankPdf(pdfPath, 1, pageWidth: 792, pageHeight: 612);
 
-        var preview = PdfPreviewRenderer.TryRenderThumbnails(
-            pdfPath,
-            CancellationToken.None,
-            pageLimit: 10);
+        var manifest = RenderThumbnails(pdfPath, Path.Combine(temp.Path, "thumbs"), pageLimit: 10);
 
-        Assert.NotNull(preview);
-        Assert.Equal(1, preview!.TotalPages);
-        Assert.Empty(preview.Pages);
+        Assert.Equal(1, manifest.TotalPages);
+        Assert.Empty(manifest.Pages);
+        Assert.Empty(Directory.EnumerateFiles(Path.Combine(temp.Path, "thumbs"), "*.png"));
+        Assert.InRange(manifest.Width / (double)manifest.Height, 792 / 612.0 - 0.02, 792 / 612.0 + 0.02);
+
+        // The rail's reader carries the shape to the stage fit.
+        var read = PreviewWindow.TryReadPdfThumbnailManifest(Path.Combine(temp.Path, "thumbs"));
+        Assert.NotNull(read);
+        Assert.Equal(1, read!.TotalPages);
+        Assert.InRange(read.PageOneAspect, 792 / 612.0 - 0.02, 792 / 612.0 + 0.02);
     }
 
     [Fact]
@@ -36,7 +44,6 @@ public sealed class PdfPreviewRendererTests
             pdfPath,
             outputPath,
             pageLimit: 10,
-            CancellationToken.None,
             startPage: 10);
 
         Assert.True(ok);
@@ -90,7 +97,7 @@ public sealed class PdfPreviewRendererTests
         var pdfPath = Path.Combine(temp.Path, "large-two-page.pdf");
         WriteBlankPdf(pdfPath, 2, pageWidth: 2250, pageHeight: 3228);
 
-        var page = PdfPreviewRenderer.TryRenderPage(pdfPath, 0, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(pdfPath, 0);
 
         Assert.NotNull(page);
         Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page!.Width, page.Height, thumbnail: false));
@@ -107,7 +114,7 @@ public sealed class PdfPreviewRendererTests
         var pdfPath = Path.Combine(temp.Path, "dieline.pdf");
         WriteBlankPdf(pdfPath, 1, pageWidth: 12848, pageHeight: 5503);
 
-        var page = PdfPreviewRenderer.TryRenderPage(pdfPath, 0, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(pdfPath, 0);
 
         Assert.NotNull(page);
         Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page!.Width, page.Height, thumbnail: false));
@@ -123,10 +130,9 @@ public sealed class PdfPreviewRendererTests
         var pdfPath = Path.Combine(temp.Path, "dielines.pdf");
         WriteBlankPdf(pdfPath, 3, pageWidth: 12848, pageHeight: 5503);
 
-        var preview = PdfPreviewRenderer.TryRenderThumbnails(pdfPath, CancellationToken.None);
+        var preview = RenderThumbnails(pdfPath, Path.Combine(temp.Path, "thumbs"));
 
-        Assert.NotNull(preview);
-        Assert.Equal(3, preview!.TotalPages);
+        Assert.Equal(3, preview.TotalPages);
         Assert.Equal(3, preview.Pages.Count);
         Assert.All(preview.Pages, page =>
             Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page.Width, page.Height, thumbnail: true)));
@@ -145,7 +151,7 @@ public sealed class PdfPreviewRendererTests
 
         Assert.True(PdfFillSignWriter.TryWriteScaledCopy(source, scaled, 1800));
 
-        var page = PdfPreviewRenderer.TryRenderPage(scaled, 0, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(scaled, 0);
         Assert.NotNull(page);
 
         // The renderer works at 2 pixels per point, and never fits a page that
@@ -167,12 +173,18 @@ public sealed class PdfPreviewRendererTests
         var pdfPath = Path.Combine(temp.Path, "mixed.pdf");
         WriteMixedSizePdf(pdfPath);
 
-        var preview = PdfPreviewRenderer.TryRenderThumbnails(pdfPath, CancellationToken.None);
+        var preview = RenderThumbnails(pdfPath, Path.Combine(temp.Path, "thumbs"));
 
-        Assert.NotNull(preview);
-        Assert.Equal(2, preview!.Pages.Count);
+        Assert.Equal(2, preview.Pages.Count);
         Assert.All(preview.Pages, page =>
             Assert.True(PdfPreviewRenderer.IsRasterSizeSafe(page.Width, page.Height, thumbnail: true)));
+    }
+
+    /// <summary>The thumbnail helper's own call, and the manifest it leaves.</summary>
+    private static PdfThumbnailManifest RenderThumbnails(string pdfPath, string directory, int pageLimit = PdfPreviewRenderer.MaxThumbnailPagesPerCall)
+    {
+        Assert.True(PdfPreviewRenderer.TryRenderThumbnailsToDirectory(pdfPath, directory, pageLimit));
+        return JsonSerializer.Deserialize<PdfThumbnailManifest>(File.ReadAllText(Path.Combine(directory, "manifest.json")))!;
     }
 
     // The rewrite is trusted only when it still draws the original, so the

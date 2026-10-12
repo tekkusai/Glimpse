@@ -38,7 +38,7 @@ public sealed class FillSignBehaviorTests
             .FittedToText(842.0 / 595.0);
         PdfFillSignWriter.WriteSignedCopy(source, output, [date]);
 
-        var page = PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None)!;
+        var page = PdfPreviewRenderer.TryRenderPage(output, 0)!;
         var ink = InkBounds(page.Bitmap);
         Assert.NotNull(ink);
 
@@ -70,7 +70,7 @@ public sealed class FillSignBehaviorTests
         var signature = new SignPlacement(SignPlacementKind.Signature, 0, 0.1, 0.1, 0.8, 0.2, null, TopBarPng());
         PdfFillSignWriter.WriteSignedCopy(source, output, [signature]);
 
-        var page = PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None)!;
+        var page = PdfPreviewRenderer.TryRenderPage(output, 0)!;
         Assert.True(page.Height > page.Width, "the rotated page displays portrait");
         var ink = InkBounds(page.Bitmap);
         Assert.NotNull(ink);
@@ -167,14 +167,14 @@ public sealed class FillSignBehaviorTests
     {
         Assert.Equal(
             PdfFillSignWriter.UnsupportedStructure,
-            PreviewWindow.SaveFailureReason(new InvalidOperationException(PdfFillSignWriter.UnsupportedStructure)));
+            PreviewWindow.SaveFailureReason(new SignRefusalException(PdfFillSignWriter.UnsupportedStructure), replacing: false));
         Assert.Contains(
-            "open in another app",
-            PreviewWindow.SaveFailureReason(new IOException("locked", unchecked((int)0x80070020))),
+            "in use",
+            PreviewWindow.SaveFailureReason(new IOException("locked", unchecked((int)0x80070020)), replacing: true),
             StringComparison.Ordinal);
         Assert.Contains(
-            "read-only",
-            PreviewWindow.SaveFailureReason(new UnauthorizedAccessException()),
+            "Save a signed copy instead",
+            PreviewWindow.SaveFailureReason(new UnauthorizedAccessException(), replacing: true),
             StringComparison.Ordinal);
     }
 
@@ -255,20 +255,22 @@ public sealed class FillSignBehaviorTests
         Assert.StartsWith(".deal.pdf.", Path.GetFileName(PreviewWindow.SigningTempPath(original)), StringComparison.Ordinal);
     }
 
+    // Rewritten for 3.0.1: the signed file used to take the original's name
+    // in the cleanup after a failure, and the save then said "Nothing was
+    // saved". It now takes the name inside the swap, and that is the save.
+    // FillSignSaveTests.AReplaceThatLosesTheOriginalIsStillASave covers it.
     [Fact]
-    public void AReplaceThatLostTheOriginalKeepsTheSignedDocument()
+    public void CleanupNeverRemovesTheOnlyCopyOfTheDocument()
     {
         using var temp = new TempDirectory();
         var original = Path.Combine(temp.Path, "deal.pdf");
         var signing = PreviewWindow.SigningTempPath(original);
         File.WriteAllText(signing, "signed");
-        File.SetAttributes(signing, FileAttributes.Hidden);
 
         PreviewWindow.CleanUpSigningTemp(signing, original);
 
-        Assert.Equal("signed", File.ReadAllText(original));
-        Assert.False(File.GetAttributes(original).HasFlag(FileAttributes.Hidden));
-        Assert.False(File.Exists(signing));
+        Assert.Equal("signed", File.ReadAllText(signing));
+        Assert.False(File.Exists(original));
     }
 
     // ------------------------------------------------------------------
@@ -384,7 +386,7 @@ public sealed class FillSignBehaviorTests
             surface.Place(SignPlacementKind.Date, 0.5, 0.5);
             surface.SetSaving(true);
 
-            var reason = PreviewWindow.SaveFailureReason(new InvalidOperationException(PdfFillSignWriter.UnsupportedStructure));
+            var reason = PreviewWindow.SaveFailureReason(new SignRefusalException(PdfFillSignWriter.UnsupportedStructure), replacing: false);
             surface.ShowSaveFailure(reason);
 
             Assert.True(Shown(Text(surface, reason)));

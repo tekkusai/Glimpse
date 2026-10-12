@@ -3,7 +3,6 @@ using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Services;
@@ -11,10 +10,18 @@ using SpacePreview.Services;
 namespace SpacePreview.Preview;
 
 /// <summary>
-/// What sign mode learns before the user places anything: the writer's own
-/// page count, or the sentence that explains why this file cannot be saved.
+/// What sign mode learns before the user places anything: the page count
+/// the viewer shows, or the sentence that explains why this file cannot be
+/// saved.
 /// </summary>
 internal readonly record struct PdfSignCheck(int PageCount, string? Problem);
+
+/// <summary>
+/// A sentence for the user: why this PDF cannot be signed, or why this save
+/// did not happen. Its message is shown as it is, so nothing but such a
+/// sentence is ever thrown as one.
+/// </summary>
+internal sealed class SignRefusalException(string sentence) : Exception(sentence);
 
 internal readonly record struct PdfPageRect(double Left, double Bottom, double Right, double Top)
 {
@@ -31,41 +38,30 @@ internal readonly record struct PdfPageRect(double Left, double Bottom, double R
         && Height > 0.1;
 }
 
+/// <summary>
+/// Signs by appending: the file's own bytes are copied and an incremental
+/// update follows them. The file is read through <see cref="PdfReader"/>,
+/// the reader the page-shape probe uses, which finds pages the way the
+/// viewer does, so the ink goes on the page the sign surface showed. A file
+/// that can be read more than one way is refused. The source is streamed,
+/// never held whole.
+/// </summary>
 internal static class PdfFillSignWriter
 {
     private const int MaxPages = 3000;
     private const int MaxObjects = 200000;
-
-    // An object stream inflates to this much at most; past it, its objects
-    // stay out of reach as before.
-    private const int MaxPackedBytes = 64 * 1024 * 1024;
     private const int MaxImagePixels = 24_000_000;
     private const long MaxPdfBytes = 256L * 1024 * 1024;
-
-    // Arrays and dictionaries nest this deep at most. Deeper is refused,
-    // never walked.
-    private const int MaxNesting = 64;
-    private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(750);
-
-    private static readonly Regex ObjectRegex = new(
-        @"(?ms)(?<number>\d{1,10})\s+(?<generation>\d{1,5})\s+obj\b(?<body>.*?)\bendobj\b",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant,
-        RegexTimeout);
-
-    private static readonly Regex ObjectHeaderRegex = new(
-        @"\G\d{1,10}\s+\d{1,5}\s+obj\b",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant,
-        RegexTimeout);
-
-    private static readonly Regex NumberRegex = new(
-        @"^[-+]?(?:\d+(?:\.\d*)?|\.\d+)$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant,
-        RegexTimeout);
 
     // Every reason a PDF cannot be signed is said in one of these sentences.
     // They reach the user unchanged, so they name no app and no parser.
     internal const string UnsupportedStructure = "This PDF is built in a way that can't be signed here yet.";
     internal const string UnreadableItem = "Something placed on the page couldn't be written. Nothing was saved.";
+
+    // A page-level scale moves page content, not every PDF coordinate
+    // system or interactive object. A file that names any of these stays on
+    // the original viewer path.
+    private static readonly string[] UnscalableFeatures = ["PatternType", "ShadingType", "Annots", "ObjStm", "UserUnit", "ByteRange"];
 
     /// <summary>
     /// Reads the document exactly as a save would, without writing. Run on
@@ -76,21 +72,12 @@ internal static class PdfFillSignWriter
     {
         try
         {
-            var document = PdfDocumentModel.Read(path);
-            foreach (var page in document.Pages)
-            {
-                ReadExistingAnnotationEntries(document, page.Body);
-            }
-
-            return new PdfSignCheck(document.Pages.Count, null);
+            using var document = PdfSignDocument.Open(path);
+            return new PdfSignCheck(document.PageCount, null);
         }
-        catch (InvalidOperationException ex)
+        catch (SignRefusalException ex)
         {
             return new PdfSignCheck(0, ex.Message);
-        }
-        catch (RegexMatchTimeoutException)
-        {
-            return new PdfSignCheck(0, UnsupportedStructure);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -102,18 +89,20 @@ internal static class PdfFillSignWriter
     {
         if (placements.Count == 0)
         {
-            throw new InvalidOperationException(UnreadableItem);
+            throw new SignRefusalException(UnreadableItem);
         }
 
         if (Path.GetFullPath(sourcePath).Equals(Path.GetFullPath(outputPath), StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException("The signed PDF must be written to a different file first.");
+            throw new SignRefusalException("The signed PDF must be written to a different file first.");
         }
 
         var created = false;
         try
         {
-            var document = PdfDocumentModel.Read(sourcePath);
+            // The source stays open, closed to writers, from the read to the
+            // copy: the bytes the pages were found in are the bytes copied.
+            using var document = PdfSignDocument.Open(sourcePath);
             var objects = BuildUpdateObjects(document, placements);
             var outputDirectory = Path.GetDirectoryName(outputPath);
             if (!string.IsNullOrWhiteSpace(outputDirectory))
@@ -124,8 +113,12 @@ internal static class PdfFillSignWriter
             // A file already at this name is someone else's: never written over.
             using var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             created = true;
-            output.Write(document.Bytes);
+            document.CopyTo(output);
             WriteIncrementalUpdate(output, document, objects);
+
+            // On the disk before the caller renames it over the original:
+            // a power cut must not leave that name on an empty file.
+            output.Flush(flushToDisk: true);
         }
         catch
         {
@@ -149,22 +142,14 @@ internal static class PdfFillSignWriter
     /// </summary>
     public static bool TryWriteScaledCopy(string sourcePath, string outputPath, double maxEdgePoints)
     {
-        var document = PdfDocumentModel.Read(sourcePath);
-
-        // A page-level scale moves page content, not every PDF coordinate
-        // system or interactive object. Leave formats this small parser cannot
-        // transform completely to the original viewer path. PDF names may use
-        // #xx escapes, so a raw substring check is not a safe gate.
-        if (FindUnsupportedScaleFeature(document.Bytes) is { } unsupported)
+        using var document = PdfSignDocument.Open(sourcePath, UnscalableFeatures);
+        if (document.Scan.FirstOf(UnscalableFeatures) is { } unsupported)
         {
             DiagnosticLog.Write($"pdf scale skipped unsupported /{unsupported}");
             return false;
         }
 
         var objects = new List<PdfWriteObject>();
-        var nextObject = document.MaxObjectNumber + 1;
-        PdfRef Allocate() => new(nextObject++, 0);
-
         foreach (var page in document.Pages)
         {
             var longest = Math.Max(page.Box.Width, page.Box.Height);
@@ -184,19 +169,18 @@ internal static class PdfFillSignWriter
 
             // The page's own content is left untouched between a matched
             // q/Q pair, so nothing has to be understood to be scaled.
-            var open = Allocate();
-            var close = Allocate();
+            var open = document.Allocate();
+            var close = document.Allocate();
             objects.Add(new PdfWriteObject(open, StreamObject("<<", AsLatin1($"q {scaleText} 0 0 {scaleText} 0 0 cm\n"))));
             objects.Add(new PdfWriteObject(close, StreamObject("<<", AsLatin1("\nQ"))));
 
-            if (WrapPageContents(document, page.Body, open, close) is not { } contents)
+            if (WrapPageContents(document, page.Dictionary, open, close) is not { } contents
+                || ScalePageBoxes(document, page, page.Dictionary.With("Contents", contents), scale) is not { } body)
             {
                 return false;
             }
 
-            var body = ReplaceOrAddDictionaryValue(page.Body, "Contents", contents);
-            body = ScalePageBoxes(body, page.Boxes, scale);
-            objects.Add(new PdfWriteObject(page.Ref, AsLatin1(body)));
+            objects.Add(new PdfWriteObject(page.Ref, body));
         }
 
         if (objects.Count == 0)
@@ -213,7 +197,7 @@ internal static class PdfFillSignWriter
             }
 
             using var output = File.Create(outputPath);
-            output.Write(document.Bytes);
+            document.CopyTo(output);
             WriteIncrementalUpdate(output, document, objects);
         }
         catch
@@ -232,162 +216,57 @@ internal static class PdfFillSignWriter
     /// were a stream nests an array inside an array and the page draws
     /// nothing. Returns null when the shape is not one of those.
     /// </summary>
-    private static string? WrapPageContents(
-        PdfDocumentModel document,
-        string pageBody,
-        PdfRef open,
-        PdfRef close)
+    private static string? WrapPageContents(PdfSignDocument document, PdfDictionary page, PdfRef open, PdfRef close)
     {
-        if (!TryReadNamedValue(pageBody, 0, "Contents", out var value, out _))
+        if (!page.Has("Contents"))
         {
             return $"[{open} R {close} R]";
         }
 
-        var existing = value;
-        if (TryParseReference(value, out var reference))
+        var existing = page.Get("Contents") switch
         {
-            if (!document.Objects.TryGetValue(reference, out var target))
+            PdfArray direct => string.Join(" ", direct.Raw()),
+            PdfRef reference => document.Reader.Read(reference.Number) switch
             {
-                return null;
-            }
+                PdfArray referenced => string.Join(" ", referenced.Raw()),
+                PdfStream => $"{reference} R",
 
-            var body = target.Body.Trim();
-            if (body.StartsWith('['))
-            {
-                if (ArrayItems(ObjectValue(body)) is not { } items)
-                {
-                    return null;
-                }
-
-                existing = string.Join(" ", items);
-            }
-            else if (!body.Contains("stream", StringComparison.Ordinal))
-            {
                 // Neither a stream nor an array: not something to splice.
-                return null;
-            }
-        }
-        else if (ArrayItems(value) is { } items)
-        {
-            existing = string.Join(" ", items);
-        }
-        else
-        {
-            return null;
-        }
-
-        return $"[{open} R {existing} {close} R]";
+                _ => null
+            },
+            _ => null
+        };
+        return existing is null ? null : $"[{open} R {existing} {close} R]";
     }
 
-    private static string ScalePageBoxes(string body, PdfPageBoxes boxes, double scale)
+    /// <summary>
+    /// The page's text with every box it has, or inherits, written at the
+    /// new scale. The print boxes are the page's own entries: inheriting a
+    /// non-standard parent value would change the source.
+    /// </summary>
+    private static byte[]? ScalePageBoxes(PdfSignDocument document, PdfPageInfo page, byte[]? body, double scale)
     {
-        body = ScalePageBox(body, "MediaBox", boxes.MediaBox, scale);
-        body = ScalePageBox(body, "CropBox", boxes.CropBox, scale);
-        body = ScalePageBox(body, "BleedBox", boxes.BleedBox, scale);
-        body = ScalePageBox(body, "TrimBox", boxes.TrimBox, scale);
-        return ScalePageBox(body, "ArtBox", boxes.ArtBox, scale);
+        // With no MediaBox of its own the viewer frames the page as US Letter.
+        body = ScalePageBox(body, "MediaBox", page.Frame.MediaBox ?? new PdfBox(0, 0, 612, 792), scale);
+        body = ScalePageBox(body, "CropBox", page.Frame.CropBox, scale);
+        foreach (var name in new[] { "BleedBox", "TrimBox", "ArtBox" })
+        {
+            body = ScalePageBox(body, name, document.Reader.BoxOf(page.Dictionary, name, inherited: false), scale);
+        }
+
+        return body;
     }
 
-    private static string ScalePageBox(string body, string name, PdfPageBox? box, double scale)
+    private static byte[]? ScalePageBox(byte[]? body, string name, PdfBox? box, double scale)
     {
-        if (box is not { IsValid: true } value)
+        if (body is null || box is not { } value)
         {
             return body;
         }
 
         var scaled = $"[{Format(value.Left * scale)} {Format(value.Bottom * scale)} "
             + $"{Format(value.Right * scale)} {Format(value.Top * scale)}]";
-        return ReplaceOrAddDictionaryValue(body, name, scaled);
-    }
-
-    private static string? FindUnsupportedScaleFeature(ReadOnlySpan<byte> bytes) =>
-        FindName(bytes, "PatternType", "ShadingType", "Annots", "ObjStm", "UserUnit", "ByteRange");
-
-    /// <summary>
-    /// The first of <paramref name="names"/> spelled anywhere in the file,
-    /// read as a viewer reads names: any character may be written as #xx,
-    /// so a raw substring is not a gate.
-    /// </summary>
-    private static string? FindName(ReadOnlySpan<byte> bytes, params string[] names)
-    {
-        Span<byte> decoded = stackalloc byte[16];
-        for (var index = 0; index < bytes.Length; index++)
-        {
-            if (bytes[index] != (byte)'/')
-            {
-                continue;
-            }
-
-            var cursor = index + 1;
-            var length = 0;
-            while (cursor < bytes.Length && !IsPdfDelimiter(bytes[cursor]))
-            {
-                var value = bytes[cursor++];
-                if (value == (byte)'#'
-                    && cursor + 1 < bytes.Length
-                    && TryHex(bytes[cursor], out var high)
-                    && TryHex(bytes[cursor + 1], out var low))
-                {
-                    value = (byte)((high << 4) | low);
-                    cursor += 2;
-                }
-
-                if (length < decoded.Length)
-                {
-                    decoded[length] = value;
-                }
-
-                length++;
-            }
-
-            foreach (var name in names)
-            {
-                var same = name.Length == length && length <= decoded.Length;
-                for (var at = 0; same && at < length; at++)
-                {
-                    same = decoded[at] == name[at];
-                }
-
-                if (same)
-                {
-                    return name;
-                }
-            }
-
-            index = cursor - 1;
-        }
-
-        return null;
-    }
-
-    private static bool IsPdfDelimiter(byte value) =>
-        value is 0 or 9 or 10 or 12 or 13 or 32
-            or (byte)'(' or (byte)')' or (byte)'<' or (byte)'>'
-            or (byte)'[' or (byte)']' or (byte)'{' or (byte)'}'
-            or (byte)'/' or (byte)'%';
-
-    private static bool TryHex(byte value, out int decoded)
-    {
-        if (value is >= (byte)'0' and <= (byte)'9')
-        {
-            decoded = value - (byte)'0';
-            return true;
-        }
-
-        if (value is >= (byte)'A' and <= (byte)'F')
-        {
-            decoded = value - (byte)'A' + 10;
-            return true;
-        }
-
-        if (value is >= (byte)'a' and <= (byte)'f')
-        {
-            decoded = value - (byte)'a' + 10;
-            return true;
-        }
-
-        decoded = 0;
-        return false;
+        return PdfDictionary.Parse(body)?.With(name, scaled);
     }
 
     internal static PdfPageRect MapDisplayRectToPageRectForTest(
@@ -401,18 +280,17 @@ internal static class PdfFillSignWriter
         double y2,
         int rotate)
     {
-        return MapDisplayRectToPageRect(left, top, width, height, new PdfPageBox(x1, y1, x2, y2), rotate);
+        return MapDisplayRectToPageRect(left, top, width, height, new PdfBox(x1, y1, x2, y2), rotate);
     }
 
-    private static List<PdfWriteObject> BuildUpdateObjects(PdfDocumentModel document, IReadOnlyList<SignPlacement> placements)
+    private static List<PdfWriteObject> BuildUpdateObjects(PdfSignDocument document, IReadOnlyList<SignPlacement> placements)
     {
-        var nextObject = document.MaxObjectNumber + 1;
         var newObjects = new List<PdfWriteObject>();
         var annotationsByPage = new Dictionary<PdfRef, List<PdfRef>>();
         var imagesByHash = new Dictionary<string, PdfRef>(StringComparer.Ordinal);
         PdfRef? fontRef = null;
 
-        PdfRef Allocate() => new(nextObject++, 0);
+        PdfRef Allocate() => document.Allocate();
 
         PdfRef EnsureFont()
         {
@@ -463,7 +341,7 @@ internal static class PdfFillSignWriter
             var rect = MapDisplayRectToPageRect(placement.X, placement.Y, placement.Width, placement.Height, page.Box, page.Rotate);
             if (!rect.IsValid)
             {
-                throw new InvalidOperationException(UnreadableItem);
+                throw new SignRefusalException(UnreadableItem);
             }
 
             var annotationRef = placement.Kind == SignPlacementKind.Date
@@ -482,14 +360,13 @@ internal static class PdfFillSignWriter
         foreach (var (pageRef, annotationRefs) in annotationsByPage)
         {
             var page = document.Pages.First(item => item.Ref.Equals(pageRef));
-            var updatedPage = UpdatePageAnnotations(document, page, annotationRefs);
-            newObjects.Add(new PdfWriteObject(page.Ref, AsLatin1(updatedPage)));
+            newObjects.Add(new PdfWriteObject(page.Ref, UpdatePageAnnotations(document, page, annotationRefs)));
         }
 
         return newObjects;
     }
 
-    private static void ValidatePlacement(PdfDocumentModel document, SignPlacement placement)
+    private static void ValidatePlacement(PdfSignDocument document, SignPlacement placement)
     {
         var inside = double.IsFinite(placement.X)
             && double.IsFinite(placement.Y)
@@ -506,7 +383,7 @@ internal static class PdfFillSignWriter
             : placement.ImagePng is { Length: > 0 };
         if (placement.PageIndex < 0 || placement.PageIndex >= document.Pages.Count || !inside || !content)
         {
-            throw new InvalidOperationException(UnreadableItem);
+            throw new SignRefusalException(UnreadableItem);
         }
     }
 
@@ -594,328 +471,32 @@ internal static class PdfFillSignWriter
             compressed);
     }
 
-    private static string UpdatePageAnnotations(PdfDocumentModel document, PdfPageInfo page, IReadOnlyList<PdfRef> newAnnotations)
+    private static byte[] UpdatePageAnnotations(PdfSignDocument document, PdfPageInfo page, IReadOnlyList<PdfRef> newAnnotations)
     {
-        var oldEntries = ReadExistingAnnotationEntries(document, page.Body);
+        var oldEntries = ExistingAnnotations(document.Reader, page.Dictionary);
         var added = string.Join(" ", newAnnotations.Select(item => $"{item} R"));
         var combined = string.IsNullOrWhiteSpace(oldEntries)
             ? added
             : $"{oldEntries} {added}";
-        return ReplaceOrAddDictionaryValue(page.Body, "Annots", $"[{combined}]");
+        return page.Dictionary.With("Annots", $"[{combined}]") ?? throw new SignRefusalException(UnsupportedStructure);
     }
 
-    private static string ReadExistingAnnotationEntries(PdfDocumentModel document, string pageBody)
+    /// <summary>
+    /// The page's annotations as they are written, to be carried into its
+    /// new revision. /Annots is an array or a reference to one, named once:
+    /// the viewer reads the last of two, and replacing one would leave the
+    /// other.
+    /// </summary>
+    private static string ExistingAnnotations(PdfReader reader, PdfDictionary page)
     {
-        if (!TryReadNamedValue(pageBody, 0, "Annots", out var value, out _))
+        if (!page.Has("Annots"))
         {
             return string.Empty;
         }
 
-        return ArrayItems(Resolve(document.Objects, value)) is { } items
-            ? string.Join(" ", items)
-            : throw new InvalidOperationException(UnsupportedStructure);
-    }
-
-    private static string ReplaceOrAddDictionaryValue(string body, string name, string replacementValue)
-    {
-        if (TryReadNamedValue(body, 0, name, out _, out var range))
-        {
-            return body[..range.Start] + $"/{name} {replacementValue}" + body[range.End..];
-        }
-
-        // A new key goes just before the outer dictionary's own '>>'.
-        var start = SkipSpace(body, 0);
-        var end = At(body, start, "<<") ? SkipObject(body, start) : -1;
-        if (end < 0)
-        {
-            throw new InvalidOperationException(UnsupportedStructure);
-        }
-
-        return body[..(end - 2)] + $" /{name} {replacementValue} " + body[(end - 2)..];
-    }
-
-    /// <summary>
-    /// Reads /<paramref name="name"/> from the dictionary's own keys; a key
-    /// inside a nested value never answers for it. False when the text is no
-    /// dictionary or lacks the key. A dictionary that can't be walked, or
-    /// names the key twice, is refused: the viewer reads the last of two.
-    /// </summary>
-    private static bool TryReadNamedValue(string text, int start, string name, out string value, out PdfTextRange range)
-    {
-        value = string.Empty;
-        range = default;
-        var found = false;
-        var index = SkipSpace(text, start);
-        if (!At(text, index, "<<"))
-        {
-            return false;
-        }
-
-        index += 2;
-        while (true)
-        {
-            index = SkipSpace(text, index);
-            if (At(text, index, ">>"))
-            {
-                return found;
-            }
-
-            var keyEnd = At(text, index, "/") ? SkipObject(text, index) : -1;
-            var valueEnd = keyEnd < 0 ? -1 : SkipObject(text, keyEnd);
-            if (valueEnd < 0)
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            if (DecodeName(text, index + 1, keyEnd) == name)
-            {
-                if (found)
-                {
-                    throw new InvalidOperationException(UnsupportedStructure);
-                }
-
-                found = true;
-                value = text[SkipSpace(text, keyEnd)..valueEnd];
-                range = new PdfTextRange(index, valueEnd);
-            }
-
-            index = valueEnd;
-        }
-    }
-
-    private static string? ValueOf(string? dictionary, string name) =>
-        dictionary is not null && TryReadNamedValue(dictionary, 0, name, out var value, out _) ? value : null;
-
-    /// <summary>The value itself, or the object it refers to. Null when that object is out of reach.</summary>
-    private static string? Resolve(Dictionary<PdfRef, PdfObject> objects, string? value) =>
-        value is null || !TryParseReference(value, out var reference) ? value
-            : objects.TryGetValue(reference, out var target) ? ObjectValue(target.Body) : null;
-
-    /// <summary>An object's own value, without the stream data that may follow it.</summary>
-    private static string? ObjectValue(string body)
-    {
-        var start = SkipSpace(body, 0);
-        var end = SkipObject(body, start);
-        return end < 0 ? null : body[start..end];
-    }
-
-    /// <summary>The items of an array value, a reference counting as one. Null when it is no array.</summary>
-    private static List<string>? ArrayItems(string? value)
-    {
-        if (value is null || !At(value, 0, "[") || SkipObject(value, 0) != value.Length)
-        {
-            return null;
-        }
-
-        var items = new List<string>();
-        var index = 1;
-        while (true)
-        {
-            index = SkipSpace(value, index);
-            if (At(value, index, "]"))
-            {
-                return items;
-            }
-
-            var end = SkipObject(value, index);
-            if (end < 0)
-            {
-                return null;
-            }
-
-            items.Add(value[index..end]);
-            index = end;
-        }
-    }
-
-    /// <summary>The name a value holds, decoded, or null when it holds something else.</summary>
-    private static string? NameValue(string? value) =>
-        value is not null && At(value, 0, "/") && SkipObject(value, 0) == value.Length
-            ? DecodeName(value, 1, value.Length)
-            : null;
-
-    /// <summary>A name as a viewer reads it: each #xx is the character it spells.</summary>
-    private static string DecodeName(string text, int start, int end)
-    {
-        var name = new StringBuilder(end - start);
-        for (var index = start; index < end; index++)
-        {
-            if (text[index] == '#'
-                && index + 2 < end
-                && TryHex((byte)text[index + 1], out var high)
-                && TryHex((byte)text[index + 2], out var low))
-            {
-                name.Append((char)((high << 4) | low));
-                index += 2;
-                continue;
-            }
-
-            name.Append(text[index]);
-        }
-
-        return name.ToString();
-    }
-
-    /// <summary>
-    /// The index just past the object at <paramref name="start"/>, or -1
-    /// when it is not well formed. Strings and nested containers are
-    /// stepped over whole, and a reference counts as one object.
-    /// </summary>
-    private static int SkipObject(string text, int start)
-    {
-        var closers = new Stack<char>();
-        var first = SkipSpace(text, start);
-        var index = first;
-        do
-        {
-            index = SkipSpace(text, index);
-            if (index >= text.Length)
-            {
-                return -1;
-            }
-
-            var ch = text[index];
-            if (ch == '[' || At(text, index, "<<"))
-            {
-                if (closers.Count == MaxNesting)
-                {
-                    return -1;
-                }
-
-                closers.Push(ch == '[' ? ']' : '>');
-                index += ch == '[' ? 1 : 2;
-            }
-            else if (ch == ']' || At(text, index, ">>"))
-            {
-                if (closers.Count == 0 || closers.Pop() != ch)
-                {
-                    return -1;
-                }
-
-                index += ch == ']' ? 1 : 2;
-            }
-            else
-            {
-                index = SkipToken(text, index);
-                if (index < 0)
-                {
-                    return -1;
-                }
-            }
-        }
-        while (closers.Count > 0);
-
-        return ReferenceEnd(text, first, index);
-    }
-
-    /// <summary>The index just past one string, name, number or keyword, or -1 for a stray delimiter.</summary>
-    private static int SkipToken(string text, int start)
-    {
-        switch (text[start])
-        {
-            case '(':
-                return FindLiteralEnd(text, start);
-            case '<':
-                var close = text.IndexOf('>', start + 1);
-                return close < 0 ? -1 : close + 1;
-            case ')' or '>' or '{' or '}':
-                return -1;
-        }
-
-        var index = start + 1;
-        while (index < text.Length && !IsPdfDelimiter((byte)text[index]))
-        {
-            index++;
-        }
-
-        return index;
-    }
-
-    /// <summary>
-    /// Extends an object number at [<paramref name="start"/>, <paramref name="end"/>)
-    /// over the generation and R that make it a reference, when they follow.
-    /// </summary>
-    private static int ReferenceEnd(string text, int start, int end)
-    {
-        if (!IsDigits(text, start, end))
-        {
-            return end;
-        }
-
-        var generation = SkipSpace(text, end);
-        var generationEnd = generation;
-        while (generationEnd < text.Length && char.IsAsciiDigit(text[generationEnd]))
-        {
-            generationEnd++;
-        }
-
-        var r = SkipSpace(text, generationEnd);
-        var isReference = generation > end
-            && generationEnd > generation
-            && r > generationEnd
-            && At(text, r, "R")
-            && (r + 1 == text.Length || IsPdfDelimiter((byte)text[r + 1]));
-        return isReference ? r + 1 : end;
-    }
-
-    private static bool IsDigits(string text, int start, int end)
-    {
-        for (var index = start; index < end; index++)
-        {
-            if (!char.IsAsciiDigit(text[index]))
-            {
-                return false;
-            }
-        }
-
-        return end > start;
-    }
-
-    /// <summary>Steps over PDF white space and comments.</summary>
-    private static int SkipSpace(string text, int index)
-    {
-        while (index < text.Length)
-        {
-            if (text[index] is '\0' or '\t' or '\n' or '\f' or '\r' or ' ')
-            {
-                index++;
-            }
-            else if (text[index] == '%')
-            {
-                while (index < text.Length && text[index] is not ('\r' or '\n'))
-                {
-                    index++;
-                }
-            }
-            else
-            {
-                break;
-            }
-        }
-
-        return index;
-    }
-
-    private static bool At(string text, int index, string token) =>
-        index >= 0 && index <= text.Length && text.AsSpan(index).StartsWith(token, StringComparison.Ordinal);
-
-    private static bool TryParseReference(string value, out PdfRef reference)
-    {
-        reference = default;
-        var match = Regex.Match(
-            value,
-            @"^\s*(?<number>\d{1,10})\s+(?<generation>\d{1,5})\s+R\s*$",
-            RegexOptions.CultureInvariant,
-            RegexTimeout);
-        if (!match.Success
-            || !int.TryParse(match.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-            || !int.TryParse(match.Groups["generation"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var generation))
-        {
-            return false;
-        }
-
-        reference = new PdfRef(number, generation);
-        return true;
+        return !page.IsRepeated("Annots") && reader.Resolve(page.Get("Annots")) is PdfArray annotations
+            ? string.Join(" ", annotations.Raw())
+            : throw new SignRefusalException(UnsupportedStructure);
     }
 
     private static PdfPageRect MapDisplayRectToPageRect(
@@ -923,7 +504,7 @@ internal static class PdfFillSignWriter
         double topEdge,
         double width,
         double height,
-        PdfPageBox box,
+        PdfBox box,
         int rotate)
     {
         var normalizedRotate = NormalizeRotation(rotate);
@@ -962,17 +543,21 @@ internal static class PdfFillSignWriter
 
     private static int NormalizeRotation(int rotate) => ((rotate % 360) + 360) % 360;
 
-    private static void WriteIncrementalUpdate(Stream output, PdfDocumentModel document, IReadOnlyList<PdfWriteObject> objects)
+    private static void WriteIncrementalUpdate(Stream output, PdfSignDocument document, IReadOnlyList<PdfWriteObject> objects)
     {
         if (output.Length > 0 && output.Position == output.Length)
         {
             WriteAscii(output, "\n");
         }
 
+        // The viewer counts offsets from the file's "%PDF-", which a few
+        // files do not start with.
+        long Offset() => output.Position - document.Reader.HeaderOffset;
+
         var offsets = new SortedDictionary<PdfRef, long>(PdfRefComparer.Instance);
         foreach (var obj in objects)
         {
-            offsets[obj.Ref] = output.Position;
+            offsets[obj.Ref] = Offset();
             WriteAscii(output, $"{obj.Ref.Number} {obj.Ref.Generation} obj\n");
             output.Write(obj.Body);
             WriteAscii(output, "\nendobj\n");
@@ -980,11 +565,11 @@ internal static class PdfFillSignWriter
 
         if (document.XrefIsStream)
         {
-            WriteCrossReferenceStream(output, document, offsets);
+            WriteCrossReferenceStream(output, document, offsets, Offset());
             return;
         }
 
-        var xrefOffset = output.Position;
+        var xrefOffset = Offset();
         WriteAscii(output, "xref\n");
         foreach (var group in ConsecutiveGroups(offsets.Keys))
         {
@@ -1016,10 +601,10 @@ internal static class PdfFillSignWriter
     /// an older stream packed away, so ink placed on such a page vanished
     /// in Chrome, Edge and Glimpse itself.
     /// </summary>
-    private static void WriteCrossReferenceStream(Stream output, PdfDocumentModel document, SortedDictionary<PdfRef, long> offsets)
+    private static void WriteCrossReferenceStream(Stream output, PdfSignDocument document, SortedDictionary<PdfRef, long> offsets, long selfOffset)
     {
         var self = new PdfRef(Math.Max(document.MaxObjectNumber, offsets.Keys.Max(item => item.Number)) + 1, 0);
-        offsets[self] = output.Position;
+        offsets[self] = selfOffset;
         var index = new StringBuilder();
         using var entries = new MemoryStream();
         foreach (var group in ConsecutiveGroups(offsets.Keys))
@@ -1104,7 +689,7 @@ internal static class PdfFillSignWriter
         var decoder = BitmapDecoder.Create(input, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
         if (decoder.Frames.Count == 0)
         {
-            throw new InvalidOperationException(UnreadableItem);
+            throw new SignRefusalException(UnreadableItem);
         }
 
         BitmapSource source = decoder.Frames[0];
@@ -1118,7 +703,7 @@ internal static class PdfFillSignWriter
         var height = source.PixelHeight;
         if (width <= 0 || height <= 0 || (long)width * height > MaxImagePixels)
         {
-            throw new InvalidOperationException(UnreadableItem);
+            throw new SignRefusalException(UnreadableItem);
         }
 
         var stride = width * 4;
@@ -1191,35 +776,6 @@ internal static class PdfFillSignWriter
         stream.Write(bytes);
     }
 
-    private static int FindLiteralEnd(string text, int start)
-    {
-        var depth = 0;
-        for (var i = start; i < text.Length; i++)
-        {
-            var ch = text[i];
-            if (ch == '\\')
-            {
-                i++;
-                continue;
-            }
-
-            if (ch == '(')
-            {
-                depth++;
-            }
-            else if (ch == ')')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return i + 1;
-                }
-            }
-        }
-
-        return -1;
-    }
-
     private static void TryDelete(string path)
     {
         try
@@ -1237,13 +793,6 @@ internal static class PdfFillSignWriter
 
     private sealed record DecodedImage(int Width, int Height, byte[] RgbBytes, byte[] AlphaBytes, bool HasAlpha);
 
-    private readonly record struct PdfTextRange(int Start, int End);
-
-    private readonly record struct PdfRef(int Number, int Generation)
-    {
-        public override string ToString() => $"{Number} {Generation}";
-    }
-
     private sealed class PdfRefComparer : IComparer<PdfRef>
     {
         public static readonly PdfRefComparer Instance = new();
@@ -1257,190 +806,188 @@ internal static class PdfFillSignWriter
 
     private sealed record PdfWriteObject(PdfRef Ref, byte[] Body);
 
-    private sealed record PdfObject(PdfRef Ref, string Body, int Position);
-
-    private sealed record PdfPageInfo(PdfRef Ref, string Body, PdfPageBoxes Boxes, int Rotate)
+    private sealed record PdfPageInfo(PdfRef Ref, PdfDictionary Dictionary, PdfPageFrame Frame)
     {
-        public PdfPageBox Box => Boxes.EffectiveBox!.Value;
+        public PdfBox Box => Frame.Box;
+
+        public int Rotate => Frame.Quarters * 90;
     }
 
-    private readonly record struct PdfPageBoxes(
-        PdfPageBox? MediaBox,
-        PdfPageBox? CropBox,
-        PdfPageBox? BleedBox,
-        PdfPageBox? TrimBox,
-        PdfPageBox? ArtBox)
+    /// <summary>
+    /// One file, open for the length of a read or a save: what the reader
+    /// found in it, and what an update appended to it has to say.
+    /// </summary>
+    private sealed class PdfSignDocument : IDisposable
     {
-        public PdfPageBox? EffectiveBox => CropBox ?? MediaBox;
-    }
+        private readonly FileStream _source;
+        private int _nextObject;
 
-    private readonly record struct PdfPageBox(double X1, double Y1, double X2, double Y2)
-    {
-        public double Left => Math.Min(X1, X2);
-
-        public double Bottom => Math.Min(Y1, Y2);
-
-        public double Right => Math.Max(X1, X2);
-
-        public double Top => Math.Max(Y1, Y2);
-
-        public double Width => Right - Left;
-
-        public double Height => Top - Bottom;
-
-        public bool IsValid =>
-            double.IsFinite(Width)
-            && double.IsFinite(Height)
-            && Width >= 1
-            && Height >= 1
-            && Width <= 20000
-            && Height <= 20000;
-    }
-
-    private sealed class PdfDocumentModel
-    {
-        private PdfDocumentModel(
-            byte[] bytes,
-            Dictionary<PdfRef, PdfObject> objects,
-            PdfRef root,
-            PdfRef? info,
-            string? idText,
-            long previousXrefOffset,
-            bool xrefIsStream,
-            int maxObjectNumber,
-            List<PdfPageInfo> pages)
+        private PdfSignDocument(FileStream source, PdfReader reader, PdfFileScan scan)
         {
-            Bytes = bytes;
-            Objects = objects;
-            Root = root;
-            Info = info;
-            IdText = idText;
-            PreviousXrefOffset = previousXrefOffset;
-            XrefIsStream = xrefIsStream;
-            MaxObjectNumber = maxObjectNumber;
-            Pages = pages;
+            _source = source;
+            Reader = reader;
+            Scan = scan;
         }
 
-        public byte[] Bytes { get; }
+        public PdfReader Reader { get; }
 
-        public Dictionary<PdfRef, PdfObject> Objects { get; }
+        public PdfFileScan Scan { get; }
 
-        public PdfRef Root { get; }
+        public PdfRef Root { get; private set; }
 
-        public PdfRef? Info { get; }
+        public PdfRef? Info { get; private set; }
 
-        public string? IdText { get; }
+        public string? IdText { get; private set; }
 
-        public long PreviousXrefOffset { get; }
+        public long PreviousXrefOffset { get; private set; }
 
         /// <summary>The newest cross-reference section is a stream, not a table.</summary>
-        public bool XrefIsStream { get; }
+        public bool XrefIsStream { get; private set; }
 
-        public int MaxObjectNumber { get; }
+        public int MaxObjectNumber { get; private set; }
 
-        public List<PdfPageInfo> Pages { get; }
+        /// <summary>The pages a mark can go on, in the viewer's order.</summary>
+        public List<PdfPageInfo> Pages { get; } = [];
 
-        public static PdfDocumentModel Read(string path)
+        /// <summary>The count the viewer reports, which a file's /Count can set apart from its pages.</summary>
+        public int PageCount { get; private set; }
+
+        /// <summary>A number no object in the file carries, for an object the update adds.</summary>
+        public PdfRef Allocate() =>
+            _nextObject < PdfReader.MaxObjectNumber
+                ? new PdfRef(_nextObject++, 0)
+                : throw new SignRefusalException(UnsupportedStructure);
+
+        public void CopyTo(Stream output)
         {
-            var fileInfo = new FileInfo(path);
-            if (fileInfo.Length > MaxPdfBytes)
+            _source.Seek(0, SeekOrigin.Begin);
+            _source.CopyTo(output, 1024 * 1024);
+        }
+
+        public void Dispose() => _source.Dispose();
+
+        /// <summary>
+        /// Opens the file closed to writers and reads everything a save
+        /// needs. <paramref name="names"/> are extra names for the pass over
+        /// the whole file to look for.
+        /// </summary>
+        public static PdfSignDocument Open(string path, params string[] names)
+        {
+            var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            try
             {
-                throw new InvalidOperationException("This PDF is too large to sign here.");
+                return Read(source, names);
+            }
+            catch (Exception ex) when (ex is not (SignRefusalException or IOException or UnauthorizedAccessException or OutOfMemoryException))
+            {
+                // The reader ran out of time, met a file that reads two ways,
+                // or tripped on bytes nobody planned for: all one answer.
+                source.Dispose();
+                DiagnosticLog.Write($"fill-sign read refused: {ex.GetType().Name}");
+                throw new SignRefusalException(UnsupportedStructure);
+            }
+            catch
+            {
+                source.Dispose();
+                throw;
+            }
+        }
+
+        private static PdfSignDocument Read(FileStream source, string[] names)
+        {
+            if (source.Length > MaxPdfBytes)
+            {
+                throw new SignRefusalException("This PDF is too large to sign here.");
             }
 
-            var bytes = File.ReadAllBytes(path);
-            if (bytes.Length < 8 || !Encoding.Latin1.GetString(bytes, 0, Math.Min(bytes.Length, 1024)).Contains("%PDF-", StringComparison.Ordinal))
+            var head = new byte[(int)Math.Min(source.Length, 1024)];
+            source.ReadExactly(head);
+            if (head.Length < 8 || head.AsSpan().IndexOf("%PDF-"u8) < 0)
             {
-                throw new InvalidOperationException("This file isn't a PDF that can be signed here.");
+                throw new SignRefusalException("This file isn't a PDF that can be signed here.");
             }
 
-            if (FindName(bytes, "Encrypt") is not null)
+            // The index, when the viewer is certain to follow it. Otherwise
+            // only what the whole file defines exactly once.
+            var reader = PdfReader.ForSigning(source);
+            var followed = reader.TryLoadIndex() && reader.TryFollowAsViewer();
+            var scan = PdfFileScan.Run(source, keepDefinitions: !followed, [.. names, "Encrypt", "DocMDP"]);
+            if (scan.Has("Encrypt"))
             {
-                throw new InvalidOperationException("This PDF is encrypted, so it can't be signed here.");
+                throw new SignRefusalException("This PDF is encrypted, so it can't be signed here.");
             }
 
-            var text = Encoding.Latin1.GetString(bytes);
-            var previousXref = ReadPreviousXrefOffset(text);
-            var (trailer, xrefIsStream) = ReadTrailerStart(text, previousXref);
-            if (!TryReadNamedValue(text, trailer, "Root", out var rootText, out _)
-                || !TryParseReference(rootText, out var root))
+            if ((!followed && !reader.ReadOnlyWhatIsDefinedOnce(scan))
+                || reader.Root is not { } root
+                || reader.StartXref < 0
+                || reader.ListedObjects() > MaxObjects
+                || scan.Definitions.Count > MaxObjects)
             {
-                throw new InvalidOperationException(UnsupportedStructure);
+                throw new SignRefusalException(UnsupportedStructure);
             }
-
-            PdfRef? info = TryReadNamedValue(text, trailer, "Info", out var infoText, out _)
-                && TryParseReference(infoText, out var infoRef)
-                    ? infoRef
-                    : null;
-            var idText = TryReadNamedValue(text, trailer, "ID", out var id, out _) ? id : null;
-            var trailerSize = TryReadNamedValue(text, trailer, "Size", out var sizeText, out _)
-                && int.TryParse(sizeText, NumberStyles.None, CultureInfo.InvariantCulture, out var size)
-                    ? size
-                    : 0;
-            var objects = ReadObjects(text);
 
             // Ink is a change a no-changes certification forbids: the saved
             // copy would carry a broken certificate.
-            if (FindName(bytes, "DocMDP") is not null && ReadCertificationPermission(objects, root) is not 3)
+            if (scan.Has("DocMDP") && CertificationPermission(reader, root) is not 3)
             {
-                throw new InvalidOperationException("This PDF is certified against changes, so it can't be signed here.");
+                throw new SignRefusalException("This PDF is certified against changes, so it can't be signed here.");
             }
 
-            var objectMax = objects.Keys.Select(item => item.Number).DefaultIfEmpty(0).Max();
-            var maxObjectNumber = Math.Max(objectMax, trailerSize - 1);
-            var pages = ReadPages(objects, root);
-            if (pages.Count == 0)
+            var document = new PdfSignDocument(source, reader, scan)
             {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            return new PdfDocumentModel(
-                bytes,
-                objects,
-                root,
-                info,
-                idText,
-                previousXref,
-                xrefIsStream,
-                maxObjectNumber,
-                pages);
+                Root = root,
+                Info = reader.TrailerWith("Info")?.Get("Info") as PdfRef?,
+                IdText = reader.TrailerWith("ID")?.Raw("ID"),
+                PreviousXrefOffset = reader.StartXref,
+                XrefIsStream = reader.NewestIsStream,
+                MaxObjectNumber = Math.Max(reader.HighestListedNumber(), scan.HighestNumber)
+            };
+            document._nextObject = document.MaxObjectNumber + 1;
+            document.ReadPages();
+            return document;
         }
 
         /// <summary>
-        /// Where the newest xref section's dictionary starts: the trailer
-        /// after an xref table, or the xref stream's own. Root and Size are
-        /// read there alone, as the viewer reads them.
+        /// Every page is read or the file is refused: a page skipped is a
+        /// page the viewer counts, and every mark after it lands a page early.
         /// </summary>
-        private static (int Start, bool Stream) ReadTrailerStart(string text, long xrefOffset)
+        private void ReadPages()
         {
-            var at = xrefOffset > 0 && xrefOffset < text.Length ? SkipSpace(text, (int)xrefOffset) : -1;
-            if (At(text, at, "xref"))
+            if (Reader.PageTree() is not { } tree)
             {
-                var trailer = text.IndexOf("trailer", at, StringComparison.Ordinal);
-                if (trailer >= 0)
-                {
-                    return (trailer + "trailer".Length, false);
-                }
-            }
-            else if (at >= 0 && ObjectHeaderRegex.Match(text, at) is { Success: true } header)
-            {
-                var dictionary = header.Index + header.Length;
-                if (TryReadNamedValue(text, dictionary, "Type", out var type, out _) && NameValue(type) == "XRef")
-                {
-                    return (dictionary, true);
-                }
+                throw new SignRefusalException(UnsupportedStructure);
             }
 
-            // A startxref off its mark (a damaged file, or bytes before the
-            // header) is one every viewer repairs from the last trailer, so
-            // the writer reads that one, as it always has.
-            var last = text.LastIndexOf("trailer", StringComparison.Ordinal);
-            if (last >= 0 && At(text, SkipSpace(text, last + "trailer".Length), "<<"))
+            Reader.WalkPages(tree.Number, tree.Node, (number, page) =>
             {
-                return (last + "trailer".Length, false);
+                // A page has to be framed as the viewer frames it, its
+                // annotations have to carry over, and the viewer has to take
+                // its new revision in place of the old.
+                if (Pages.Count >= MaxPages
+                    || Reader.FrameOf(page) is not { } frame
+                    || frame.Box.Width is < 1 or > 20000
+                    || frame.Box.Height is < 1 or > 20000
+                    || !Reader.CanBeReplaced(number))
+                {
+                    throw new SignRefusalException(UnsupportedStructure);
+                }
+
+                ExistingAnnotations(Reader, page);
+                Pages.Add(new PdfPageInfo(new PdfRef(number, Reader.GenerationOf(number)), page, frame));
+                return true;
+            });
+            if (Pages.Count == 0)
+            {
+                throw new SignRefusalException(UnsupportedStructure);
             }
 
-            throw new InvalidOperationException(UnsupportedStructure);
+            // A /Count below the number of pages hides the rest from the
+            // viewer; one above it counts pages that are not there.
+            PageCount = Reader.DeclaredPageCount(tree.Node) ?? Pages.Count;
+            if (PageCount < Pages.Count)
+            {
+                Pages.RemoveRange(PageCount, Pages.Count - PageCount);
+            }
         }
 
         /// <summary>
@@ -1448,383 +995,28 @@ internal static class PdfFillSignWriter
         /// /Perms /DocMDP, then the signature's DocMDP reference. Unset is 2.
         /// Null when a step is out of reach; only a /P read as 3 allows ink.
         /// </summary>
-        private static int? ReadCertificationPermission(Dictionary<PdfRef, PdfObject> objects, PdfRef root)
+        private static int? CertificationPermission(PdfReader reader, PdfRef root)
         {
-            var catalog = objects.TryGetValue(root, out var rootObject) ? rootObject.Body : null;
-            var signature = Resolve(objects, ValueOf(Resolve(objects, ValueOf(catalog, "Perms")), "DocMDP"));
-            foreach (var item in ArrayItems(Resolve(objects, ValueOf(signature, "Reference"))) ?? [])
+            var permissions = reader.Resolve((reader.Read(root.Number) as PdfDictionary)?.Get("Perms")) as PdfDictionary;
+            var signature = reader.Resolve(permissions?.Get("DocMDP")) as PdfDictionary;
+            foreach (var item in (reader.Resolve(signature?.Get("Reference")) as PdfArray)?.Items ?? [])
             {
-                var reference = Resolve(objects, item);
-                if (NameValue(ValueOf(reference, "TransformMethod")) != "DocMDP")
+                if (reader.Resolve(item) is not PdfDictionary reference
+                    || (reference.Get("TransformMethod") as PdfName?)?.Value != "DocMDP")
                 {
                     continue;
                 }
 
-                var permission = Resolve(objects, ValueOf(Resolve(objects, ValueOf(reference, "TransformParams")), "P"));
-                return permission is null ? 2
-                    : int.TryParse(permission, NumberStyles.None, CultureInfo.InvariantCulture, out var value) ? value
-                    : null;
+                var parameters = reader.Resolve(reference.Get("TransformParams")) as PdfDictionary;
+                return reader.Resolve(parameters?.Get("P")) switch
+                {
+                    null => 2,
+                    double permission when permission == Math.Floor(permission) && Math.Abs(permission) < int.MaxValue => (int)permission,
+                    _ => null
+                };
             }
 
             return null;
-        }
-
-        private static Dictionary<PdfRef, PdfObject> ReadObjects(string text)
-        {
-            var objects = new Dictionary<PdfRef, PdfObject>();
-            foreach (Match match in ObjectRegex.Matches(text))
-            {
-                if (objects.Count > MaxObjects)
-                {
-                    throw new InvalidOperationException(UnsupportedStructure);
-                }
-
-                if (!int.TryParse(match.Groups["number"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-                    || !int.TryParse(match.Groups["generation"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var generation))
-                {
-                    continue;
-                }
-
-                var obj = new PdfObject(new PdfRef(number, generation), match.Groups["body"].Value, match.Index);
-                if (!objects.TryGetValue(obj.Ref, out var prior) || obj.Position > prior.Position)
-                {
-                    objects[obj.Ref] = obj;
-                }
-            }
-
-            foreach (var container in objects.Values.Where(item => TryReadType(item.Body, out var type) && type == "ObjStm").ToList())
-            {
-                ReadPackedObjects(objects, container);
-            }
-
-            return objects;
-        }
-
-        /// <summary>
-        /// The objects packed in a compressed object stream. Acrobat and Word
-        /// keep a linearized file's page tree there, and without it the pages
-        /// have no order. Each takes its stream's place in the file, so a
-        /// later plain definition still wins. A stream that doesn't read
-        /// cleanly adds nothing.
-        /// </summary>
-        private static void ReadPackedObjects(Dictionary<PdfRef, PdfObject> objects, PdfObject container)
-        {
-            var body = container.Body;
-            var dictionaryStart = SkipSpace(body, 0);
-            var dictionaryEnd = SkipObject(body, dictionaryStart);
-            var dictionary = dictionaryEnd < 0 ? null : body[dictionaryStart..dictionaryEnd];
-            if (dictionary is null
-                || !int.TryParse(Resolve(objects, ValueOf(dictionary, "N")), NumberStyles.None, CultureInfo.InvariantCulture, out var count)
-                || !int.TryParse(Resolve(objects, ValueOf(dictionary, "First")), NumberStyles.None, CultureInfo.InvariantCulture, out var first)
-                || count <= 0
-                || count > MaxObjects
-                || ValueOf(dictionary, "DecodeParms") is not null
-                || NameValue(ValueOf(dictionary, "Filter")) is not ("FlateDecode" or null))
-            {
-                return;
-            }
-
-            var keyword = body.IndexOf("stream", dictionaryEnd, StringComparison.Ordinal);
-            if (keyword < 0)
-            {
-                return;
-            }
-
-            var dataStart = keyword + "stream".Length;
-            dataStart += At(body, dataStart, "\r\n") ? 2 : At(body, dataStart, "\n") ? 1 : 0;
-            var dataEnd = int.TryParse(Resolve(objects, ValueOf(dictionary, "Length")), NumberStyles.None, CultureInfo.InvariantCulture, out var length)
-                && length <= body.Length - dataStart
-                    ? dataStart + length
-                    : body.LastIndexOf("endstream", StringComparison.Ordinal);
-            if (dataEnd < dataStart)
-            {
-                return;
-            }
-
-            string data;
-            try
-            {
-                var raw = Encoding.Latin1.GetBytes(body[dataStart..dataEnd]);
-                if (ValueOf(dictionary, "Filter") is null)
-                {
-                    data = Encoding.Latin1.GetString(raw);
-                }
-                else
-                {
-                    using var zlib = new ZLibStream(new MemoryStream(raw), CompressionMode.Decompress);
-                    using var inflated = new MemoryStream();
-                    var buffer = new byte[16 * 1024];
-                    int read;
-                    while ((read = zlib.Read(buffer, 0, buffer.Length)) > 0)
-                    {
-                        inflated.Write(buffer, 0, read);
-                        if (inflated.Length > MaxPackedBytes)
-                        {
-                            return;
-                        }
-                    }
-
-                    data = Encoding.Latin1.GetString(inflated.GetBuffer(), 0, (int)inflated.Length);
-                }
-            }
-            catch (InvalidDataException)
-            {
-                return;
-            }
-
-            if (first <= 0 || first > data.Length)
-            {
-                return;
-            }
-
-            var header = data[..first].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-            if (header.Length < count * 2)
-            {
-                return;
-            }
-
-            var entries = new (int Number, int Offset)[count];
-            for (var i = 0; i < count; i++)
-            {
-                if (!int.TryParse(header[i * 2], NumberStyles.None, CultureInfo.InvariantCulture, out var number)
-                    || !int.TryParse(header[i * 2 + 1], NumberStyles.None, CultureInfo.InvariantCulture, out var offset)
-                    || offset > data.Length - first
-                    || (i > 0 && offset < entries[i - 1].Offset))
-                {
-                    return;
-                }
-
-                entries[i] = (number, offset);
-            }
-
-            for (var i = 0; i < count; i++)
-            {
-                var start = first + entries[i].Offset;
-                var end = i + 1 < count ? first + entries[i + 1].Offset : data.Length;
-                var packed = new PdfObject(new PdfRef(entries[i].Number, 0), data[start..end], container.Position);
-                if (!objects.TryGetValue(packed.Ref, out var prior) || packed.Position > prior.Position)
-                {
-                    if (objects.Count > MaxObjects)
-                    {
-                        throw new InvalidOperationException(UnsupportedStructure);
-                    }
-
-                    objects[packed.Ref] = packed;
-                }
-            }
-        }
-
-        private static long ReadPreviousXrefOffset(string text)
-        {
-            var index = text.LastIndexOf("startxref", StringComparison.Ordinal);
-            if (index < 0)
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            var match = Regex.Match(
-                text[index..],
-                @"startxref\s+(?<offset>\d+)",
-                RegexOptions.CultureInvariant,
-                RegexTimeout);
-            if (!match.Success
-                || !long.TryParse(match.Groups["offset"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var offset))
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            return offset;
-        }
-
-        private static List<PdfPageInfo> ReadPages(Dictionary<PdfRef, PdfObject> objects, PdfRef root)
-        {
-            if (objects.TryGetValue(root, out var rootObject)
-                && TryReadReference(rootObject.Body, "Pages", out var pagesRoot)
-                && objects.ContainsKey(pagesRoot))
-            {
-                var pages = new List<PdfPageInfo>();
-                TraversePageTree(objects, pagesRoot, default, null, 0, [], pages);
-                return pages;
-            }
-
-            return ReadOnlyPage(objects);
-        }
-
-        /// <summary>
-        /// The page of a file whose page tree is packed out of reach. Without
-        /// the tree there is no page order, and only a lone page can't land
-        /// on the wrong one.
-        /// </summary>
-        private static List<PdfPageInfo> ReadOnlyPage(Dictionary<PdfRef, PdfObject> objects)
-        {
-            var found = objects.Values
-                .Where(item => TryReadType(item.Body, out var type) && type == "Page")
-                .Take(2)
-                .ToList();
-            if (found.Count != 1)
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            var page = found[0];
-            var boxes = ReadPageBoxes(objects, page.Body, default, inheritPageTreeBoxes: false);
-            if (boxes.EffectiveBox is not { IsValid: true })
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            var rotate = TryReadRotate(objects, page.Body, out var ownRotate) ? ownRotate : 0;
-            return [new PdfPageInfo(page.Ref, page.Body, boxes, rotate)];
-        }
-
-        /// <summary>
-        /// Every node is read or the file is refused: a node skipped is a
-        /// page the viewer counts, and every mark after it lands a page early.
-        /// </summary>
-        private static void TraversePageTree(
-            Dictionary<PdfRef, PdfObject> objects,
-            PdfRef reference,
-            PdfPageBoxes inheritedBoxes,
-            int? inheritedRotate,
-            int depth,
-            HashSet<PdfRef> seen,
-            List<PdfPageInfo> pages)
-        {
-            if (depth > 64
-                || pages.Count >= MaxPages
-                || !seen.Add(reference)
-                || !objects.TryGetValue(reference, out var obj)
-                || !TryReadType(obj.Body, out var type))
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            var boxes = ReadPageBoxes(objects, obj.Body, inheritedBoxes, inheritPageTreeBoxes: type == "Pages");
-            var rotate = TryReadRotate(objects, obj.Body, out var ownRotate) ? ownRotate : inheritedRotate;
-
-            if (type == "Page" && boxes.EffectiveBox is { IsValid: true })
-            {
-                pages.Add(new PdfPageInfo(reference, obj.Body, boxes, rotate ?? 0));
-                return;
-            }
-
-            if (type != "Pages" || !TryReadKids(objects, obj.Body, out var kids))
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            foreach (var kid in kids)
-            {
-                TraversePageTree(objects, kid, boxes, rotate, depth + 1, seen, pages);
-            }
-        }
-
-        private static PdfPageBoxes ReadPageBoxes(
-            Dictionary<PdfRef, PdfObject> objects,
-            string body,
-            PdfPageBoxes inherited,
-            bool inheritPageTreeBoxes)
-        {
-            PdfPageBox? Read(string name) =>
-                TryReadBox(objects, body, name, out var box) ? box : null;
-
-            // MediaBox and CropBox are inheritable page-tree attributes. The
-            // print boxes are page entries whose absent value follows CropBox;
-            // inheriting a non-standard parent value would change the source.
-            return new PdfPageBoxes(
-                Read("MediaBox") ?? inherited.MediaBox,
-                Read("CropBox") ?? inherited.CropBox,
-                inheritPageTreeBoxes ? null : Read("BleedBox"),
-                inheritPageTreeBoxes ? null : Read("TrimBox"),
-                inheritPageTreeBoxes ? null : Read("ArtBox"));
-        }
-
-        private static bool TryReadType(string body, out string type)
-        {
-            type = NameValue(ValueOf(body, "Type")) ?? string.Empty;
-            return type.Length > 0;
-        }
-
-        /// <summary>
-        /// A box of four numbers, or false when the dictionary names none
-        /// usable. Anything else is refused, not guessed at: a misread box
-        /// moves every mark.
-        /// </summary>
-        private static bool TryReadBox(Dictionary<PdfRef, PdfObject> objects, string body, string name, out PdfPageBox box)
-        {
-            box = default;
-            if (ValueOf(body, name) is not { } value)
-            {
-                return false;
-            }
-
-            var items = ArrayItems(Resolve(objects, value));
-            if (items is not { Count: 4 })
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            var numbers = new double[4];
-            for (var i = 0; i < 4; i++)
-            {
-                if (!NumberRegex.IsMatch(items[i])
-                    || !double.TryParse(items[i], NumberStyles.Float, CultureInfo.InvariantCulture, out numbers[i])
-                    || !double.IsFinite(numbers[i]))
-                {
-                    throw new InvalidOperationException(UnsupportedStructure);
-                }
-            }
-
-            box = new PdfPageBox(numbers[0], numbers[1], numbers[2], numbers[3]);
-            return box.IsValid;
-        }
-
-        /// <summary>
-        /// The page's turn. The viewer turns by whole quarters, so a value
-        /// between them is a turn the writer could only guess.
-        /// </summary>
-        private static bool TryReadRotate(Dictionary<PdfRef, PdfObject> objects, string body, out int rotate)
-        {
-            rotate = 0;
-            if (ValueOf(body, "Rotate") is not { } value)
-            {
-                return false;
-            }
-
-            if (!int.TryParse(Resolve(objects, value), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out rotate)
-                || rotate % 90 != 0)
-            {
-                throw new InvalidOperationException(UnsupportedStructure);
-            }
-
-            return true;
-        }
-
-        private static bool TryReadKids(Dictionary<PdfRef, PdfObject> objects, string body, out List<PdfRef> kids)
-        {
-            kids = [];
-            if (ArrayItems(Resolve(objects, ValueOf(body, "Kids"))) is not { } items)
-            {
-                return false;
-            }
-
-            foreach (var item in items)
-            {
-                if (!TryParseReference(item, out var kid))
-                {
-                    return false;
-                }
-
-                kids.Add(kid);
-            }
-
-            return true;
-        }
-
-        private static bool TryReadReference(string body, string name, out PdfRef reference)
-        {
-            reference = default;
-            return ValueOf(body, name) is { } value && TryParseReference(value, out reference);
         }
     }
 }

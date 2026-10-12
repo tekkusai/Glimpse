@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Security.Cryptography;
@@ -35,6 +36,14 @@ internal static class PdfViewerLink
     // duplicated work, without a dictionary of locks to clean up afterwards.
     private static readonly object[] BuildGates =
         Enumerable.Range(0, 16).Select(_ => new object()).ToArray();
+
+    // One open asks for the key twice at once: for the stand-in and for the
+    // viewer. A hash under way is shared with whoever asks while it runs,
+    // and with nobody after: the next look reads the file again.
+    private static readonly ConcurrentDictionary<string, Lazy<string>> Hashing = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>The file's bytes into the key. Tests count its runs.</summary>
+    internal static Func<FileInfo, string> HashFile { get; set; } = Hash;
 
     /// <summary>
     /// A .pdf path for this artwork, or null when one cannot be made.
@@ -183,7 +192,7 @@ internal static class PdfViewerLink
                 return FramingOutcome.Declined;
             }
 
-            switch (ProvedInHelper(sourcePath, staging))
+            switch (ProvedInHelper(sourcePath, staging, cancellationToken))
             {
                 case ProofResult.Proved:
                     return FramingOutcome.Framed;
@@ -228,33 +237,37 @@ internal static class PdfViewerLink
     /// exit code and a fallback to linking instead of the user's preview.
     /// Anything other than a clean match is treated as a failed proof.
     /// </summary>
-    private static ProofResult ProvedInHelper(string sourcePath, string staging)
+    private static ProofResult ProvedInHelper(string sourcePath, string staging, CancellationToken cancellationToken)
     {
-        using var process = PdfiumHelper.Start("--prove-pdf-scale", sourcePath, staging);
-        if (process is null)
+        // This thread is the pool's and already inside the build gate: it
+        // waits here. A preview that has moved on cancels the token, which
+        // kills the helper and ends the wait.
+        var run = PdfiumHelper.RunAsync(ProofTimeout, cancellationToken, ProcessPriorityClass.Normal, "--prove-pdf-scale", sourcePath, staging)
+            .GetAwaiter()
+            .GetResult();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!run.Started)
         {
             DiagnosticLog.Write("pdf proof helper did not start");
             return ProofResult.Unavailable;
         }
 
-        if (!process.WaitForExit(ProofTimeout))
-        {
-            // A proof that will not finish is a proof that failed. Artwork
-            // this heavy is exactly what must not hold a preview open.
-            PdfiumHelper.Kill(process);
-
-            DiagnosticLog.Write($"pdf proof timed out, linking instead: {sourcePath}");
-            return ProofResult.Unavailable;
-        }
-
         // 0 proved, 2 ran and rejected. Anything else (a native crash, a
-        // startup failure) is the helper never reaching a verdict.
-        return process.ExitCode switch
+        // startup failure) is the helper never reaching a verdict. A proof
+        // that will not finish is a proof that failed: artwork this heavy
+        // is exactly what must not hold a preview open.
+        switch (run.ExitCode)
         {
-            0 => ProofResult.Proved,
-            2 => ProofResult.Rejected,
-            _ => ProofResult.Unavailable
-        };
+            case 0:
+                return ProofResult.Proved;
+            case 2:
+                return ProofResult.Rejected;
+            case null:
+                DiagnosticLog.Write($"pdf proof timed out, linking instead: {sourcePath}");
+                return ProofResult.Unavailable;
+            default:
+                return ProofResult.Unavailable;
+        }
     }
 
     /// <summary>
@@ -265,6 +278,20 @@ internal static class PdfViewerLink
     /// identity exact for every route.
     /// </summary>
     private static string CacheKey(FileInfo file)
+    {
+        var identity = $"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
+        var entry = Hashing.GetOrAdd(identity, _ => new Lazy<string>(() => HashFile(file)));
+        try
+        {
+            return entry.Value;
+        }
+        finally
+        {
+            Hashing.TryRemove(KeyValuePair.Create(identity, entry));
+        }
+    }
+
+    private static string Hash(FileInfo file)
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(Encoding.UTF8.GetBytes($"{file.FullName}|{file.Length}|{file.LastWriteTimeUtc.Ticks}|pdfview|v4"));

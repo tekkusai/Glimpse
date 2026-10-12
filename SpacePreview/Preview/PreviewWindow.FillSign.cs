@@ -48,6 +48,16 @@ public partial class PreviewWindow
     private SignSession? _signSession;
     private long _signPageRequest;
 
+    /// <summary>
+    /// The Sign pill was pressed and its page is not up yet. The header
+    /// holds the pill off for as long, and the window shows the working
+    /// cursor: the press was taken.
+    /// </summary>
+    internal bool IsEnteringFillSign { get; private set; }
+
+    /// <summary>What sign mode says when the page it opens on cannot be drawn.</summary>
+    internal const string SignPageUnavailable = "This page couldn't be opened for signing. Try again, or open the PDF in another app to sign it.";
+
     /// <summary>Sign mode's page render: a pdfium helper, never this process. Tests stand in for it.</summary>
     internal Func<string, int, CancellationToken, Task<PdfPreviewPage?>> RenderSignPage { get; set; } =
         PdfiumHelper.TryRenderPageAsync;
@@ -57,6 +67,13 @@ public partial class PreviewWindow
 
     /// <summary>The writer itself; tests hold it to open the gaps around a save.</summary>
     internal Action<string, string, IReadOnlyList<SignPlacement>> WriteSignedPdf { get; set; } = PdfFillSignWriter.WriteSignedCopy;
+
+    /// <summary>
+    /// Where the signed copy goes when the PDF's own folder cannot take a
+    /// new file, or null when the user names no place. A dialog, unless a
+    /// test stands in for it.
+    /// </summary>
+    internal Func<string, string?>? AskWhereToSaveCopy { get; set; }
 
     internal bool IsFillSignModeActive => _fillSignSurface is not null;
 
@@ -96,12 +113,23 @@ public partial class PreviewWindow
             return;
         }
 
+        // The viewer and the helper can each take seconds to answer. The
+        // press shows at once that it was taken: the pill goes quiet and the
+        // window works.
+        IsEnteringFillSign = true;
+        SignButton.IsEnabled = false;
+        var cursor = Cursor;
+        Cursor = Cursors.AppStarting;
         try
         {
             await EnterFillSignSessionAsync(path, session);
         }
         finally
         {
+            IsEnteringFillSign = false;
+            Cursor = cursor;
+            SyncHeaderTools();
+
             // An entry that did not leave its page up leaves the file free.
             if (_fillSignSurface is null || !ReferenceEquals(_signSession, session))
             {
@@ -119,31 +147,54 @@ public partial class PreviewWindow
         var draftLoad = Task.Run(() => SignDrafts.Load(path));
         var preflight = Task.Run(() => CheckSignable(path));
         // Asked of the viewer now: a document scrolled by wheel alone has a
-        // stale rail page.
-        var (currentPage, totalPages) = await ReadPdfPositionAsync();
+        // stale rail page. The viewer can take two seconds to answer, so
+        // the page the rail last knew starts rendering meanwhile.
+        var rail = _activePdfRail;
+        var asked = ReadPdfPositionAsync();
         var (file, draft) = await draftLoad;
         if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null)
         {
             return;
         }
 
-        int? viewerPages = totalPages > 0 ? totalPages : null;
-        var pageIndex = draft?.PageIndex ?? Math.Max(0, currentPage - 1);
-        var pages = new SignPageCache(index => RenderSignPage(path, index, session.Cancellation.Token), viewerPages ?? pageIndex + 1);
-        var page = await pages.Get(pageIndex);
-        if (page is null)
+        var pages = new SignPageCache(index => RenderSignPage(path, index, session.Cancellation.Token), 1);
+        var pageIndex = draft?.PageIndex ?? Math.Max(0, (rail?.CurrentPage ?? 1) - 1);
+        _ = pages.Get(pageIndex);
+        if (draft is null)
         {
-            if (version == _loadVersion && IsCurrentContentPath(path) && _fillSignSurface is null)
+            var (currentPage, _) = await asked;
+            if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null)
             {
-                DiagnosticLog.Write($"fill-sign entry render failed page={pageIndex + 1}");
+                return;
             }
 
-            return;
+            pageIndex = Math.Max(0, currentPage - 1);
         }
 
+        // Read after the wait: the rail may have counted the pages meanwhile.
+        int? viewerPages = rail?.Document is { TotalPages: > 0 } counted ? counted.TotalPages : null;
+        pages.PageCount = viewerPages ?? pageIndex + 1;
+        var page = await pages.TryGet(pageIndex);
         if (version != _loadVersion || !IsCurrentContentPath(path) || _fillSignSurface is not null
             || PreviewContent.Content is not FrameworkElement current)
         {
+            return;
+        }
+
+        if (page is null)
+        {
+            // The mode still opens, on a blank sheet that says so: a press
+            // that ends in nothing reads as a pill that does not work. No
+            // work can go on it, so the file stays free to sign, here after
+            // Close or in another window now.
+            DiagnosticLog.Write($"fill-sign entry render failed page={pageIndex + 1}");
+            var blank = new FillSignSurface(pageIndex, viewerPages ?? pageIndex + 1, BlankSignPage(rail?.PageAspect ?? 612.0 / 792.0));
+            blank.ExitRequested += ExitFillSignMode;
+            _fillSignParkedContent = current;
+            _fillSignSurface = blank;
+            PreviewContent.Content = blank;
+            blank.ShowProblem(SignPageUnavailable);
+            EndSignSession(session);
             return;
         }
 
@@ -191,7 +242,7 @@ public partial class PreviewWindow
 
         if (draft is not null)
         {
-            surface.Restore(draft.Placements);
+            surface.Restore(draft.Placements, draft.Lost);
             DiagnosticLog.Write($"fill-sign restored placements={draft.Placements.Count}");
         }
 
@@ -214,24 +265,49 @@ public partial class PreviewWindow
         }
 
         // Pages render at their own pace; only the last one asked for shows.
+        // One that is not ready yet says it is on its way.
         var request = ++_signPageRequest;
-        var page = await pages.Get(pageIndex);
+        var rendering = pages.TryGet(pageIndex);
+        if (!rendering.IsCompleted)
+        {
+            surface.ShowNotice($"Opening page {pageIndex + 1}\u2026");
+        }
+
+        var page = await rendering;
         if (page is null)
         {
-            pages.Forget(pageIndex);
             DiagnosticLog.Write($"fill-sign page render failed page={pageIndex + 1}");
         }
 
-        if (page is null
-            || request != _signPageRequest
+        if (request != _signPageRequest
             || !IsCurrentContentPath(path)
             || !ReferenceEquals(_fillSignSurface, surface))
         {
             return;
         }
 
+        if (page is null)
+        {
+            surface.ShowNotice($"Page {pageIndex + 1} didn't open. Try again.");
+            return;
+        }
+
         surface.ShowPage(pageIndex, page);
         pages.KeepNeighbors(pageIndex);
+    }
+
+    /// <summary>
+    /// A white sheet in the document's page shape, for a surface whose page
+    /// did not render. One bit a pixel: it is there to be a shape.
+    /// </summary>
+    private static PdfPreviewPage BlankSignPage(double aspect)
+    {
+        aspect = double.IsFinite(aspect) ? Math.Clamp(aspect, 0.2, 5) : 612.0 / 792.0;
+        var (width, height) = aspect >= 1 ? (1224, (int)Math.Round(1224 / aspect)) : ((int)Math.Round(1224 * aspect), 1224);
+        var stride = (width + 7) / 8;
+        var sheet = BitmapSource.Create(width, height, 96, 96, PixelFormats.Indexed1, new BitmapPalette([Colors.White, Colors.White]), new byte[stride * height], stride);
+        sheet.Freeze();
+        return new PdfPreviewPage(sheet, width, height);
     }
 
     /// <summary>
@@ -246,18 +322,45 @@ public partial class PreviewWindow
 
         public int PageCount { get; set; } = pageCount;
 
+        /// <summary>
+        /// The page's render, started if it has none. A render that ended
+        /// with no page is forgotten here, so asking again tries again: a
+        /// page that failed once ahead of the reader stayed out of reach
+        /// until they moved two pages away.
+        /// </summary>
         public Task<PdfPreviewPage?> Get(int index)
         {
-            if (!_pages.TryGetValue(index, out var page))
+            if (!_pages.TryGetValue(index, out var page)
+                || (page.IsCompleted && (!page.IsCompletedSuccessfully || page.Result is null)))
             {
-                page = render(index);
+                try
+                {
+                    page = render(index);
+                }
+                catch (Exception ex)
+                {
+                    page = Task.FromException<PdfPreviewPage?>(ex);
+                }
+
                 _pages[index] = page;
             }
 
             return page;
         }
 
-        public void Forget(int index) => _pages.Remove(index);
+        /// <summary>The page, or null when its render failed in any way.</summary>
+        public async Task<PdfPreviewPage?> TryGet(int index)
+        {
+            try
+            {
+                return await Get(index);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"fill-sign page render faulted page={index + 1}: {ex.GetType().Name}");
+                return null;
+            }
+        }
 
         public void KeepNeighbors(int index)
         {
@@ -268,12 +371,12 @@ public partial class PreviewWindow
 
             if (index + 1 < PageCount)
             {
-                _ = Get(index + 1);
+                _ = TryGet(index + 1);
             }
 
             if (index > 0)
             {
-                _ = Get(index - 1);
+                _ = TryGet(index - 1);
             }
         }
     }
@@ -323,7 +426,7 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// A save that died midway (a crash, a power cut) leaves its hidden
+    /// A save that died midway (a crash, a power cut) leaves its
     /// temporary file beside the PDF. The next session on the file clears
     /// them: only exact names, only once older than any save takes, and only
     /// while the original is there, since a failed replace can leave the
@@ -462,7 +565,6 @@ public partial class PreviewWindow
                     {
                         RequireUnchanged(path, stamp);
                         WriteSignedPdf(path, temp, placements);
-                        File.SetAttributes(temp, File.GetAttributes(temp) | FileAttributes.Hidden);
                     });
 
                     // The embedded viewer holds the original open; release
@@ -485,19 +587,25 @@ public partial class PreviewWindow
             }
             else
             {
-                finalPath = await Task.Run(() =>
-                {
-                    RequireUnchanged(path, stamp);
-                    return WriteSignedCopyBeside(path, placements);
-                });
+                finalPath = await SaveSignedCopyAsync(path, stamp, placements, StillOwnsSurface);
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // No place was named for the copy: the choices are back, and say why.
+            if (StillOwnsSurface())
+            {
+                surface.ShowSaveFailure(CopyNeedsAnotherFolder);
+            }
+
+            return;
         }
         catch (Exception ex)
         {
             DiagnosticLog.Write($"fill-sign save failed {path}: {ex.GetType().Name}: {ex.Message}");
             if (StillOwnsSurface())
             {
-                surface.ShowSaveFailure(SaveFailureReason(ex));
+                surface.ShowSaveFailure(SaveFailureReason(ex, overwrite));
             }
 
             return;
@@ -529,17 +637,40 @@ public partial class PreviewWindow
     /// <summary>What a save says when the PDF is no longer the version the work was placed on.</summary>
     internal const string ChangedSinceSigningBegan = "This PDF was changed in another app while you were signing. Nothing was saved.";
 
-    /// <summary>What a failed save says in place of the choices it brings back.</summary>
-    internal static string SaveFailureReason(Exception ex) => ex switch
+    /// <summary>What a save says when the copy's folder is read-only and no other was picked.</summary>
+    internal const string CopyNeedsAnotherFolder = "This folder is read-only. Save a signed copy again and pick another.";
+
+    // ERROR_WRITE_PROTECT, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION,
+    // ERROR_HANDLE_DISK_FULL and ERROR_DISK_FULL, as an IOException carries them.
+    private const int WriteProtected = unchecked((int)0x80070013);
+    private const int SharingViolation = unchecked((int)0x80070020);
+    private const int LockViolation = unchecked((int)0x80070021);
+    private const int HandleDiskFull = unchecked((int)0x80070027);
+    private const int DiskFull = unchecked((int)0x80070070);
+
+    /// <summary>
+    /// What a failed save says in place of the choices it brings back. Each
+    /// line has to be true whoever holds the file and wherever the copy was
+    /// going: the holder may be this app's own viewer or another of its
+    /// windows, and a copy is only ever written beside the original or
+    /// where the user said.
+    /// </summary>
+    internal static string SaveFailureReason(Exception ex, bool replacing) => ex switch
     {
-        // The writer's own refusals are already user-facing sentences.
-        InvalidOperationException => ex.Message,
-        UnauthorizedAccessException => "The file or its folder is read-only. Save a signed copy somewhere else.",
-        IOException { HResult: unchecked((int)0x80070020) or unchecked((int)0x80070021) } =>
-            "The file is open in another app. Close it there and try again.",
-        IOException { HResult: unchecked((int)0x80070070) } => "The disk is full. Nothing was saved.",
+        // Only a sentence written for the user is shown as it is.
+        SignRefusalException => ex.Message,
+        _ when IsReadOnlyPlace(ex) => replacing
+            ? "The original can't be replaced here. Save a signed copy instead."
+            : "That folder can't be written to. Save a signed copy again and pick another.",
+        IOException { HResult: SharingViolation or LockViolation } =>
+            "The file is in use. Close anything else that shows it, then try again.",
+        IOException { HResult: DiskFull or HandleDiskFull } => "The disk is full. Nothing was saved.",
         _ => "The signed file couldn't be saved. Nothing was changed."
     };
+
+    /// <summary>The folder, the file or the disk refuses a write that another place would take.</summary>
+    private static bool IsReadOnlyPlace(Exception ex) =>
+        ex is UnauthorizedAccessException or IOException { HResult: WriteProtected };
 
     /// <summary>
     /// The work was placed on one version of the file. Saving onto any
@@ -550,13 +681,16 @@ public partial class PreviewWindow
     {
         if (FileStamp.Of(path) != stamp)
         {
-            throw new InvalidOperationException(ChangedSinceSigningBegan);
+            throw new SignRefusalException(ChangedSinceSigningBegan);
         }
     }
 
     /// <summary>
-    /// A hidden file beside the original, its own for each save: two saves
-    /// at once never write into, or swap in, each other's.
+    /// A file beside the original, its own for each save: two saves at once
+    /// never write into, or swap in, each other's. It is not hidden. The
+    /// swap gives the original's attributes to the signed file on NTFS, but
+    /// nothing promises that on another file system, and a signed document
+    /// that turns up hidden is a document the user cannot find.
     /// </summary>
     internal static string SigningTempPath(string path) =>
         Path.Combine(Path.GetDirectoryName(path) ?? string.Empty, $".{Path.GetFileName(path)}.{Guid.NewGuid().ToString("N")[..8]}.signing");
@@ -584,27 +718,106 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// After a failed replace the temporary file normally goes. ReplaceFile
-    /// can fail after removing the original, though, and then the temporary
-    /// file is the only copy of the document: it takes the original's name.
+    /// The copy beside the original, or, when that folder cannot take a new
+    /// file, wherever the user says. A copy that could only be saved in a
+    /// place it cannot be saved in is no way to sign a PDF on a read-only
+    /// share or disc. Cancelled when the user names no place.
+    /// </summary>
+    private async Task<string> SaveSignedCopyAsync(
+        string path,
+        FileStamp stamp,
+        IReadOnlyList<SignPlacement> placements,
+        Func<bool> stillOwnsSurface)
+    {
+        try
+        {
+            return await Task.Run(() =>
+            {
+                RequireUnchanged(path, stamp);
+                return WriteSignedCopyBeside(path, placements);
+            });
+        }
+        catch (Exception ex) when (IsReadOnlyPlace(ex) && stillOwnsSurface())
+        {
+            DiagnosticLog.Write($"fill-sign copy needs another folder: {ex.GetType().Name}");
+        }
+
+        // The save bar says "Saving" while the dialog is up, and nothing on
+        // the surface takes input: the dialog is the one thing to answer.
+        var chosen = (AskWhereToSaveCopy ?? AskForCopyPath)(path);
+        if (chosen is null || !stillOwnsSurface())
+        {
+            throw new OperationCanceledException();
+        }
+
+        return await Task.Run(() =>
+        {
+            RequireUnchanged(path, stamp);
+            return WriteSignedCopyAt(path, chosen, placements);
+        });
+    }
+
+    private string? AskForCopyPath(string path)
+    {
+        var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        var dialog = new Microsoft.Win32.SaveFileDialog
+        {
+            Title = "Save the signed copy",
+            FileName = Path.GetFileName(NextSignedCopyPath(Path.Combine(documents, Path.GetFileName(path)))),
+            InitialDirectory = documents,
+            Filter = "PDF|*.pdf",
+            DefaultExt = ".pdf",
+            AddExtension = true,
+            OverwritePrompt = true
+        };
+        return dialog.ShowDialog(this) == true ? dialog.FileName : null;
+    }
+
+    /// <summary>
+    /// The copy under the name the user gave. A file already there was
+    /// agreed to in the dialog, and the writer still never writes into one:
+    /// the copy is made beside the name and moved onto it.
+    /// </summary>
+    private string WriteSignedCopyAt(string path, string chosen, IReadOnlyList<SignPlacement> placements)
+    {
+        if (Path.GetFullPath(chosen).Equals(Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new SignRefusalException("That is the original. Pick another name for the signed copy.");
+        }
+
+        if (!File.Exists(chosen))
+        {
+            WriteSignedPdf(path, chosen, placements);
+            return chosen;
+        }
+
+        var staged = SigningTempPath(chosen);
+        try
+        {
+            WriteSignedPdf(path, staged, placements);
+            File.Move(staged, chosen, overwrite: true);
+            return chosen;
+        }
+        catch
+        {
+            CleanUpSigningTemp(staged, chosen);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// After a failed save the temporary file goes, unless it is the only
+    /// copy of the document: a replace that lost the original and could
+    /// not put the signed file in its place leaves the signed file where
+    /// it is, and the failure names it.
     /// </summary>
     internal static void CleanUpSigningTemp(string temp, string original)
     {
         try
         {
-            if (!File.Exists(temp))
-            {
-                return;
-            }
-
-            File.SetAttributes(temp, File.GetAttributes(temp) & ~FileAttributes.Hidden);
-            if (File.Exists(original))
+            if (File.Exists(temp) && File.Exists(original))
             {
                 File.Delete(temp);
-            }
-            else
-            {
-                File.Move(temp, original);
             }
         }
         catch (Exception ex)
@@ -614,25 +827,64 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// Swaps the signed file in, retrying while the viewer lets go of the
-    /// original. Every try checks first that the original is still the
-    /// version the work was placed on.
+    /// Swaps the signed file in, off the UI thread, retrying while the
+    /// viewer lets go of the original. Every try checks first that the
+    /// original is still the version the work was placed on.
     /// </summary>
     private static async Task ReplaceWithRetriesAsync(string signedPath, string destinationPath, FileStamp stamp)
     {
+        var originalLost = false;
         for (var attempt = 0; ; attempt++)
         {
             try
             {
-                RequireUnchanged(destinationPath, stamp);
-                File.Replace(signedPath, destinationPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+                await Task.Run(() =>
+                {
+                    if (!originalLost)
+                    {
+                        RequireUnchanged(destinationPath, stamp);
+                    }
+
+                    SwapIn(signedPath, destinationPath, ReplaceFile, ref originalLost);
+                });
                 return;
             }
             catch (IOException) when (attempt < 12)
             {
                 await Task.Delay(250);
             }
+            catch (IOException) when (originalLost)
+            {
+                throw new SignRefusalException(
+                    $"The signed PDF was saved as \"{Path.GetFileName(signedPath)}\" in the same folder. Rename it to finish.");
+            }
         }
+    }
+
+    private static void ReplaceFile(string signedPath, string destinationPath) =>
+        File.Replace(signedPath, destinationPath, destinationBackupFileName: null, ignoreMetadataErrors: true);
+
+    /// <summary>
+    /// One try at the swap. Replacing a file can fail after the original is
+    /// already gone. The signed file is then the only copy of the document:
+    /// it takes the original's name, and that is the save, not a failure.
+    /// </summary>
+    internal static void SwapIn(string signedPath, string destinationPath, Action<string, string> replace, ref bool originalLost)
+    {
+        if (!originalLost)
+        {
+            try
+            {
+                replace(signedPath, destinationPath);
+                return;
+            }
+            catch (IOException) when (!File.Exists(destinationPath) && File.Exists(signedPath))
+            {
+                originalLost = true;
+            }
+        }
+
+        File.Move(signedPath, destinationPath);
     }
 
     private static string NextSignedCopyPath(string path)

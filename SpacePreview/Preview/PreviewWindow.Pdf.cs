@@ -38,6 +38,12 @@ public partial class PreviewWindow
         OpenExternally
     }
 
+    /// <summary>
+    /// The viewer may load the one file it was opened on, wherever that
+    /// file lives: a PDF on a share has a host in its address, and
+    /// cancelling it for that showed the error card for every PDF on a NAS
+    /// or in WSL. Any other file stays out, on any host.
+    /// </summary>
     internal static PdfNavigationAction DecidePdfNavigation(string sourcePath, string uri)
     {
         if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed))
@@ -51,7 +57,7 @@ public partial class PreviewWindow
             return PdfNavigationAction.OpenExternally;
         }
 
-        if (!parsed.IsFile || !IsLocalFileUri(parsed))
+        if (!parsed.IsFile)
         {
             return PdfNavigationAction.Cancel;
         }
@@ -165,7 +171,23 @@ public partial class PreviewWindow
         grid.Tag = railState;
         TrackPdfRailLifetime(grid, railState);
         _ = LoadPdfPageRailOutOfProcessAsync(railState);
+        if (!LooksLikeLocalDrivePath(path))
+        {
+            _ = HintPdfStageOffThreadAsync(path, version);
+        }
+
         return grid;
+    }
+
+    /// <summary>
+    /// A file on a share is never read on the dispatcher, so the page shape
+    /// that sizes a local PDF's window before it loads is read on the pool
+    /// for this one, and lands like any probe that missed its wait.
+    /// </summary>
+    private async Task HintPdfStageOffThreadAsync(string path, long version)
+    {
+        var outline = await Task.Run(() => PdfPageSizeProbe.Read(path) ?? CachedPdfOutline(path));
+        HintPdfStage(outline, version);
     }
 
     /// <summary>
@@ -195,19 +217,18 @@ public partial class PreviewWindow
         var probe = PdfPageSizeProbe.ReadAsync(pdfPath);
         if (probe.Wait(IsVisible ? PdfProbeWait : PdfProbeFirstFrameWait))
         {
-            return HintPdfStage(pdfPath, probe.Result, version);
+            return HintPdfStage(probe.Result ?? CachedPdfOutline(pdfPath), version);
         }
 
         _ = probe.ContinueWith(
-            done => Dispatcher.BeginInvoke(new Action(() => HintPdfStage(pdfPath, done.Result, version))),
+            done => Dispatcher.BeginInvoke(new Action(() => HintPdfStage(done.Result ?? CachedPdfOutline(pdfPath), version))),
             TaskScheduler.Default);
         return true;
     }
 
-    private bool HintPdfStage(string pdfPath, PdfOutline? probed, long version)
+    private bool HintPdfStage(PdfOutline? outline, long version)
     {
-        if ((probed is { WidthPoints: > 0, HeightPoints: > 0 } ? probed : CachedPdfOutline(pdfPath))
-            is not { WidthPoints: > 0, HeightPoints: > 0 } page)
+        if (outline is not { WidthPoints: > 0, HeightPoints: > 0 } page)
         {
             return false;
         }
@@ -243,7 +264,7 @@ public partial class PreviewWindow
 
             return manifest.Pages.Count > 0
                 ? new PdfOutline(manifest.Pages[0].Width, manifest.Pages[0].Height, manifest.TotalPages)
-                : new PdfOutline(0, 0, manifest.TotalPages);
+                : new PdfOutline(Math.Max(0, manifest.Width), Math.Max(0, manifest.Height), manifest.TotalPages);
         }
         catch
         {
@@ -345,6 +366,12 @@ public partial class PreviewWindow
     {
         if (document.Pages.Count == 0)
         {
+            // A one-page document draws no thumbnail and still names its shape.
+            if (document.PageOneAspect > 0 && double.IsFinite(document.PageOneAspect))
+            {
+                SetStageFitHint(StageFitHint.PageAspect(document.PageOneAspect, singlePage: document.TotalPages == 1), state.Version);
+            }
+
             return;
         }
 
@@ -374,10 +401,23 @@ public partial class PreviewWindow
             && state.Version == _loadVersion
             && !state.Token.IsCancellationRequested;
 
-        if (KnownPdfOutline(path) is { } outline)
+        // A local file is asked here, so a known count builds the rail
+        // before the viewer lays out. A share is asked on the pool.
+        var known = LooksLikeLocalDrivePath(path)
+            ? KnownPdfOutline(path)
+            : await Task.Run(() => PdfPageSizeProbe.Read(path) is { PageCount: > 0 } read ? read : CachedPdfOutline(path));
+        if (!Current())
+        {
+            return;
+        }
+
+        if (known is { } outline)
         {
             ApplyPdfPageCount(state, outline.PageCount, outline.WidthPoints / outline.HeightPoints);
-            if (outline.PageCount <= 1)
+
+            // One page needs no rail, only its shape. A count cached before
+            // 3.0.1 came without one, and the first range below brings it.
+            if (outline is { PageCount: <= 1, WidthPoints: > 0, HeightPoints: > 0 })
             {
                 return;
             }
@@ -518,9 +558,14 @@ public partial class PreviewWindow
         CancellationToken token,
         int startPage = 0)
     {
-        var cacheDir = PdfRailCacheDirectory(path, pageLimit, startPage);
+        // The cache's name is made from the file's size and time: a look at
+        // the file, which on a share is a trip over the network, so it is
+        // made off this thread with the read.
+        var cacheDir = await Task.Run(() => PdfRailCacheDirectory(path, pageLimit, startPage), token);
         var cached = await Task.Run(() => TryReadPdfThumbnailManifest(cacheDir), token);
-        if (cached is not null)
+
+        // A one-page entry cached before 3.0.1 has no page shape: it is made again.
+        if (cached is not null && (cached.TotalPages != 1 || cached.PageOneAspect > 0))
         {
             return cached;
         }
@@ -532,47 +577,35 @@ public partial class PreviewWindow
 
         try
         {
-            using var process = PdfiumHelper.Start(
+            // The helper rasters pages while Chromium is loading the same
+            // document and the entrance is animating. It must never win CPU
+            // from the frames the user is watching. A helper that hangs is
+            // killed at its deadline, not left running under the preview.
+            var run = await PdfiumHelper.RunAsync(
+                PdfiumHelper.RangeDeadline(pageLimit),
+                token,
+                ProcessPriorityClass.BelowNormal,
                 "--render-pdf-thumbnails",
                 path,
                 tempDir,
                 pageLimit.ToString(System.Globalization.CultureInfo.InvariantCulture),
                 startPage.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            if (process is null)
+            token.ThrowIfCancellationRequested();
+            if (!run.Started)
             {
+                DiagnosticLog.Write("pdf thumbnail helper did not start");
                 return null;
-            }
-
-            // The helper rasters pages while Chromium is loading the same
-            // document and the entrance is animating. It must never win CPU
-            // from the frames the user is watching.
-            try
-            {
-                process.PriorityClass = ProcessPriorityClass.BelowNormal;
-            }
-            catch
-            {
-                // A helper that already exited keeps its default priority.
-            }
-
-            try
-            {
-                await process.WaitForExitAsync(token);
-            }
-            catch (OperationCanceledException)
-            {
-                PdfiumHelper.Kill(process);
-                throw;
             }
 
             // A manifest is written last, so one that exists is complete even
             // when the helper died on its way out.
             var rendered = await Task.Run(() => TryReadPdfThumbnailManifest(tempDir), token);
-            if (process.ExitCode != 0)
+            if (run.ExitCode != 0)
             {
                 var written = Directory.EnumerateFiles(tempDir, "page-*.png").Count();
+                var ending = run.ExitCode is { } exitCode ? $"exit {exitCode}" : "missed its deadline";
                 DiagnosticLog.Write(
-                    $"pdf thumbnail helper exit {process.ExitCode} for {path}: pages {startPage + 1}-{startPage + pageLimit}, "
+                    $"pdf thumbnail helper {ending} for {path}: pages {startPage + 1}-{startPage + pageLimit}, "
                     + (rendered is null ? $"stopped at page {startPage + written + 1}" : "manifest complete"));
             }
 
@@ -637,7 +670,7 @@ public partial class PreviewWindow
 
             if (manifest.TotalPages == 1)
             {
-                return new PdfPreviewDocument([], 1);
+                return new PdfPreviewDocument([], 1, manifest is { Width: > 0, Height: > 0 } ? (double)manifest.Width / manifest.Height : 0);
             }
 
             var root = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)

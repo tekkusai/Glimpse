@@ -547,8 +547,16 @@ public sealed class SignDraftTests
         try
         {
             var pdf = SignablePdf(root);
-            Assert.Null(await EnterAsync(first, pdf, render: (_, _) => Task.FromResult<PdfPreviewPage?>(null)));
-            Assert.NotNull(await EnterAsync(second, pdf));
+
+            // Since 3.0.1 a page that will not open leaves a sheet that says
+            // so, where it left nothing. It holds no work, and no session.
+            var failed = await EnterAsync(first, pdf, render: (_, _) => Task.FromResult<PdfPreviewPage?>(null));
+            Assert.Equal(Visibility.Collapsed, Fields.Get<StackPanel>(failed, "_tools").Visibility);
+            Assert.Null(Fields.Get<SignDraftKeeper?>(first, "_signDraft"));
+
+            var working = await EnterAsync(second, pdf);
+            Assert.NotNull(working);
+            Assert.True(Button(working, "Date").IsEnabled);
         }
         finally
         {

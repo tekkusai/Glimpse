@@ -26,8 +26,12 @@ internal readonly record struct FileStamp(long Length, long LastWriteUtcTicks)
     }
 }
 
-/// <summary>Work brought back from a draft, made on exactly the version of the file now on disk.</summary>
-internal sealed record SignDraft(int PageIndex, IReadOnlyList<SignPlacement> Placements);
+/// <summary>
+/// Work brought back from a draft, made on exactly the version of the file
+/// now on disk. Lost counts the placements that could not come back: their
+/// signature or stamp was replaced or removed since.
+/// </summary>
+internal sealed record SignDraft(int PageIndex, IReadOnlyList<SignPlacement> Placements, int Lost = 0);
 
 /// <summary>
 /// Unsaved sign-mode work, kept in the data root so an upgrade, Windows
@@ -129,13 +133,17 @@ internal static class SignDrafts
                 return (file, null);
             }
 
+            // The count stays in the draft until the session that resumes it
+            // has said it: this look may be the Sign pill deciding its label,
+            // long before anyone reads the notice.
+            var lost = Math.Max(0, stored.Lost) + stored.Placements.Length - kept.Length;
             if (kept.Length < stored.Placements.Length)
             {
                 DiagnosticLog.Write($"fill-sign draft let go of {stored.Placements.Length - kept.Length} placements whose ink is gone");
-                Save(draftPath, stored with { Placements = kept.Select(pair => pair.Item).ToArray() });
+                Save(draftPath, stored with { Placements = kept.Select(pair => pair.Item).ToArray(), Lost = lost });
             }
 
-            return (file, new SignDraft(Math.Max(0, stored.Page), kept.Select(pair => pair.Placement!).ToArray()));
+            return (file, new SignDraft(Math.Max(0, stored.Page), kept.Select(pair => pair.Placement!).ToArray(), lost));
         }
     }
 
@@ -304,7 +312,8 @@ internal static class SignDrafts
         }
     }
 
-    private sealed record DraftFile(string Path, long Length, long LastWriteUtcTicks, int Page, DraftPlacement[] Placements);
+    /// <summary>Lost is how many placements earlier looks had to let go of, not yet told to the user.</summary>
+    private sealed record DraftFile(string Path, long Length, long LastWriteUtcTicks, int Page, DraftPlacement[] Placements, int Lost = 0);
 
     /// <summary>Image is relative to the data root; Ink only for ink redrawn on the pad.</summary>
     private sealed record DraftPlacement(

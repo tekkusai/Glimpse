@@ -11,12 +11,27 @@ namespace SpacePreview.Preview;
 
 internal sealed record PdfPreviewPage(BitmapSource Bitmap, int Width, int Height);
 
-internal sealed record PdfPreviewDocument(IReadOnlyList<PdfPreviewPage> Pages, int TotalPages);
+/// <summary>PageOneAspect is page one's width over height when no thumbnail carries it, or 0.</summary>
+internal sealed record PdfPreviewDocument(IReadOnlyList<PdfPreviewPage> Pages, int TotalPages, double PageOneAspect = 0);
 
-internal sealed record PdfThumbnailManifest(int TotalPages, List<PdfThumbnailManifestPage> Pages);
+/// <summary>
+/// Width and Height are the page's size in thumbnail pixels when the
+/// document has one page, and 0 otherwise. One page draws no thumbnail,
+/// and its shape is still what the window opens to.
+/// </summary>
+internal sealed record PdfThumbnailManifest(int TotalPages, List<PdfThumbnailManifestPage> Pages, int Width = 0, int Height = 0);
 
 internal sealed record PdfThumbnailManifestPage(int Number, string File, int Width, int Height);
 
+/// <summary>
+/// pdfium, for the helper processes and nothing else (see PdfiumHelper). A
+/// helper exits as soon as its answer is written, so a document is never
+/// closed here: closing one runs pdfium's form-fill teardown, and that
+/// faults once enough annotated pages have rendered and a collection has
+/// run (65 pages of one datasheet, 25 of a slide deck). The process's exit
+/// reclaims the document. Nothing here is cancelled either: a helper that
+/// is no longer wanted is killed.
+/// </summary>
 internal static class PdfPreviewRenderer
 {
     private const double PixelsPerPoint = 2.0; // 144 DPI. Sharp enough for preview, cheap enough for Spacebar.
@@ -49,15 +64,6 @@ internal static class PdfPreviewRenderer
     ];
 
     /// <summary>
-    /// Set by the helper processes, which exit as soon as their answer is
-    /// written. Closing a document runs pdfium's form-fill teardown, and that
-    /// faults once enough annotated pages have rendered and a collection has
-    /// run: 65 pages of one datasheet, 25 of a slide deck. A helper skips the
-    /// teardown and lets the process exit reclaim the document.
-    /// </summary>
-    internal static bool SkipDocumentTeardown { get; set; }
-
-    /// <summary>
     /// True when two documents draw the same pages. Rewriting a PDF can
     /// go wrong in ways no page count reveals: a pattern that does not follow
     /// the page, content that resolves to nothing, a crop that stops being
@@ -65,16 +71,13 @@ internal static class PdfPreviewRenderer
     /// it still looks like the original. Both sides are forced to the same
     /// raster, so a page scaled correctly compares equal.
     /// </summary>
-    public static bool RendersLike(string leftPath, string rightPath, CancellationToken cancellationToken)
+    public static bool RendersLike(string leftPath, string rightPath)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        PdfiumGate.Wait(cancellationToken);
-        IDocReader? leftDocument = null;
-        IDocReader? rightDocument = null;
+        PdfiumGate.Wait();
         try
         {
-            leftDocument = DocLib.Instance.GetDocReader(leftPath, new PageDimensions(ProofEdge, ProofEdge));
-            rightDocument = DocLib.Instance.GetDocReader(rightPath, new PageDimensions(ProofEdge, ProofEdge));
+            var leftDocument = DocLib.Instance.GetDocReader(leftPath, new PageDimensions(ProofEdge, ProofEdge));
+            var rightDocument = DocLib.Instance.GetDocReader(rightPath, new PageDimensions(ProofEdge, ProofEdge));
             var pageCount = leftDocument.GetPageCount();
             if (pageCount <= 0 || pageCount > ProofMaxPages || rightDocument.GetPageCount() != pageCount)
             {
@@ -83,7 +86,6 @@ internal static class PdfPreviewRenderer
 
             for (var pageIndex = 0; pageIndex < pageCount; pageIndex++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 using var leftPage = leftDocument.GetPageReader(pageIndex);
                 using var rightPage = rightDocument.GetPageReader(pageIndex);
                 if (leftPage.GetPageWidth() != rightPage.GetPageWidth()
@@ -113,18 +115,12 @@ internal static class PdfPreviewRenderer
 
             return true;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch
         {
             return false;
         }
         finally
         {
-            Close(leftDocument);
-            Close(rightDocument);
             PdfiumGate.Release();
         }
     }
@@ -183,38 +179,24 @@ internal static class PdfPreviewRenderer
     /// places ink against exactly what the document shows, so annotations
     /// render too. Page index is zero-based, matching the rail.
     /// </summary>
-    public static PdfPreviewPage? TryRenderPage(string path, int pageIndex, CancellationToken cancellationToken)
+    public static PdfPreviewPage? TryRenderPage(string path, int pageIndex)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        PdfiumGate.Wait(cancellationToken);
+        PdfiumGate.Wait();
         try
         {
-            IDocReader? document = null;
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint));
-                if (pageIndex < 0 || pageIndex >= document.GetPageCount())
-                {
-                    return null;
-                }
-
-                using var pageReader = document.GetPageReader(pageIndex);
-                return RenderPage(pageReader, thumbnail: false)
-                    ?? RenderFittedPage(path, pageIndex, pageReader, cancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch
+            var document = DocLib.Instance.GetDocReader(path, new PageDimensions(PixelsPerPoint));
+            if (pageIndex < 0 || pageIndex >= document.GetPageCount())
             {
                 return null;
             }
-            finally
-            {
-                Close(document);
-            }
+
+            using var pageReader = document.GetPageReader(pageIndex);
+            return RenderPage(pageReader, thumbnail: false)
+                ?? RenderFittedPage(path, pageIndex, pageReader);
+        }
+        catch
+        {
+            return null;
         }
         finally
         {
@@ -223,9 +205,9 @@ internal static class PdfPreviewRenderer
     }
 
     /// <summary>The page helper's job: <see cref="TryRenderPage"/> written to a PNG.</summary>
-    public static bool TryRenderPageToFile(string path, int pageIndex, string pngPath, CancellationToken cancellationToken)
+    public static bool TryRenderPageToFile(string path, int pageIndex, string pngPath)
     {
-        var page = TryRenderPage(path, pageIndex, cancellationToken);
+        var page = TryRenderPage(path, pageIndex);
         if (page is null)
         {
             return false;
@@ -257,18 +239,6 @@ internal static class PdfPreviewRenderer
         return Math.Max(0.01, currentScale * factor * AdaptiveRasterHeadroom);
     }
 
-    /// <summary>Rail thumbnails in memory: pages [startPage, startPage + pageLimit).</summary>
-    public static PdfPreviewDocument? TryRenderThumbnails(
-        string path,
-        CancellationToken cancellationToken,
-        int pageLimit = MaxThumbnailPagesPerCall,
-        int startPage = 0)
-    {
-        var pages = new SortedDictionary<int, PdfPreviewPage>();
-        var totalPages = RenderThumbnails(path, pageLimit, startPage, cancellationToken, (number, page) => pages[number] = page);
-        return totalPages is null ? null : new PdfPreviewDocument([.. pages.Values], totalPages.Value);
-    }
-
     /// <summary>
     /// The helper's job: each thumbnail is written the moment it renders, so
     /// a helper that dies mid-range leaves a count of how far it got, and the
@@ -278,65 +248,68 @@ internal static class PdfPreviewRenderer
         string path,
         string directory,
         int pageLimit,
-        CancellationToken cancellationToken,
         int startPage = 0)
     {
         Directory.CreateDirectory(directory);
         var written = new SortedDictionary<int, PdfThumbnailManifestPage>();
-        var totalPages = RenderThumbnails(path, pageLimit, startPage, cancellationToken, (number, page) =>
+        var counted = RenderThumbnails(path, pageLimit, startPage, (number, page) =>
         {
             var file = $"page-{number:0000}.png";
             SavePng(page.Bitmap, Path.Combine(directory, file));
             written[number] = new PdfThumbnailManifestPage(number, file, page.Width, page.Height);
         });
-        if (totalPages is null)
+        if (counted is not { } document)
         {
             return false;
         }
 
         File.WriteAllText(
             Path.Combine(directory, "manifest.json"),
-            JsonSerializer.Serialize(new PdfThumbnailManifest(totalPages.Value, [.. written.Values])));
+            JsonSerializer.Serialize(new PdfThumbnailManifest(document.TotalPages, [.. written.Values], document.Width, document.Height)));
         return true;
     }
 
     /// <summary>
     /// Renders pages [startPage, startPage + pageLimit) and hands each to
     /// <paramref name="onPage"/> by one-based number. Returns the document's
-    /// page count, or null when it cannot be read.
+    /// page count, with the page's size in thumbnail pixels when there is
+    /// one page, or null when it cannot be read.
     /// </summary>
-    private static int? RenderThumbnails(
+    private static (int TotalPages, int Width, int Height)? RenderThumbnails(
         string path,
         int pageLimit,
         int startPage,
-        CancellationToken cancellationToken,
         Action<int, PdfPreviewPage> onPage)
     {
-        cancellationToken.ThrowIfCancellationRequested();
-        PdfiumGate.Wait(cancellationToken);
-        IDocReader? document = null;
+        PdfiumGate.Wait();
         try
         {
-            document = DocLib.Instance.GetDocReader(path, new PageDimensions(ThumbnailPixelsPerPoint));
+            var document = DocLib.Instance.GetDocReader(path, new PageDimensions(ThumbnailPixelsPerPoint));
             var totalPages = document.GetPageCount();
             if (totalPages <= 0)
             {
                 return null;
             }
 
-            // A one-page document has no rail. Counting it is enough; do not
-            // rasterize page one merely to discover that the rail stays hidden.
+            // A one-page document has no rail. Counting it and measuring its
+            // page is enough: the measure is what the window opens to, and
+            // page one is not rasterized merely to learn the rail stays hidden.
             startPage = Math.Max(0, startPage);
-            if ((totalPages == 1 && startPage == 0) || startPage >= totalPages)
+            if (totalPages == 1 && startPage == 0)
             {
-                return totalPages;
+                using var only = document.GetPageReader(0);
+                return (1, only.GetPageWidth(), only.GetPageHeight());
+            }
+
+            if (startPage >= totalPages)
+            {
+                return (totalPages, 0, 0);
             }
 
             var pageCount = Math.Min(totalPages - startPage, Math.Clamp(pageLimit, 1, MaxThumbnailPagesPerCall));
             var fitted = false;
             for (var i = 0; i < pageCount; i++)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 using var pageReader = document.GetPageReader(startPage + i);
                 if (RenderPage(pageReader, thumbnail: true) is { } page)
                 {
@@ -348,22 +321,17 @@ internal static class PdfPreviewRenderer
                 // used to drop the whole rail; fit the range instead, at one
                 // scale so the rail stays even. Only a range that has proved
                 // oversized pays to measure every page.
-                if (fitted || ThumbnailFitScale(document, startPage, pageCount, cancellationToken) is not { } scale)
+                if (fitted || ThumbnailFitScale(document, startPage, pageCount) is not { } scale)
                 {
                     return null;
                 }
 
                 fitted = true;
-                Close(document);
                 document = DocLib.Instance.GetDocReader(path, new PageDimensions(scale));
                 i = -1;
             }
 
-            return totalPages;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
+            return (totalPages, 0, 0);
         }
         catch
         {
@@ -371,16 +339,7 @@ internal static class PdfPreviewRenderer
         }
         finally
         {
-            Close(document);
             PdfiumGate.Release();
-        }
-    }
-
-    private static void Close(IDocReader? document)
-    {
-        if (!SkipDocumentTeardown)
-        {
-            document?.Dispose();
         }
     }
 
@@ -389,16 +348,11 @@ internal static class PdfPreviewRenderer
     /// already fits. Every page is measured: a set can open with an ordinary
     /// cover and reach a dieline five pages in.
     /// </summary>
-    private static double? ThumbnailFitScale(
-        IDocReader document,
-        int startPage,
-        int pageCount,
-        CancellationToken cancellationToken)
+    private static double? ThumbnailFitScale(IDocReader document, int startPage, int pageCount)
     {
         double? scale = null;
         for (var i = 0; i < pageCount; i++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
             using var pageReader = document.GetPageReader(startPage + i);
             var width = pageReader.GetPageWidth();
             var height = pageReader.GetPageHeight();
@@ -444,32 +398,20 @@ internal static class PdfPreviewRenderer
     /// largest scale that fits the budget. Refusing it looks to the user
     /// like a damaged file.
     /// </summary>
-    private static PdfPreviewPage? RenderFittedPage(
-        string path,
-        int pageIndex,
-        IPageReader measured,
-        CancellationToken cancellationToken)
+    private static PdfPreviewPage? RenderFittedPage(string path, int pageIndex, IPageReader measured)
     {
-        cancellationToken.ThrowIfCancellationRequested();
         var scale = PageScaleForRasterBudget(
             measured.GetPageWidth(),
             measured.GetPageHeight(),
             PixelsPerPoint);
         var document = DocLib.Instance.GetDocReader(path, new PageDimensions(scale));
-        try
+        if (pageIndex >= document.GetPageCount())
         {
-            if (pageIndex >= document.GetPageCount())
-            {
-                return null;
-            }
+            return null;
+        }
 
-            using var pageReader = document.GetPageReader(pageIndex);
-            return RenderPage(pageReader, thumbnail: false);
-        }
-        finally
-        {
-            Close(document);
-        }
+        using var pageReader = document.GetPageReader(pageIndex);
+        return RenderPage(pageReader, thumbnail: false);
     }
 
     internal static bool IsRasterSizeSafe(int width, int height, bool thumbnail)

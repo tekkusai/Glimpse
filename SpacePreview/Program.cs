@@ -45,12 +45,11 @@ internal static class Program
     private static int RenderPdfThumbnails(string[] args)
     {
         DiagnosticLog.TagProcess("render-pdf-thumbnails");
-        PdfPreviewRenderer.SkipDocumentTeardown = true;
         try
         {
             var pageLimit = int.Parse(args[3], CultureInfo.InvariantCulture);
             var startPage = args.Length > 4 ? int.Parse(args[4], CultureInfo.InvariantCulture) : 0;
-            return PdfPreviewRenderer.TryRenderThumbnailsToDirectory(args[1], args[2], pageLimit, CancellationToken.None, startPage)
+            return PdfPreviewRenderer.TryRenderThumbnailsToDirectory(args[1], args[2], pageLimit, startPage)
                 ? 0
                 : 2;
         }
@@ -69,11 +68,10 @@ internal static class Program
     private static int RenderPdfPage(string[] args)
     {
         DiagnosticLog.TagProcess("render-pdf-page");
-        PdfPreviewRenderer.SkipDocumentTeardown = true;
         try
         {
             var pageIndex = int.Parse(args[2], CultureInfo.InvariantCulture);
-            return PdfPreviewRenderer.TryRenderPageToFile(args[1], pageIndex, args[3], CancellationToken.None) ? 0 : 2;
+            return PdfPreviewRenderer.TryRenderPageToFile(args[1], pageIndex, args[3]) ? 0 : 2;
         }
         catch (Exception ex)
         {
@@ -86,10 +84,9 @@ internal static class Program
     private static int ProvePdfScale(string[] args)
     {
         DiagnosticLog.TagProcess("prove-pdf-scale");
-        PdfPreviewRenderer.SkipDocumentTeardown = true;
         try
         {
-            return PdfPreviewRenderer.RendersLike(args[1], args[2], CancellationToken.None) ? 0 : 2;
+            return PdfPreviewRenderer.RendersLike(args[1], args[2]) ? 0 : 2;
         }
         catch (Exception ex)
         {

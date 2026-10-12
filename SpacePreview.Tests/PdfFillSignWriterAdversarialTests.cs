@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using SpacePreview.Preview;
 
 namespace SpacePreview.Tests;
@@ -19,8 +18,9 @@ public sealed class PdfFillSignWriterAdversarialTests
             sb.Append("1 0 obj\n<</Type /Page>>\n");
         }
 
-        // A sound footer, so the reader gets past the trailer and the
-        // object scan meets three million bytes with no endobj in them.
+        // A sound footer, so the reader gets past the trailer. The index
+        // names the first of them as the catalog, which has no pages: the
+        // three million bytes behind it are never walked.
         var xref = sb.Length;
         sb.Append("xref\n0 2\n0000000000 65535 f \n0000000009 00000 n \n");
         sb.Append($"trailer\n<< /Size 2 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
@@ -28,7 +28,7 @@ public sealed class PdfFillSignWriterAdversarialTests
         var output = path + ".signing";
 
         var sw = Stopwatch.StartNew();
-        Assert.Throws<RegexMatchTimeoutException>(() => PdfFillSignWriter.WriteSignedCopy(
+        Assert.Throws<SignRefusalException>(() => PdfFillSignWriter.WriteSignedCopy(
             path,
             output,
             [new SignPlacement(SignPlacementKind.Date, 0, 0.1, 0.1, 0.2, 0.05, "1/1/2026")]));
@@ -61,7 +61,7 @@ public sealed class PdfFillSignWriterAdversarialTests
         Assert.True(new FileInfo(output).Length > new FileInfo(source).Length);
         // The signed output must still render: the writer's promise is
         // an openable document, not just appended bytes.
-        var page = PdfPreviewRenderer.TryRenderPage(output, 0, CancellationToken.None);
+        var page = PdfPreviewRenderer.TryRenderPage(output, 0);
         Assert.NotNull(page);
     }
 

@@ -128,8 +128,8 @@ public sealed class FillSignFlowTests
         // Both pages render with visible ink: one save, two signed pages.
         for (var page = 0; page < 2; page++)
         {
-            var before = PdfPreviewRenderer.TryRenderPage(source, page, CancellationToken.None);
-            var after = PdfPreviewRenderer.TryRenderPage(output, page, CancellationToken.None);
+            var before = PdfPreviewRenderer.TryRenderPage(source, page);
+            var after = PdfPreviewRenderer.TryRenderPage(output, page);
             Assert.NotNull(before);
             Assert.NotNull(after);
             Assert.True(PixelsDiffer(before!.Bitmap, after!.Bitmap), $"Page {page + 1} shows no ink.");

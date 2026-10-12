@@ -207,10 +207,12 @@ internal sealed class FillSignSurface : Grid
     public int PageIndex => _pageIndex;
 
     /// <summary>
-    /// Brings back work from a draft, on its pages, and says so once. It is
-    /// not a change: nothing is written until the user changes something.
+    /// Brings back work from a draft, on its pages, and says so once. The
+    /// line counts what did not come back: a placement whose signature or
+    /// stamp was replaced or removed since is not restored. It is not a
+    /// change: nothing is written until the user changes something.
     /// </summary>
-    public void Restore(IReadOnlyList<SignPlacement> placements)
+    public void Restore(IReadOnlyList<SignPlacement> placements, int lost = 0)
     {
         foreach (var placement in placements)
         {
@@ -221,7 +223,21 @@ internal sealed class FillSignSurface : Grid
             }
         }
 
-        _notice = HasWork ? RestoredNotice : null;
+        _notice = !HasWork ? null : RestoredNoticeFor(lost);
+        UpdateWorkState();
+    }
+
+    internal static string RestoredNoticeFor(int lost) => lost switch
+    {
+        <= 0 => RestoredNotice,
+        1 => "Your earlier work is back, except 1 item.",
+        _ => $"Your earlier work is back, except {lost} items."
+    };
+
+    /// <summary>A line in the bar's center, there until the next change to the work.</summary>
+    public void ShowNotice(string notice)
+    {
+        _notice = notice;
         UpdateWorkState();
     }
 
@@ -346,7 +362,16 @@ internal sealed class FillSignSurface : Grid
             return;
         }
 
-        _problem = check.Problem + " Open it in another app to sign it.";
+        ShowProblem(check.Problem + " Open it in another app to sign it.");
+    }
+
+    /// <summary>
+    /// This file, or this page, cannot be signed here: the sentence says
+    /// why and what to do, the tools go, and Cancel becomes Close.
+    /// </summary>
+    public void ShowProblem(string sentence)
+    {
+        _problem = sentence;
         DisarmTool();
         CloseSignaturePicker();
         HideInkCapture();
