@@ -55,6 +55,8 @@ internal static partial class EpubPreviewLoader
             var protectedBook = archive.GetEntry("META-INF/encryption.xml") is not null;
 
             var builder = new StringBuilder(32_000);
+            var sections = new StringBuilder(32_000);
+            var unreadable = false;
             builder.Append("<div class=\"md-root\">");
             builder.Append("<h1>");
             builder.Append(WebUtility.HtmlEncode(title));
@@ -90,27 +92,46 @@ internal static partial class EpubPreviewLoader
                         continue;
                     }
 
-                    var preview = BuildChapterPreview(archive, chapter, titles, budget, cancellationToken);
+                    // A chapter that cannot be read costs the book that
+                    // chapter, not the whole preview.
+                    var preview = TryBuildChapterPreview(archive, chapter, titles, budget, cancellationToken);
+                    if (preview is null)
+                    {
+                        unreadable = true;
+                        continue;
+                    }
+
                     if (string.IsNullOrWhiteSpace(preview))
                     {
                         continue;
                     }
 
-                    builder.Append("<section id=\"ch-");
-                    builder.Append(spineIndex);
-                    builder.Append('"');
+                    sections.Append("<section id=\"ch-");
+                    sections.Append(spineIndex);
+                    sections.Append('"');
                     if (titles.Count == 0 || titles.ContainsKey(chapter.Path))
                     {
-                        builder.Append(" data-title=\"");
-                        builder.Append(WebUtility.HtmlEncode(TitleFor(chapter.Path, titles)));
-                        builder.Append('"');
+                        sections.Append(" data-title=\"");
+                        sections.Append(WebUtility.HtmlEncode(TitleFor(chapter.Path, titles)));
+                        sections.Append('"');
                     }
 
-                    builder.Append("><hr>");
-                    builder.Append(preview);
-                    builder.Append("</section>");
+                    sections.Append("><hr>");
+                    sections.Append(preview);
+                    sections.Append("</section>");
                 }
 
+                if (unreadable)
+                {
+                    // Said once, above the text, however many chapters went.
+                    builder.Append("<p class=\"notice\" id=\"epub-unreadable\">");
+                    builder.Append(sections.Length > 0
+                        ? "Part of this book can't be shown here. Open the book to read all of it."
+                        : "This book's text can't be shown here. Open the book to read it.");
+                    builder.Append("</p>");
+                }
+
+                builder.Append(sections);
                 if (!budget.HasText)
                 {
                     builder.Append("<p id=\"epub-rest\"><em>Showing the beginning of this book. Open the book for the rest.</em></p>");
@@ -156,7 +177,7 @@ internal static partial class EpubPreviewLoader
 
     private static string? FindPackagePath(ZipArchive archive, CancellationToken cancellationToken = default)
     {
-        var container = LoadXml(archive, "META-INF/container.xml", cancellationToken);
+        var container = TryLoadXml(archive, "META-INF/container.xml", cancellationToken);
         var rootFile = container?
             .Descendants()
             .FirstOrDefault(e => e.Name.LocalName.Equals("rootfile", StringComparison.OrdinalIgnoreCase));
@@ -215,7 +236,7 @@ internal static partial class EpubPreviewLoader
             item.Properties.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("nav", StringComparer.OrdinalIgnoreCase));
         if (nav is not null)
         {
-            var navXml = LoadXml(archive, nav.Path, cancellationToken);
+            var navXml = TryLoadXml(archive, nav.Path, cancellationToken);
             if (navXml is not null)
             {
                 foreach (var link in navXml.Descendants().Where(e => e.Name.LocalName.Equals("a", StringComparison.OrdinalIgnoreCase)))
@@ -231,7 +252,7 @@ internal static partial class EpubPreviewLoader
             ?.Attribute("toc")?.Value;
         if (!string.IsNullOrWhiteSpace(tocId) && manifest.TryGetValue(tocId, out var ncx))
         {
-            var ncxXml = LoadXml(archive, ncx.Path, cancellationToken);
+            var ncxXml = TryLoadXml(archive, ncx.Path, cancellationToken);
             if (ncxXml is not null)
             {
                 foreach (var point in ncxXml.Descendants().Where(e => e.Name.LocalName.Equals("navPoint", StringComparison.OrdinalIgnoreCase)))
@@ -246,20 +267,20 @@ internal static partial class EpubPreviewLoader
         return result;
     }
 
-    private static string? BuildChapterPreview(
+    /// <summary>
+    /// The chapter's sanitized markup, or null when it cannot be read: not
+    /// in the book, past the size cap, not XML (a text/html chapter that is
+    /// real HTML), nested too deep, or with no body.
+    /// </summary>
+    private static string? TryBuildChapterPreview(
         ZipArchive archive,
         ManifestItem chapter,
         IReadOnlyDictionary<string, string> titles,
         BookBudget budget,
         CancellationToken cancellationToken)
     {
-        var xml = LoadXml(archive, chapter.Path, cancellationToken);
-        if (xml is null)
-        {
-            return null;
-        }
-
-        var body = xml.Descendants().FirstOrDefault(e => e.Name.LocalName.Equals("body", StringComparison.OrdinalIgnoreCase));
+        var xml = TryLoadXml(archive, chapter.Path, cancellationToken);
+        var body = xml?.Descendants().FirstOrDefault(e => e.Name.LocalName.Equals("body", StringComparison.OrdinalIgnoreCase));
         if (body is null)
         {
             return null;
@@ -423,6 +444,27 @@ internal static partial class EpubPreviewLoader
         return $"data:{contentType};base64,{Convert.ToBase64String(bytes, 0, length)}";
     }
 
+    /// <summary>
+    /// A part of the book the preview can do without: its container file,
+    /// its navigation, one chapter. Unreadable, it is as good as absent.
+    /// </summary>
+    private static XDocument? TryLoadXml(ZipArchive archive, string entryPath, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return LoadXml(archive, entryPath, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"epub part unreadable: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
     private static XDocument? LoadXml(
         ZipArchive archive,
         string entryPath,
@@ -435,16 +477,93 @@ internal static partial class EpubPreviewLoader
             return null;
         }
 
+        // The zip's length is a claim: read one byte past it to catch a lie.
+        var bytes = new byte[entry.Length + 1];
+        int length;
+        using (var stream = entry.Open())
+        {
+            length = stream.ReadAtLeast(bytes, bytes.Length, throwOnEndOfStream: false);
+        }
+
+        if (length != entry.Length)
+        {
+            return null;
+        }
+
+        var xml = ResolveNamedEntities(bytes.AsSpan(0, length));
         var settings = new XmlReaderSettings
         {
             DtdProcessing = DtdProcessing.Ignore,
             XmlResolver = null,
             MaxCharactersInDocument = MaxXmlBytes
         };
-        var document = XmlNesting.Load(entry.Open, settings, LoadOptions.PreserveWhitespace);
+        var document = XmlNesting.Load(() => new MemoryStream(xml, writable: false), settings, LoadOptions.PreserveWhitespace);
         cancellationToken.ThrowIfCancellationRequested();
         return document;
     }
+
+    /// <summary>
+    /// EPUB 2 writes &amp;nbsp; and &amp;mdash; freely: its chapters may use
+    /// the XHTML entity set, which XML knows only through the XHTML DTD. A
+    /// book's DTD is never processed, so each name becomes a character
+    /// reference before the parse. A name XHTML does not define becomes its
+    /// own text, as a browser shows it. Comments and CDATA pass untouched.
+    /// </summary>
+    internal static byte[] ResolveNamedEntities(ReadOnlySpan<byte> xml)
+    {
+        // The names are ASCII, so this reads UTF-8 and the one-byte code
+        // pages. UTF-16 and UTF-32 start with a mark or a zero byte, and
+        // keep XML's own five.
+        if (xml.Length >= 2 && (xml[0] is 0xFF or 0xFE or 0x00 || xml[1] == 0x00))
+        {
+            return xml.ToArray();
+        }
+
+        var output = new MemoryStream(xml.Length + 256);
+        var copied = 0;
+        var at = 0;
+        while (at < xml.Length)
+        {
+            var rest = xml[at..];
+            if (rest[0] == (byte)'<')
+            {
+                var close = rest.StartsWith("<!--"u8) ? "-->"u8 : rest.StartsWith("<![CDATA["u8) ? "]]>"u8 : default;
+                var end = close.IsEmpty ? -1 : rest.IndexOf(close);
+                at += end < 0 ? 1 : end + close.Length;
+                continue;
+            }
+
+            var semicolon = rest[0] == (byte)'&' ? rest[..Math.Min(rest.Length, MaxEntityName + 2)].IndexOf((byte)';') : -1;
+            if (semicolon < 2 || rest[1..semicolon].IndexOfAnyExcept(EntityNameBytes) >= 0)
+            {
+                at++;
+                continue;
+            }
+
+            var name = Encoding.ASCII.GetString(rest[1..semicolon]);
+            if (name is not ("amp" or "lt" or "gt" or "quot" or "apos"))
+            {
+                var decoded = WebUtility.HtmlDecode($"&{name};");
+                var reference = decoded.Length > 1 && decoded[0] == '&'
+                    ? $"&amp;{name};"
+                    : string.Concat(decoded.EnumerateRunes().Select(rune => $"&#{rune.Value};"));
+                output.Write(xml[copied..at]);
+                output.Write(Encoding.ASCII.GetBytes(reference));
+                copied = at + semicolon + 1;
+            }
+
+            at += semicolon + 1;
+        }
+
+        output.Write(xml[copied..]);
+        return output.ToArray();
+    }
+
+    // The longest XHTML name is "thetasym", eight letters; a longer run is not a name.
+    private const int MaxEntityName = 32;
+
+    private static readonly System.Buffers.SearchValues<byte> EntityNameBytes =
+        System.Buffers.SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"u8);
 
     private static string? MetadataValue(XDocument package, string name)
     {

@@ -68,6 +68,7 @@ public sealed class EpubPreviewLoaderTests
 
     // A chapter nested past the limit is refused before the sanitizer, or a
     // value read from it, can recurse that deep; ordinary nesting reads.
+    // The refused chapter is left out and the rest of the book shows.
     [Fact]
     public void AChapterNestedPastTheLimitIsRefused()
     {
@@ -77,7 +78,11 @@ public sealed class EpubPreviewLoaderTests
         CreateMinimalEpub(deep, chapter2Text: Nested(XmlNesting.MaxDepth + 50, "Deep text"));
         CreateMinimalEpub(ordinary, chapter2Text: Nested(40, "Deep text"));
 
-        Assert.Null(EpubPreviewLoader.TryBuildBody(deep));
+        var refused = EpubPreviewLoader.TryBuildBody(deep);
+        Assert.NotNull(refused);
+        Assert.DoesNotContain("Deep text", refused, StringComparison.Ordinal);
+        Assert.Contains("Hello from the book", refused, StringComparison.Ordinal);
+        Assert.Contains("epub-unreadable", refused, StringComparison.Ordinal);
         Assert.Contains("Deep text", EpubPreviewLoader.TryBuildBody(ordinary), StringComparison.Ordinal);
     }
 
