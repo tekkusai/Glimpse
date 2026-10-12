@@ -35,19 +35,33 @@ public partial class PreviewWindow
 
     /// <summary>
     /// Untrusted HTML gets Quick Look semantics: no scripts, no network.
-    /// Navigation blocking alone is not enough; subresources (an image, a
-    /// stylesheet, a tracking pixel) must not phone home either. Local data
-    /// stays allowed: file content and data: URIs. UNC-shaped file URLs are
-    /// blocked because they are network requests, not local files.
+    /// One rule (<see cref="IsAllowedUntrustedHtmlResource"/>) judges the
+    /// page's navigations, every frame's, and every request any frame
+    /// makes: an image, a stylesheet or a tracking pixel must not phone
+    /// home from anywhere in the page. The browser's dead proxy
+    /// (WebViewEnvironment) stands under all of it.
+    /// <paramref name="pagePath"/> is the saved page being shown, and
+    /// matters only when it sits on a share.
     /// </summary>
-    private static void HardenForUntrustedHtml(Microsoft.Web.WebView2.Core.CoreWebView2 core)
+    internal static void HardenForUntrustedHtml(CoreWebView2 core, string? pagePath = null)
     {
+        var shareFolder = ShareFolderOf(pagePath);
         core.Settings.IsScriptEnabled = false;
         core.NavigationStarting += (_, args) =>
         {
-            if (!IsAllowedUntrustedHtmlResource(args.Uri))
+            if (!IsAllowedUntrustedHtmlResource(args.Uri, shareFolder))
             {
                 args.Cancel = true;
+            }
+        };
+        core.FrameNavigationStarting += (_, args) =>
+        {
+            // A srcdoc frame goes too: sandboxed, its requests reach no
+            // WebResourceRequested filter, so it must not load at all.
+            if (!IsAllowedUntrustedHtmlResource(args.Uri, shareFolder))
+            {
+                args.Cancel = true;
+                DiagnosticLog.Write($"webview blocked frame {DiagnosticLog.DescribeUri(args.Uri)}");
             }
         };
         core.NewWindowRequested += (_, args) =>
@@ -55,10 +69,11 @@ public partial class PreviewWindow
             args.Handled = true;
             DiagnosticLog.Write($"webview blocked popup {DiagnosticLog.DescribeUri(args.Uri)}");
         };
-        core.AddWebResourceRequestedFilter("*", Microsoft.Web.WebView2.Core.CoreWebView2WebResourceContext.All);
+        // The two-argument filter misses every sandboxed frame's requests.
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
         core.WebResourceRequested += (_, args) =>
         {
-            if (!IsAllowedUntrustedHtmlResource(args.Request.Uri))
+            if (!IsAllowedUntrustedHtmlResource(args.Request.Uri, shareFolder))
             {
                 args.Response = core.Environment.CreateWebResourceResponse(null, 403, "Blocked", "");
                 DiagnosticLog.Write($"webview blocked remote resource {DiagnosticLog.DescribeUri(args.Request.Uri)}");
@@ -66,7 +81,15 @@ public partial class PreviewWindow
         };
     }
 
-    internal static bool IsAllowedUntrustedHtmlResource(string uri)
+    /// <summary>
+    /// What a saved page may load or navigate to: data: URIs and files. A
+    /// page on a local disk reads local disks and no share, because a share
+    /// is a network request to a host the page chose. A page on a share
+    /// (<paramref name="shareFolder"/>, from <see cref="ShareFolderOf"/>)
+    /// reads its own folder tree and nothing else, not even a local disk:
+    /// previewing it asks its server only for what sits beside it.
+    /// </summary>
+    internal static bool IsAllowedUntrustedHtmlResource(string uri, string? shareFolder = null)
     {
         if (!Uri.TryCreate(uri, UriKind.Absolute, out var parsed))
         {
@@ -83,12 +106,46 @@ public partial class PreviewWindow
             return false;
         }
 
+        if (shareFolder is not null)
+        {
+            try
+            {
+                // GetFullPath folds "..", and cannot climb out of \\server\share.
+                return parsed.IsUnc
+                    && Path.GetFullPath(parsed.LocalPath).StartsWith(shareFolder, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         if (string.IsNullOrEmpty(parsed.Host))
         {
             return !parsed.LocalPath.StartsWith(@"\\", StringComparison.Ordinal);
         }
 
         return parsed.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The folder tree a saved page on a share may read: its own folder,
+    /// ending in a separator. Null for a page on a local disk.
+    /// </summary>
+    internal static string? ShareFolderOf(string? pagePath)
+    {
+        try
+        {
+            return Uri.TryCreate(pagePath, UriKind.Absolute, out var page)
+                   && page.IsUnc
+                   && Path.GetDirectoryName(Path.GetFullPath(page.LocalPath)) is { Length: > 0 } folder
+                ? folder.TrimEnd('\\') + '\\'
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     internal static bool IsSafeLocalPreviewTarget(string path)
@@ -241,7 +298,7 @@ public partial class PreviewWindow
         return GeneratedHtmlNavigationAction.Cancel;
     }
 
-    private static void HardenForGeneratedHtml(CoreWebView2 core, GeneratedHtmlDocument document)
+    internal static void HardenForGeneratedHtml(CoreWebView2 core, GeneratedHtmlDocument document)
     {
         core.Settings.IsScriptEnabled = false;
         if (!string.IsNullOrWhiteSpace(document.ResourceHost)
@@ -280,7 +337,13 @@ public partial class PreviewWindow
                 OpenExternalUri(args.Uri);
             }
         };
-        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        // Glimpse writes no frames, so one that appears is not its own.
+        core.FrameNavigationStarting += (_, args) =>
+        {
+            args.Cancel = true;
+            DiagnosticLog.Write($"generated html blocked frame {DiagnosticLog.DescribeUri(args.Uri)}");
+        };
+        core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All, CoreWebView2WebResourceRequestSourceKinds.All);
         core.WebResourceRequested += (_, args) =>
         {
             if (!IsAllowedGeneratedHtmlResource(document.HtmlPath, document.ResourceHost, args.Request.Uri))
@@ -504,7 +567,16 @@ public partial class PreviewWindow
                 RememberWebViewProcesses(webView.CoreWebView2);
                 webView.CoreWebView2.ContextMenuRequested += (_, args) => OnWebContextMenuRequested(webView, args);
                 webView.CoreWebView2.ProcessFailed += (_, args) =>
-                    ReportFailure(new InvalidOperationException($"browser process failed ({args.ProcessFailedKind})"));
+                {
+                    if (ProcessFailureLosesPage(args.ProcessFailedKind, kind))
+                    {
+                        ReportFailure(new InvalidOperationException($"browser process failed ({args.ProcessFailedKind})"));
+                    }
+                    else
+                    {
+                        DiagnosticLog.Write($"browser process failed, page kept ({args.ProcessFailedKind}): {diagnosticLabel}");
+                    }
+                };
                 configure?.Invoke(webView.CoreWebView2);
                 var uri = await source;
                 await webView.MayNavigate;
@@ -527,6 +599,21 @@ public partial class PreviewWindow
     }
 
     /// <summary>
+    /// Whether a failed browser process took the page with it. The browser
+    /// starts a new GPU or utility process by itself and an unresponsive
+    /// renderer may answer again, so a driver reset must not turn a pinned
+    /// preview into an error card. A frame's process takes only that frame,
+    /// except in the PDF viewer, whose document may be drawn in one: there
+    /// it stays the failure it was.
+    /// </summary>
+    internal static bool ProcessFailureLosesPage(CoreWebView2ProcessFailedKind failure, WebSurfaceKind surface) => failure switch
+    {
+        CoreWebView2ProcessFailedKind.BrowserProcessExited or CoreWebView2ProcessFailedKind.RenderProcessExited => true,
+        CoreWebView2ProcessFailedKind.FrameRenderProcessExited => surface == WebSurfaceKind.PdfViewer,
+        _ => false
+    };
+
+    /// <summary>
     /// A saved page is somebody else's document: opaque on white like a
     /// browser, staged hidden and shown in one cut once laid out.
     /// </summary>
@@ -540,7 +627,7 @@ public partial class PreviewWindow
             ex => _ = ShowTextOrFileFallbackAsync(path),
             configure: core =>
             {
-                HardenForUntrustedHtml(core);
+                HardenForUntrustedHtml(core, path);
                 NormalizeHtmlPageScrolling(core);
             }));
         return grid;
@@ -697,65 +784,11 @@ public partial class PreviewWindow
         };
     }
 
-    /// <summary>
-    /// One temp file per source: rapid A-B-A scrubbing must not read a file
-    /// another preview just overwrote. The directory is pruned when it grows.
-    /// </summary>
-    internal static string TempHtmlPath(string folder, string sourcePath)
-    {
-        var htmlDir = AppPaths.InDataRoot(folder);
-        Directory.CreateDirectory(htmlDir);
-        try
-        {
-            PruneTempHtmlDirectory(htmlDir);
-        }
-        catch
-        {
-            // Pruning is best-effort housekeeping.
-        }
-
-        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            Encoding.UTF8.GetBytes(sourcePath.ToUpperInvariant())))[..16];
-        return Path.Combine(htmlDir, hash + ".html");
-    }
-
-    internal static void PruneTempHtmlDirectory(string htmlDir)
-    {
-        const int maxFiles = 128;
-        var keepNewerThan = DateTime.UtcNow - TimeSpan.FromMinutes(10);
-        var files = new DirectoryInfo(htmlDir)
-            .EnumerateFiles("*.html")
-            .OrderBy(file => file.LastWriteTimeUtc)
-            .ToList();
-        var extraCount = files.Count - maxFiles;
-        if (extraCount <= 0)
-        {
-            return;
-        }
-
-        foreach (var file in files)
-        {
-            if (extraCount <= 0)
-            {
-                return;
-            }
-
-            if (file.LastWriteTimeUtc > keepNewerThan)
-            {
-                continue;
-            }
-
-            try
-            {
-                file.Delete();
-                extraCount--;
-            }
-            catch
-            {
-                // A file still in use by a live preview stays.
-            }
-        }
-    }
+    // MERGE: PreviewWindow.Image.cs, another lane's file, still writes the
+    // image page through this. It goes when BuildBrowserImagePreview there
+    // calls ImagePage.Build and WriteImageHtml is deleted.
+    internal static string TempHtmlPath(string folder, string sourcePath) =>
+        HtmlCache.PathFor(folder, sourcePath);
 
     private static void OpenExternalUri(string uri)
     {

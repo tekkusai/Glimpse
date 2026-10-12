@@ -124,10 +124,9 @@ public partial class PreviewWindow
 
     private async Task<FrameworkElement> BuildMediaPreviewAsync(string path, long version, CancellationToken token)
     {
-        var palette = Theme.Current;
         var settings = Settings.Current;
         var source = await Task.Run(
-            () => MediaPlayerPage.Build(path, palette, settings.MediaVolume, settings.MediaMuted),
+            () => MediaPlayerPage.Build(path, settings.MediaVolume, settings.MediaMuted),
             token);
         token.ThrowIfCancellationRequested();
 
@@ -324,12 +323,11 @@ public partial class PreviewWindow
     internal static PreviewAction? MediaCodecStoreAction(Mp4CodecInfo? codecs) =>
         codecs?.HasHevcVideo == true ? HevcFix : null;
 
-    private static string MediaOpenInsteadText(string path)
-    {
-        var extension = Path.GetExtension(path);
-        var app = string.IsNullOrEmpty(extension) ? null : NativeMethods.TryGetFriendlyAppName(extension);
-        return string.IsNullOrWhiteSpace(app) || app.Equals("Pick an app", StringComparison.OrdinalIgnoreCase)
-            ? "Open it in a media player instead."
-            : $"Open it with {app} instead.";
-    }
+    // The app is the one the header's Open pill names. A type with no
+    // default app has none: Windows answers with its app picker, whose name
+    // follows the system's language.
+    internal static string MediaOpenInsteadText(string path) =>
+        ResolveOpenTarget(path, isDirectory: false).AppName is { } app
+            ? $"Open it with {app} instead."
+            : "Open it in a media player instead.";
 }

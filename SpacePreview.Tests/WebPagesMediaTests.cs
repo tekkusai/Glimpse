@@ -7,8 +7,8 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// The player: one cached page per kind and theme, the track in the query,
-/// audio in the theme, video on black.
+/// The player: one cached page per kind, the track in the query, audio in
+/// the theme, video on black.
 /// </summary>
 public sealed class WebPagesMediaTests
 {
@@ -19,8 +19,8 @@ public sealed class WebPagesMediaTests
         var first = WriteSilentWav(Path.Combine(temp.Path, "first take.wav"));
         var second = WriteSilentWav(Path.Combine(temp.Path, "second.wav"));
 
-        var a = MediaPlayerPage.Build(first, Theme.Dark, savedVolume: 0.5, muted: false);
-        var b = MediaPlayerPage.Build(second, Theme.Dark, savedVolume: 0.9, muted: true);
+        var a = MediaPlayerPage.Build(first, savedVolume: 0.5, muted: false);
+        var b = MediaPlayerPage.Build(second, savedVolume: 0.9, muted: true);
 
         // A new track or a volume change never rewrites the page.
         Assert.Equal(a.LocalPath, b.LocalPath);
@@ -33,33 +33,34 @@ public sealed class WebPagesMediaTests
         Assert.Equal(new Uri(first).AbsoluteUri, HttpUtility.ParseQueryString(a.Query)["src"]);
 
         // A saved volume that is not a number opens at the default instead of breaking the page.
-        var odd = MediaPlayerPage.Build(first, Theme.Dark, savedVolume: double.NaN, muted: false);
+        var odd = MediaPlayerPage.Build(first, savedVolume: double.NaN, muted: false);
         Assert.Equal("0.75", HttpUtility.ParseQueryString(odd.Query)["volume"]);
     }
 
     [Fact]
     public void PlayerPagesShareTheTokenBlockAndRevealThemselves()
     {
-        WebPagesStyleTests.AssertSharedPageChrome(MediaPlayerPage.Page(isAudio: true, Theme.Current));
-        WebPagesStyleTests.AssertSharedPageChrome(MediaPlayerPage.Page(isAudio: false, Theme.Current));
+        WebPagesStyleTests.AssertSharedPageChrome(MediaPlayerPage.Page(isAudio: true));
+        WebPagesStyleTests.AssertSharedPageChrome(MediaPlayerPage.Page(isAudio: false));
     }
 
     [Fact]
     public void AudioFollowsTheThemeAndVideoStaysOnBlack()
     {
-        var lightAudio = MediaPlayerPage.Page(isAudio: true, Theme.Light);
-        var lightVideo = MediaPlayerPage.Page(isAudio: false, Theme.Light);
+        var audio = MediaPlayerPage.Page(isAudio: true);
+        var video = MediaPlayerPage.Page(isAudio: false);
 
-        Assert.Contains("<html class=\"audio\">", lightAudio, StringComparison.Ordinal);
-        Assert.Contains($"--canvas: {WebPagesStyleTests.Hex(Theme.Light.CanvasBg)};", lightAudio, StringComparison.Ordinal);
-        Assert.Contains("--ctl-text: var(--text);", lightAudio, StringComparison.Ordinal);
+        // Audio's controls are the theme's tokens, so they turn with it.
+        Assert.Contains("<html class=\"audio\">", audio, StringComparison.Ordinal);
+        Assert.Contains("--ctl-text: var(--text);", audio, StringComparison.Ordinal);
+        Assert.DoesNotContain($"--ctl-text: {WebPagesStyleTests.Hex(Theme.OverlayText)};", audio, StringComparison.Ordinal);
 
-        Assert.Contains("<html class=\"video\">", lightVideo, StringComparison.Ordinal);
-        Assert.Contains("html.video { background: #000; }", lightVideo, StringComparison.Ordinal);
+        Assert.Contains("<html class=\"video\">", video, StringComparison.Ordinal);
+        Assert.Contains("html.video { background: #000; }", video, StringComparison.Ordinal);
         // No black frame with controls before the picture.
-        Assert.Contains("html.video:not(.ready) { animation: none; opacity: 0; }", lightVideo, StringComparison.Ordinal);
-        Assert.Contains("media.addEventListener('loadeddata', ready, { once: true });", lightVideo, StringComparison.Ordinal);
-        Assert.Contains($"--ctl-text: {WebPagesStyleTests.Hex(Theme.OverlayText)};", lightVideo, StringComparison.Ordinal);
+        Assert.Contains("html.video:not(.ready) { animation: none; opacity: 0; }", video, StringComparison.Ordinal);
+        Assert.Contains("media.addEventListener('loadeddata', ready, { once: true });", video, StringComparison.Ordinal);
+        Assert.Contains($"--ctl-text: {WebPagesStyleTests.Hex(Theme.OverlayText)};", video, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -67,7 +68,7 @@ public sealed class WebPagesMediaTests
     [InlineData(false)]
     public void SeekAndVolumeAreOneSliderFilledWithTheAccent(bool isAudio)
     {
-        var page = MediaPlayerPage.Page(isAudio, Theme.Dark);
+        var page = MediaPlayerPage.Page(isAudio);
 
         // One fill for every slider, set where the shared look is set; no
         // slider names a fill of its own.
@@ -79,7 +80,7 @@ public sealed class WebPagesMediaTests
     [Fact]
     public void QueryValuesNeverBecomeMarkup()
     {
-        foreach (var page in new[] { MediaPlayerPage.Page(true, Theme.Dark), MediaPlayerPage.Page(false, Theme.Dark) })
+        foreach (var page in new[] { MediaPlayerPage.Page(true), MediaPlayerPage.Page(false) })
         {
             Assert.Contains("element.textContent = value", page, StringComparison.Ordinal);
             Assert.DoesNotContain("innerHTML", page, StringComparison.Ordinal);
@@ -92,7 +93,7 @@ public sealed class WebPagesMediaTests
     [Fact]
     public void ButtonsAndArrowKeysSkipTheSameStep()
     {
-        var page = MediaPlayerPage.Page(isAudio: false, Theme.Dark);
+        var page = MediaPlayerPage.Page(isAudio: false);
         var nudge = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "public bool TryNudgeMediaFromArrow");
 
         Assert.Contains($"const SKIP = {MediaPlayerPage.SkipSeconds};", page, StringComparison.Ordinal);
@@ -123,6 +124,14 @@ public sealed class WebPagesMediaTests
         Assert.Equal(written, ShellThumbnailProvider.TryWriteThumbnailPng(missing, key));
         Assert.Empty(Directory.GetFiles(AppPaths.InDataRoot("MediaArtwork"), "*.tmp"));
     }
+
+    // The failure card names an app only when the type has one. With none,
+    // Windows answers with its app picker, whose name follows its language.
+    [Fact]
+    public void ATypeWithNoDefaultAppGetsTheGeneralAdvice() =>
+        Assert.Equal(
+            "Open it in a media player instead.",
+            PreviewWindow.MediaOpenInsteadText(@"C:\clips\take.glimpse-no-app-41c7"));
 
     private static string WriteSilentWav(string path)
     {

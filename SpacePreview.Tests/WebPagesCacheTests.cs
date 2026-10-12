@@ -50,6 +50,21 @@ public sealed class WebPagesCacheTests
         Assert.True(DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromHours(1));
     }
 
+    // 2.0 kept Office pictures in a folder nothing has written since. It
+    // goes whole, where a listed cache folder would only ever be thinned.
+    [Fact]
+    public void AFolderOnlyOlderReleasesWroteIsRemoved()
+    {
+        using var temp = new TempDirectory();
+        var leftover = Directory.CreateDirectory(Path.Combine(temp.Path, "OfficeMedia")).FullName;
+        File.WriteAllText(Path.Combine(leftover, "image1.png"), "png");
+
+        CacheHousekeeping.Run(temp.Path, DateTime.UtcNow);
+
+        Assert.False(Directory.Exists(leftover));
+        Assert.DoesNotContain("OfficeMedia", CacheHousekeeping.Folders);
+    }
+
     [Fact]
     public void HousekeepingCoversEveryFolderOfPagesAndArtwork()
     {

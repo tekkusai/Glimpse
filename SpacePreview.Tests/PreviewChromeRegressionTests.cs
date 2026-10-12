@@ -183,7 +183,7 @@ public sealed class PreviewChromeRegressionTests
 
         // The player reports an engine failure to the host, which owns the
         // failure card; the page never keeps a dead player of its own.
-        foreach (var page in new[] { MediaPlayerPage.Page(isAudio: true, Theme.Dark), MediaPlayerPage.Page(isAudio: false, Theme.Light) })
+        foreach (var page in new[] { MediaPlayerPage.Page(isAudio: true), MediaPlayerPage.Page(isAudio: false) })
         {
             Assert.Contains("window.glimpseToggleMedia =", page, StringComparison.Ordinal);
             Assert.Contains("media.addEventListener('error', () => post({ error:", page, StringComparison.Ordinal);

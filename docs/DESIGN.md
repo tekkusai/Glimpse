@@ -54,8 +54,8 @@ An open or pinned preview follows a theme change without reloading. Every
 part Glimpse draws itself takes its colors by resource (`Theme.Themed`), and
 what a resource can't carry, like a shadow's strength, is set again on the
 change (`Theme.Follow`). Each browser gets the new `PreferredColorScheme`,
-and the pages Glimpse writes carry both palettes, the second behind
-`prefers-color-scheme`, so they turn with it. Fill & Sign keeps the colors
+and the pages Glimpse writes carry both palettes, light as written and dark
+behind `prefers-color-scheme`, so they turn with it. Fill & Sign keeps the colors
 it opened with.
 
 ## Type
@@ -218,8 +218,8 @@ object (a file card, a folder, an archive, audio, a font) opens at the
 compact default.
 
 Pages Glimpse writes (code, markdown, text, media player, image viewer,
-spreadsheets, EPUB) take their colors from one CSS block generated from the
-current palette. They style scrollbars to match the WPF ones (no arrow buttons,
+spreadsheets, EPUB) take their colors from one stylesheet generated from both
+palettes, with one name per token. They style scrollbars to match the WPF ones (no arrow buttons,
 rounded thumb in `ScrollThumb`), use the accent for `::selection`, and start
 transparent so they dissolve in over the canvas.
 

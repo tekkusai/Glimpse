@@ -3,7 +3,6 @@ using System.IO;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Windows.Media;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
@@ -22,12 +21,11 @@ internal static partial class SheetHtml
     private const int GutterWidth = 40;
 
     /// <summary>
-    /// The page's chrome in both themes. The cache stays theme-neutral:
-    /// prefers-color-scheme picks the palette, and the preview sets the
-    /// browser's scheme from the app theme. Cells stay paper in both,
-    /// because a sheet's own colors were authored for white.
+    /// The stylesheet every page starts from, then the sheet's own rules.
+    /// Cells stay paper in both themes, because a sheet's own colors were
+    /// authored for white.
     /// </summary>
-    internal static readonly string Style = BuildStyle(Theme.Light, Theme.Dark);
+    internal static readonly string Style = "<style>\n" + GeneratedHtmlTheme.PageCss + SheetRules(Theme.Light) + "</style>";
 
     public static void Normalize(string htmlPath)
     {
@@ -79,7 +77,6 @@ internal static partial class SheetHtml
         + WebUtility.HtmlEncode(title)
         + "</title>"
         + Style
-        + "<style>body{font-family:\"Segoe UI Variable Text\",\"Segoe UI\",sans-serif}</style>"
         + "</head><body><div id=\"sp-wrap\">"
         + DecorateSheetTable(table)
         + "</div></body></html>";
@@ -121,53 +118,43 @@ internal static partial class SheetHtml
         }
     }
 
-    private static string BuildStyle(ThemePalette light, ThemePalette dark)
-    {
-        static string Css(Color color) => color.A == 255
-            ? $"#{color.R:X2}{color.G:X2}{color.B:X2}"
-            : string.Create(CultureInfo.InvariantCulture, $"rgba({color.R},{color.G},{color.B},{color.A / 255.0:0.###})");
+    private static string SheetRules(ThemePalette paper) => $$"""
+html, body { height: 100%; margin: 0; overflow: hidden; }
 
-        static string Alpha(Color color, double alpha) =>
-            string.Create(CultureInfo.InvariantCulture, $"rgba({color.R},{color.G},{color.B},{alpha:0.##})");
+/* Calc exports x-small text against columns sized for 11 pt. */
+body, div, table, thead, tbody, tfoot, tr, th, td, p { font-size: 13px; }
 
-        static string Palette(ThemePalette p) =>
-            $"--canvas:{Css(p.CanvasBg)};--chrome:{Css(p.ChromeBg)};--edge:{Css(p.RaisedBorder)};"
-            + $"--label:{Css(p.TextSecondary)};--thumb:{Alpha(p.ScrollThumb, 0.6)};--thumb-hover:{Alpha(p.ScrollThumb, 0.95)};"
-            + $"--select:{Alpha(p.Accent, 0.3)}";
+#sp-wrap { height: 100%; overflow: auto; }
 
-        // Paper is the light palette's: cells keep their authored colors.
-        var paper = light;
-        return "<style>"
-            + $":root{{color-scheme:light;{Palette(light)}}}"
-            + $"@media (prefers-color-scheme:dark){{:root{{color-scheme:dark;{Palette(dark)}}}}}"
-            // The one reveal: the page dissolves over the canvas, every tab too.
-            + "html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards}"
-            + "@keyframes glimpse-in{from{opacity:0}}"
-            + "@media (prefers-reduced-motion:reduce){html{animation:none}}"
-            + "html,body{height:100%;margin:0;overflow:hidden;background:var(--canvas)}"
-            // Calc exports x-small text against columns sized for 11 pt.
-            + "body,div,table,thead,tbody,tfoot,tr,th,td,p{font-size:13px}"
-            + "::selection{background:var(--select)}"
-            + "#sp-wrap{height:100%;overflow:auto}"
-            + "#sp-wrap::-webkit-scrollbar{width:11px;height:11px}"
-            + "#sp-wrap::-webkit-scrollbar-button{display:none}"
-            + "#sp-wrap::-webkit-scrollbar-track,#sp-wrap::-webkit-scrollbar-corner{background:transparent}"
-            + "#sp-wrap::-webkit-scrollbar-thumb{background:var(--thumb);border:2px solid transparent;border-radius:6px;background-clip:padding-box;min-height:30px}"
-            + "#sp-wrap::-webkit-scrollbar-thumb:hover{background:var(--thumb-hover);background-clip:padding-box}"
-            + $"table{{background:{Css(paper.RaisedBg)};color:{Css(paper.TextPrimary)};margin:24px;outline:1px solid var(--edge)}}"
-            + $"td,th{{padding:3px 8px;box-shadow:inset -1px -1px 0 {Css(paper.Border)}}}"
-            + $"a{{color:{Css(paper.Accent)}}}"
-            // Cell comments export as inline text; Excel shows a red corner.
-            + "comment{display:none}"
-            + "a.comment-indicator{float:right;width:0;height:0;border-top:6px solid #C42B1C;border-left:6px solid transparent}"
-            + "td.sp-h{position:sticky;background:var(--chrome);color:var(--label);"
-            + "font:400 11.5px \"Segoe UI Variable Text\",\"Segoe UI\",sans-serif;"
-            + "text-align:center;vertical-align:middle;padding:3px 6px;box-shadow:inset -1px -1px 0 var(--edge);user-select:none}"
-            + "td.sp-cl{top:0;z-index:3}"
-            + "td.sp-rn{left:0;z-index:2}"
-            + "td.sp-corner{top:0;left:0;z-index:4}"
-            + "</style>";
-    }
+table {
+  margin: 24px;
+  background: {{GeneratedHtmlTheme.Hex(paper.RaisedBg)}};
+  color: {{GeneratedHtmlTheme.Hex(paper.TextPrimary)}};
+  outline: 1px solid var(--raised-border);
+}
+td, th { padding: 3px 8px; box-shadow: inset -1px -1px 0 {{GeneratedHtmlTheme.Hex(paper.Border)}}; }
+a { color: {{GeneratedHtmlTheme.Hex(paper.Accent)}}; }
+
+/* Cell comments export as inline text; Excel shows a red corner. */
+comment { display: none; }
+a.comment-indicator { float: right; width: 0; height: 0; border-top: 6px solid #C42B1C; border-left: 6px solid transparent; }
+
+td.sp-h {
+  position: sticky;
+  padding: 3px 6px;
+  background: var(--chrome);
+  color: var(--text-2);
+  font: 400 11.5px var(--font-ui);
+  text-align: center;
+  vertical-align: middle;
+  box-shadow: inset -1px -1px 0 var(--raised-border);
+  user-select: none;
+}
+td.sp-cl { top: 0; z-index: 3; }
+td.sp-rn { left: 0; z-index: 2; }
+td.sp-corner { top: 0; left: 0; z-index: 4; }
+
+""";
 
     /// <summary>
     /// A multi-sheet workbook becomes one page per sheet, so the preview
@@ -345,7 +332,10 @@ internal static partial class SheetHtml
     [GeneratedRegex("<title>(.*?)</title>", RegexOptions.Singleline)]
     private static partial Regex TitleRegex();
 
-    [GeneratedRegex("<h1>Sheet \\d+: <em>(.*?)</em></h1>", RegexOptions.IgnoreCase)]
+    // "Sheet 1: <em>Budget</em>" in an English LibreOffice, "Tabelle 1: ..."
+    // in a German one. The shape names the sheet; the word before it is the
+    // engine's language.
+    [GeneratedRegex("<h1>[^<]*<em>(.*?)</em></h1>", RegexOptions.IgnoreCase)]
     private static partial Regex SheetHeadingRegex();
 
     [GeneratedRegex("<body[^>]*>", RegexOptions.IgnoreCase)]

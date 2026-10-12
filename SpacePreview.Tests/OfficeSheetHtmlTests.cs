@@ -31,21 +31,24 @@ public sealed class OfficeSheetHtmlTests
         </html>
         """;
 
+    // Both palettes, the dissolve, the scrollbars and the selection are
+    // the stylesheet every page shares; the sheet adds only its own rules.
     [Fact]
-    public void TheSheetTakesBothPalettesFromTheDesignTokens()
+    public void TheSheetStartsFromTheStylesheetEveryPageShares()
     {
-        Assert.Contains($"--canvas:{Hex(Theme.Light.CanvasBg)}", SheetHtml.Style, StringComparison.Ordinal);
-        Assert.Contains("@media (prefers-color-scheme:dark){:root{color-scheme:dark;", SheetHtml.Style, StringComparison.Ordinal);
-        Assert.Contains($"--canvas:{Hex(Theme.Dark.CanvasBg)}", SheetHtml.Style, StringComparison.Ordinal);
-        Assert.Contains($"--chrome:{Hex(Theme.Dark.ChromeBg)}", SheetHtml.Style, StringComparison.Ordinal);
+        WebPagesStyleTests.AssertSharedPageChrome(SheetHtml.Style);
+        Assert.Contains($"--canvas: {Hex(Theme.Dark.CanvasBg)};", SheetHtml.Style, StringComparison.Ordinal);
+        Assert.Contains($"--chrome: {Hex(Theme.Light.ChromeBg)};", SheetHtml.Style, StringComparison.Ordinal);
     }
 
+    // A sheet's own colors were authored for white, so its cells stay
+    // paper in both themes while the canvas and the headers turn.
     [Fact]
-    public void TheSheetDissolvesInLikeEveryOtherPageAndStillsForReducedMotion()
+    public void CellsStayPaperWhileTheChromeFollowsTheTheme()
     {
-        Assert.Contains("html{animation:glimpse-in 160ms cubic-bezier(.2,0,0,1) backwards}", SheetHtml.Style, StringComparison.Ordinal);
-        Assert.Contains("@keyframes glimpse-in{from{opacity:0}}", SheetHtml.Style, StringComparison.Ordinal);
-        Assert.Contains("@media (prefers-reduced-motion:reduce){html{animation:none}}", SheetHtml.Style, StringComparison.Ordinal);
+        Assert.Contains($"background: {Hex(Theme.Light.RaisedBg)};", SheetHtml.Style, StringComparison.Ordinal);
+        Assert.Contains($"color: {Hex(Theme.Light.TextPrimary)};", SheetHtml.Style, StringComparison.Ordinal);
+        Assert.Contains("background: var(--chrome);", SheetHtml.Style, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -64,7 +67,7 @@ public sealed class OfficeSheetHtmlTests
         Assert.Contains("<td class=\"sp-h sp-rn\">2</td>", first, StringComparison.Ordinal);
         Assert.Contains("table-layout:fixed;width:300px", first, StringComparison.Ordinal);
         Assert.DoesNotContain("tracker.example", first, StringComparison.Ordinal);
-        Assert.Contains("font-size:13px", first, StringComparison.Ordinal);
+        Assert.Contains("font-size: 13px", first, StringComparison.Ordinal);
         Assert.DoesNotContain("Second", first, StringComparison.Ordinal);
     }
 

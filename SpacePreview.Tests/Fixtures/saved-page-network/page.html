@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Saved page network check</title>
+<!--
+  Live check for "no network from a saved page". Run listen.ps1 first, then
+  press Space on this file. Every way out asks a different loopback address,
+  so the listener and the log both say which one got through:
+
+    127.0.0.2  an image in the page itself
+    127.0.0.3  an image in a sandboxed srcdoc frame
+    127.0.0.4  an image in a sandboxed data: frame
+    127.0.0.5  a frame from a server
+    127.0.0.6  an image in a sandboxed frame from a file beside the page
+    127.0.0.7  a preconnect
+    127.0.0.8  an image on a share (nothing listens; the log line is the proof)
+-->
+<link rel="preconnect" href="http://127.0.0.7:47811/">
+<style>
+body { font: 15px "Segoe UI", sans-serif; margin: 32px; }
+iframe { display: block; width: 320px; height: 60px; margin: 8px 0; }
+</style>
+</head>
+<body>
+<h1>Saved page network check</h1>
+<p>Nothing on this page may reach the listener.</p>
+<img alt="top" src="http://127.0.0.2:47811/top.png">
+<img alt="share" src="file://127.0.0.8/glimpse-fixture/share.png">
+<iframe sandbox srcdoc="&lt;img alt='srcdoc' src='http://127.0.0.3:47811/srcdoc.png'&gt;"></iframe>
+<iframe sandbox src="data:text/html,&lt;img alt='data' src='http://127.0.0.4:47811/data.png'&gt;"></iframe>
+<iframe src="http://127.0.0.5:47811/frame.html"></iframe>
+<iframe sandbox src="frame.html"></iframe>
+</body>
+</html>

@@ -30,7 +30,7 @@ public sealed class UntrustedHtmlPolicyTests
     public void UntrustedHtmlBlocksPopupNavigationToo()
     {
         var source = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var hardener = TestSource.MethodFrom(source, "private static void HardenForUntrustedHtml");
+        var hardener = TestSource.MethodFrom(source, "internal static void HardenForUntrustedHtml");
 
         Assert.Contains("core.NewWindowRequested", hardener, StringComparison.Ordinal);
         Assert.Contains("args.Handled = true", hardener, StringComparison.Ordinal);
@@ -137,55 +137,11 @@ public sealed class UntrustedHtmlPolicyTests
     public void GeneratedHtmlOpensExternalLinksOnlyFromUserInput()
     {
         var source = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var hardener = TestSource.MethodFrom(source, "private static void HardenForGeneratedHtml");
+        var hardener = TestSource.MethodFrom(source, "internal static void HardenForGeneratedHtml");
 
         Assert.Contains("args.IsUserInitiated", hardener, StringComparison.Ordinal);
         Assert.Equal(2, hardener.Split("args.IsUserInitiated", StringSplitOptions.None).Length - 1);
         Assert.Contains("args.Cancel = true", hardener, StringComparison.Ordinal);
         Assert.Contains("args.Handled = true", hardener, StringComparison.Ordinal);
     }
-
-    [Fact]
-    public void TempHtmlPruneDeletesOldestFilesOnly()
-    {
-        using var temp = new TempDirectory();
-        var oldTime = DateTime.UtcNow - TimeSpan.FromHours(1);
-        var newTime = DateTime.UtcNow;
-
-        for (var i = 0; i < 135; i++)
-        {
-            var path = Path.Combine(temp.Path, $"old-{i:000}.html");
-            File.WriteAllText(path, i.ToString());
-            File.SetLastWriteTimeUtc(path, oldTime.AddSeconds(i));
-        }
-
-        var fresh = Path.Combine(temp.Path, "fresh.html");
-        File.WriteAllText(fresh, "fresh");
-        File.SetLastWriteTimeUtc(fresh, newTime);
-
-        PreviewWindow.PruneTempHtmlDirectory(temp.Path);
-
-        Assert.True(File.Exists(fresh));
-        Assert.Equal(128, Directory.GetFiles(temp.Path, "*.html").Length);
-        Assert.False(File.Exists(Path.Combine(temp.Path, "old-000.html")));
-    }
-
-    [Fact]
-    public void TempHtmlPruneKeepsRecentFilesEvenWhenOverCap()
-    {
-        using var temp = new TempDirectory();
-        var recent = DateTime.UtcNow;
-
-        for (var i = 0; i < 140; i++)
-        {
-            var path = Path.Combine(temp.Path, $"recent-{i:000}.html");
-            File.WriteAllText(path, i.ToString());
-            File.SetLastWriteTimeUtc(path, recent);
-        }
-
-        PreviewWindow.PruneTempHtmlDirectory(temp.Path);
-
-        Assert.Equal(140, Directory.GetFiles(temp.Path, "*.html").Length);
-    }
-
 }

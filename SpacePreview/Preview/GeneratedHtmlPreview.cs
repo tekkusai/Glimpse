@@ -26,16 +26,6 @@ internal sealed record GeneratedHtmlDocument(
     string? ResourceFolder = null)
 {
     public Uri Source => new(HtmlPath, UriKind.Absolute);
-
-    // The page paints the canvas itself; the view under it matches.
-    public System.Drawing.Color Background
-    {
-        get
-        {
-            var color = Theme.Current.CanvasBg;
-            return System.Drawing.Color.FromArgb(color.R, color.G, color.B);
-        }
-    }
 }
 
 internal sealed record GeneratedCodeAttempt(
@@ -57,8 +47,6 @@ internal static partial class GeneratedHtmlPreview
         .UseAutoIdentifiers()
         .Build();
 
-    private static string ThemeKey(ThemePalette palette) => palette.IsDark ? "dark" : "light";
-
     public static GeneratedHtmlDocument? TryBuildMarkdown(string path)
     {
         try
@@ -69,17 +57,16 @@ internal static partial class GeneratedHtmlPreview
                 return null;
             }
 
-            var palette = Theme.Current;
             var directory = Path.GetDirectoryName(Path.GetFullPath(path));
             var host = directory is null ? null : $"glimpse-md-{StableToken(path)}.local".ToLowerInvariant();
             var htmlPath = HtmlCache.Get(
                 "MarkdownHtml",
-                $"{path}|{StableTextContentToken(preview)}|{ThemeKey(palette)}",
+                $"{path}|{StableTextContentToken(preview)}",
                 () =>
                 {
                     var rendered = RenderMarkdown(MarkdownSourceWithoutLoaderNotice(preview));
                     var notice = preview.Truncated ? MarkdownTruncationNotice(preview) : string.Empty;
-                    return BuildShell($"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered, host)}{notice}</div>", palette);
+                    return BuildShell($"<div class=\"md-root\">{NormalizeMarkdownHtml(rendered, host)}{notice}</div>");
                 });
 
             return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath, host, directory);
@@ -129,10 +116,9 @@ internal static partial class GeneratedHtmlPreview
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var palette = Theme.Current;
             var htmlPath = HtmlCache.Get(
                 "CodeHtml",
-                $"{path}|{StableTextContentToken(loadedText)}|{ThemeKey(palette)}",
+                $"{path}|{StableTextContentToken(loadedText)}",
                 () =>
                 {
                     if (!CanHighlightCodeLength(loadedText.Text.Length))
@@ -142,7 +128,7 @@ internal static partial class GeneratedHtmlPreview
 
                     var body = TryRenderCode(path, loadedText.Text, cancellationToken, highlighting);
                     cancellationToken.ThrowIfCancellationRequested();
-                    return body is null ? null : BuildShell(body, palette);
+                    return body is null ? null : BuildShell(body);
                 });
 
             return htmlPath is null
@@ -168,15 +154,14 @@ internal static partial class GeneratedHtmlPreview
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var palette = Theme.Current;
             var htmlPath = HtmlCache.Get(
                 "EpubHtml",
-                $"{path}|{StableEpubContentToken(path, cancellationToken)}|{ThemeKey(palette)}",
+                $"{path}|{StableEpubContentToken(path, cancellationToken)}",
                 () =>
                 {
                     var body = EpubPreviewLoader.TryBuildBody(path, cancellationToken);
                     cancellationToken.ThrowIfCancellationRequested();
-                    return body is null ? null : BuildShell(body, palette);
+                    return body is null ? null : BuildShell(body);
                 });
 
             return htmlPath is null ? null : new GeneratedHtmlDocument(path, htmlPath);
@@ -438,20 +423,24 @@ internal static partial class GeneratedHtmlPreview
         return false;
     }
 
-    internal static string BuildShell(string body, ThemePalette palette) => $$"""
+    internal static string BuildShell(string body) => $$"""
 <!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-{{GeneratedHtmlTheme.PageCss(palette)}}{{GeneratedHtmlTheme.DocumentCss(palette)}}</style>
+{{GeneratedHtmlTheme.PageCss}}{{GeneratedHtmlTheme.DocumentCss}}</style>
 </head>
 <body>
 {{body}}
 </body>
 </html>
 """;
+
+    // MERGE: OfficeOpenXmlPreview.Shell still passes a palette, and that file
+    // is another lane's. This goes with that call's second argument.
+    internal static string BuildShell(string body, ThemePalette palette) => BuildShell(body);
 
     private static string StableToken(string path)
     {

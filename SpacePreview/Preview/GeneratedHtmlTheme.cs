@@ -5,11 +5,12 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Preview;
 
 /// <summary>
-/// The CSS every page Glimpse writes is built from. The tokens come from the
-/// app's palettes, so a web page cannot drift from the WPF chrome beside it.
-/// A page opens in the palette it was written with and turns to the other
-/// when the browser's color scheme does, which the preview window sets from
-/// the app theme. docs/DESIGN.md ("Web pages") is the contract.
+/// The one stylesheet every page Glimpse writes starts from. The tokens come
+/// from the app's palettes, so a web page cannot drift from the WPF chrome
+/// beside it, and each has one name. Light is written as the base and dark
+/// behind prefers-color-scheme, which the preview window sets from the app
+/// theme: a page is the same text in either theme, cached once, and an open
+/// one turns with the app. docs/DESIGN.md ("Web pages") is the contract.
 /// </summary>
 internal static class GeneratedHtmlTheme
 {
@@ -23,7 +24,7 @@ internal static class GeneratedHtmlTheme
     /// Tokens, the canvas, the in-page reveal, scrollbars, selection and the
     /// font stacks. Every page starts here.
     /// </summary>
-    public static string PageCss(ThemePalette p) => BothThemes(p, PaletteTokens) + """
+    public static readonly string PageCss = BothThemes(PaletteTokens) + """
 :root {
   --font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
@@ -64,14 +65,14 @@ html {
 """;
 
     /// <summary>Markdown, code and EPUB documents.</summary>
-    public static string DocumentCss(ThemePalette p) => DocumentRules + BothThemes(p, SyntaxTokens);
+    public static readonly string DocumentCss = DocumentRules + BothThemes(SyntaxTokens);
 
-    private static string BothThemes(ThemePalette p, Func<ThemePalette, string> tokens) => $$"""
+    private static string BothThemes(Func<ThemePalette, string> tokens) => $$"""
 :root {
-{{tokens(p)}}}
-@media (prefers-color-scheme: {{(p.IsDark ? "light" : "dark")}}) {
+{{tokens(Theme.Light)}}}
+@media (prefers-color-scheme: dark) {
 :root {
-{{tokens(p.IsDark ? Theme.Light : Theme.Dark)}}}
+{{tokens(Theme.Dark)}}}
 }
 
 """;

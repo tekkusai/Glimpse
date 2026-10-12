@@ -6,9 +6,9 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Preview;
 
 /// <summary>
-/// The audio and video player. One page per kind and theme is cached; the
-/// file, its tags, its artwork and the saved volume travel in the query
-/// string, so neither a new track nor a volume change rewrites the page.
+/// The audio and video player. One page per kind is cached; the file, its
+/// tags, its artwork and the saved volume travel in the query string, so
+/// neither a new track nor a volume change rewrites the page.
 /// The page reads them with textContent and attributes, never as markup.
 /// </summary>
 internal static class MediaPlayerPage
@@ -21,13 +21,13 @@ internal static class MediaPlayerPage
     /// metadata and artwork are slow first reads, so this runs on the thread
     /// pool, never on the UI thread.
     /// </summary>
-    public static Uri Build(string mediaPath, ThemePalette palette, double savedVolume, bool muted)
+    public static Uri Build(string mediaPath, double savedVolume, bool muted)
     {
         var isAudio = FileKinds.IsAudio(mediaPath);
         var pagePath = HtmlCache.Get(
             "MediaHtml",
-            $"player|{(isAudio ? "audio" : "video")}|{(palette.IsDark ? "dark" : "light")}",
-            () => Page(isAudio, palette))!;
+            $"player|{(isAudio ? "audio" : "video")}",
+            () => Page(isAudio))!;
 
         // Settings are user-editable; an out-of-range value must not abort the page.
         var volume = double.IsFinite(savedVolume) ? Math.Clamp(savedVolume, 0, 1) : 0.75;
@@ -61,7 +61,7 @@ internal static class MediaPlayerPage
     private static string Pair(string name, string? value) =>
         string.IsNullOrWhiteSpace(value) ? string.Empty : $"{name}={Uri.EscapeDataString(value.Trim())}";
 
-    internal static string Page(bool isAudio, ThemePalette p)
+    internal static string Page(bool isAudio)
     {
         // Video always plays on black under the fixed dark HUD; audio wears the theme.
         var controls = isAudio
@@ -115,7 +115,7 @@ internal static class MediaPlayerPage
 <head>
 <meta charset="utf-8">
 <style>
-{{GeneratedHtmlTheme.PageCss(p)}}
+{{GeneratedHtmlTheme.PageCss}}
 :root {
 {{controls}}
 }

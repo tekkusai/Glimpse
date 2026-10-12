@@ -12,6 +12,18 @@ namespace SpacePreview.Services;
 /// </summary>
 internal static class WebViewEnvironment
 {
+    // Autoplay: media previews must start without a click (inert elsewhere).
+    // The proxy is a closed port on this machine and nothing goes around
+    // it, loopback included, so no page has a route to a server. The
+    // previews' own request handlers cannot promise that: a preconnect is
+    // no request, a frame opens its socket before it can be cancelled, and
+    // a request still waiting for its handler goes out when the view
+    // closes. Every preview is a local file, which no proxy touches.
+    private const string BrowserArguments =
+        "--autoplay-policy=no-user-gesture-required"
+        + " --proxy-server=http://127.0.0.1:9"
+        + " --proxy-bypass-list=<-loopback>";
+
     private static readonly Lazy<Task<CoreWebView2Environment>> Instance = new(CreateAsync);
 
     public static Task<CoreWebView2Environment> GetAsync() => Instance.Value;
@@ -35,9 +47,6 @@ internal static class WebViewEnvironment
         var userDataFolder = AppPaths.InDataRoot("WebView2");
         Directory.CreateDirectory(userDataFolder);
 
-        // Autoplay: media previews must start without a click (inert elsewhere).
-        var options = new CoreWebView2EnvironmentOptions(
-            "--autoplay-policy=no-user-gesture-required");
-        return CoreWebView2Environment.CreateAsync(null, userDataFolder, options);
+        return CoreWebView2Environment.CreateAsync(null, userDataFolder, new CoreWebView2EnvironmentOptions(BrowserArguments));
     }
 }
