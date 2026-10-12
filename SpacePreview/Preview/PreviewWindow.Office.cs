@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
@@ -186,11 +185,13 @@ public partial class PreviewWindow
     /// already has a slot for every page, and a click on a page that has not
     /// arrived is kept. When the whole document lands the rail shows it at
     /// once. The viewer swaps to it in place only while it still stands
-    /// where it opened, because only then is the swap invisible. A reader
-    /// who has scrolled, zoomed or clicked into the pages is never moved:
-    /// choosing a page past the first ones makes the swap, and so does the
-    /// next look at the file. <paramref name="say"/> sets the note under
-    /// the rail; null clears it.
+    /// where it opened, because only then is the swap invisible. That is
+    /// asked when the whole document lands and again when the swap is due:
+    /// the replacement takes about half a second to stage, and a reader
+    /// can start to scroll in it. A reader who has scrolled, zoomed or
+    /// clicked into the pages is never moved: choosing a page past the
+    /// first ones makes the swap, and so does the next look at the file.
+    /// <paramref name="say"/> sets the note under the rail; null clears it.
     /// </summary>
     private void FollowProgressiveConversion(
         ConvertedOfficeDocument partial,
@@ -212,7 +213,28 @@ public partial class PreviewWindow
         int? askedPage = null;
         ConvertedOfficeDocument? full = null;
 
-        void Upgrade(int page)
+        // A click into the pages can leave a selection or an open find bar
+        // that a swap would drop, so it settles the matter without asking
+        // the viewer, before the question and after it. A viewer that gives
+        // no answer counts as moved.
+        async Task<bool> ReaderHasNotMovedAsync() =>
+            !_userEngagedContent
+            && !ContentOwnsKeyboard()
+            && await AskPdfViewerAsync<bool>(railState, LookForPdfPagesAtOpening) == true
+            && !_userEngagedContent
+            && !ContentOwnsKeyboard();
+
+        // The rest is ready, and the reader keeps their place.
+        void Hold()
+        {
+            DiagnosticLog.Write($"office progressive upgrade held, the viewer is in use {job.SourcePath}");
+            say(ProgressiveNote(ProgressiveRest.Ready, partial, job.Kind));
+        }
+
+        // A swap in place is one nobody asked for, so it goes ahead only if
+        // the reader has still not moved when it is due. A page chosen
+        // while it staged, or while the viewer was asked, is asking.
+        void Upgrade(int page, bool inPlace = false)
         {
             upgrading = true;
             StagePdfViewerReplacement(
@@ -221,7 +243,7 @@ public partial class PreviewWindow
                 full!.DocumentPath,
                 $"office progressive upgrade page={page} {full.DocumentPath}",
                 "office upgrade",
-                () =>
+                onSwapped: () =>
                 {
                     upgrading = false;
                     railState.CurrentPage = page;
@@ -232,6 +254,14 @@ public partial class PreviewWindow
                     {
                         JumpPdfToPage(railState, later);
                     }
+                },
+                stillWanted: inPlace
+                    ? async () => askedPage.HasValue || await ReaderHasNotMovedAsync() || askedPage.HasValue
+                    : null,
+                onCalledOff: () =>
+                {
+                    upgrading = false;
+                    Hold();
                 });
         }
 
@@ -293,13 +323,7 @@ public partial class PreviewWindow
                 railState.Document = null;
                 _ = LoadPdfPageRailOutOfProcessAsync(railState);
 
-                // A click into the pages can leave a selection or an open
-                // find bar that a swap would drop, so it settles the matter
-                // without asking the viewer.
-                var atRest = !askedPage.HasValue
-                    && !_userEngagedContent
-                    && !ContentOwnsKeyboard()
-                    && await PdfViewerStandsWhereItOpenedAsync(railState);
+                var atRest = !askedPage.HasValue && await ReaderHasNotMovedAsync();
                 if (Left())
                 {
                     ReleasePartial();
@@ -315,15 +339,14 @@ public partial class PreviewWindow
                 {
                     Upgrade(asked);
                 }
-                else if (atRest && !_userEngagedContent && !ContentOwnsKeyboard())
+                else if (atRest)
                 {
                     DiagnosticLog.Write($"office progressive upgrade in place {job.SourcePath}");
-                    Upgrade(1);
+                    Upgrade(1, inPlace: true);
                 }
                 else
                 {
-                    DiagnosticLog.Write($"office progressive upgrade held, the viewer is in use {job.SourcePath}");
-                    say(ProgressiveNote(ProgressiveRest.Ready, partial, job.Kind));
+                    Hold();
                 }
             }
             catch (OperationCanceledException)
@@ -333,62 +356,6 @@ public partial class PreviewWindow
                 ReleasePartial();
             }
         }
-    }
-
-    /// <summary>
-    /// Whether the viewer still shows the top of the document at fit width,
-    /// which is where a swap to the whole document would put it. The viewer
-    /// itself is asked: a wheel, a touchpad or a pinch moves it without
-    /// passing through this window. Its first answer comes a moment after
-    /// the first question, so the question is repeated until then. No
-    /// answer counts as moved.
-    /// </summary>
-    private async Task<bool> PdfViewerStandsWhereItOpenedAsync(PdfPageRailState state)
-    {
-        var hwnd = TryGetPdfAutomationHwnd(state.WebView);
-        if (hwnd == IntPtr.Zero)
-        {
-            return false;
-        }
-
-        // UI Automation crosses into the browser and cannot be cancelled,
-        // so it runs off the dispatcher and is left behind when it is late.
-        var probe = Task.Run(() =>
-        {
-            var scrolls = new System.Windows.Automation.AndCondition(
-                new System.Windows.Automation.PropertyCondition(
-                    System.Windows.Automation.AutomationElement.ControlTypeProperty,
-                    System.Windows.Automation.ControlType.Document),
-                new System.Windows.Automation.PropertyCondition(
-                    System.Windows.Automation.ScrollPattern.VerticallyScrollableProperty,
-                    true));
-            var clock = Stopwatch.StartNew();
-            while (clock.Elapsed < PdfPageAutomationTimeout)
-            {
-                try
-                {
-                    // Of the documents nested in the viewer only the pages
-                    // themselves scroll; its frame and toolbar never do.
-                    if (TryCreatePdfAutomationRoot(hwnd)?.FindFirst(System.Windows.Automation.TreeScope.Descendants, scrolls) is { } pages
-                        && pages.TryGetCurrentPattern(System.Windows.Automation.ScrollPattern.Pattern, out var pattern)
-                        && pattern is System.Windows.Automation.ScrollPattern scroll)
-                    {
-                        var position = scroll.Current;
-                        return position.VerticalScrollPercent <= 0 && !position.HorizontallyScrollable;
-                    }
-                }
-                catch
-                {
-                    // The tree changed under the question; ask again.
-                }
-
-                Thread.Sleep(50);
-            }
-
-            return false;
-        });
-
-        return await Task.WhenAny(probe, Task.Delay(PdfPageAutomationTimeout + TimeSpan.FromSeconds(1))) == probe && await probe;
     }
 
     /// <summary>

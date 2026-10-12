@@ -1,3 +1,4 @@
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -59,6 +60,59 @@ public sealed class OfficeProgressiveUpgradeTests
         deck.Land();
 
         await deck.HeldAsync(Ready);
+    });
+
+    // The whole deck takes about half a second to stage behind the first
+    // slides. 3.0.1 first asked only before that: a reader who began to
+    // scroll while it staged was put back at the top of the deck.
+    [Fact]
+    public Task AReaderWhoStartsToScrollWhileTheWholeDeckStagesIsNotMoved() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        await deck.ProveTheWheelAsync();
+        var shown = deck.Viewer;
+
+        deck.Land();
+        var staged = await deck.StagedAsync();
+        await PdfViewerWheel.TurnAsync(shown.CoreWebView2, 600);
+
+        await deck.CalledOffAsync(shown, staged);
+
+        // Choosing a slide past the first ones is still the reader's own move.
+        Assert.True(deck.Choose(9));
+        Assert.Equal(9, await deck.SwappedAtAsync());
+    });
+
+    [Fact]
+    public Task AReaderWhoClicksIntoTheSlidesWhileTheWholeDeckStagesIsNotMoved() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        var shown = deck.Viewer;
+
+        deck.Land();
+        var staged = await deck.StagedAsync();
+        Fields.Set(deck.Window, "_userEngagedContent", true);
+
+        await deck.CalledOffAsync(shown, staged);
+    });
+
+    // A slide chosen while the whole deck stages is the reader asking for
+    // it, whatever else they did meanwhile.
+    [Fact]
+    public Task ASlideChosenWhileTheWholeDeckStagesStillGetsTheWholeDeck() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        var shown = deck.Viewer;
+
+        deck.Land();
+        await deck.StagedAsync();
+        Fields.Set(deck.Window, "_userEngagedContent", true);
+        Assert.True(deck.Choose(9));
+
+        await UntilAsync(() => !ReferenceEquals(deck.Viewer, shown) || deck.Note == Ready, "The whole deck never settled.");
+        Assert.NotSame(shown, deck.Viewer);
+        await UntilAsync(() => deck.Note is null, "The note outlived the swap.");
+        await deck.ShowsSlideAsync(9);
     });
 
     [Fact]
@@ -159,8 +213,12 @@ public sealed class OfficeProgressiveUpgradeTests
             await UntilAsync(
                 () => Fields.Get<WebView2>(Rail, "WebView") is var shown && !ReferenceEquals(shown, first) ? shown : null,
                 "The viewer never moved.");
-            await UntilAsync(async () => await ReadPageAsync() == slide, "The viewer never said where it was.");
+            await ShowsSlideAsync(slide);
         }
+
+        /// <summary>The viewer itself comes to say it is on the slide.</summary>
+        public Task ShowsSlideAsync(int slide) =>
+            UntilAsync(async () => await ReadPageAsync() == slide, "The viewer never said where it was.");
 
         /// <summary>The slide the whole deck is opened at, read from the address of the viewer that replaces the first slides.</summary>
         public async Task<int> SwappedAtAsync()
@@ -169,6 +227,47 @@ public sealed class OfficeProgressiveUpgradeTests
             return int.Parse(
                 System.Text.RegularExpressions.Regex.Match(replacement.Source.Fragment, @"page=(\d+)").Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>The viewer the reader is looking at.</summary>
+        public WebView2 Viewer => Fields.Get<WebView2>(Rail, "WebView");
+
+        /// <summary>
+        /// Shows that the viewer takes the wheel, and leaves it at the top
+        /// where it opened. A viewer still loading swallows the wheel.
+        /// </summary>
+        public async Task ProveTheWheelAsync()
+        {
+            await PdfViewerWheel.ScrollAsync(Viewer.CoreWebView2, 600);
+            await PdfViewerWheel.ScrollAsync(Viewer.CoreWebView2, -6000);
+        }
+
+        /// <summary>The whole deck's viewer while it loads behind the one on screen.</summary>
+        public Task<WebView2> StagedAsync()
+        {
+            var shown = Viewer;
+            return UntilAsync(
+                () => Fields.Get<Grid>(Rail, "Surface").Children.OfType<WebView2>().FirstOrDefault(view => !ReferenceEquals(view, shown)),
+                "The whole deck never staged behind the first slides.");
+        }
+
+        /// <summary>
+        /// The swap stood down, and left what a reader who had already
+        /// moved is left with: their viewer where it was, the staged one
+        /// gone, the whole deck in the rail and the note saying it is ready.
+        /// </summary>
+        public async Task CalledOffAsync(WebView2 shown, WebView2 staged)
+        {
+            await UntilAsync(
+                () => Note == Ready || !ReferenceEquals(Viewer, shown),
+                "The whole deck neither took the viewer's place nor stood down.");
+            Assert.True(ReferenceEquals(Viewer, shown), "The reader was moved to the top of the whole deck.");
+            Assert.Equal(Ready, Note);
+            Assert.Equal(new[] { shown }, Fields.Get<Grid>(Rail, "Surface").Children.OfType<WebView2>());
+            Assert.Throws<ObjectDisposedException>(() => staged.CoreWebView2);
+            Assert.Equal(Visibility.Visible, shown.Visibility);
+            Assert.Equal(WholePath, Fields.Get<string>(Rail, "Path"));
+            Assert.NotNull(Fields.Get<Delegate?>(Rail, "TryHandleJump"));
         }
 
         /// <summary>The note comes to say <paramref name="words"/>, and no viewer was staged on the way there.</summary>

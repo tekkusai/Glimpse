@@ -147,8 +147,8 @@ public partial class PreviewWindow
         var draftLoad = Task.Run(() => SignDrafts.Load(path));
         var preflight = Task.Run(() => CheckSignable(path));
         // Asked of the viewer now: a document scrolled by wheel alone has a
-        // stale rail page. The viewer can take two seconds to answer, so
-        // the page the rail last knew starts rendering meanwhile.
+        // stale rail page. The viewer can take seconds to answer, so the
+        // page the rail last knew starts rendering meanwhile.
         var rail = _activePdfRail;
         var asked = ReadPdfPositionAsync();
         var (file, draft) = await draftLoad;

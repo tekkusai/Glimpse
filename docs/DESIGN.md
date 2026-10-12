@@ -219,6 +219,9 @@ PostScript Illustrator file its title, then the app that wrote it and when.
 - Use `Branding.Name`, never a hard-coded app name.
 - Never show an exception message, a byte offset or an engine name the user
   did not choose.
+- In sign mode a line that carries news is never cut. It sits in the bar's
+  center when it fits in two lines, and otherwise takes a row of its own
+  under the bar.
 
 ## Web pages
 

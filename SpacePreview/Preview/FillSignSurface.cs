@@ -47,6 +47,7 @@ internal sealed class FillSignSurface : Grid
     private readonly Border _resizeHandle;
     private readonly Grid _toolBar;
     private readonly Grid _saveBar;
+    private readonly Border _newsRow;
     private readonly Grid _inkOverlay;
     private readonly Canvas _inkCanvas;
     private readonly List<List<Point>> _inkStrokes = [];
@@ -62,6 +63,7 @@ internal sealed class FillSignSurface : Grid
     private ButtonBase _cancelPill = null!;
     private ButtonBase _savePill = null!;
     private TextBlock _saveStatus = null!;
+    private TextBlock _newsRowText = null!;
     private TextBlock _inkTitle = null!;
     private int _pageIndex;
     private int _totalPages;
@@ -160,7 +162,8 @@ internal sealed class FillSignSurface : Grid
         _saveBar.Visibility = Visibility.Collapsed;
         Children.Add(new Grid { Children = { _toolBar, _saveBar } });
 
-        _pageArea = new Grid { ClipToBounds = true, Children = { _scroller, _chromeLayer, _inkOverlay } };
+        _newsRow = BuildNewsRow(palette);
+        _pageArea = new Grid { ClipToBounds = true, Children = { _scroller, _chromeLayer, _newsRow, _inkOverlay } };
         SetRow(_pageArea, 1);
         Children.Add(_pageArea);
 
@@ -319,8 +322,7 @@ internal sealed class FillSignSurface : Grid
 
         CloseSignaturePicker();
         SetSaveStatus(null, failed: false);
-        _toolBar.Visibility = Visibility.Collapsed;
-        _saveBar.Visibility = Visibility.Visible;
+        ShowBar(_saveBar);
     }
 
     /// <summary>
@@ -342,8 +344,7 @@ internal sealed class FillSignSurface : Grid
     public void ShowSaveFailure(string reason)
     {
         SetSaving(false);
-        _toolBar.Visibility = Visibility.Collapsed;
-        _saveBar.Visibility = Visibility.Visible;
+        ShowBar(_saveBar);
         SetSaveStatus(reason, failed: true);
     }
 
@@ -416,21 +417,9 @@ internal sealed class FillSignSurface : Grid
         bar.Children.Add(_tools);
 
         // The center says what to do next, or why this file cannot be
-        // signed. A line that does not fit is hidden, never cut.
-        _centerText = new TextBlock
-        {
-            FontSize = Metrics.FontCaption,
-            Foreground = Theme.Brush(palette.TextTertiary),
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = TextAlignment.Center,
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(12, 0, 12, 0)
-        };
-        var center = new Grid { ClipToBounds = true, Children = { _centerText } };
-        center.SizeChanged += (_, _) => FitCenterText();
-        SetColumn(center, 1);
-        bar.Children.Add(center);
+        // signed. PlaceLine finds room for a line that does not fit here.
+        _centerText = BuildLine();
+        bar.Children.Add(BuildLineCell(_centerText));
 
         // Moving between pages is part of signing, so the arrows live right
         // on the readout; single-page documents show no arrows at all.
@@ -481,19 +470,8 @@ internal sealed class FillSignSurface : Grid
         back.Margin = new Thickness(12, 0, 0, 0);
         bar.Children.Add(back);
 
-        _saveStatus = new TextBlock
-        {
-            FontSize = Metrics.FontCaption,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextAlignment = TextAlignment.Center,
-            TextWrapping = TextWrapping.Wrap,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxHeight = BarHeight - 8,
-            Margin = new Thickness(12, 0, 12, 0)
-        };
-        SetColumn(_saveStatus, 1);
-        bar.Children.Add(_saveStatus);
+        _saveStatus = BuildLine();
+        bar.Children.Add(BuildLineCell(_saveStatus));
 
         var copy = HousePill.Build("Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent);
         copy.Margin = new Thickness(0);
@@ -514,6 +492,52 @@ internal sealed class FillSignSurface : Grid
 
         bar.Children.Add(Hairline(palette, columns: 3));
         return bar;
+    }
+
+    /// <summary>A bar's line: what to do next, or what just happened.</summary>
+    private static TextBlock BuildLine() => new()
+    {
+        FontSize = Metrics.FontCaption,
+        HorizontalAlignment = HorizontalAlignment.Center,
+        VerticalAlignment = VerticalAlignment.Center,
+        TextAlignment = TextAlignment.Center,
+        TextWrapping = TextWrapping.Wrap,
+        Margin = new Thickness(12, 0, 12, 0)
+    };
+
+    /// <summary>A bar's center column: it holds the line and tells when the line's room changes.</summary>
+    private Grid BuildLineCell(TextBlock line)
+    {
+        var cell = new Grid { ClipToBounds = true, Children = { line } };
+        cell.SizeChanged += (_, _) => PlaceLine();
+        SetColumn(cell, 1);
+        return cell;
+    }
+
+    /// <summary>
+    /// The row a sentence drops to when the bar has no room for it, in the
+    /// bar's own tone. It lies over the top of the page area, so the page
+    /// never jumps when it comes or goes.
+    /// </summary>
+    private Border BuildNewsRow(ThemePalette palette)
+    {
+        _newsRowText = new TextBlock
+        {
+            FontSize = Metrics.FontCaption,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.Wrap
+        };
+        return new Border
+        {
+            Background = Theme.Brush(palette.ChromeBg),
+            BorderBrush = Theme.Brush(palette.Border),
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(12, 8, 12, 8),
+            VerticalAlignment = VerticalAlignment.Top,
+            Visibility = Visibility.Collapsed,
+            Child = _newsRowText
+        };
     }
 
     private static Border Hairline(ThemePalette palette, int columns)
@@ -556,6 +580,7 @@ internal sealed class FillSignSurface : Grid
     {
         _saveStatus.Text = text ?? string.Empty;
         _saveStatus.Foreground = Theme.Brush(failed ? Theme.Current.Warning : Theme.Current.TextSecondary);
+        PlaceLine();
     }
 
     private void RequestPage(int pageIndex)
@@ -618,28 +643,49 @@ internal sealed class FillSignSurface : Grid
         _hintRetired |= HasWork;
         _centerText.Text = _problem ?? _notice ?? (_hintRetired ? string.Empty : Hint);
         _centerText.Foreground = Theme.Brush(_problem is null ? Theme.Current.TextTertiary : Theme.Current.Warning);
-        FitCenterText();
+        PlaceLine();
     }
 
-    private void FitCenterText()
+    /// <summary>
+    /// Puts the showing bar's line where all of it can be read. It stays in
+    /// the bar's center while it fits there in two lines. News that does
+    /// not fit (a problem, a notice, why a save failed) drops to the row
+    /// under the bar, which wraps to whatever the window's width asks. Only
+    /// the hint, which is no news, is hidden for want of room. Nothing is
+    /// ever cut.
+    /// </summary>
+    private void PlaceLine()
     {
-        if (_centerText.Parent is not FrameworkElement column || column.ActualWidth <= 0)
+        var saving = _saveBar.Visibility == Visibility.Visible;
+        var line = saving ? _saveStatus : _centerText;
+        var news = saving ? line.Text.Length > 0 : (_problem ?? _notice) is not null;
+
+        // Before the first layout there is no room to measure, and the line
+        // stays put. After it, a center squeezed to nothing is no room. The
+        // line is measured the way its cell measures it, margins included.
+        var fits = true;
+        if (ActualWidth > 0 && line.Parent is FrameworkElement cell)
         {
-            return;
+            line.Measure(new Size(cell.ActualWidth, BarHeight));
+            fits = cell.ActualWidth > line.Margin.Left + line.Margin.Right
+                && line.DesiredSize.Height <= BarHeight - 8;
         }
 
-        var room = column.ActualWidth - _centerText.Margin.Left - _centerText.Margin.Right;
-        _centerText.Measure(new Size(room, BarHeight));
-        _centerText.Visibility = _centerText.DesiredSize.Height <= BarHeight - 8 && room > 0
-            ? Visibility.Visible
-            : Visibility.Hidden;
+        var below = news && !fits;
+        line.Visibility = fits ? Visibility.Visible : Visibility.Hidden;
+        _newsRowText.Text = below ? line.Text : string.Empty;
+        _newsRowText.Foreground = line.Foreground;
+        _newsRow.Visibility = below ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    private void HideSaveChoice()
+    private void ShowBar(Grid bar)
     {
-        _saveBar.Visibility = Visibility.Collapsed;
-        _toolBar.Visibility = Visibility.Visible;
+        _toolBar.Visibility = ReferenceEquals(bar, _toolBar) ? Visibility.Visible : Visibility.Collapsed;
+        _saveBar.Visibility = ReferenceEquals(bar, _saveBar) ? Visibility.Visible : Visibility.Collapsed;
+        PlaceLine();
     }
+
+    private void HideSaveChoice() => ShowBar(_toolBar);
 
     /// <summary>A date still being typed is part of the work: it goes in as typed.</summary>
     private void RequestSave(bool overwrite)
