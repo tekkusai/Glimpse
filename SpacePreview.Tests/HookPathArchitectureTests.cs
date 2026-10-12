@@ -1,56 +1,249 @@
+using System.Reflection;
+using SpacePreview.Services;
+
 namespace SpacePreview.Tests;
 
 public sealed class HookPathArchitectureTests
 {
-    private static readonly string[] ForbiddenHookPathTokens =
+    private const BindingFlags Any =
+        BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
+    // Windows calls KeyboardHook.HookCallback on the keyboard hook thread;
+    // the rest are the delegates it and the controller invoke there.
+    private static readonly MethodBase[] KeyboardRoots =
     [
-        "File.",
-        "Directory.",
-        "Process.GetProcessById",
-        "Process.Start",
-        "GC.Collect",
-        "WaitForPendingFinalizers",
-        "Thread.Sleep",
-        ".Wait(",
-        ".Result",
-        "GetAwaiter().GetResult",
-        "WaitOne(",
-        "Task.Delay(",
-        "Task.Run(",
-        "ProcessIntegrityService",
-        "Process.GetProcess",
-        // The picker is read only by its bounded monitor, never on the hook.
-        "CommonFileDialogSelectionService.TryGetSelection",
-        "StaTask.Run"
+        Method(typeof(KeyboardHook), "HookCallback"),
+        Method(typeof(SpacePreviewController), "OnKeyDown"),
+        Method(typeof(SpacePreviewController), "OnKeyUp"),
+        Method(typeof(SpacePreviewController), "ReadKey")
     ];
 
-    // Windows silently removes a low-level hook whose callback overruns its
-    // timeout. The scan is shallow (it does not follow callees), so every
-    // method the keyboard callback runs is listed.
-    [Theory]
-    [InlineData(@"SpacePreview\Services\KeyboardHook.cs", "HookCallback")]
-    [InlineData(@"SpacePreview\Services\MouseHook.cs", "HookCallback")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyDown")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "CaptureKeyFacts")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "Perform")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "FollowExplorer")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "QueueOpen")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "QueuePickerOpen")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "DeferPickerOpen")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnKeyUp")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "TargetOf")]
-    [InlineData(@"SpacePreview\Services\SpacePreviewController.cs", "OnMouseDown")]
-    [InlineData(@"SpacePreview\Services\PreviewKeyMap.cs", "Route")]
-    [InlineData(@"SpacePreview\Services\SpaceKeyLatch.cs", "Press")]
-    public void HookPathMethodsDoNotContainBlockingWork(string relativePath, string methodName)
-    {
-        var body = TestSource.CodeMethod(relativePath, methodName);
+    private static readonly MethodBase[] MouseRoots =
+    [
+        Method(typeof(MouseHook), "HookCallback"),
+        Method(typeof(SpacePreviewController), "QueueMouseDown"),
+        Method(typeof(SpacePreviewController), "IsMouseActivationWindow")
+    ];
 
-        foreach (var token in ForbiddenHookPathTokens)
-        {
-            Assert.DoesNotContain(token, body, StringComparison.Ordinal);
-        }
+    // Any member of these types can hold a thread.
+    private static readonly string[] BlockingTypes =
+    [
+        "System.IO.File",
+        "System.IO.Directory",
+        "System.IO.FileStream",
+        "System.Diagnostics.Process",
+        "System.Threading.Monitor",
+        "System.Threading.Lock",
+        "System.Threading.Mutex",
+        "System.Threading.WaitHandle",
+        "System.Threading.ManualResetEventSlim",
+        "System.Threading.SemaphoreSlim",
+        "System.Threading.Tasks.Task",
+        "System.Threading.Tasks.Task`1",
+        "System.Runtime.CompilerServices.TaskAwaiter",
+        "System.Runtime.CompilerServices.TaskAwaiter`1",
+        "System.Runtime.CompilerServices.AsyncVoidMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncTaskMethodBuilder",
+        "System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1",
+        "System.Windows.Threading.DispatcherOperation",
+        "SpacePreview.Services.ProcessIntegrityService",
+        "SpacePreview.Services.StaTask"
+    ];
+
+    private static readonly string[] BlockingMethods =
+    [
+        "System.GC.Collect",
+        "System.GC.WaitForPendingFinalizers",
+        "System.Threading.Thread.Sleep",
+        "System.Threading.Thread.Join",
+        // Waiting for the UI thread is the one thing the hook has a thread to avoid.
+        "System.Windows.Threading.Dispatcher.Invoke",
+        // The picker is read only by its bounded monitor, never on the hook.
+        "SpacePreview.Services.CommonFileDialogSelectionService.TryGetSelection"
+    ];
+
+    /// <summary>
+    /// Everything of Glimpse a key waits for, by name. The list is checked
+    /// against the compiled product, so a method added to the path fails
+    /// here until someone has looked at it and written it down.
+    /// </summary>
+    [Fact]
+    public void TheKeyboardHookThreadRunsExactlyThese()
+    {
+        Assert.Equal(
+            [
+                "CommonFileDialogSelectionMonitor.TryGetCachedSelection",
+                "CommonFileDialogSelectionService.HasFileListFocus",
+                "DeferredFileDialogPreviewIntentSlot.Cancel",
+                "DiagnosticLog.Write",
+                "ExplorerSelectionService.IsWindowTextEditing",
+                "ExplorerSelectionService.TryGetForegroundContext",
+                "ExplorerSelectionService.WindowThreadHasTextEditingFocus",
+                "KeyboardHook.HookCallback",
+                "NativeMethods.CallNextHookEx",
+                "NativeMethods.GetAncestor",
+                "NativeMethods.GetAsyncKeyState",
+                "NativeMethods.GetClassName",
+                "NativeMethods.GetClassNameString",
+                "NativeMethods.GetForegroundRoot",
+                "NativeMethods.GetForegroundWindow",
+                "NativeMethods.GetGUIThreadInfo",
+                "NativeMethods.GetParent",
+                "NativeMethods.GetRoot",
+                "NativeMethods.GetWindowProcessId",
+                "NativeMethods.GetWindowThreadProcessId",
+                "NativeMethods.IsKeyDown",
+                "NativeMethods.IsWindow",
+                "PreviewInputPolicy.IsDesktopWindowClass",
+                "PreviewInputPolicy.IsTextEditingClass",
+                "PreviewInputPolicy.ResolveForegroundContext",
+                "PreviewKeyMap.Claim",
+                "PreviewKeyMap.Classify",
+                "PreviewKeyMap.Facts",
+                "PreviewKeyMap.IsArrow",
+                "PreviewKeyMap.IsMapped",
+                "PreviewKeyMap.IsNavigation",
+                "PreviewKeyMap.IsZoomKey",
+                "PreviewKeyMap.Let",
+                "PreviewKeyMap.NoModifiers",
+                "PreviewKeyMap.OpenFromForeground",
+                "PreviewKeyMap.Route",
+                "PreviewKeyMap.RouteEnter",
+                "PreviewKeyMap.RouteIdle",
+                "PreviewKeyMap.RouteNavigation",
+                "PreviewKeyMap.RoutePinned",
+                "PreviewKeyMap.RouteSpace",
+                "PreviewKeyMap.RouteVisible",
+                "SpaceKeyLatch.IsRepeat",
+                "SpaceKeyLatch.Press",
+                "SpaceKeyLatch.Release",
+                "SpaceKeyLatch.Reset",
+                "SpacePreviewController.ClearPendingFileDialogPreview",
+                "SpacePreviewController.HasChildFocus",
+                "SpacePreviewController.OnKeyDown",
+                "SpacePreviewController.OnKeyUp",
+                "SpacePreviewController.ReadKey"
+            ],
+            HookThreadReach.Names(HookThreadReach.From(KeyboardRoots)));
     }
+
+    [Fact]
+    public void TheMouseHookThreadRunsExactlyThese()
+    {
+        Assert.Equal(
+            [
+                "MouseHook.HookCallback",
+                "NativeMethods.CallNextHookEx",
+                "NativeMethods.GetAncestor",
+                "NativeMethods.GetForegroundWindow",
+                "NativeMethods.GetRootWindowAt",
+                "NativeMethods.SetForegroundWindow",
+                "NativeMethods.WindowFromPoint",
+                "SpacePreviewController.IsMouseActivationWindow",
+                "SpacePreviewController.QueueMouseDown"
+            ],
+            HookThreadReach.Names(HookThreadReach.From(MouseRoots)));
+    }
+
+    /// <summary>
+    /// The walk stops at a delegate, so each one a hook thread invokes is
+    /// listed, and what it points to is a root above.
+    /// </summary>
+    [Fact]
+    public void TheDelegatesTheHookThreadsInvokeAreTheRootsAbove()
+    {
+        Assert.Equal(
+            [
+                "KeyboardHook.HookCallback -> Action<Int32>",
+                "KeyboardHook.HookCallback -> Func<Int32, UInt32, Int64, Boolean>",
+                "SpacePreviewController.OnKeyDown -> Func<Int32, Boolean, KeyPress>"
+            ],
+            HookThreadReach.DelegateCalls(HookThreadReach.From(KeyboardRoots)));
+        Assert.Equal(
+            [
+                "MouseHook.HookCallback -> Action<Int32, Int32, Int32>",
+                "MouseHook.HookCallback -> Func<IntPtr, Boolean>"
+            ],
+            HookThreadReach.DelegateCalls(HookThreadReach.From(MouseRoots)));
+
+        Sta.Run(() =>
+        {
+            var controller = new SpacePreviewController(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+            try
+            {
+                var keyboard = Fields.Get<KeyboardHook>(controller, "_keyboardHook");
+                var mouse = Fields.Get<MouseHook>(controller, "_mouseHook");
+
+                Assert.Equal("OnKeyDown", Fields.Get<Delegate>(keyboard, "_onKeyDown").Method.Name);
+                Assert.Equal("OnKeyUp", Fields.Get<Delegate>(keyboard, "_onKeyUp").Method.Name);
+                Assert.Equal("ReadKey", Fields.Get<Delegate>(controller, "_readKey").Method.Name);
+                Assert.Equal("QueueMouseDown", Fields.Get<Delegate>(mouse, "_onMouseDown").Method.Name);
+                Assert.Equal("IsMouseActivationWindow", Fields.Get<Delegate>(mouse, "_shouldActivateWindow").Method.Name);
+            }
+            finally
+            {
+                controller.Dispose();
+            }
+        });
+    }
+
+    /// <summary>
+    /// Windows silently removes a low-level hook whose callback overruns its
+    /// timeout, and until then every key waits. Nothing a hook thread runs
+    /// may block, wait for the UI thread or touch a window.
+    /// </summary>
+    [Fact]
+    public void NothingAHookThreadRunsCanBlockOrTouchAWindow()
+    {
+        Assert.Empty(Offenses([.. KeyboardRoots, .. MouseRoots]));
+    }
+
+    /// <summary>
+    /// The list this replaces named methods by hand and scanned their text.
+    /// It passed while a bare Space ran three unlisted methods on the hook
+    /// path that start a task to open a process token. That work is the
+    /// dispatcher's now; the walk has to be able to see it there.
+    /// </summary>
+    [Fact]
+    public void TheWalkSeesTheElevationCheckTheHandKeptListMissed()
+    {
+        var perform = Method(typeof(SpacePreviewController), "Perform");
+
+        Assert.Contains(
+            "SpacePreviewController.StartElevationMismatchCheck",
+            HookThreadReach.Names(HookThreadReach.From(perform)));
+        Assert.Contains(
+            "SpacePreviewController.StartElevationMismatchCheck calls System.Threading.Tasks.Task.Run",
+            Offenses([perform]));
+        Assert.DoesNotContain(perform, HookThreadReach.From([.. KeyboardRoots, .. MouseRoots]));
+    }
+
+    private static List<string> Offenses(MethodBase[] roots)
+    {
+        var offenses = new List<string>();
+        foreach (var method in HookThreadReach.From(roots))
+        {
+            foreach (var callee in HookThreadReach.Calls(method))
+            {
+                var type = callee.DeclaringType!;
+                var typeName = type.IsGenericType ? type.GetGenericTypeDefinition().FullName! : type.FullName!;
+                var blocking = BlockingTypes.Contains(typeName)
+                    || BlockingMethods.Contains($"{typeName}.{callee.Name}");
+                var window = typeName.StartsWith("SpacePreview.Preview.", StringComparison.Ordinal)
+                    || (typeName.StartsWith("System.Windows.", StringComparison.Ordinal)
+                        && callee.Name != "BeginInvoke");
+                if (blocking || window)
+                {
+                    offenses.Add($"{HookThreadReach.Name(method)} calls {typeName}.{callee.Name}");
+                }
+            }
+        }
+
+        return offenses;
+    }
+
+    private static MethodBase Method(Type type, string name) =>
+        type.GetMethod(name, Any) ?? throw new MissingMethodException(type.Name, name);
 
     [Fact]
     public void DiagnosticLogWriteOnlyQueues()

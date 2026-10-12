@@ -9,24 +9,35 @@ namespace SpacePreview.Services;
 /// cache is missing or being refreshed, the dialog receives Space normally.
 /// The controller reports foreground changes. Focus and selection events are
 /// watched only in a verified picker's own process, only while it is in front.
+/// Everything here runs on the dispatcher except
+/// <see cref="TryGetCachedSelection"/>, which the keyboard hook thread calls.
 /// </summary>
 internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 {
+    /// <summary>
+    /// What the hook thread reads. The dispatcher swaps a new one in whole,
+    /// so the hook thread takes no lock and never sees half an update.
+    /// </summary>
+    private sealed record DialogCache(
+        IntPtr Cached,
+        IntPtr Pending,
+        IntPtr Disabled,
+        ExplorerSelection? Selection)
+    {
+        public static readonly DialogCache Empty = new(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, null);
+    }
+
     private const int SelectionSettleMilliseconds = 35;
     private static readonly TimeSpan ForegroundPollInterval = TimeSpan.FromMilliseconds(500);
 
     private readonly Dispatcher _dispatcher;
     private readonly NativeMethods.WinEventProc _objectChanged;
     private readonly DispatcherTimer _foregroundPoll;
-    private readonly object _cacheGate = new();
     private readonly uint _currentProcessId = (uint)Environment.ProcessId;
     private IntPtr _objectHook;
     private uint _objectHookProcessId;
-    private IntPtr _cachedDialog;
-    private IntPtr _pendingDialog;
-    private IntPtr _disabledDialog;
     private IntPtr _verifiedDialog;
-    private ExplorerSelection? _cachedSelection;
+    private DialogCache _cache = DialogCache.Empty;
     private long _refreshGeneration;
     private bool _disposed;
 
@@ -46,27 +57,25 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     public event Action<IntPtr, ExplorerSelection?>? RefreshCompleted;
     public event Action<IntPtr>? DialogObserved;
 
-    /// <summary>Safe for the low-level keyboard-hook lane.</summary>
+    /// <summary>Safe for the keyboard hook thread: one read of the cache, no lock.</summary>
     public bool TryGetCachedSelection(IntPtr dialogRoot, out ExplorerSelection? selection)
     {
         selection = null;
-        if (_disposed || dialogRoot == IntPtr.Zero || !NativeMethods.IsWindow(dialogRoot))
+        if (dialogRoot == IntPtr.Zero || !NativeMethods.IsWindow(dialogRoot))
         {
             return false;
         }
 
-        lock (_cacheGate)
+        var cache = Volatile.Read(ref _cache);
+        if (cache.Pending == dialogRoot
+            || cache.Cached != dialogRoot
+            || cache.Selection is null)
         {
-            if (_pendingDialog == dialogRoot
-                || _cachedDialog != dialogRoot
-                || _cachedSelection is null)
-            {
-                return false;
-            }
-
-            selection = _cachedSelection;
-            return true;
+            return false;
         }
+
+        selection = cache.Selection;
+        return true;
     }
 
     public void RequestRefresh(IntPtr dialogRoot, int settleMilliseconds = SelectionSettleMilliseconds)
@@ -79,20 +88,14 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         }
 
         var generation = Interlocked.Increment(ref _refreshGeneration);
-        lock (_cacheGate)
+        var cache = _cache;
+        if (cache.Disabled == dialogRoot)
         {
-            if (_disabledDialog == dialogRoot)
-            {
-                return;
-            }
-
-            if (_disabledDialog != IntPtr.Zero && _disabledDialog != dialogRoot)
-            {
-                _disabledDialog = IntPtr.Zero;
-            }
-
-            _pendingDialog = dialogRoot;
+            return;
         }
+
+        // Another dialog's timeout no longer applies.
+        Volatile.Write(ref _cache, cache with { Disabled = IntPtr.Zero, Pending = dialogRoot });
 
         _dispatcher.BeginInvoke(
             () => _ = RefreshAsync(dialogRoot, generation, Math.Max(0, settleMilliseconds)),
@@ -129,13 +132,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
                 return;
             }
 
-            lock (_cacheGate)
-            {
-                _pendingDialog = IntPtr.Zero;
-                _disabledDialog = dialogRoot;
-                _cachedDialog = dialogRoot;
-                _cachedSelection = null;
-            }
+            Volatile.Write(ref _cache, new DialogCache(dialogRoot, IntPtr.Zero, dialogRoot, null));
 
             DiagnosticLog.Write($"file dialog selection timed out hwnd=0x{dialogRoot.ToInt64():X}; disabled for dialog");
             return;
@@ -145,14 +142,9 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
             return;
         }
 
-        ExplorerSelection? previous;
-        lock (_cacheGate)
-        {
-            previous = _cachedDialog == dialogRoot ? _cachedSelection : null;
-            _cachedDialog = dialogRoot;
-            _cachedSelection = selection;
-            _pendingDialog = IntPtr.Zero;
-        }
+        var cache = _cache;
+        var previous = cache.Cached == dialogRoot ? cache.Selection : null;
+        Volatile.Write(ref _cache, cache with { Cached = dialogRoot, Selection = selection, Pending = IntPtr.Zero });
 
         if (!SelectionsEqual(previous, selection))
         {
@@ -315,14 +307,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         Interlocked.Increment(ref _refreshGeneration);
         _foregroundPoll.Stop();
         UnwatchDialogProcess();
-
-        lock (_cacheGate)
-        {
-            _cachedDialog = IntPtr.Zero;
-            _pendingDialog = IntPtr.Zero;
-            _disabledDialog = IntPtr.Zero;
-            _verifiedDialog = IntPtr.Zero;
-            _cachedSelection = null;
-        }
+        _verifiedDialog = IntPtr.Zero;
+        Volatile.Write(ref _cache, DialogCache.Empty);
     }
 }

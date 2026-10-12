@@ -22,6 +22,14 @@ internal sealed class SpacePreviewController : IDisposable
         SelectionRefreshRequest Request,
         long StartedGenerationAtRelease);
 
+    /// <summary>A key the hook thread has answered, on its way to the dispatcher.</summary>
+    private readonly record struct RoutedKey(
+        long Number,
+        KeyPress Press,
+        KeyDecision Decision,
+        long Stamp,
+        long OtherKeyDowns);
+
     private const int MaxPinnedPreviews = 6;
     private const int MaxObservedAccessDialogs = 64;
     private const int DeferredFileDialogPreviewLifetimeMilliseconds = 1200;
@@ -50,8 +58,10 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _ownerLossTimer;
     private readonly DispatcherTimer _fullscreenRecheckTimer;
 
-    // Tests stand in for the window in front and for the shell's browse.
+    // Tests stand in for the window in front, for the shell's browse and for
+    // what the hook thread reads at a key.
     private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
+    private readonly Func<int, bool, KeyPress> _readKey;
     private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
         (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
     private readonly uint _processId = (uint)Environment.ProcessId;
@@ -66,7 +76,25 @@ internal sealed class SpacePreviewController : IDisposable
     private volatile bool _previewVisible;
     private ExplorerSelection? _officeNeighborSelection;
     private CancellationTokenSource? _officeNeighbors;
+
+    // The hook thread and the dispatcher share no lock. The dispatcher
+    // publishes _keyState whole and the hook thread reads it; the hook
+    // thread posts each key and counts the others in _otherKeyDowns.
+    private KeyState? _keyState = KeyState.Idle;
+    private long _otherKeyDowns;
+
+    // Hook thread only.
     private readonly SpaceKeyLatch _spaceKey = new(SpaceKeyLatch.RepeatWindowFor(SystemParameters.KeyboardDelay));
+    private int _spaceKeyEpochSeen;
+    private long _keyNumber;
+    private long _glanceEndedAtKey;
+
+    // Dispatcher only.
+    private readonly HashSet<Type> _reportedKeyStateFailures = [];
+    private bool _keyboardHookWanted;
+    private bool _keyStateWatched;
+    private int _spaceKeyEpoch;
+    private long _ackedKey;
     private bool _refreshInFlight;
     private SelectionRefreshRequest? _queuedRefreshRequest;
     private readonly long[] _navigationKeyRefreshTokens = new long[256];
@@ -105,6 +133,7 @@ internal sealed class SpacePreviewController : IDisposable
     public SpacePreviewController(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
+        _readKey = ReadKey;
         _keyboardHook = new KeyboardHook(OnKeyDown, OnKeyUp);
         _mouseHook = new MouseHook(QueueMouseDown, IsMouseActivationWindow);
         _fullscreenInputSuspension = new FullscreenInputSuspension();
@@ -196,30 +225,41 @@ internal sealed class SpacePreviewController : IDisposable
             || (root != IntPtr.Zero
                 && (processId == _processId
                     || PreviewInputPolicy.IsServedSurfaceClass(NativeMethods.GetClassNameString(root))));
-        if (wanted == _keyboardHook.IsInstalled)
+        if (wanted != _keyboardHookWanted)
         {
-            return;
+            // Keys went unseen while the hook was out: no latch or key-up
+            // verification carries across.
+            _keyboardHookWanted = wanted;
+            _spaceKeyEpoch++;
+            if (!wanted)
+            {
+                ClearNavigationRefreshTokens();
+                ClearPendingFileDialogPreview();
+            }
         }
 
-        // Keys went unseen while the hook was out: no latch or key-up
-        // verification carries across.
-        _spaceKey.Reset();
+        // Published before the hook thread can see a key. The hook is asked
+        // for on every served window, not only the first: the install runs
+        // on the hook thread, and one Windows refused is tried again by the
+        // next ask. One Windows dropped comes back as it always did: the
+        // next switch away takes the dead handle out, the switch back
+        // installs a new one.
+        SyncKeyState();
         if (wanted)
         {
             _keyboardHook.Start();
-            return;
         }
-
-        _keyboardHook.Stop();
-        ClearNavigationRefreshTokens();
-        ClearPendingFileDialogPreview();
+        else
+        {
+            _keyboardHook.Stop();
+        }
     }
 
     private void OnFullscreenSuspensionChanged(bool suspended)
     {
         if (suspended)
         {
-            _spaceKey.Reset();
+            _spaceKeyEpoch++;
             ClearNavigationRefreshTokens();
             ClearPendingFileDialogPreview();
         }
@@ -235,7 +275,7 @@ internal sealed class SpacePreviewController : IDisposable
             RequestHide();
         }
 
-        SyncMouseHook();
+        SyncHooks();
     }
 
     // Same window, new shape. No window in front (a lock, a switch between
@@ -317,7 +357,8 @@ internal sealed class SpacePreviewController : IDisposable
                 && PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)));
     }
 
-    private void SyncMouseHook()
+    /// <summary>What is on screen changed: both hook threads get the new picture.</summary>
+    private void SyncHooks()
     {
         var windows = new List<IntPtr>(_pinnedWindows.Count + 1);
         if (_previewVisible && _previewWindow?.Hwnd is { } activeHwnd && activeHwnd != IntPtr.Zero)
@@ -346,7 +387,97 @@ internal sealed class SpacePreviewController : IDisposable
         {
             _mouseHook.Stop();
         }
+
+        SyncKeyState();
     }
+
+    /// <summary>
+    /// Publishes what the keyboard hook thread decides from, and keeps it
+    /// current. The controller publishes at each change it makes. A preview
+    /// also changes without telling it (sign mode, a find bar, a text box
+    /// taking focus), so while the hook is in and a preview is up, the state
+    /// goes out again each time the dispatcher runs out of work.
+    /// </summary>
+    private void SyncKeyState()
+    {
+        var watch = !_disposed
+            && _keyboardHookWanted
+            && (_previewVisible || _pinnedWindows.Count > 0);
+        if (watch != _keyStateWatched)
+        {
+            _keyStateWatched = watch;
+            if (watch)
+            {
+                _dispatcher.Hooks.DispatcherInactive += OnDispatcherInactive;
+            }
+            else
+            {
+                _dispatcher.Hooks.DispatcherInactive -= OnDispatcherInactive;
+            }
+        }
+
+        PublishKeyState();
+    }
+
+    private void OnDispatcherInactive(object? sender, EventArgs e) => PublishKeyState();
+
+    private void PublishKeyState() => Volatile.Write(ref _keyState, CaptureKeyState());
+
+    /// <summary>
+    /// The state the keymap reads, as it is now. Null when a window could not
+    /// be read; the hook thread then lets every key through.
+    /// </summary>
+    private KeyState? CaptureKeyState()
+    {
+        try
+        {
+            var pinned = new WindowKeyState[_pinnedWindows.Count];
+            for (var i = 0; i < pinned.Length; i++)
+            {
+                pinned[i] = ReadWindowKeyState(_pinnedWindows[i]);
+            }
+
+            return new KeyState
+            {
+                AckedKey = _ackedKey,
+                SpaceKeyEpoch = _spaceKeyEpoch,
+                PreviewVisible = _previewVisible,
+                OpenPending = _openPending,
+                Source = _lastSelectionSource,
+                MultiSelection = _multiSelection is { Count: > 1 },
+                OwnerRoot = _previewOwnerRootHwnd,
+                Preview = _previewVisible && _previewWindow is { } glance ? ReadWindowKeyState(glance) : default,
+                Pinned = pinned
+            };
+        }
+        catch (Exception ex)
+        {
+            // A window mid-teardown can refuse a read. Fail open rather than
+            // decide keys on a guess, and say so once per kind.
+            if (_reportedKeyStateFailures.Add(ex.GetType()))
+            {
+                DiagnosticLog.Write($"keyboard state read failed: {ex.GetType().Name}: {ex.Message}");
+            }
+
+            return null;
+        }
+    }
+
+    private static WindowKeyState ReadWindowKeyState(PreviewWindow window) => new()
+    {
+        Hwnd = window.Hwnd,
+        Browsable = window.CurrentPath is not null,
+        FillSign = window.IsFillSignModeActive,
+        TextFocus = window.HasTextFocus,
+        FindBarArmed = window.IsEscapeYieldArmed,
+        GridOpen = window.IsGridViewOpen,
+        EscapeLayer = window.IsGridViewOpen || window.IsSlideshowActive,
+        HeaderZoom = window.HasHeaderZoom,
+        CanRotate = window.CanRotateFromKeyboard,
+        ContentEngaged = window.UserEngagedContent,
+        MediaPlayable = window.IsMediaPlayable,
+        EnterYield = window.EnterYieldsToContent
+    };
 
     // Read on the mouse observer thread.
     private bool IsMouseActivationWindow(IntPtr hwnd)
@@ -362,22 +493,21 @@ internal sealed class SpacePreviewController : IDisposable
         return false;
     }
 
-    // Called synchronously from the keyboard hook: every key on the PC waits
-    // here. No disk I/O, sleeps, waits, blocking GC, process lookup or slow
-    // cleanup; post anything non-trivial to the dispatcher.
+    /// <summary>
+    /// Keyboard hook thread: every key on the PC waits here while the hook is
+    /// in. It reads the keyboard and the window in front, asks the keymap
+    /// with the state the dispatcher published, and answers Windows. It
+    /// touches no window and never waits for the dispatcher; what the key
+    /// means is settled there, in <see cref="OnKeyRouted"/>.
+    /// </summary>
     private bool OnKeyDown(int vk, uint time, long stamp)
     {
         if (vk != NativeMethods.VK_SPACE)
         {
+            // Any other key ends a picker Space that still waits for its
+            // selection. The count covers one the dispatcher has yet to arm.
+            Volatile.Write(ref _otherKeyDowns, _otherKeyDowns + 1);
             ClearPendingFileDialogPreview();
-        }
-
-        // A new key-down supersedes any earlier native refresh for this
-        // physical key; only a down that reaches Explorer installs a fresh
-        // token for key-up verification.
-        if ((uint)vk < (uint)_navigationKeyRefreshTokens.Length)
-        {
-            _navigationKeyRefreshTokens[vk] = 0;
         }
 
         if (!PreviewKeyMap.IsMapped(vk))
@@ -385,92 +515,166 @@ internal sealed class SpacePreviewController : IDisposable
             return false;
         }
 
-        var (facts, window) = CaptureKeyFacts(vk, time);
-        var decision = PreviewKeyMap.Route(facts);
-        if (vk == NativeMethods.VK_SPACE)
+        var space = vk == NativeMethods.VK_SPACE;
+        if (Volatile.Read(ref _keyState) is not { } state)
+        {
+            // The dispatcher could not read its windows: fail open.
+            if (space)
+            {
+                _spaceKey.Press(time, acted: false);
+            }
+
+            return false;
+        }
+
+        if (state.SpaceKeyEpoch != _spaceKeyEpochSeen)
+        {
+            _spaceKeyEpochSeen = state.SpaceKeyEpoch;
+            _spaceKey.Reset();
+        }
+
+        var press = _readKey(vk, space && _spaceKey.IsRepeat(time));
+
+        // This thread claimed the key that ends the glance. Until the
+        // dispatcher has acted on it the published state still shows the
+        // glance, and the next arrow would be swallowed for nothing.
+        if (state.AckedKey < _glanceEndedAtKey)
+        {
+            state = state with { PreviewVisible = false };
+        }
+
+        var decision = PreviewKeyMap.Route(PreviewKeyMap.Facts(press, state));
+        if (space)
         {
             _spaceKey.Press(time, acted: decision.Swallow || decision.Action != KeyAction.None);
         }
 
-        Perform(decision.Action, facts, window, stamp);
+        var number = ++_keyNumber;
+        if (decision.Action is KeyAction.Hide or KeyAction.HideForPickerCommit or KeyAction.ReturnToPicker)
+        {
+            _glanceEndedAtKey = number;
+        }
+
+        // Ahead of everything queued, in key order: the same place the key
+        // had when the hook ran on the dispatcher.
+        var routed = new RoutedKey(number, press, decision, stamp, _otherKeyDowns);
+        _dispatcher.BeginInvoke(() => OnKeyRouted(routed), DispatcherPriority.Send);
         return decision.Swallow;
     }
 
-    private (KeyFacts Facts, PreviewWindow? Window) CaptureKeyFacts(int vk, uint time)
+    /// <summary>
+    /// Keyboard hook thread. Only reads of what Windows itself holds: the
+    /// modifier keys and the window in front, with its focus.
+    /// </summary>
+    private KeyPress ReadKey(int vk, bool spaceRepeat)
     {
         var root = NativeMethods.GetForegroundRoot();
-        var pinned = FindPinnedWindow(root);
-        var target = TargetOf(root, pinned is not null);
-        var window = pinned ?? (_previewVisible ? _previewWindow : null);
         var space = vk == NativeMethods.VK_SPACE;
         var arrow = PreviewKeyMap.IsArrow(vk);
-        var facts = new KeyFacts
+        var press = new KeyPress
         {
             Vk = vk,
             Shift = NativeMethods.IsKeyDown(NativeMethods.VK_SHIFT),
             Ctrl = NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL),
             Alt = NativeMethods.IsKeyDown(NativeMethods.VK_MENU),
             Win = NativeMethods.IsKeyDown(NativeMethods.VK_LWIN) || NativeMethods.IsKeyDown(NativeMethods.VK_RWIN),
-            SpaceRepeat = space && _spaceKey.IsRepeat(time),
-            Target = target,
-            PreviewVisible = _previewVisible,
-            OpenPending = _openPending,
-            Source = _lastSelectionSource,
-            MultiSelection = _multiSelection is { Count: > 1 }
+            SpaceRepeat = spaceRepeat,
+            Root = root,
+            RootIsDesktop = PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)),
+            RootTextEditing = (space || arrow) && ExplorerSelectionService.IsWindowTextEditing(root),
+            RootFileListFocus = (space || PreviewKeyMap.IsNavigation(vk))
+                && CommonFileDialogSelectionService.HasFileListFocus(root),
+            RootChildFocus = (arrow || vk == NativeMethods.VK_RETURN) && HasChildFocus(root)
         };
 
-        if (window is not null)
-        {
-            facts = facts with
-            {
-                Browsable = window.CurrentPath is not null,
-                FillSign = window.IsFillSignModeActive,
-                TextFocus = window.HasTextFocus,
-                FindBarArmed = window.IsEscapeYieldArmed,
-                GridOpen = window.IsGridViewOpen,
-                EscapeLayer = window.IsGridViewOpen || window.IsSlideshowActive,
-                HeaderZoom = window.HasHeaderZoom,
-                CanRotate = window.CanRotateFromKeyboard,
-                ContentEngaged = window.UserEngagedContent,
-                Media = (space || arrow) && window.IsMediaPlayable,
-                EnterYield = vk == NativeMethods.VK_RETURN
-                    && target == KeyTarget.Preview
-                    && window.EnterYieldsToContent,
-                ContentOwnsKeyboard = arrow && target == KeyTarget.Preview && window.ContentOwnsKeyboard()
-            };
-        }
-
-        if (target == KeyTarget.Owner && (space || arrow))
-        {
-            facts = facts with { OwnerTextEditing = ExplorerSelectionService.IsWindowTextEditing(root) };
-        }
-
-        if (target == KeyTarget.Owner
-            && _lastSelectionSource == SelectionSource.CommonFileDialog
-            && (space || PreviewKeyMap.IsNavigation(vk)))
-        {
-            facts = facts with { PickerListFocus = CommonFileDialogSelectionService.HasFileListFocus(_previewOwnerRootHwnd) };
-        }
-
         // Only a fresh Space that could open something asks what is in front.
-        if (space
-            && !facts.SpaceRepeat
-            && (!_previewVisible || target == KeyTarget.Other)
-            && !facts.Shift && !facts.Ctrl && !facts.Alt && !facts.Win)
+        if (!space || spaceRepeat || press.Shift || press.Ctrl || press.Alt || press.Win)
         {
-            var context = ExplorerSelectionService.TryGetForegroundContext(ignoreTextEditing: true);
-            facts = facts with
-            {
-                Context = context,
-                PickerCacheReady = context is { IsFileDialog: true }
-                    && _commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var cached)
-                    && cached is not null
-            };
+            return press;
         }
 
-        return (facts, window);
+        var context = ExplorerSelectionService.TryGetForegroundContext(ignoreTextEditing: true);
+        return press with
+        {
+            Context = context,
+            PickerCacheReady = context is { IsFileDialog: true }
+                && _commonFileDialogMonitor.TryGetCachedSelection(context.Hwnd, out var cached)
+                && cached is not null
+        };
     }
 
+    /// <summary>
+    /// Focus sits in a child window of <paramref name="root"/>: for a
+    /// preview, its browser view and not the WPF chrome. WPF cannot answer
+    /// this for a windowed WebView2, so Win32 is asked.
+    /// </summary>
+    private static bool HasChildFocus(IntPtr root)
+    {
+        var info = new NativeMethods.GUITHREADINFO
+        {
+            cbSize = System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.GUITHREADINFO>()
+        };
+
+        return root != IntPtr.Zero
+            && NativeMethods.GetGUIThreadInfo(0, ref info)
+            && info.hwndFocus != IntPtr.Zero
+            && info.hwndFocus != root
+            && NativeMethods.GetAncestor(info.hwndFocus, NativeMethods.GA_ROOT) == root;
+    }
+
+    /// <summary>
+    /// The dispatcher's half of a key, in key order. The hook thread has
+    /// told Windows whether the key is swallowed, from state that can be a
+    /// turn old. The keymap is asked again with the state as it is now, so
+    /// a key means what it meant when the hook ran here, and
+    /// <see cref="PreviewKeyMap.Settle"/> covers the keys the two disagree on.
+    /// </summary>
+    private void OnKeyRouted(RoutedKey key)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        try
+        {
+            // A new key-down supersedes any earlier native refresh for this
+            // physical key; only a down that reaches Explorer installs a
+            // fresh token for key-up verification.
+            var vk = key.Press.Vk;
+            _navigationKeyRefreshTokens[vk] = 0;
+            if (CaptureKeyState() is not { } state)
+            {
+                return;
+            }
+
+            var facts = PreviewKeyMap.Facts(key.Press, state);
+            var now = PreviewKeyMap.Route(facts);
+            var action = PreviewKeyMap.Settle(key.Decision, now);
+            if (now.Swallow != key.Decision.Swallow)
+            {
+                DiagnosticLog.Write(
+                    $"key vk=0x{vk:X} {(key.Decision.Swallow ? "swallowed" : "passed")} on stale state hook={key.Decision.Action} now={now.Action} -> {action}");
+            }
+
+            Perform(action, facts, FindPinnedWindow(key.Press.Root) ?? (_previewVisible ? _previewWindow : null), key.Stamp);
+
+            // A key typed after this Space found no intent to cancel yet.
+            if (action == KeyAction.DeferPickerOpen && Volatile.Read(ref _otherKeyDowns) != key.OtherKeyDowns)
+            {
+                ClearPendingFileDialogPreview();
+            }
+        }
+        finally
+        {
+            // Told to the hook thread whatever happened: it holds the glance
+            // for ended until it hears about the key that ended it.
+            _ackedKey = Math.Max(_ackedKey, key.Number);
+            PublishKeyState();
+        }
+    }
+
+    /// <summary>Dispatcher. Runs what a key means; the swallow is long done.</summary>
     private void Perform(KeyAction action, in KeyFacts facts, PreviewWindow? window, long stamp)
     {
         var vk = facts.Vk;
@@ -502,21 +706,20 @@ internal sealed class SpacePreviewController : IDisposable
                     NativeMethods.VK_RETURN => "enter -> hide, explorer opens",
                     _ => "space -> hide"
                 });
-                _dispatcher.BeginInvoke(RequestHide);
+                RequestHide();
                 return;
             case KeyAction.HideForPickerCommit:
                 DiagnosticLog.Write("enter -> hide, file dialog confirms");
-                _dispatcher.BeginInvoke(RequestHide);
+                RequestHide();
                 return;
             case KeyAction.ReturnToPicker:
-                var owner = _previewOwnerRootHwnd;
                 DiagnosticLog.Write("enter -> return to file dialog");
-                _dispatcher.BeginInvoke(() => HidePreviewAndRestoreOwner(owner));
+                HidePreviewAndRestoreOwner(_previewOwnerRootHwnd);
                 return;
             case KeyAction.OpenCurrent:
                 window?.ConsumeEnterYieldToContent();
                 DiagnosticLog.Write("enter -> open current");
-                _dispatcher.BeginInvoke(() => window?.OpenCurrent());
+                window?.OpenCurrent();
                 return;
             case KeyAction.YieldEnter:
                 window?.ConsumeEnterYieldToContent();
@@ -529,59 +732,49 @@ internal sealed class SpacePreviewController : IDisposable
                 window?.NoteFindShortcut();
                 return;
             case KeyAction.ToggleMedia:
-                _dispatcher.BeginInvoke(() => window?.TryToggleMediaPlayback());
+                window?.TryToggleMediaPlayback();
                 return;
             case KeyAction.NudgeMedia:
-                _dispatcher.BeginInvoke(() => window?.TryNudgeMediaFromArrow(vk));
+                window?.TryNudgeMediaFromArrow(vk);
                 return;
             case KeyAction.Browse:
-                var delta = vk is NativeMethods.VK_LEFT or NativeMethods.VK_UP ? -1 : 1;
-                _dispatcher.BeginInvoke(() => BrowseRelativeAsync(delta, stamp));
+                BrowseRelativeAsync(vk is NativeMethods.VK_LEFT or NativeMethods.VK_UP ? -1 : 1, stamp);
                 return;
             case KeyAction.GridMove:
-                var columns = vk switch { NativeMethods.VK_LEFT => -1, NativeMethods.VK_RIGHT => 1, _ => 0 };
-                var rows = vk switch { NativeMethods.VK_UP => -1, NativeMethods.VK_DOWN => 1, _ => 0 };
-                _dispatcher.BeginInvoke(() => window?.MoveGridCursor(columns, rows));
+                window?.MoveGridCursor(
+                    vk switch { NativeMethods.VK_LEFT => -1, NativeMethods.VK_RIGHT => 1, _ => 0 },
+                    vk switch { NativeMethods.VK_UP => -1, NativeMethods.VK_DOWN => 1, _ => 0 });
                 return;
             case KeyAction.GridToggle:
-                _dispatcher.BeginInvoke(() => window?.ToggleGridView());
+                window?.ToggleGridView();
                 return;
             case KeyAction.GridCommit:
-                _dispatcher.BeginInvoke(() => window?.CommitGridCursor());
+                window?.CommitGridCursor();
                 return;
             case KeyAction.EscapeLayer:
                 DiagnosticLog.Write("escape -> selection surface");
-                _dispatcher.BeginInvoke(() =>
-                {
-                    // A second Esc can arrive before the first one's layer
-                    // closed; with no layer left it means dismiss.
-                    if (window?.TryConsumeEscapeLayer() != true)
-                    {
-                        RequestHide();
-                    }
-                });
+                window?.TryConsumeEscapeLayer();
                 return;
             case KeyAction.FillSignEscape:
                 DiagnosticLog.Write("escape -> fill-sign layer");
-                _dispatcher.BeginInvoke(() => window?.RequestFillSignEscape());
+                window?.RequestFillSignEscape();
                 return;
             case KeyAction.ClosePinned:
                 DiagnosticLog.Write("escape -> close focused pinned preview");
                 if (window is not null)
                 {
-                    _dispatcher.BeginInvoke(() => OnPinnedCloseRequested(window));
+                    OnPinnedCloseRequested(window);
                 }
 
                 return;
             case KeyAction.Zoom:
-                _dispatcher.BeginInvoke(() => window?.TryAdjustZoomFromShortcut(vk));
+                window?.TryAdjustZoomFromShortcut(vk);
                 return;
             case KeyAction.FillScreen:
-                _dispatcher.BeginInvoke(() => window?.ToggleFillScreen());
+                window?.ToggleFillScreen();
                 return;
             case KeyAction.Rotate:
-                var direction = facts.Shift ? -1 : 1;
-                _dispatcher.BeginInvoke(() => window?.RotateFromKeyboard(direction));
+                window?.RotateFromKeyboard(facts.Shift ? -1 : 1);
                 return;
             case KeyAction.FollowExplorer:
                 FollowExplorer(vk, PreviewKeyMap.EditsSelection(facts), stamp);
@@ -605,26 +798,33 @@ internal sealed class SpacePreviewController : IDisposable
             DispatcherPriority.Input);
     }
 
+    /// <summary>Keyboard hook thread. A key-up is never swallowed.</summary>
     private void OnKeyUp(int vk)
     {
         if (vk == NativeMethods.VK_SPACE)
         {
             _spaceKey.Release();
-        }
-
-        if ((uint)vk >= (uint)_navigationKeyRefreshTokens.Length)
-        {
             return;
         }
 
+        // Only a navigation key can owe the glance a look at what its
+        // release committed.
+        if (PreviewKeyMap.IsNavigation(vk))
+        {
+            var root = NativeMethods.GetForegroundRoot();
+            _dispatcher.BeginInvoke(() => OnNavigationKeyUp(vk, root), DispatcherPriority.Send);
+        }
+    }
+
+    private void OnNavigationKeyUp(int vk, IntPtr root)
+    {
         var refreshToken = _navigationKeyRefreshTokens[vk];
         _navigationKeyRefreshTokens[vk] = 0;
-        if (!_previewVisible || refreshToken == 0)
+        if (_disposed || !_previewVisible || refreshToken == 0)
         {
             return;
         }
 
-        var root = NativeMethods.GetForegroundRoot();
         if (TargetOf(root, FindPinnedWindow(root) is not null) is not (KeyTarget.Preview or KeyTarget.Owner))
         {
             return;
@@ -681,8 +881,13 @@ internal sealed class SpacePreviewController : IDisposable
             }
 
             // Clicking into the preview focuses it so Ctrl+C and viewer
-            // shortcuts reach the content the user is interacting with.
-            _dispatcher.BeginInvoke(() => target.ActivateForInteraction(screenX, screenY));
+            // shortcuts reach the content the user is interacting with. The
+            // click changes whose keys the arrows and Enter are.
+            _dispatcher.BeginInvoke(() =>
+            {
+                target.ActivateForInteraction(screenX, screenY);
+                PublishKeyState();
+            });
             return;
         }
 
@@ -809,7 +1014,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         _previewVisible = true;
-        SyncMouseHook();
+        SyncHooks();
     }
 
     private PreviewWindow CreatePreviewWindow()
@@ -885,7 +1090,7 @@ internal sealed class SpacePreviewController : IDisposable
             UpdatePinCapacity();
         }
 
-        SyncMouseHook();
+        SyncHooks();
     }
 
     /// <summary>The controller's own close: the one close the leave gate lets through.</summary>
@@ -1008,7 +1213,7 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         UpdatePinCapacity();
-        SyncMouseHook();
+        SyncHooks();
     }
 
     private void OnPinnedCloseRequested(PreviewWindow window)
@@ -1024,7 +1229,7 @@ internal sealed class SpacePreviewController : IDisposable
         _pinnedWindows.Remove(window);
         RetireWindow(window);
         UpdatePinCapacity();
-        SyncMouseHook();
+        SyncHooks();
         DiagnosticLog.Write($"pinned preview closed ({_pinnedWindows.Count} of {MaxPinnedPreviews})");
 
         // The last pin held off the trim's collection and page-out; with no
@@ -1084,15 +1289,20 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        _previewWindow ??= CreatePreviewWindow();
-        CancelIdleTrim();
-        _lastExplorerHwnd = selection.ExplorerHwnd;
         if (_previewOwnerRootHwnd == IntPtr.Zero)
         {
             _previewOwnerRootHwnd = selection.ExplorerHwnd;
         }
 
         var fileDialogMode = _lastSelectionSource == SelectionSource.CommonFileDialog;
+        if (!_previewVisible)
+        {
+            PublishLanding(selection, fileDialogMode);
+        }
+
+        _previewWindow ??= CreatePreviewWindow();
+        CancelIdleTrim();
+        _lastExplorerHwnd = selection.ExplorerHwnd;
         DiagnosticLog.Write(
             $"preview requested {selection.Path} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
         _previewWindow.InputStamp = inputStamp;
@@ -1126,7 +1336,26 @@ internal sealed class SpacePreviewController : IDisposable
         }
 
         _previewVisible = true;
-        SyncMouseHook();
+        SyncHooks();
+    }
+
+    /// <summary>
+    /// A fresh glance keeps the dispatcher busy from here until its window
+    /// is up, and no key gets its turn before then. The hook thread is told
+    /// now what will be true at that turn, so a key pressed while the window
+    /// is built belongs to the glance, as it did when it waited for the
+    /// build. If the window fails to show, the hide that follows says so.
+    /// </summary>
+    private void PublishLanding(ExplorerSelection selection, bool fileDialogMode)
+    {
+        Volatile.Write(ref _keyState, CaptureKeyState() is not { } state
+            ? null
+            : state with
+            {
+                PreviewVisible = true,
+                MultiSelection = !fileDialogMode && selection.SelectedPaths is { Count: > 1 },
+                Preview = new WindowKeyState { Hwnd = _previewWindow?.Hwnd ?? IntPtr.Zero, Browsable = true }
+            });
     }
 
     private void OnPreviewContentReady(PreviewWindow window)
@@ -1265,7 +1494,7 @@ internal sealed class SpacePreviewController : IDisposable
 
         _multiIndex = target;
         _officeNeighborSelection = null;
-        DiagnosticLog.Write($"browse within selection -> {path} ({_multiIndex + 1} of {set.Count})");
+        DiagnosticLog.Write($"browse within selection ({_multiIndex + 1} of {set.Count}) -> {path}");
         if (changes)
         {
             _previewWindow.InputStamp = inputStamp;
@@ -1397,6 +1626,7 @@ internal sealed class SpacePreviewController : IDisposable
         if (!LeaveForNewContext())
         {
             _openPending = false;
+            PublishKeyState();
             return;
         }
 
@@ -1419,12 +1649,14 @@ internal sealed class SpacePreviewController : IDisposable
         // a topmost preview over the new foreground app is unexpected.
         if (NativeMethods.GetForegroundWindow() != context.Hwnd)
         {
+            PublishKeyState();
             DiagnosticLog.Write("queued lookup -> foreground changed, dropping");
             return;
         }
 
         if (selection is null)
         {
+            PublishKeyState();
             DiagnosticLog.Write($"queued lookup -> no selection class={context.ClassName} hwnd=0x{context.Hwnd.ToInt64():X}");
             return;
         }
@@ -1517,7 +1749,7 @@ internal sealed class SpacePreviewController : IDisposable
 
         var now = Environment.TickCount64;
         var ownershipValid = !_disposed
-            && _keyboardHook.IsInstalled
+            && _keyboardHookWanted
             && !_fullscreenInputSuspension.IsSuspended
             && NativeMethods.GetForegroundRoot() == dialogRoot
             && CommonFileDialogSelectionService.HasFileListFocus(dialogRoot);
@@ -1589,9 +1821,9 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        // Capture identity on the hook lane, then leave immediately. The old
-        // dispatcher hop let the preview open first; its later foreground
-        // recheck could silently abandon the warning it was meant to show.
+        // Capture identity in the key's own turn, before the preview opens.
+        // A check queued behind the open rechecked the foreground later and
+        // could silently abandon the warning it was meant to show.
         var processId = NativeMethods.GetWindowProcessId(dialogRoot);
         StartElevationMismatchCheck(dialogRoot, processId);
     }
@@ -1788,9 +2020,13 @@ internal sealed class SpacePreviewController : IDisposable
     {
         _previewVisible = false;
         ResetSession();
+
+        // Before the window does its own leaving, which can take a while:
+        // from here the hook thread claims no key for this glance.
+        PublishKeyState();
         DiagnosticLog.Write("hide preview");
         _previewWindow?.HidePreview();
-        SyncMouseHook();
+        SyncHooks();
         ScheduleIdleTrim();
     }
 
@@ -2121,7 +2357,7 @@ internal sealed class SpacePreviewController : IDisposable
                     return;
                 }
 
-                DiagnosticLog.Write($"browse {step:+0;-0} -> {selection.Path} ({selection.ViewIndex + 1} of {selection.ViewCount})");
+                DiagnosticLog.Write($"browse {step:+0;-0} ({selection.ViewIndex + 1} of {selection.ViewCount}) -> {selection.Path}");
                 if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))
                 {
                     // Signing may have started while the shell answered.
@@ -2172,6 +2408,9 @@ internal sealed class SpacePreviewController : IDisposable
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;
         _keyboardHook.Dispose();
         _mouseHook.Dispose();
+
+        // Ends the state watch.
+        SyncKeyState();
         if (_previewWindow is not null)
         {
             _previewWindow.HidePreview();

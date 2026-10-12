@@ -105,8 +105,9 @@ internal readonly record struct KeyFacts
 
 /// <summary>
 /// The keymap is the product. One pure decision per key: swallow it or let
-/// it through, and what follows. The controller gathers the facts and runs
-/// the action; nothing here touches a window.
+/// it through, and what follows. The hook thread reads the key and the
+/// dispatcher publishes the previews' state; the facts are those two set
+/// against each other. Nothing here touches a window.
 /// </summary>
 internal static class PreviewKeyMap
 {
@@ -183,6 +184,113 @@ internal static class PreviewKeyMap
         }
 
         return KeyTarget.Other;
+    }
+
+    /// <summary>
+    /// The facts for one key. The hook thread passes the state the dispatcher
+    /// last published; the dispatcher, when the key's turn comes, passes the
+    /// state as it is then. Equal inputs give equal facts.
+    /// </summary>
+    public static KeyFacts Facts(in KeyPress key, KeyState state)
+    {
+        WindowKeyState? pinned = null;
+        foreach (var candidate in state.Pinned)
+        {
+            if (key.Root != IntPtr.Zero && candidate.Hwnd == key.Root)
+            {
+                pinned = candidate;
+                break;
+            }
+        }
+
+        var ownerIsDesktop = state.Source == SelectionSource.Desktop;
+        var target = Classify(
+            key.Root,
+            pinned is not null,
+            state.PreviewVisible,
+            state.Preview.Hwnd,
+            state.OwnerRoot,
+            ownerIsDesktop,
+            ownerIsDesktop && key.Root != state.OwnerRoot && key.RootIsDesktop);
+        var space = key.Vk == NativeMethods.VK_SPACE;
+        var arrow = IsArrow(key.Vk);
+        var facts = new KeyFacts
+        {
+            Vk = key.Vk,
+            Shift = key.Shift,
+            Ctrl = key.Ctrl,
+            Alt = key.Alt,
+            Win = key.Win,
+            SpaceRepeat = key.SpaceRepeat,
+            Target = target,
+            PreviewVisible = state.PreviewVisible,
+            OpenPending = state.OpenPending,
+            Source = state.Source,
+            MultiSelection = state.MultiSelection,
+            OwnerTextEditing = target == KeyTarget.Owner && (space || arrow) && key.RootTextEditing,
+            PickerListFocus = target == KeyTarget.Owner
+                && state.Source == SelectionSource.CommonFileDialog
+                && (space || IsNavigation(key.Vk))
+                && key.RootFileListFocus,
+            Context = key.Context,
+            PickerCacheReady = key.PickerCacheReady
+        };
+
+        // Window facts describe the window the keys are going to: the pinned
+        // preview in front, otherwise the transient one.
+        if ((pinned ?? (state.PreviewVisible ? state.Preview : null)) is not { } window)
+        {
+            return facts;
+        }
+
+        return facts with
+        {
+            Browsable = window.Browsable,
+            FillSign = window.FillSign,
+            TextFocus = window.TextFocus,
+            FindBarArmed = window.FindBarArmed,
+            GridOpen = window.GridOpen,
+            EscapeLayer = window.EscapeLayer,
+            HeaderZoom = window.HeaderZoom,
+            CanRotate = window.CanRotate,
+            ContentEngaged = window.ContentEngaged,
+            Media = (space || arrow) && window.MediaPlayable,
+            EnterYield = key.Vk == NativeMethods.VK_RETURN
+                && target == KeyTarget.Preview
+                && window.EnterYield
+                && key.RootChildFocus,
+            ContentOwnsKeyboard = arrow && target == KeyTarget.Preview && key.RootChildFocus
+        };
+    }
+
+    /// <summary>
+    /// The hook thread answered Windows from the published state, which can
+    /// be a turn behind. The dispatcher routes the same key again with the
+    /// state as it is, and this says what to run. The swallow is already
+    /// done and cannot be taken back.
+    /// </summary>
+    public static KeyAction Settle(KeyDecision hook, KeyDecision now)
+    {
+        // Nothing was stale, or it changed nothing Windows was told.
+        if (hook.Swallow == now.Swallow)
+        {
+            return now.Action;
+        }
+
+        // Swallowed for something that is no longer true. The app the key
+        // belonged to cannot be given it back; running the old meaning
+        // would act on a window that has moved on.
+        if (hook.Swallow)
+        {
+            return KeyAction.None;
+        }
+
+        // The key went to the app. An arrow Explorer has already acted on is
+        // followed, never stepped a second time. Anything else keeps the
+        // meaning that went with the pass.
+        return now.Action is KeyAction.Browse or KeyAction.GridMove
+            ? KeyAction.FollowExplorer
+            : hook.Action;
     }
 
     public static KeyDecision Route(in KeyFacts f)

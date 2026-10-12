@@ -33,8 +33,10 @@ internal sealed record DeferredFileDialogPreviewIntent(
 
 /// <summary>
 /// One immutable deferred picker request, exchanged atomically between the
-/// hook lane and dispatcher. Refreshes may wait without consuming it; every
-/// cancel, expiry, replacement, or fulfillment is compare-and-swap guarded.
+/// keyboard hook thread and the dispatcher. The hook thread only cancels;
+/// the dispatcher arms, evaluates and expires. Refreshes may wait without
+/// consuming it; every cancel, expiry, replacement, or fulfillment is
+/// compare-and-swap guarded.
 /// </summary>
 internal sealed class DeferredFileDialogPreviewIntentSlot
 {

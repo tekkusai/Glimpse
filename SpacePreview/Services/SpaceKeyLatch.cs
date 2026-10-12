@@ -4,7 +4,7 @@ namespace SpacePreview.Services;
 /// Tells a held Space from a new press, from the hook's own events alone.
 /// A press the keymap acted on latches until its key-up; its auto-repeats
 /// then carry no new meaning. A lost key-up expires on its own once the
-/// repeats stop arriving.
+/// repeats stop arriving. It belongs to the keyboard hook thread alone.
 /// </summary>
 internal sealed class SpaceKeyLatch
 {
