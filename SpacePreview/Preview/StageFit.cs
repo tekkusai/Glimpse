@@ -5,10 +5,11 @@ namespace SpacePreview.Preview;
 
 /// <summary>
 /// How a preview item asks the stage to take its shape. Pixel content
-/// (images, video) is honest at its native size and is never inflated past
-/// it. Page content (documents) has an aspect but no native pixels, so it
-/// takes generous room at that aspect. Compact content (audio) wants the
-/// floor. Formats with no intrinsic shape keep the default stage.
+/// (images, video) gets a window no bigger than its native size. Page
+/// content (documents) has an aspect but no native pixels, so it takes
+/// generous room at that aspect. Content you scroll through gets a desktop
+/// browser's window. Compact content (audio) wants the floor. Anything
+/// else keeps the default stage.
 /// </summary>
 internal readonly struct StageFitHint
 {

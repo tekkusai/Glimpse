@@ -1,5 +1,7 @@
 # Glimpse 3.0
 
+![Glimpse 3.0 showing a PDF with its page rail, in light theme](https://raw.githubusercontent.com/tekkusai/Glimpse/v3.0.0/docs/screenshots/pdf.png)
+
 **Previews arrive instead of loading.** Every file now opens the same way. When its content is ready within a moment, the window fades in with it already there. When it isn't, the window takes the file's shape right away and shows the best picture of it Glimpse has: page one of a PDF you have opened before, an Office file's own thumbnail, or a quiet outline at the page's exact size. The content then dissolves in over it. The spinner, the dimmed overlay and the zoom-in pop are gone. Arrowing through a folder crossfades from one file to the next with no blank frame in between, and a video waits for its first frame instead of flashing black.
 
 **Faster where you wait.** Opening a file again right after closing it is quicker for nearly every type. On the same machine, Markdown went from 199 to 66 ms, PDFs from 454 to 263 ms, PowerPoint from 536 to 251 ms and video from 361 to 87 ms.
@@ -25,6 +27,7 @@
 - Run as administrator appears only for files that can run that way
 - Audio shows the track's cover and tags; heading links in Markdown work
 - Space in a second Explorer window moves the preview there
+- A pinned, always-on-top preview steps behind a game that goes full screen in its own window
 - Web pages, Markdown, code, text and spreadsheets open at the size of a desktop browser window, so a page shows the layout its author designed
 - Launching Glimpse while it is already running opens Settings, which replaces the Hide tray icon option
 - Settings lists anything this PC is missing for full previews, with one button to get each, and the signatures you've saved, which you can delete there

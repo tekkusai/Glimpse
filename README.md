@@ -1,39 +1,63 @@
 # Glimpse
 
-Glimpse is a Quick Look-style file previewer for Windows. Select something in File Explorer or on the desktop, press Space, and Glimpse opens a preview. The same shortcut also works in standard Windows Open and upload dialogs.
+Glimpse is Quick Look for Windows. Select a file in File Explorer, on the desktop or in an Open or upload dialog, press Space, and Glimpse shows it. Press Space or Esc to close it.
 
-Press Space or Esc when you're done.
+![The Glimpse welcome: the Space key, and how to use it](docs/hero.png)
 
-![Glimpse](docs/hero.png)
+| Photos | PDFs, with a page rail |
+|---|---|
+| ![Earthrise from Apollo 8 in Glimpse](docs/screenshots/photo.png) | ![A PDF in Glimpse in light theme](docs/screenshots/pdf.png) |
+| **Markdown** | **Code** |
+| ![This README in Glimpse](docs/screenshots/markdown.png) | ![A C# file in Glimpse in light theme](docs/screenshots/code.png) |
 
-Glimpse is a native WPF app with a small Win32 input hook. It reads the current Explorer selection through Windows shell APIs; it doesn't take over file associations or replace your default apps.
+Glimpse is a native WPF app. It reads the selection through the Windows shell, so it doesn't take over file associations or replace your default apps.
 
 ## Getting Glimpse
 
-Download `Glimpse-Setup-<version>.exe` from the [latest release](https://github.com/tekkusai/Glimpse/releases/latest). That's the right download for most people. GitHub's automatic “Source code” archives are there for anyone who wants to build Glimpse themselves.
+Download `Glimpse-Setup-<version>.exe` from the [latest release](https://github.com/tekkusai/Glimpse/releases/latest) and run it. GitHub's "Source code" archives are only for building Glimpse yourself.
 
-The installer runs for the current user and can start Glimpse when you sign in. It installs WebView2 only when Windows doesn't already have it. For full Word, Excel, and PowerPoint previews, it can also offer LibreOffice if no compatible Office engine is installed; the installer shows the size of that download before anything happens.
+Setup installs for the current user and can start Glimpse when you sign in. It installs WebView2 only when Windows doesn't already have it. For full Word, Excel and PowerPoint previews it can also add LibreOffice, and it shows the size of that download before anything happens.
 
-## What it can do
+After that, Glimpse keeps itself up to date. It installs a new release while you're away from your PC, never while a preview is open or a game or presentation is full screen, and only when the release is signed by its developer. Settings has a switch to turn this off and an Install now button.
 
-- Preview files from Explorer, the desktop, and standard Open/upload dialogs.
-- Move through the current folder with the header arrows or the arrow keys.
-- Open the selected file with Enter or the Open button.
-- Pin a preview while you keep browsing.
-- Copy selected text where the preview supports it, or copy the file itself.
-- Follow the Windows theme, with manual Light and Dark options in the tray menu.
+## What it shows
 
-Glimpse has built-in views for common images, text and source files, folders, archives, audio, video, fonts, executables, shortcuts, Photoshop and Illustrator files, and several 3D formats including STL, OBJ, PLY, 3MF, and STEP.
+- Photos and images, including HEIC, WebP, AVIF, SVG and Photoshop files. Images zoom around the cursor, and Ctrl+R turns a photo and saves the turn.
+- PDFs and Illustrator files in the WebView2 PDF viewer, with a page rail beside them.
+- Word, Excel and PowerPoint files through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
+- Markdown, code with syntax colors, JSON, logs and plain text.
+- Your own web pages, with scripts off and nothing loaded from the internet.
+- Video and audio, with the track's cover and tags.
+- Folders and archives as a list of what's inside, largest first.
+- Fonts as a full specimen in their own face.
+- 3D models (STL, OBJ, PLY, 3MF, GLB) as solid shapes you can turn, and STEP files as a wireframe.
+- EPUB books, programs, shortcuts and app packages.
 
-PDFs use the WebView2 PDF viewer. Office files get their best previews through LibreOffice or OpenOffice, with a simpler fallback when neither is installed. Local HTML is opened with scripts disabled and remote requests blocked.
+Each kind opens in a window shaped for it. Photos, video and pages take their own shape. Anything you scroll through opens at the size of a desktop browser window. Everything else opens in a compact window.
+
+## Using it
+
+| Key | What it does |
+|---|---|
+| Space, Esc | Close the preview |
+| Arrow keys | The next or previous file in the folder |
+| Enter | Open the file in its app |
+| Ctrl+Plus, Ctrl+Minus, Ctrl+0 | Zoom in, out, and back to fit |
+| Ctrl+R, Ctrl+Shift+R | Turn an image right or left |
+| F11 | Fill the screen |
+
+Select several files before pressing Space and the arrows step through only those. The grid button shows them all at once, and a slideshow plays them.
+
+The pin keeps a preview open while you go on browsing, up to six at a time. Right-click a preview to copy its text, the file or its path, and use the menu beside Open for Open with, Show in Explorer and Share.
+
+**Fill & Sign.** A PDF's Sign button lets you place a signature, a date or a stamp on any page, then save a signed copy beside the original or sign it in place. Signatures you draw are saved for next time. If Glimpse closes before you save, Sign reads Resume the next time you open that PDF.
 
 ## Requirements
 
 - Windows 10 1809 or newer on x64. ARM64 works through Windows' x64 emulation.
-- WebView2 Runtime for web-backed previews.
-- .NET 10 SDK if you're building from source.
+- WebView2 Runtime, which Setup installs when it's missing.
 - Optional: LibreOffice or OpenOffice for full Office previews.
-- Optional: Inno Setup 6 if you want to build the installer.
+- To build from source: the .NET 10 SDK, and Inno Setup 6 for the installer.
 
 ## Building from source
 
@@ -43,65 +67,42 @@ cd Glimpse
 dotnet build .\SpacePreview.sln -c Release
 ```
 
-The development build lands at:
-
-```text
-.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe
-```
-
-You can run that executable directly while working on the app.
+The build lands at `.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe`, and you can run it directly.
 
 ## Tests
 
 ```powershell
 dotnet test .\SpacePreview.sln -c Release
-```
-
-The `SpacePreview\scripts` folder also contains smoke and regression checks:
-
-```powershell
-.\SpacePreview\scripts\smoke.ps1
 .\SpacePreview\scripts\regression.ps1
+.\SpacePreview\scripts\smoke.ps1
 ```
 
-The smoke test expects Glimpse to be running already.
+The regression suite renders previews off screen in a throwaway data folder. The smoke test drives File Explorer for real and expects Glimpse to be running already.
 
 ## Publishing
 
 ```powershell
-# Framework-dependent build
-.\SpacePreview\scripts\publish.ps1
-
-# Self-contained installer payload
-.\SpacePreview\scripts\publish.ps1 -SelfContained
-
-# Installer
 .\SpacePreview\scripts\build-installer.ps1
 ```
 
-The installer build fetches Microsoft's WebView2 bootstrapper when necessary and verifies its Microsoft signature before packaging it. Downloaded dependencies, publish output, and generated installers stay out of Git.
+This publishes a self-contained build, packages it with Inno Setup, and signs the checksum with the release key. [docs/RELEASE.md](docs/RELEASE.md) has the full checklist, and [docs/DESIGN.md](docs/DESIGN.md) has the rules for how Glimpse looks and moves.
 
 ## Startup commands
 
 ```powershell
-# Start on Windows sign-in for the current user
-.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe --install-startup
-
-# Remove startup registration
-.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe --uninstall-startup
-
-# Stop the resident process
-.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe --quit
+Glimpse.exe --install-startup     # start when you sign in
+Glimpse.exe --uninstall-startup   # stop starting when you sign in
+Glimpse.exe --quit                # quit the running copy
 ```
 
 ## Security and privacy
 
-Glimpse reads a file only when you ask to preview it. Files aren't uploaded, and Glimpse doesn't change their default applications.
+Glimpse reads a file only when you ask to preview it. Files never leave your PC, and Glimpse doesn't change their default apps. The only request Glimpse makes on its own is to GitHub, to look for a new release.
 
-The global Space shortcut is implemented with a low-level keyboard hook. Glimpse handles it only on supported selection surfaces such as Explorer, the desktop, standard file dialogs, and its own windows. Diagnostic logs remain under `%LOCALAPPDATA%\Glimpse`, rotate by size, and redact local paths by default.
+The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Office conversion runs with its network blocked. Updates install only when their signature matches the key built into the app. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
 
 Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 
-Glimpse is available under the [MIT License](LICENSE).
+Glimpse is available under the [MIT License](LICENSE). The Earthrise photo in the screenshots is by NASA (Apollo 8, 1968) and is in the public domain.
