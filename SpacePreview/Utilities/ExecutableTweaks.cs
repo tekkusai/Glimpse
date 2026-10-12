@@ -78,7 +78,7 @@ internal static class ExecutableTweaks
         }
         catch (Exception ex)
         {
-            DiagnosticLog.Write($"compat flag toggle failed {exePath} {flag}: {ex.GetType().Name}: {ex.Message}");
+            DiagnosticLog.Write($"compat flag toggle failed {flag} {exePath}: {ex.GetType().Name}: {ex.Message}");
             return HasFlag(exePath, flag);
         }
     }

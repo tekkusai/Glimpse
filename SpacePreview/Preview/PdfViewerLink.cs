@@ -179,7 +179,7 @@ internal static class PdfViewerLink
         {
             if (!PdfFillSignWriter.TryWriteScaledCopy(sourcePath, staging, MaxViewerEdgePoints))
             {
-                DiagnosticLog.Write($"pdf rescale not applicable <path:{sourcePath}>");
+                DiagnosticLog.Write($"pdf rescale not applicable {sourcePath}");
                 return FramingOutcome.Declined;
             }
 

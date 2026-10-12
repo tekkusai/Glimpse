@@ -16,11 +16,22 @@ internal static class DiagnosticLog
     private static long _bytesSinceRotationCheck;
 
     private static readonly Regex WindowsPathPattern = new(
-        @"(?<![\w:])([A-Za-z]:\\(?:[^\\/:*?""<>|\r\n]+\\)*[^\\/:*?""<>|\r\n]*)",
+        @"(?<!\w)([A-Za-z]:\\(?:[^\\/:*?""<>|\r\n]+\\)*[^\\/:*?""<>|\r\n]*)",
         RegexOptions.Compiled);
 
     private static readonly Regex UncPathPattern = new(
         @"\\\\[^\s\\/:*?""<>|]+\\(?:[^\r\n\\/:*?""<>|]+\\?)*[^\r\n\\/:*?""<>|]*",
+        RegexOptions.Compiled);
+
+    // A path with spaces runs on into the words after it, so the kind is
+    // the last short dotted word, wherever in the run it ends.
+    private static readonly Regex ExtensionPattern = new(
+        @"\.[A-Za-z0-9]{1,8}(?=\s|$)",
+        RegexOptions.Compiled | RegexOptions.RightToLeft);
+
+    // What 3.0.0 and earlier wrote: the file's name between the colons.
+    private static readonly Regex NamedPathPattern = new(
+        @"<path:(?<name>[^<>]*):(?<hash>[0-9a-f]{8})>",
         RegexOptions.Compiled);
 
     private static readonly BlockingCollection<string> Queue = new(
@@ -170,10 +181,19 @@ internal static class DiagnosticLog
         }
     }
 
+    /// <summary>
+    /// A path becomes its kind and a stable tag, which is what a bug report
+    /// needs. The folder and the name are the user's: Copy diagnostics is
+    /// pasted into public issues. A line an older build wrote with the name
+    /// in it loses the name here too.
+    /// </summary>
     internal static string Redact(string message)
     {
         message = WindowsPathPattern.Replace(message, match => DescribePath(match.Value));
-        return UncPathPattern.Replace(message, match => DescribePath(match.Value));
+        message = UncPathPattern.Replace(message, match => DescribePath(match.Value));
+        return NamedPathPattern.Replace(
+            message,
+            match => Describe(match.Groups["name"].Value, match.Groups["hash"].Value));
     }
 
     private static string DescribePath(string path)
@@ -181,19 +201,17 @@ internal static class DiagnosticLog
         try
         {
             var name = Path.GetFileName(path.TrimEnd('\\', '/'));
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                name = "path";
-            }
-
             var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(path))).ToLowerInvariant()[..8];
-            return $"<path:{name}:{hash}>";
+            return Describe(name, hash);
         }
         catch
         {
             return "<path>";
         }
     }
+
+    private static string Describe(string name, string hash) =>
+        $"<path:*{ExtensionPattern.Match(name).Value}:{hash}>";
 
     private static void RotateIfNeeded(int nextBytes)
     {

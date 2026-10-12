@@ -82,8 +82,29 @@ public sealed class ChromePolicyTests
         Assert.Contains("Version: 9.9.9", text, StringComparison.Ordinal);
         Assert.Contains("Documents: LibreOffice", text, StringComparison.Ordinal);
         Assert.Contains("reveal +80ms", text, StringComparison.Ordinal);
-        Assert.Contains("<path:Secret plans.docx:", text, StringComparison.Ordinal);
+        Assert.Contains("<path:*.docx:", text, StringComparison.Ordinal);
         Assert.DoesNotContain(@"C:\Users\someone", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secret plans", text, StringComparison.Ordinal);
+    }
+
+    // Copy diagnostics is pasted into public issues: a previewed file's
+    // name must not travel with it, whatever follows the path on the line
+    // and whichever build wrote the line.
+    [Theory]
+    [InlineData(@"browse +1 -> C:\Users\someone\Secret plans.docx (2 of 14)", "<path:*.docx:")]
+    [InlineData(@"epub preview failed \\nas\books\Secret plans.v2.epub: XmlException: boom", "<path:*.epub:")]
+    [InlineData(@"opened C:\Users\someone\Secret plans", "<path:*:")]
+    [InlineData("pdf preview <path:Secret plans.pdf:1a2b3c4d>", "<path:*.pdf:1a2b3c4d>")]
+    [InlineData("browse +1 -> <path:Secret plans.docx (2 of 14):1a2b3c4d>", "<path:*.docx:1a2b3c4d>")]
+    // A path straight after a colon was once written whole.
+    [InlineData(@"pdf rescale not applicable <path:C:\Users\someone\Secret plans.ai>", "<path:*.ai:")]
+    public void DiagnosticsNeverCarryAFileName(string line, string expected)
+    {
+        var text = SettingsWindow.BuildDiagnostics("9.9.9", "LibreOffice", [line]);
+
+        Assert.Contains(expected, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Secret", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("someone", text, StringComparison.Ordinal);
     }
 
     [Fact]
