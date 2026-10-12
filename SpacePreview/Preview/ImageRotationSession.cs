@@ -1,5 +1,6 @@
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using SpacePreview.Services;
 
 namespace SpacePreview.Preview;
 
@@ -40,6 +41,13 @@ internal sealed class ImageRotationSession
     /// <summary>The preview has moved on or closed. Its last write may still be on its way.</summary>
     public bool HasLeft { get; private set; }
 
+    /// <summary>
+    /// The full decode of an image that opened on a first frame, running
+    /// until it has landed here or been given up. A turn made in that time
+    /// is written when it ends: see <see cref="TryUpgradeDecoded"/>.
+    /// </summary>
+    public Task FullDecode { get; set; } = Task.CompletedTask;
+
     /// <summary>Raised on the UI thread whenever the displayed bitmap changes.</summary>
     public event Action? ViewChanged;
 
@@ -76,6 +84,44 @@ internal sealed class ImageRotationSession
         }
     }
 
+    /// <summary>
+    /// The app is ending: gives every rotation still on its way to disk up
+    /// to <paramref name="bound"/> to land. One cut off mid-write leaves its
+    /// working file beside the picture. False when a write was still running.
+    /// </summary>
+    public static bool WaitForSaves(TimeSpan bound)
+    {
+        Task[] saves;
+        lock (SavesInFlight)
+        {
+            saves = [.. SavesInFlight.Values];
+        }
+
+        return Task.WaitAll(saves, bound);
+    }
+
+    /// <summary>
+    /// Removes the working file a save left beside this picture when the
+    /// app ended under it. A save of this file that is running now owns
+    /// that name, and no save can begin while this looks.
+    /// </summary>
+    public static void RemoveStrandedTemp(string path)
+    {
+        if (!ImageRotationService.SavesThroughATemp(path))
+        {
+            return;
+        }
+
+        var key = System.IO.Path.GetFullPath(path);
+        lock (SavesInFlight)
+        {
+            if (!SavesInFlight.ContainsKey(key) && ImageRotationService.DeleteTemp(ImageRotationService.TempPathFor(key)))
+            {
+                DiagnosticLog.Write($"rotate stranded temp removed beside {key}");
+            }
+        }
+    }
+
     /// <summary>Rotates the view a quarter turn. Positive is clockwise.</summary>
     public void Rotate(int direction)
     {
@@ -84,7 +130,7 @@ internal sealed class ImageRotationSession
         ViewChanged?.Invoke();
 
         _commitTimer?.Stop();
-        if (Persistence == RotationPersistence.ViewOnly)
+        if (!ImageRotationService.Saves(Persistence))
         {
             return;
         }
@@ -99,8 +145,10 @@ internal sealed class ImageRotationSession
     /// <summary>
     /// Replaces a first frame with the full decode. Pending turns ride on
     /// top of the better pixels, so rotating early never freezes a stand-in
-    /// on screen. Once a write has been handed to the disk, a decode that
-    /// started before it no longer matches the file and is refused.
+    /// on screen. Once a write has been handed to the disk, nothing says
+    /// whether a decode read the file before the write or after it, so it
+    /// is refused. While the preview is up that never happens: the write
+    /// waits for <see cref="FullDecode"/>.
     /// </summary>
     public bool TryUpgradeDecoded(BitmapSource decoded, int baseOrientation)
     {
@@ -116,7 +164,22 @@ internal sealed class ImageRotationSession
         return true;
     }
 
-    private void OnCommitTimer(object? sender, EventArgs e) => Save();
+    private async void OnCommitTimer(object? sender, EventArgs e)
+    {
+        _commitTimer!.Stop();
+
+        // Written now, the turn would shut out the full decode, and the
+        // picture would stay a first frame until it was reopened. However
+        // the decode ends, the write follows it.
+        await Task.WhenAny(FullDecode);
+
+        // A turn made during the wait started the clock again, and its own
+        // tick writes.
+        if (!_commitTimer.IsEnabled)
+        {
+            Save();
+        }
+    }
 
     /// <summary>
     /// The preview is leaving this image: hands any pending turns to the
@@ -134,7 +197,7 @@ internal sealed class ImageRotationSession
     {
         _commitTimer?.Stop();
         var turns = _unsaved;
-        if (turns == 0 || Persistence == RotationPersistence.ViewOnly)
+        if (turns == 0 || !ImageRotationService.Saves(Persistence))
         {
             return;
         }
@@ -185,7 +248,7 @@ internal sealed class ImageRotationSession
             // Found out only by trying. The file is view-only from here on,
             // and the turn the user made stays in the view, as it would
             // have had the header said so.
-            Persistence = RotationPersistence.ViewOnly;
+            Persistence = RotationPersistence.CannotCarry;
             _unsaved = 0;
         }
         else

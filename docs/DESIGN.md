@@ -207,6 +207,10 @@ An app package's two fact lines are what it is, then who made it and which
 build: its description, then the publisher, version and architecture on one
 line.
 
+A model or drawing that reaches the card says what it holds: a STEP file its
+products, then its schema and entity count; an STL its triangle count; a
+PostScript Illustrator file its title, then the app that wrote it and when.
+
 ## Words
 
 - Sentence case. Straight quotes. No em dashes.

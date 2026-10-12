@@ -555,7 +555,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsImage(path) || (useSignatureRouting && FileSignatures.IsImage(signature)))
         {
-            if (await TryBuildImagePreviewAsync(path, version, token) is { } image)
+            if (await TryBuildImagePreviewAsync(path, version, token, StageHeader(version)) is { } image)
             {
                 return image;
             }
@@ -579,7 +579,7 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsPhotoshop(path))
         {
-            if (await TryBuildPsdPreviewAsync(path, version, token) is { } composite)
+            if (await TryBuildPsdPreviewAsync(path, version, token, StageHeader(version)) is { } composite)
             {
                 return composite;
             }
@@ -993,7 +993,7 @@ public partial class PreviewWindow : Window
             }
 
             if ((FileKinds.IsImage(contentPath) || FileKinds.IsBrowserImage(contentPath) || FileKinds.IsPhotoshop(contentPath))
-                && ImageHeader.TryRead(contentPath) is { } image)
+                && ReadStageHeader(contentPath, version) is { } image)
             {
                 SetStageFitHint(StageFitHint.ImagePixels(image.Width, image.Height), version);
 

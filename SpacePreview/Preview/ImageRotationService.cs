@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Windows.Media.Imaging;
 using SpacePreview.Services;
@@ -12,8 +13,14 @@ internal enum RotationPersistence
     /// <summary>Rotation is saved by turning the pixels themselves. Lossless formats only.</summary>
     Reencode,
 
-    /// <summary>Rotation shows in the preview but is never written back.</summary>
-    ViewOnly
+    /// <summary>Rotation shows in the preview but is never written back: nothing here saves this kind of file.</summary>
+    ViewOnly,
+
+    /// <summary>Not written back because the file is read-only.</summary>
+    ReadOnly,
+
+    /// <summary>Not written back because this file, unlike most of its kind, would lose something to the turn.</summary>
+    CannotCarry
 }
 
 /// <summary>What became of a rotation handed to the disk. Anything but <see cref="Saved"/> left the file as it was.</summary>
@@ -44,25 +51,42 @@ internal enum RotationSaveResult
 /// </summary>
 internal static class ImageRotationService
 {
+    // How long a save keeps asking for a file another program has open, and
+    // how often. Explorer's thumbnailer, the search indexer and antivirus
+    // each open a file that was just written and let go within a moment,
+    // and nothing says when they have.
+    private static readonly TimeSpan InUsePatience = TimeSpan.FromMilliseconds(1500);
+    private static readonly TimeSpan InUseRetryStep = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>Whether a turn of such a file is written to disk. Every other answer is a reason it is not.</summary>
+    public static bool Saves(RotationPersistence persistence) =>
+        persistence is RotationPersistence.ExifTag or RotationPersistence.Reencode;
+
     public static RotationPersistence Classify(string path)
     {
         try
         {
             var info = new FileInfo(path);
-            if (!info.Exists || (info.Attributes & FileAttributes.ReadOnly) != 0)
+            if (!info.Exists)
             {
                 return RotationPersistence.ViewOnly;
             }
 
             // PNG and BMP are judged by what this file holds, not by its
             // name, so the tooltip can say "not saved" before the first click.
-            return Path.GetExtension(path).ToLowerInvariant() switch
+            var persistence = Path.GetExtension(path).ToLowerInvariant() switch
             {
                 ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => RotationPersistence.ExifTag,
-                ".png" => PngRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.ViewOnly,
-                ".bmp" => BmpRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.ViewOnly,
+                ".png" => PngRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.CannotCarry,
+                ".bmp" => BmpRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.CannotCarry,
                 _ => RotationPersistence.ViewOnly
             };
+
+            // Read-only is the reason only for a file that would otherwise
+            // save. Clearing the attribute would not make a WebP save.
+            return Saves(persistence) && (info.Attributes & FileAttributes.ReadOnly) != 0
+                ? RotationPersistence.ReadOnly
+                : persistence;
         }
         catch
         {
@@ -72,7 +96,7 @@ internal static class ImageRotationService
 
     /// <summary>
     /// Applies <paramref name="quarterTurnsCw"/> to the file on disk. Runs on
-    /// a worker thread.
+    /// a worker thread, and may hold it for <see cref="InUsePatience"/>.
     /// </summary>
     public static RotationSaveResult SaveQuarterTurns(string path, int quarterTurnsCw)
     {
@@ -82,36 +106,71 @@ internal static class ImageRotationService
             return RotationSaveResult.Saved;
         }
 
-        try
+        // A sharing violation, and only that, is worth asking again: the
+        // whole save runs again, so it turns the file as it is by then.
+        long firstRefusal = 0;
+        while (true)
         {
-            // A file made read-only or removed since it opened is a failed
-            // save, not a format that cannot be saved.
-            var info = new FileInfo(path);
-            if (!info.Exists)
+            try
             {
-                DiagnosticLog.Write($"rotate save failed (file gone) {path}");
-                return RotationSaveResult.Failed;
-            }
+                var result = SaveOnce(path, turns);
+                if (firstRefusal != 0)
+                {
+                    DiagnosticLog.Write(
+                        $"rotate save waited {Stopwatch.GetElapsedTime(firstRefusal).TotalMilliseconds:0} ms for a file in use {path}");
+                }
 
-            if (info.IsReadOnly)
-            {
-                DiagnosticLog.Write($"rotate save failed (read-only) {path}");
-                return RotationSaveResult.ReadOnly;
+                return result;
             }
-
-            return Path.GetExtension(path).ToLowerInvariant() switch
+            catch (IOException ex) when (IsSharingViolation(ex) && StillPatient(ref firstRefusal))
             {
-                ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => SaveExifOrientation(path, turns),
-                ".png" => PngRotation.Save(path, turns),
-                ".bmp" => BmpRotation.Save(path, turns),
-                _ => RotationSaveResult.CannotCarry
-            };
+                Thread.Sleep(InUseRetryStep);
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"rotate save failed {path}: {ex.GetType().Name}: {ex.Message}");
+                return FailureFor(ex);
+            }
         }
-        catch (Exception ex)
+    }
+
+    private static bool IsSharingViolation(IOException ex) => (ex.HResult & 0xFFFF) == 32;
+
+    /// <summary>Whether a refused save may ask again. The clock starts at the first refusal.</summary>
+    private static bool StillPatient(ref long firstRefusal)
+    {
+        if (firstRefusal == 0)
         {
-            DiagnosticLog.Write($"rotate save failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return FailureFor(ex);
+            firstRefusal = Stopwatch.GetTimestamp();
         }
+
+        return Stopwatch.GetElapsedTime(firstRefusal) < InUsePatience;
+    }
+
+    private static RotationSaveResult SaveOnce(string path, int turns)
+    {
+        // A file made read-only or removed since it opened is a failed
+        // save, not a format that cannot be saved.
+        var info = new FileInfo(path);
+        if (!info.Exists)
+        {
+            DiagnosticLog.Write($"rotate save failed (file gone) {path}");
+            return RotationSaveResult.Failed;
+        }
+
+        if (info.IsReadOnly)
+        {
+            DiagnosticLog.Write($"rotate save failed (read-only) {path}");
+            return RotationSaveResult.ReadOnly;
+        }
+
+        return Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => SaveExifOrientation(path, turns),
+            ".png" => PngRotation.Save(path, turns),
+            ".bmp" => BmpRotation.Save(path, turns),
+            _ => RotationSaveResult.CannotCarry
+        };
     }
 
     /// <summary>The Win32 error inside an I/O failure names what the user can do about it.</summary>
@@ -361,19 +420,27 @@ internal static class ImageRotationService
     /// <summary>Where a rewritten file is built before it replaces the original, beside it so the swap stays on one volume.</summary>
     internal static string TempPathFor(string path) => path + ".spvw-rotate.tmp";
 
-    internal static void DeleteTemp(string tempPath)
+    /// <summary>The formats a save rewrites through that file: PNG and BMP always, a JPEG when its tag is spliced in.</summary>
+    internal static bool SavesThroughATemp(string path) =>
+        IsJpeg(path) || Path.GetExtension(path).ToLowerInvariant() is ".png" or ".bmp";
+
+    /// <summary>True when there was a file and it is gone.</summary>
+    internal static bool DeleteTemp(string tempPath)
     {
         try
         {
             if (File.Exists(tempPath))
             {
                 File.Delete(tempPath);
+                return true;
             }
         }
         catch
         {
             // A stranded temp file is cosmetic; the original is intact.
         }
+
+        return false;
     }
 
     /// <summary>

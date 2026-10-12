@@ -30,15 +30,39 @@ public partial class PreviewWindow
         ImageFileStamp? Stamp,
         int CacheGeneration);
 
+    // The header read on the way to placing the window, and the load it
+    // was read for.
+    private (long Version, ImageHeader Header)? _stageHeader;
+
     /// <summary>
-    /// <paramref name="known"/> is the header when the caller has already
-    /// read it for this item; it is not read a second time.
+    /// The one read of an image's header, made where the stage takes its
+    /// shape, and kept for the decode of the same load. It is not kept
+    /// while a rotation of the file is on its way to disk: by the time the
+    /// decode asked, the file would no longer be the one it describes.
+    /// </summary>
+    private ImageHeader? ReadStageHeader(string path, long version)
+    {
+        var settled = ImageRotationSession.WhenSaved(path).IsCompleted;
+        var header = ImageHeader.TryRead(path);
+        _stageHeader = settled && header is not null ? (version, header) : null;
+        return header;
+    }
+
+    /// <summary>The header the stage read for this load, or null when it read none.</summary>
+    private ImageHeader? StageHeader(long version) =>
+        _stageHeader is { } read && read.Version == version ? read.Header : null;
+
+    /// <summary>
+    /// <paramref name="known"/> is the header the stage read for this load
+    /// (<see cref="StageHeader"/>), and it is not read a second time. Null
+    /// when the stage read none, as for a file whose bytes are not at hand:
+    /// then it is read here, off the UI thread.
     /// </summary>
     private async Task<FrameworkElement?> TryBuildImagePreviewAsync(
         string path,
         long version,
         CancellationToken token,
-        ImageHeader? known = null)
+        ImageHeader? known)
     {
         // A rotation of this same file still on its way to disk lands
         // first, so the preview opens on what the file is and not on what
@@ -53,6 +77,10 @@ public partial class PreviewWindow
         var stage = StageContentPixels();
         var (header, decoded, persistence) = await Task.Run(() =>
         {
+            // A save cut short by the app's end left its working file
+            // beside the picture. Opening the picture removes it, at the
+            // cost of one file stat.
+            ImageRotationSession.RemoveStrandedTemp(path);
             var read = known ?? ImageHeader.TryRead(path);
             var first = DecodeImageFirstFrame(path, read, stage);
             return (read, first, first is null ? RotationPersistence.ViewOnly : ImageRotationService.Classify(path));
@@ -75,7 +103,8 @@ public partial class PreviewWindow
 
         if (!decoded.IsFullDecode)
         {
-            _ = CompleteLargeImageDecodeAsync(path, header, decoded, session, version, token);
+            // The session holds a turn back from the disk until this ends.
+            session.FullDecode = CompleteLargeImageDecodeAsync(path, header, decoded, session, version, token);
         }
 
         // The header is the geometry truth, and a local image gave it to the
@@ -96,12 +125,12 @@ public partial class PreviewWindow
         return viewer.Element;
     }
 
-    /// <summary>As for an image: <paramref name="known"/> is the header the caller already read.</summary>
+    /// <summary>As for an image: <paramref name="known"/> is the header the stage read, or null.</summary>
     private async Task<FrameworkElement?> TryBuildPsdPreviewAsync(
         string path,
         long version,
         CancellationToken token,
-        ImageHeader? known = null)
+        ImageHeader? known)
     {
         var (header, composite) = await Task.Run(
             () => (known ?? ImageHeader.TryRead(path), PsdPreviewLoader.TryLoad(path, token)),
@@ -359,13 +388,20 @@ public partial class PreviewWindow
 
     private void UpdateRotateButtons()
     {
-        var suffix = _rotationSession?.Persistence == RotationPersistence.ViewOnly
-            ? ". Not saved for this file type."
-            : string.Empty;
+        var suffix = RotateTooltipSuffix(_rotationSession?.Persistence);
         RotateLeftButton.ToolTip = $"Rotate left (Ctrl+Shift+R){suffix}";
         RotateRightButton.ToolTip = $"Rotate right (Ctrl+R){suffix}";
         SyncHeaderTools();
     }
+
+    /// <summary>What the rotate tooltips add when a turn will show and not be written, with the true reason.</summary>
+    internal static string RotateTooltipSuffix(RotationPersistence? persistence) => persistence switch
+    {
+        RotationPersistence.ViewOnly => ". Not saved for this file type.",
+        RotationPersistence.ReadOnly => ". Not saved. This file is read-only.",
+        RotationPersistence.CannotCarry => ". Not saved. This file can't store a rotation.",
+        _ => string.Empty
+    };
 
     private void RotateLeftButton_Click(object sender, RoutedEventArgs e)
     {
@@ -375,6 +411,18 @@ public partial class PreviewWindow
     private void RotateRightButton_Click(object sender, RoutedEventArgs e)
     {
         RotateCurrentImage(1);
+    }
+
+    /// <summary>
+    /// A window that closes with a turn not yet written hands it to the
+    /// disk. The app's end closes its windows without hiding them first,
+    /// and then waits for what they handed over (App.OnExit).
+    /// </summary>
+    protected override void OnClosed(EventArgs e)
+    {
+        _rotationSession?.Commit();
+        _rotationSession = null;
+        base.OnClosed(e);
     }
 
     private void RotateCurrentImage(int direction)
@@ -422,7 +470,7 @@ public partial class PreviewWindow
         RotationSaveResult.InUse => "Rotation not saved. Close the app using this file, then rotate again.",
         RotationSaveResult.ReadOnly => "Rotation not saved. This file is read-only.",
         RotationSaveResult.DiskFull => "Rotation not saved. Free up disk space, then rotate again.",
-        RotationSaveResult.CannotCarry => "Rotation not saved. This file can't store one.",
+        RotationSaveResult.CannotCarry => "Rotation not saved. This file can't store it.",
         _ => "Rotation not saved. This file can't be changed."
     };
 

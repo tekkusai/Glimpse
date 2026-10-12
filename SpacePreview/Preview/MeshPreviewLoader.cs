@@ -155,7 +155,12 @@ internal static class MeshPreviewLoader
         return Build(mesh.Triangles, "STL mesh", cap, token);
     }
 
-    private static bool TryReadBinaryStlCount(Stream stream, out uint count)
+    /// <summary>
+    /// The triangle count a binary STL declares, when the file is long
+    /// enough to hold that many. The file card asks too, for an STL that
+    /// did not load.
+    /// </summary>
+    internal static bool TryReadBinaryStlCount(Stream stream, out uint count)
     {
         count = 0;
         if (stream.Length < 84)

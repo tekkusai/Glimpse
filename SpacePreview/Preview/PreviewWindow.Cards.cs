@@ -222,6 +222,20 @@ public partial class PreviewWindow
             // the card means the target is missing or out of reach.
             facts = ShortcutFacts(TryReadShortcutTarget(path));
         }
+        else if (FileKinds.IsStep(path))
+        {
+            // These three have a richer view when their content allows
+            // one. Here it did not, and the card says what 2.0's did.
+            facts = CardFacts.Step(path, token);
+        }
+        else if (Path.GetExtension(path).Equals(".stl", StringComparison.OrdinalIgnoreCase))
+        {
+            facts = CardFacts.Stl(path, token);
+        }
+        else if (FileKinds.IsIllustrator(path))
+        {
+            facts = CardFacts.Illustrator(path);
+        }
 
         return new FileCardData(shellImage, title, facts);
     }

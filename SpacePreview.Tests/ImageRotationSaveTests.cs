@@ -205,7 +205,7 @@ public sealed class ImageRotationSaveTests
         session.Rotate(1);
 
         Assert.Equal(RotationSaveResult.CannotCarry, await outcome.Task.WaitAsync(TimeSpan.FromSeconds(10)));
-        Assert.Equal(RotationPersistence.ViewOnly, session.Persistence);
+        Assert.Equal(RotationPersistence.CannotCarry, session.Persistence);
         Assert.Equal((8, 16), Size(session));
         Assert.Equal(bytes, File.ReadAllBytes(path));
     });

@@ -199,7 +199,7 @@ public sealed class ImageRotationCarryTests
         var file = Png(5, 3, bitDepth, colorType, rows, key);
         File.WriteAllBytes(path, file);
 
-        Assert.Equal(RotationPersistence.ViewOnly, ImageRotationService.Classify(path));
+        Assert.Equal(RotationPersistence.CannotCarry, ImageRotationService.Classify(path));
         Assert.True(Refuses(path, 1));
         Assert.Equal(file, File.ReadAllBytes(path));
     }
@@ -212,7 +212,7 @@ public sealed class ImageRotationCarryTests
         var file = AnimatedPng();
         File.WriteAllBytes(path, file);
 
-        Assert.Equal(RotationPersistence.ViewOnly, ImageRotationService.Classify(path));
+        Assert.Equal(RotationPersistence.CannotCarry, ImageRotationService.Classify(path));
         Assert.True(Refuses(path, 1));
         Assert.Equal(file, File.ReadAllBytes(path));
     }
@@ -233,7 +233,7 @@ public sealed class ImageRotationCarryTests
         File.WriteAllBytes(path, file);
 
         // Only the chunks in front of the pixels are read when a file opens.
-        Assert.Equal(beforePixels ? RotationPersistence.ViewOnly : RotationPersistence.Reencode, ImageRotationService.Classify(path));
+        Assert.Equal(beforePixels ? RotationPersistence.CannotCarry : RotationPersistence.Reencode, ImageRotationService.Classify(path));
         Assert.True(Refuses(path, 1));
         Assert.Equal(file, File.ReadAllBytes(path));
     }
@@ -342,7 +342,7 @@ public sealed class ImageRotationCarryTests
 
         File.WriteAllBytes(path, file);
 
-        Assert.Equal(RotationPersistence.ViewOnly, ImageRotationService.Classify(path));
+        Assert.Equal(RotationPersistence.CannotCarry, ImageRotationService.Classify(path));
         Assert.True(Refuses(path, 1));
         Assert.Equal(file, File.ReadAllBytes(path));
     }

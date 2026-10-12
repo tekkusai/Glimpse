@@ -188,7 +188,7 @@ public sealed class ImageRotationTests
 
         try
         {
-            Assert.Equal(RotationPersistence.ViewOnly, ImageRotationService.Classify(path));
+            Assert.Equal(RotationPersistence.ReadOnly, ImageRotationService.Classify(path));
             Assert.Equal(RotationSaveResult.ReadOnly, ImageRotationService.SaveQuarterTurns(path, 1));
             Assert.Equal(1, ImageOrientation.Read(path));
         }

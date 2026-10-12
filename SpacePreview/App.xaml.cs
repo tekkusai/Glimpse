@@ -216,6 +216,14 @@ public partial class App : Application
             }
         }
 
+        // The windows handed their last turns to the disk as they closed.
+        // A write cut off here would leave its working file beside the
+        // user's picture, so it gets the same two seconds to land.
+        if (!ImageRotationSession.WaitForSaves(TimeSpan.FromSeconds(2)))
+        {
+            DiagnosticLog.Write("rotation save still running at exit");
+        }
+
         _quitRegistration?.Unregister(null);
         _quitEvent?.Dispose();
         _showRegistration?.Unregister(null);
