@@ -235,12 +235,14 @@ public sealed class SettingsWindowTests
     public Task EveryUpdateStatusFitsBesideCopyDiagnostics() => WpfApp.RunAsync(async () =>
     {
         // Each footer at its natural width, against the window's content width.
-        using var scope = new UpdateSettingsScope(settings => settings with { SkippedUpdateVersion = "10.10.10" });
+        using var scope = new UpdateSettingsScope();
         using var nothingNewer = new ReleaseFixture { NoRelease = true, HoldCheck = new() };
         using var newer = new ReleaseFixture();
+        using var unsigned = new ReleaseFixture("10.10.10", signed: false);
         using var root = new TempDirectory();
         using var checking = new AppUpdater(nothingNewer.Service(root.Path));
         using var pending = new AppUpdater(newer.Service(root.Path), isMetered: () => true);
+        using var rejected = new AppUpdater(unsigned.Service(root.Path), isMetered: () => true);
         var footers = new List<(string Words, double Width)>();
         void Measure(SettingsWindow settings)
         {
@@ -276,6 +278,9 @@ public sealed class SettingsWindowTests
             await pending.CheckNowAsync();
             Measure(Open2(pending));
 
+            await rejected.CheckNowAsync();
+            Measure(Open2(rejected));
+
             Settings.Update(settings => settings with { UpdatedAtUtc = DateTimeOffset.Now.AddDays(-1) });
             Measure(Open2());
 
@@ -284,8 +289,9 @@ public sealed class SettingsWindowTests
 
             var content = first.Width - 40;
             Assert.All(footers, footer => Assert.True(footer.Width <= content, $"\"{footer.Words}\" needs {footer.Width:0} of {content:0} px"));
-            Assert.Equal(6, footers.Count);
+            Assert.Equal(7, footers.Count);
             Assert.Contains(footers, footer => footer.Words.StartsWith("Up to date | Check for updates", StringComparison.Ordinal));
+            Assert.Contains(footers, footer => footer.Words.EndsWith("10.10.10 failed verification.", StringComparison.Ordinal));
             Assert.Contains(footers, footer => footer.Words.StartsWith("Updated yesterday | What's new", StringComparison.Ordinal));
             Assert.Contains(footers, footer => footer.Words.StartsWith("Couldn't check for updates since", StringComparison.Ordinal) || footer.Words.Contains("| Couldn't check", StringComparison.Ordinal));
         }

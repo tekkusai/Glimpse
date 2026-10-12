@@ -12,7 +12,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
 $root = Resolve-Path "$PSScriptRoot\.."
 
-# Every copy of Glimpse skips a release its key did not sign, so a build
+# No copy of Glimpse installs a release its key did not sign, so a build
 # without the key stops here, before the long part.
 $signingKey = if ($env:GLIMPSE_UPDATE_KEY) { $env:GLIMPSE_UPDATE_KEY } else { Join-Path $env:LOCALAPPDATA "GlimpseRelease\update-signing-key.pem" }
 if (-not (Test-Path -LiteralPath $signingKey -PathType Leaf)) {

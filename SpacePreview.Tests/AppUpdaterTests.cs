@@ -368,25 +368,33 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
-    public Task AReleaseWithoutItsSignatureIsSkippedForGood() => WpfApp.RunAsync(async () =>
+    public Task AReleaseWithoutItsSignatureIsOfferedOnceItHasOne() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture(signed: false);
         using var root = new TempDirectory();
-        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => false);
+        using var updates = new AppUpdater(release.Service(root.Path), () => Away, isMetered: () => true);
 
         await updates.CheckNowAsync();
         await updates.CheckNowAsync();
 
         Assert.Null(updates.State.Pending);
         Assert.False(updates.State.UpToDate);
-        Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
+        Assert.Equal("3.1.0", updates.State.Rejected);
         Assert.Equal(0, release.RequestsFor(".sha256"));
         Assert.Equal(0, release.RequestsFor(".exe"));
+
+        // Published before its .sig was attached, then put right: nothing
+        // was kept against the version, so the next check offers it.
+        release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: true, release.PublishedAt);
+        await updates.CheckNowAsync();
+
+        Assert.Equal("3.1.0", updates.State.Pending?.VersionText);
+        Assert.Null(updates.State.Rejected);
     });
 
     [Fact]
-    public Task ASignatureStillUploadingIsAskedForAgainNotSkipped() => WpfApp.RunAsync(async () =>
+    public Task ASignatureStillUploadingIsAskedForAgain() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
@@ -400,7 +408,7 @@ public sealed class AppUpdaterTests
         await updates.CheckNowAsync();
         Assert.Null(updates.State.Pending);
         Assert.False(updates.State.UpToDate);
-        Assert.Null(Settings.Current.SkippedUpdateVersion);
+        Assert.Null(updates.State.Rejected);
         Assert.Equal(0, release.RequestsFor(".sha256"));
 
         // Uploaded by the next check, it is offered.
@@ -410,7 +418,7 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
-    public Task AReleaseSignedWithAnotherKeyIsSkippedBeforeItDownloads() => WpfApp.RunAsync(async () =>
+    public Task AReleaseSignedWithAnotherKeyIsNeverDownloaded() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
@@ -421,14 +429,15 @@ public sealed class AppUpdaterTests
         await updates.CheckNowAsync();
         await updates.CheckNowAsync();
 
+        // Each check reads the sidecar and the .sig again, and nothing more.
         Assert.Null(updates.State.Pending);
-        Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
-        Assert.Equal(1, release.RequestsFor(".sha256.sig"));
+        Assert.Equal("3.1.0", updates.State.Rejected);
+        Assert.Equal(2, release.RequestsFor(".sha256.sig"));
         Assert.Equal(0, release.RequestsFor(".exe"));
     });
 
     [Fact]
-    public Task AnInstallerThatFailsItsChecksumIsSkipped() => WpfApp.RunAsync(async () =>
+    public Task AnInstallerThatFailsItsChecksumIsNotInstalled() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
@@ -445,7 +454,7 @@ public sealed class AppUpdaterTests
         await updates.TickAsync();
 
         Assert.Null(updates.State.Pending);
-        Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
+        Assert.Equal("3.1.0", updates.State.Rejected);
         Assert.Equal(0, launches);
         Assert.Empty(Directory.EnumerateFiles(root.Path));
     });
@@ -759,14 +768,14 @@ public sealed class AppUpdaterTests
         await updates.InstallNowAsync();
         Assert.Equal(new UpdateFooter("Up to date", FooterLink.CheckForUpdates, null), Footer());
 
-        // Back, then unsigned: it is skipped, and says so.
+        // Back, then unsigned: it is not offered, and says so.
         release.NoRelease = false;
         await updates.CheckNowAsync();
         Assert.NotNull(updates.State.Pending);
         AgeTheLastCheck();
         release.Json = ReleaseFixture.BuildJson("3.1.0", ReleaseFixture.InstallerSize, release.Sha256, signed: false, release.PublishedAt);
         await updates.InstallNowAsync();
-        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification and was skipped."), Footer());
+        Assert.Equal(new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification."), Footer());
 
         Assert.Equal(4, release.RequestsFor("/releases/latest"));
         Assert.Null(Settings.Current.UpdateAttemptVersion);
@@ -835,7 +844,7 @@ public sealed class AppUpdaterTests
     });
 
     [Fact]
-    public Task AReleaseThatLostItsSignatureBeforeLaunchIsSkipped() => WpfApp.RunAsync(async () =>
+    public Task AReleaseThatLostItsSignatureBeforeLaunchIsNotInstalled() => WpfApp.RunAsync(async () =>
     {
         using var scope = new UpdateSettingsScope();
         using var release = new ReleaseFixture();
@@ -852,7 +861,7 @@ public sealed class AppUpdaterTests
         await updates.TickAsync();
 
         Assert.Null(updates.State.Pending);
-        Assert.Equal("3.1.0", Settings.Current.SkippedUpdateVersion);
+        Assert.Equal("3.1.0", updates.State.Rejected);
         Assert.Null(Settings.Current.UpdateAttemptVersion);
     });
 
@@ -1042,7 +1051,7 @@ public sealed class AppUpdaterTests
 
             Assert.Empty(launches);
             Assert.Null(Settings.Current.UpdateAttemptVersion);
-            Assert.Null(Settings.Current.SkippedUpdateVersion);
+            Assert.Null(updates.State.Rejected);
             Assert.True(updates.State is { Installing: false, SetupStarted: false, InstallFailed: false, Installer: not null, Pending: not null });
 
             // Not a failed attempt: the next time the user is away, it installs,
@@ -1078,7 +1087,7 @@ public sealed class AppUpdaterTests
 
         Assert.Equal(0, launches);
         Assert.Null(Settings.Current.UpdateAttemptVersion);
-        Assert.Null(Settings.Current.SkippedUpdateVersion);
+        Assert.Null(updates.State.Rejected);
         Assert.True(updates.State is { Installing: false, SetupStarted: false, Installer: not null, Pending: not null });
     });
 

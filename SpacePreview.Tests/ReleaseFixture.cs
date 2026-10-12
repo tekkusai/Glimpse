@@ -180,7 +180,6 @@ internal sealed class UpdateSettingsScope : IDisposable
         {
             InstallUpdatesAutomatically = true,
             LastUpdateCheckUtc = null,
-            SkippedUpdateVersion = null,
             UpdateAttemptVersion = null,
             UpdateAttemptUtc = null,
             UpdatedAtUtc = null,

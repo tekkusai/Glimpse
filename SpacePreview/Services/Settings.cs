@@ -53,9 +53,6 @@ internal sealed record Settings
     /// </summary>
     public DateTimeOffset? LastUpdateCheckUtc { get; init; }
 
-    /// <summary>A release whose signature or checksum failed. It is never downloaded again.</summary>
-    public string? SkippedUpdateVersion { get; init; }
-
     /// <summary>The last update setup started, and when.</summary>
     public string? UpdateAttemptVersion { get; init; }
 

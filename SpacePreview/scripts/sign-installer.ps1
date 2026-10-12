@@ -8,9 +8,9 @@ param(
 # version, writes the installer's .sha256 sidecar and the sidecar's .sig,
 # then checks the .sig the way the app will, with the public key compiled
 # into it. When any of that fails, the installer, sidecar and .sig are
-# deleted before the error: a copy of Glimpse that meets a release whose
-# .sig does not verify, or whose installer names another version, skips
-# that version for good, so nothing half-signed may be left to upload.
+# deleted before the error: no copy of Glimpse installs a release whose
+# .sig does not verify, or whose installer names another version, so
+# nothing half-signed may be left to upload.
 
 $ErrorActionPreference = "Stop"
 
@@ -28,7 +28,7 @@ try {
     # The app reads the same field and rejects any other version.
     $productVersion = "$((Get-Item -LiteralPath $Setup).VersionInfo.ProductVersion)".Trim()
     if ($productVersion -cne $version) {
-        throw "The installer says it is version '$productVersion', not $version. Every copy of Glimpse would skip this release."
+        throw "The installer says it is version '$productVersion', not $version. No copy of Glimpse would install this release."
     }
 
     $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Setup).Hash
@@ -61,7 +61,7 @@ try {
         $verifier.Dispose()
     }
     if (-not $signed) {
-        throw "The key at $Key is not the release key: its signature does not verify with the public key in AppUpdateService.cs, so every copy of Glimpse would skip this release."
+        throw "The key at $Key is not the release key: its signature does not verify with the public key in AppUpdateService.cs, so no copy of Glimpse would install this release."
     }
 }
 catch {

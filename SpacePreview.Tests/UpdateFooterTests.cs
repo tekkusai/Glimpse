@@ -181,15 +181,19 @@ public sealed class UpdateFooterTests
     }
 
     [Fact]
-    public void AReleaseThatFailedVerificationIsNamedUntilANewerOneCounts()
+    public void AReleaseThatFailedVerificationIsNamedUntilACheckFindsOtherwise()
     {
         Assert.Equal(
-            new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification and was skipped."),
-            Describe(new UpdateState(), Checked with { SkippedUpdateVersion = "3.1.0" }));
-        Assert.Null(Describe(new UpdateState(), Checked with { SkippedUpdateVersion = "3.0.0" }).Caption);
+            new UpdateFooter(null, FooterLink.CheckForUpdates, "3.1.0 failed verification."),
+            Describe(new UpdateState { Rejected = "3.1.0" }, Checked));
 
-        // Pulled from GitHub, it is no longer what the check finds.
-        Assert.Null(Describe(new UpdateState { UpToDate = true }, Checked with { SkippedUpdateVersion = "3.1.0" }).Caption);
+        // Still named while the next check asks, so the window keeps its height.
+        Assert.Equal(
+            new UpdateFooter("Checking for updates", FooterLink.None, "3.1.0 failed verification."),
+            Describe(new UpdateState { Rejected = "3.1.0", Checking = true }, Checked));
+
+        // Pulled from GitHub or put right, it is no longer what the check finds.
+        Assert.Null(Describe(new UpdateState { UpToDate = true }, Checked).Caption);
     }
 
     [Fact]
@@ -225,7 +229,7 @@ public sealed class UpdateFooterTests
             Describe(new UpdateState { Pending = Release, InstallFailed = true }, Checked).Caption,
             Describe(new UpdateState { CheckFailed = true }, Checked).Caption,
             Describe(new UpdateState(), Checked with { LastUpdateCheckUtc = Now.AddDays(-9) }).Caption,
-            Describe(new UpdateState(), Checked with { SkippedUpdateVersion = "3.1.0" }).Caption
+            Describe(new UpdateState { Rejected = "3.1.0" }, Checked).Caption
         };
 
         Assert.All(words, word => Assert.DoesNotContain('—', word!));

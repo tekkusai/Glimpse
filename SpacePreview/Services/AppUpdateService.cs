@@ -25,7 +25,7 @@ internal sealed record AppUpdateRelease(
 
     public string InstallerFileName => $"Glimpse-Setup-{VersionText}.exe";
 
-    /// <summary>The release key's signature over the sidecar. A release without one is skipped.</summary>
+    /// <summary>The release key's signature over the sidecar. A release without one is not offered.</summary>
     public Uri? SignatureUri { get; init; }
 
     /// <summary>When GitHub published the release. Automatic installs wait on it.</summary>
@@ -33,8 +33,8 @@ internal sealed record AppUpdateRelease(
 }
 
 /// <summary>
-/// A release that can never install: its signature, checksum or identity
-/// failed. Trying again cannot help, so its version is skipped.
+/// A release that cannot install as it stands: its signature, checksum or
+/// identity failed. It is not offered, and the next check looks again.
 /// </summary>
 internal sealed class UpdateRejectedException(string message) : Exception(message);
 
@@ -136,8 +136,8 @@ internal sealed partial class AppUpdateService : IDisposable
     /// <summary>
     /// Proves the maintainer released this: the release key signed the exact
     /// sidecar bytes, and the sidecar names the installer GitHub hashed.
-    /// Throws <see cref="UpdateRejectedException"/> for a release that can
-    /// never pass, and anything else for a network that may recover.
+    /// Throws <see cref="UpdateRejectedException"/> for a release that does
+    /// not pass as it stands, and anything else for a network that may recover.
     /// </summary>
     public async Task VerifyAsync(AppUpdateRelease release, CancellationToken cancellationToken)
     {
@@ -438,8 +438,8 @@ internal sealed partial class AppUpdateService : IDisposable
     /// The signature asset, when the release has exactly one at the pinned
     /// URL. One listed but still uploading fails the check, as a sidecar
     /// would, and it is asked again later. Missing beside an uploaded
-    /// installer and sidecar is not a failed check: the release is skipped
-    /// by name.
+    /// installer and sidecar is not a failed check: the release is not
+    /// offered until a check finds one.
     /// </summary>
     internal static Uri? FindSignatureUri(GitHubRelease release, AppUpdateRelease update)
     {

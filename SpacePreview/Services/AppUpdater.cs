@@ -32,6 +32,12 @@ internal sealed record UpdateState
     /// <summary>A newer release whose signature and checksum verified.</summary>
     public AppUpdateRelease? Pending { get; init; }
 
+    /// <summary>
+    /// The newest release's version, when its signature, checksum or
+    /// identity failed at the last look. The next check looks again.
+    /// </summary>
+    public string? Rejected { get; init; }
+
     public bool Downloading { get; init; }
 
     /// <summary>The pending release's installer, verified on disk.</summary>
@@ -159,7 +165,15 @@ internal sealed class AppUpdater : IDisposable
             var latest = await _service.CheckForUpdateAsync(_lifetime.Token);
             var pending = latest is null ? null : await VerifyAsync(latest);
             Settings.Update(settings => settings with { LastUpdateCheckUtc = DateTimeOffset.UtcNow });
-            Set(State with { Checking = false, CheckFailed = false, Unanswered = false, UpToDate = latest is null, Pending = pending });
+            Set(State with
+            {
+                Checking = false,
+                CheckFailed = false,
+                Unanswered = false,
+                UpToDate = latest is null,
+                Pending = pending,
+                Rejected = pending is null ? latest?.VersionText : null
+            });
             DiagnosticLog.Write(pending is null
                 ? $"update check current={_service.CurrentVersionText}"
                 : $"update available current={_service.CurrentVersionText} latest={pending.VersionText}");
@@ -397,11 +411,6 @@ internal sealed class AppUpdater : IDisposable
 
     private async Task<AppUpdateRelease?> VerifyAsync(AppUpdateRelease release)
     {
-        if (Settings.Current.SkippedUpdateVersion == release.VersionText)
-        {
-            return null;
-        }
-
         try
         {
             await _service.VerifyAsync(release, _lifetime.Token);
@@ -410,7 +419,7 @@ internal sealed class AppUpdater : IDisposable
         }
         catch (UpdateRejectedException ex)
         {
-            Skip(release, ex);
+            Reject(release, ex);
             return null;
         }
     }
@@ -460,7 +469,7 @@ internal sealed class AppUpdater : IDisposable
         }
         catch (UpdateRejectedException ex)
         {
-            Skip(release, ex);
+            Reject(release, ex);
             return null;
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
@@ -507,7 +516,7 @@ internal sealed class AppUpdater : IDisposable
         catch (UpdateRejectedException ex)
         {
             Set(State with { Installing = false, SetupStarted = false });
-            Skip(release, ex);
+            Reject(release, ex);
         }
         catch (Exception ex)
         {
@@ -560,13 +569,16 @@ internal sealed class AppUpdater : IDisposable
         Set(State with { Installer = null, Installing = false, SetupStarted = false, InstallFailed = asked });
     }
 
-    private void Skip(AppUpdateRelease release, Exception reason)
+    /// <summary>
+    /// Not pending, and nothing kept: the next check verifies the release
+    /// again, so a .sig attached late or put right makes it installable.
+    /// </summary>
+    private void Reject(AppUpdateRelease release, Exception reason)
     {
-        DiagnosticLog.Write($"update skipped version={release.VersionText}: {reason.Message}");
-        Settings.Update(settings => settings with { SkippedUpdateVersion = release.VersionText });
+        DiagnosticLog.Write($"update rejected version={release.VersionText}: {reason.Message}");
         if (State.Pending?.Version == release.Version)
         {
-            Set(State with { Pending = null, Installing = false });
+            Set(State with { Pending = null, Installing = false, Rejected = release.VersionText });
         }
     }
 

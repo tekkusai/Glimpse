@@ -576,11 +576,9 @@ internal sealed record UpdateFooter(string? Status, FooterLink Link, string? Cap
             : null;
         // Gone while a new check runs: that one answers.
         var failed = state.CheckFailed && !state.Checking ? "Couldn't check for updates." : null;
-        // A skipped release that is no longer the latest needs no word.
+        // The newest release did not verify at the last check. The next one looks again.
         var caption = stale ?? failed
-            ?? (!state.UpToDate && AppUpdateService.TryParseVersion(settings.SkippedUpdateVersion, out var skipped) && skipped > current
-                ? $"{skipped.ToString(3)} failed verification and was skipped."
-                : null);
+            ?? (state.Rejected is { } rejected ? $"{rejected} failed verification." : null);
         // The day it landed and the next, then the usual footer.
         var updated = settings.UpdatedAtUtc is { } at ? (now.Date - at.ToOffset(now.Offset).Date).Days : -1;
         if (updated is 0 or 1)
