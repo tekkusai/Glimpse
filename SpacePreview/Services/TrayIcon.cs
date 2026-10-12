@@ -226,14 +226,7 @@ internal sealed class TrayIcon : IDisposable
     private void ShowMajorUpdateNotice()
     {
         var (title, text) = MajorUpdateNotice(_updates.CurrentVersion);
-        var data = NewIconData();
-        data.uFlags = NativeMethods.NIF_INFO;
-        data.szInfoTitle = title;
-        data.szInfo = text;
-        data.dwInfoFlags = NativeMethods.NIIF_INFO
-            | NativeMethods.NIIF_NOSOUND
-            | NativeMethods.NIIF_RESPECT_QUIET_TIME;
-        if (_disposed || !_iconVisible || !ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data))
+        if (!ShowBalloon(title, text))
         {
             DiagnosticLog.Write("update notice failed");
             return;
@@ -242,6 +235,34 @@ internal sealed class TrayIcon : IDisposable
         _balloonIsUpdateNotice = true;
         Settings.Update(settings => settings with { MajorUpdateNoticeDue = false });
         DiagnosticLog.Write($"update notice shown version={_updates.CurrentVersion.ToString(3)}");
+    }
+
+    /// <summary>
+    /// A word about something the user can no longer see in a preview, such
+    /// as a rotation that did not save after its picture had gone.
+    /// </summary>
+    public void ShowNotice(string title, string text)
+    {
+        if (!ShowBalloon(title, text))
+        {
+            DiagnosticLog.Write("tray notice failed");
+            return;
+        }
+
+        _balloonIsUpdateNotice = false;
+    }
+
+    // Quiet by rule: no sound, and never during Windows' quiet time.
+    private bool ShowBalloon(string title, string text)
+    {
+        var data = NewIconData();
+        data.uFlags = NativeMethods.NIF_INFO;
+        data.szInfoTitle = title;
+        data.szInfo = text;
+        data.dwInfoFlags = NativeMethods.NIIF_INFO
+            | NativeMethods.NIIF_NOSOUND
+            | NativeMethods.NIIF_RESPECT_QUIET_TIME;
+        return !_disposed && _iconVisible && ShellNotifyIcon(NativeMethods.NIM_MODIFY, ref data);
     }
 
     private void OnBalloonClicked()

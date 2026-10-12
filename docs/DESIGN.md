@@ -43,7 +43,7 @@ always sits on the calmest tone.
 | `Warning`      | `#D9A66A`   | `#9A6B24`   | Warnings only |
 | `ScrollThumb`  | `#5A5A5A`   | `#B8B8B8`   | Scrollbar thumbs, WPF and web |
 
-Floating HUDs over content (zoom readout, mesh overlay) use the fixed dark
+Floating HUDs over content (zoom readout and image notices, mesh overlay) use the fixed dark
 glass in `Theme.Overlay*` in both themes.
 
 Video always plays on black. Everything else follows the theme, including the
@@ -237,3 +237,6 @@ One gesture set for every zoomable view:
 - Ctrl+Plus, Ctrl+Minus and Ctrl+0 work whenever the view is zoomable.
 - Pan is clamped to the content's edges.
 - Images with transparency sit on a subtle two-tone checkerboard.
+- A sentence the image has to say, such as a rotation that did not save,
+  appears where the zoom readout does, in the same glass and type, and holds
+  for four seconds.

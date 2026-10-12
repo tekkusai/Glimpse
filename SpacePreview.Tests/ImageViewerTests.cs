@@ -72,7 +72,7 @@ public sealed class ImageViewerTests
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "portrait.jpg");
         SaveJpeg(path, Gray(64, 48));
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 1));
 
         var header = ImageHeader.TryRead(path)!;
 
@@ -149,7 +149,7 @@ public sealed class ImageViewerTests
         var path = Path.Combine(temp.Path, "logo.svg");
         File.WriteAllText(path, """<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40"><rect width="120" height="40"/></svg>""");
 
-        var html = File.ReadAllText(PreviewWindow.WriteImageHtml(path).LocalPath);
+        var html = File.ReadAllText(ImagePage.Build(path).LocalPath);
 
         Assert.Contains("const STEP = 1.15, MAX = 32,", html, StringComparison.Ordinal);
         Assert.Equal(ZoomGestures.WheelStep, 1.15);

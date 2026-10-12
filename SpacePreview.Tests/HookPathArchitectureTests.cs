@@ -156,13 +156,11 @@ public sealed class HookPathArchitectureTests
     public void GiantImagesUseCacheOnlyArtworkThenAStampAwareFullDecode()
     {
         var firstFrame = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "DecodeImageFirstFrame");
-        var decoder = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "TryDecodeImage");
         var shell = TestSource.CodeMethod(@"SpacePreview\Preview\ShellThumbnailProvider.cs", "TryGetCachedThumbnail");
         var rotate = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RotateCurrentImage");
 
         Assert.Contains("_imageDecodeCache.TryGet", firstFrame, StringComparison.Ordinal);
         Assert.Contains("TryGetCachedThumbnail", firstFrame, StringComparison.Ordinal);
-        Assert.Contains("IgnoreImageCache", decoder, StringComparison.Ordinal);
         Assert.Contains("SIIGBF_INCACHEONLY", shell, StringComparison.Ordinal);
         Assert.DoesNotContain("TryGetThumbnail", shell, StringComparison.Ordinal);
         Assert.Contains("_imageDecodeCache.Invalidate", rotate, StringComparison.Ordinal);

@@ -33,9 +33,9 @@ internal sealed record CachedImageDecode(BitmapSource Bitmap, int Orientation);
 
 /// <summary>
 /// The preview only needs the image the user is likely to step back to. One
-/// strong entry also keeps WPF's decoded URI alive, turning a repeated giant
-/// PNG from another full inflate into a direct bitmap handoff. The window's
-/// existing idle retirement bounds the lifetime; this class bounds the size.
+/// strong entry turns a repeated giant PNG from another full inflate into a
+/// direct bitmap handoff. The window's existing idle retirement bounds the
+/// lifetime; this class bounds the size.
 /// </summary>
 internal sealed class RecentImageDecodeCache
 {

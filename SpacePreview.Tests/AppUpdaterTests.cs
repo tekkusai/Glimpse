@@ -1132,7 +1132,11 @@ public sealed class AppUpdaterTests
 
         var tray = TestSource.Read(@"SpacePreview\Services\TrayIcon.cs");
         var notice = TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowMajorUpdateNotice");
-        Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", notice, StringComparison.Ordinal);
+        // Every tray notice goes through one quiet balloon.
+        Assert.Contains("ShowBalloon(title, text)", notice, StringComparison.Ordinal);
+        var balloon = TestSource.Method(@"SpacePreview\Services\TrayIcon.cs", "ShowBalloon");
+        Assert.Contains("NativeMethods.NIIF_RESPECT_QUIET_TIME", balloon, StringComparison.Ordinal);
+        Assert.Contains("NativeMethods.NIIF_NOSOUND", balloon, StringComparison.Ordinal);
         Assert.Contains("MajorUpdateNoticeDue = false", notice, StringComparison.Ordinal);
         // TrayWindowTests drives the click itself; this is the tray's wiring to it.
         Assert.Contains("balloonClicked: OnBalloonClicked", tray, StringComparison.Ordinal);

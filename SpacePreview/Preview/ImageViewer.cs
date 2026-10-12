@@ -74,6 +74,9 @@ internal interface IZoomableImage
 /// </summary>
 internal sealed class ImageViewer : IZoomableImage
 {
+    // A sentence needs longer on screen than a number does.
+    private static readonly TimeSpan NoticeHold = TimeSpan.FromSeconds(4);
+
     private readonly Grid _root;
     private readonly Border _frame;
     private readonly Image _image;
@@ -100,13 +103,17 @@ internal sealed class ImageViewer : IZoomableImage
         {
             FontSize = Metrics.FontLabel,
             FontWeight = FontWeights.SemiBold,
-            Foreground = Theme.Brush(Theme.OverlayText)
+            Foreground = Theme.Brush(Theme.OverlayText),
+            // The readout is a few digits; a notice is a sentence, and
+            // wraps inside a narrow window instead of running off it.
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center
         };
         _hud = new Border
         {
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Bottom,
-            Margin = new Thickness(0, 0, 0, 18),
+            Margin = new Thickness(18, 0, 18, 18),
             Padding = new Thickness(12, 6, 12, 7),
             CornerRadius = Metrics.SurfaceCorner,
             Background = Theme.Brush(Theme.OverlayScrim),
@@ -291,13 +298,21 @@ internal sealed class ImageViewer : IZoomableImage
     private void ShowTransparency() =>
         _frame.Background = HasAlpha(_bitmap) ? Checkerboard(Theme.Current) : null;
 
-    private void ShowHud()
+    /// <summary>
+    /// A sentence about this image, such as a rotation that did not save,
+    /// said where the zoom readout speaks and gone the same way.
+    /// </summary>
+    public void ShowNotice(string text) => ShowHud(text, NoticeHold);
+
+    private void ShowHud() => ShowHud($"{Math.Round(_scale * 100)}%", ZoomGestures.HudHold);
+
+    private void ShowHud(string text, TimeSpan hold)
     {
-        _hudText.Text = $"{Math.Round(_scale * 100)}%";
+        _hudText.Text = text;
         _hud.BeginAnimation(UIElement.OpacityProperty, null);
         _hud.Opacity = 1;
         var fade = Motion.Enabled ? ZoomGestures.HudFade : TimeSpan.Zero;
-        _hud.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0, fade) { BeginTime = ZoomGestures.HudHold });
+        _hud.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0, fade) { BeginTime = hold });
     }
 
     internal static bool HasAlpha(BitmapSource bitmap)

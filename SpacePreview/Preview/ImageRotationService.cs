@@ -9,19 +9,38 @@ internal enum RotationPersistence
     /// <summary>Rotation is saved by flipping the EXIF orientation tag. Pixels never change.</summary>
     ExifTag,
 
-    /// <summary>Rotation is saved by re-encoding pixels. Lossless formats only.</summary>
+    /// <summary>Rotation is saved by turning the pixels themselves. Lossless formats only.</summary>
     Reencode,
 
     /// <summary>Rotation shows in the preview but is never written back.</summary>
     ViewOnly
 }
 
+/// <summary>What became of a rotation handed to the disk. Anything but <see cref="Saved"/> left the file as it was.</summary>
+internal enum RotationSaveResult
+{
+    Saved,
+
+    /// <summary>The file cannot hold a rotation without losing something of its own. Trying again changes nothing.</summary>
+    CannotCarry,
+
+    /// <summary>Another program has the file open.</summary>
+    InUse,
+
+    ReadOnly,
+
+    DiskFull,
+
+    /// <summary>Anything else: no permission, or the file is gone.</summary>
+    Failed
+}
+
 /// <summary>
-/// Persists quarter-turn rotations without degrading pixels: EXIF orientation
-/// for JPEG/TIFF, a pixel-lossless re-encode for PNG/BMP (metadata and color
-/// profile carried when the codec round-trips them), and view-only wherever a
-/// write would mean lossy re-compression. Every failure falls back silently
-/// to view-only; the original file is never at risk.
+/// Persists quarter-turn rotations without costing the file anything: EXIF
+/// orientation for JPEG/TIFF, the pixels themselves turned for PNG/BMP with
+/// everything else the file holds carried across byte for byte, and
+/// view-only wherever a write would lose something. A write that does not
+/// land says which way it failed, and the original file is never at risk.
 /// </summary>
 internal static class ImageRotationService
 {
@@ -34,70 +53,111 @@ internal static class ImageRotationService
             {
                 return RotationPersistence.ViewOnly;
             }
+
+            // PNG and BMP are judged by what this file holds, not by its
+            // name, so the tooltip can say "not saved" before the first click.
+            return Path.GetExtension(path).ToLowerInvariant() switch
+            {
+                ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => RotationPersistence.ExifTag,
+                ".png" => PngRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.ViewOnly,
+                ".bmp" => BmpRotation.CanCarry(path) ? RotationPersistence.Reencode : RotationPersistence.ViewOnly,
+                _ => RotationPersistence.ViewOnly
+            };
         }
         catch
         {
             return RotationPersistence.ViewOnly;
         }
-
-        return Path.GetExtension(path).ToLowerInvariant() switch
-        {
-            ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => RotationPersistence.ExifTag,
-            ".png" or ".bmp" => RotationPersistence.Reencode,
-            _ => RotationPersistence.ViewOnly
-        };
     }
 
     /// <summary>
     /// Applies <paramref name="quarterTurnsCw"/> to the file on disk. Runs on
-    /// a worker thread; returns false when the file keeps its stored state.
+    /// a worker thread.
     /// </summary>
-    public static bool TrySaveQuarterTurns(string path, int quarterTurnsCw)
+    public static RotationSaveResult SaveQuarterTurns(string path, int quarterTurnsCw)
     {
         var turns = ((quarterTurnsCw % 4) + 4) % 4;
         if (turns == 0)
         {
-            return true;
+            return RotationSaveResult.Saved;
         }
 
         try
         {
-            return Classify(path) switch
+            // A file made read-only or removed since it opened is a failed
+            // save, not a format that cannot be saved.
+            var info = new FileInfo(path);
+            if (!info.Exists)
             {
-                RotationPersistence.ExifTag => TrySaveExifOrientation(path, turns),
-                RotationPersistence.Reencode => TryReencodeRotated(path, turns),
-                _ => false
+                DiagnosticLog.Write($"rotate save failed (file gone) {path}");
+                return RotationSaveResult.Failed;
+            }
+
+            if (info.IsReadOnly)
+            {
+                DiagnosticLog.Write($"rotate save failed (read-only) {path}");
+                return RotationSaveResult.ReadOnly;
+            }
+
+            return Path.GetExtension(path).ToLowerInvariant() switch
+            {
+                ".jpg" or ".jpeg" or ".jpe" or ".jfif" or ".tif" or ".tiff" => SaveExifOrientation(path, turns),
+                ".png" => PngRotation.Save(path, turns),
+                ".bmp" => BmpRotation.Save(path, turns),
+                _ => RotationSaveResult.CannotCarry
             };
         }
         catch (Exception ex)
         {
             DiagnosticLog.Write($"rotate save failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return false;
+            return FailureFor(ex);
         }
     }
 
-    private static bool TrySaveExifOrientation(string path, int turns)
+    /// <summary>The Win32 error inside an I/O failure names what the user can do about it.</summary>
+    private static RotationSaveResult FailureFor(Exception ex) => ex switch
+    {
+        IOException io => (io.HResult & 0xFFFF) switch
+        {
+            // Sharing violation, lock violation.
+            32 or 33 => RotationSaveResult.InUse,
+            // Handle disk full, disk full.
+            39 or 112 => RotationSaveResult.DiskFull,
+            // Write-protected media.
+            19 => RotationSaveResult.ReadOnly,
+            _ => RotationSaveResult.Failed
+        },
+        UnauthorizedAccessException or OutOfMemoryException => RotationSaveResult.Failed,
+        // The codec refused what this file holds. A retry meets the same file.
+        _ => RotationSaveResult.CannotCarry
+    };
+
+    private static RotationSaveResult SaveExifOrientation(string path, int turns)
     {
         var query = ImageOrientation.MetadataQueryFor(path);
         if (query is null)
         {
-            return false;
+            return RotationSaveResult.CannotCarry;
         }
 
-        var target = ImageOrientation.RotateCw(ImageOrientation.Read(path), turns);
-
+        int target;
         using (var stream = File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read))
         {
-            var decoder = BitmapDecoder.Create(
+            var frame = BitmapDecoder.Create(
                 stream,
                 BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreColorProfile,
-                BitmapCacheOption.Default);
-            var writer = decoder.Frames[0].CreateInPlaceBitmapMetadataWriter();
+                BitmapCacheOption.Default).Frames[0];
+
+            // Read through the handle that writes. A separate read that
+            // found the file busy would answer "upright", and the turn
+            // would be added to the wrong start.
+            target = ImageOrientation.RotateCw(ImageOrientation.ReadFrom(frame, path), turns);
+            var writer = frame.CreateInPlaceBitmapMetadataWriter();
             writer.SetQuery(query, (ushort)target);
             if (writer.TrySave())
             {
                 DiagnosticLog.Write($"rotate saved (exif {target}) {path}");
-                return true;
+                return RotationSaveResult.Saved;
             }
         }
 
@@ -107,11 +167,11 @@ internal static class ImageRotationService
         if (IsJpeg(path) && !HasExifSegment(path) && TrySpliceJpegExifOrientation(path, target))
         {
             DiagnosticLog.Write($"rotate saved (exif spliced {target}) {path}");
-            return true;
+            return RotationSaveResult.Saved;
         }
 
         DiagnosticLog.Write($"rotate not persisted (no exif room) {path}");
-        return false;
+        return RotationSaveResult.CannotCarry;
     }
 
     private static bool IsJpeg(string path) =>
@@ -235,11 +295,13 @@ internal static class ImageRotationService
     /// <summary>
     /// Inserts a minimal EXIF APP1 segment (orientation only) into a JPEG
     /// that has none. Pure byte splice through a temp file; the original is
-    /// replaced only after the copy is complete.
+    /// replaced only after the copy is complete. False means the file's
+    /// structure will not take the splice; a disk or sharing failure throws,
+    /// so the caller can name it.
     /// </summary>
     private static bool TrySpliceJpegExifOrientation(string path, int orientation)
     {
-        var tempPath = path + ".spvw-rotate.tmp";
+        var tempPath = TempPathFor(path);
         try
         {
             using (var source = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
@@ -290,24 +352,27 @@ internal static class ImageRotationService
             File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
             return true;
         }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"rotate splice failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return false;
-        }
         finally
         {
-            try
+            DeleteTemp(tempPath);
+        }
+    }
+
+    /// <summary>Where a rewritten file is built before it replaces the original, beside it so the swap stays on one volume.</summary>
+    internal static string TempPathFor(string path) => path + ".spvw-rotate.tmp";
+
+    internal static void DeleteTemp(string tempPath)
+    {
+        try
+        {
+            if (File.Exists(tempPath))
             {
-                if (File.Exists(tempPath))
-                {
-                    File.Delete(tempPath);
-                }
+                File.Delete(tempPath);
             }
-            catch
-            {
-                // A stranded temp file is cosmetic; the original is intact.
-            }
+        }
+        catch
+        {
+            // A stranded temp file is cosmetic; the original is intact.
         }
     }
 
@@ -369,83 +434,5 @@ internal static class ImageRotationService
         segment[i] = 0x00;
 
         return segment;
-    }
-
-    /// <summary>
-    /// Rotates pixels and rewrites the file through a temp copy. Only called
-    /// for formats whose PIXEL encoders are lossless. Metadata and color
-    /// profiles are carried when the codec round-trips them; when they will
-    /// not transfer, the pixels win and the log names the file.
-    /// </summary>
-    private static bool TryReencodeRotated(string path, int turns)
-    {
-        BitmapFrame sourceFrame;
-        using (var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-        {
-            sourceFrame = BitmapDecoder.Create(
-                stream,
-                BitmapCreateOptions.PreservePixelFormat | BitmapCreateOptions.IgnoreColorProfile,
-                BitmapCacheOption.OnLoad).Frames[0];
-        }
-
-        var rotated = ImageOrientation.Apply(sourceFrame, ImageOrientation.FromQuarterTurns(turns));
-        if (TryWriteRotated(path, rotated, sourceFrame, preserveMetadata: true))
-        {
-            DiagnosticLog.Write($"rotate saved (re-encode {turns * 90} deg) {path}");
-            return true;
-        }
-
-        if (TryWriteRotated(path, rotated, sourceFrame, preserveMetadata: false))
-        {
-            DiagnosticLog.Write($"rotate saved (re-encode {turns * 90} deg, metadata dropped) {path}");
-            return true;
-        }
-
-        return false;
-    }
-
-    private static bool TryWriteRotated(string path, BitmapSource rotated, BitmapFrame sourceFrame, bool preserveMetadata)
-    {
-        var tempPath = path + ".spvw-rotate.tmp";
-        try
-        {
-            BitmapEncoder encoder = Path.GetExtension(path).ToLowerInvariant() switch
-            {
-                ".png" => new PngBitmapEncoder(),
-                ".bmp" => new BmpBitmapEncoder(),
-                _ => throw new NotSupportedException("re-encode rotation is limited to lossless formats")
-            };
-            encoder.Frames.Add(preserveMetadata
-                ? BitmapFrame.Create(rotated, thumbnail: null, sourceFrame.Metadata as BitmapMetadata, sourceFrame.ColorContexts)
-                : BitmapFrame.Create(rotated));
-
-            using (var output = File.Open(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
-            {
-                encoder.Save(output);
-            }
-
-            File.Replace(tempPath, path, destinationBackupFileName: null, ignoreMetadataErrors: true);
-            return true;
-        }
-        catch (Exception ex) when (preserveMetadata)
-        {
-            // The pixels-only retry follows; this trade is worth a log line.
-            DiagnosticLog.Write($"rotate metadata carry failed {path}: {ex.GetType().Name}: {ex.Message}");
-            return false;
-        }
-        finally
-        {
-            try
-            {
-                if (File.Exists(tempPath))
-                {
-                    File.Delete(tempPath);
-                }
-            }
-            catch
-            {
-                // A stranded temp file is cosmetic; the original is intact.
-            }
-        }
     }
 }

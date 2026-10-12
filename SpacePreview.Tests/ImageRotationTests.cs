@@ -90,10 +90,10 @@ public sealed class ImageRotationTests
 
         // The WPF JPEG encoder writes no EXIF, so the first save exercises
         // the byte-splice; the second finds the spliced tag and patches it.
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 1));
         Assert.Equal(6, ImageOrientation.Read(path));
 
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 1));
         Assert.Equal(3, ImageOrientation.Read(path));
 
         // Metadata-only writes must not touch pixel data size in any
@@ -117,7 +117,7 @@ public sealed class ImageRotationTests
             new byte[] { 255, 0, 0, 255, 0, 0, 255, 255 }, 8);
         SaveBitmap(new PngBitmapEncoder(), source, path);
 
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 1));
 
         // A quarter turn clockwise stands the pair up: blue above red.
         var pixels = DecodePixels(path, out var width, out var height);
@@ -142,7 +142,7 @@ public sealed class ImageRotationTests
         bytes.Insert(2, 0xFF);
         File.WriteAllBytes(path, [.. bytes]);
 
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 1));
         Assert.Equal(6, ImageOrientation.Read(path));
 
         var decoded = DecodePixels(path, out var width, out var height);
@@ -174,7 +174,7 @@ public sealed class ImageRotationTests
         original.AsSpan(2).CopyTo(patched.AsSpan(2 + garbageExif.Length));
         File.WriteAllBytes(path, patched);
 
-        Assert.False(ImageRotationService.TrySaveQuarterTurns(path, 1));
+        Assert.Equal(RotationSaveResult.CannotCarry, ImageRotationService.SaveQuarterTurns(path, 1));
         Assert.Equal(patched, File.ReadAllBytes(path));
     }
 
@@ -189,7 +189,7 @@ public sealed class ImageRotationTests
         try
         {
             Assert.Equal(RotationPersistence.ViewOnly, ImageRotationService.Classify(path));
-            Assert.False(ImageRotationService.TrySaveQuarterTurns(path, 1));
+            Assert.Equal(RotationSaveResult.ReadOnly, ImageRotationService.SaveQuarterTurns(path, 1));
             Assert.Equal(1, ImageOrientation.Read(path));
         }
         finally
@@ -216,7 +216,7 @@ public sealed class ImageRotationTests
         SaveBitmap(new JpegBitmapEncoder(), MakeBitmap(8, 8), path);
         var stamp = File.GetLastWriteTimeUtc(path);
 
-        Assert.True(ImageRotationService.TrySaveQuarterTurns(path, 4));
+        Assert.Equal(RotationSaveResult.Saved, ImageRotationService.SaveQuarterTurns(path, 4));
         Assert.Equal(stamp, File.GetLastWriteTimeUtc(path));
     }
 

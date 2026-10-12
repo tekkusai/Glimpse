@@ -107,6 +107,7 @@ public partial class App : Application
             _trayIcon = CreateTrayIcon();
             _controller.PreviewAccessWarningDetected += warning =>
                 _trayIcon?.ShowPreviewAccessWarning(warning);
+            PreviewWindow.RotationNotSavedUnseen += (title, text) => _trayIcon?.ShowNotice(title, text);
             _controller.Start();
             CacheHousekeeping.Start();
 

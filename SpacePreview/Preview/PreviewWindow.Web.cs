@@ -784,12 +784,6 @@ public partial class PreviewWindow
         };
     }
 
-    // MERGE: PreviewWindow.Image.cs, another lane's file, still writes the
-    // image page through this. It goes when BuildBrowserImagePreview there
-    // calls ImagePage.Build and WriteImageHtml is deleted.
-    internal static string TempHtmlPath(string folder, string sourcePath) =>
-        HtmlCache.PathFor(folder, sourcePath);
-
     private static void OpenExternalUri(string uri)
     {
         try

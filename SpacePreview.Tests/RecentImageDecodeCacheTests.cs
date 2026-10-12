@@ -87,7 +87,7 @@ public sealed class RecentImageDecodeCacheTests
         File.WriteAllBytes(path, [1]);
         var first = Bitmap(8, 6);
         var full = Bitmap(16, 12);
-        var session = new ImageRotationSession(path, first, ImageOrientation.Normal);
+        var session = new ImageRotationSession(path, first, ImageOrientation.Normal, ImageRotationService.Classify(path));
         var qualityChanges = 0;
         var compositionChanges = 0;
         session.QualityUpgraded += () => qualityChanges++;
@@ -105,7 +105,7 @@ public sealed class RecentImageDecodeCacheTests
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "preview.webp");
         File.WriteAllBytes(path, [1]);
-        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal);
+        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal, ImageRotationService.Classify(path));
         session.Rotate(1);
 
         // Rotating while the stand-in shows must not freeze the stand-in.
@@ -120,7 +120,7 @@ public sealed class RecentImageDecodeCacheTests
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "preview.jpg");
         File.WriteAllBytes(path, [1]);
-        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal);
+        var session = new ImageRotationSession(path, Bitmap(8, 6), ImageOrientation.Normal, ImageRotationService.Classify(path));
         session.Rotate(1);
         session.Commit();
 

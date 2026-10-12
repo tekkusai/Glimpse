@@ -6,7 +6,7 @@ using SpacePreview.Utilities;
 namespace SpacePreview.Preview;
 
 /// <summary>
-/// The page for images the web engine draws (animated GIF, SVG, AVIF). It
+/// The page for images the web engine draws (animated GIF, PNG and WebP, SVG, AVIF). It
 /// follows the same gesture spec as the native viewer, written in from
 /// <see cref="ZoomGestures"/>: raster images measure in device pixels; an
 /// SVG measures in its own units, which are CSS pixels. It starts from the
@@ -19,7 +19,10 @@ internal static class ImagePage
     {
         var isSvg = FileKinds.IsSvg(imagePath);
         var svgSize = isSvg && SvgSizeProbe.TryReadCanvasSize(imagePath, out var canvasSize) ? canvasSize : new Size(0, 0);
-        var checker = isSvg || (FileKinds.IsGif(imagePath) && PreviewWindow.GifHasTransparency(imagePath));
+        var checker = isSvg
+            || (FileKinds.IsGif(imagePath)
+                ? PreviewWindow.GifHasTransparency(imagePath)
+                : FileKinds.IsImage(imagePath) && ImageHeader.TryRead(imagePath)?.HasAlpha == true);
         var pagePath = HtmlCache.Get(
             "ImageHtml",
             $"{imagePath}|{Number(svgSize.Width)}|{Number(svgSize.Height)}|{checker}",
