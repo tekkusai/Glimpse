@@ -464,8 +464,7 @@ public partial class PreviewWindow
         Func<Uri> getSource,
         string diagnosticLabel,
         Action<Exception>? onFailed = null,
-        Action<Microsoft.Web.WebView2.Core.CoreWebView2>? configure = null,
-        bool trackAsPreviewDisposable = true)
+        Action<Microsoft.Web.WebView2.Core.CoreWebView2>? configure = null)
     {
         var requestVersion = _loadVersion;
         var requestToken = _loadCancellation?.Token ?? CancellationToken.None;
@@ -473,10 +472,6 @@ public partial class PreviewWindow
         var initializationStarted = 0;
         var webView = new StagedWebView(kind);
         WarmBrowserForNextGlance();
-        if (trackAsPreviewDisposable)
-        {
-            _nextDisposable = webView;
-        }
 
         bool IsCurrentRequest() =>
             !requestToken.IsCancellationRequested && requestVersion == _loadVersion;

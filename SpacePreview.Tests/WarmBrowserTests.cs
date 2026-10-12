@@ -501,8 +501,7 @@ public sealed class WarmBrowserTests
             (Func<Uri>)(() => new Uri("about:blank")),
             "warm browser test",
             null,
-            null,
-            false);
+            null);
 
     private static string Png(TempDirectory temp, string name)
     {

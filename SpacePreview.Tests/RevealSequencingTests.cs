@@ -663,8 +663,7 @@ public sealed class RevealSequencingTests
                 (Func<Uri>)(() => new Uri("about:blank")),
                 "sequencing test",
                 null,
-                null,
-                true)!;
+                null)!;
 
             // A load that was replaced while its last step ran ends late.
             var folder = temp.CreateDirectory("folder");

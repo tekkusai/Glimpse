@@ -198,11 +198,10 @@ public partial class PreviewWindow
     private static FrameworkElement BuildPdfErrorPreview(string path)
     {
         var kind = Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase) ? "PDF" : "file";
-        var extension = Path.GetExtension(path);
-        var app = string.IsNullOrEmpty(extension) ? null : NativeMethods.TryGetFriendlyAppName(extension);
-        var next = string.IsNullOrWhiteSpace(app) || app.Equals("Pick an app", StringComparison.OrdinalIgnoreCase)
-            ? "Open it in another app instead."
-            : $"Open it with {app} instead.";
+        // The header's own question, so the card and the Open pill name the same app.
+        var next = ResolveOpenTarget(path, isDirectory: false).AppName is { } app
+            ? $"Open it with {app} instead."
+            : "Open it in another app instead.";
         return BuildErrorPreview($"{Branding.Name} can't preview this {kind}", next);
     }
 
@@ -1534,8 +1533,7 @@ public partial class PreviewWindow
             source,
             navigationLabel,
             onFailed: null,
-            configure: core => ConfigurePdfViewer(core, pdfPath),
-            trackAsPreviewDisposable: false);
+            configure: core => ConfigurePdfViewer(core, pdfPath));
         Grid.SetColumn(fresh, 1);
         fresh.Visibility = Visibility.Hidden;
         fresh.AllowNavigation();

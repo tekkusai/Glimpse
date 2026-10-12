@@ -128,14 +128,6 @@ public partial class PreviewWindow
         set => PreviewContent.Tag = value;
     }
 
-    // CreateWebView still leaves its view here. Content now carries its own
-    // view to the hand-over, so nothing is kept: a field shared by every
-    // load let one load dispose another's view.
-    private static IDisposable? _nextDisposable
-    {
-        set { }
-    }
-
     /// <summary>
     /// The load on screen stops being current the moment another begins.
     /// Nothing of it acts again, and until the next load has its own

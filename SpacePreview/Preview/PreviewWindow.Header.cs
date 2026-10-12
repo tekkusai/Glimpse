@@ -219,7 +219,7 @@ public partial class PreviewWindow
         var settled = _loadFinished;
         ZoomControls.IsEnabled = !settled || _zoomWebView is not null;
         ContentActions.IsEnabled = !settled || _rotationSession is not null;
-        SignButton.IsEnabled = _fillSignSurface is null && (!settled || _fillSignPath is not null);
+        SignButton.IsEnabled = _fillSignSurface is null && !IsEnteringFillSign && (!settled || _fillSignPath is not null);
 
         // Work kept from last time: the pill offers it back, at the same width.
         SignLabel.Visibility = _hasSignDraft ? Visibility.Hidden : Visibility.Visible;
