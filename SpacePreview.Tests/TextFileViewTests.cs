@@ -25,6 +25,10 @@ public sealed class TextFileViewTests
     private const int Piece = 4 * 1024;
     private const int Budget = 40_000;
 
+    // Three screens of the widest lines here are a third of this, as they
+    // are a third of the real budget at the real sizes.
+    private const long Span = 1024 * 1024;
+
     private static readonly Rect ParkedPixels = new(-30000, 0, 1920, 1040);
 
     [Fact]
@@ -456,13 +460,16 @@ public sealed class TextFileViewTests
         }
     });
 
-    [Fact]
-    public Task AFileOfVeryLongLinesIsReadThroughToItsLast() => WpfApp.RunAsync(async () =>
+    [Theory]
+    [InlineData(1024 * 1024)]
+    [InlineData(100 * 1024)]
+    public Task AFileOfVeryLongLinesIsReadThroughToItsLast(int span) => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
 
         // Three hundred records of 40,000 characters, as a file of JSON
-        // lines can be.
+        // lines can be. The box may span a megabyte of the file, which is
+        // more than a screen of them, or a tenth of that, which is less.
         var records = new StringBuilder();
         for (var i = 0; i < 300; i++)
         {
@@ -470,27 +477,94 @@ public sealed class TextFileViewTests
         }
 
         var (path, text) = Write(temp, records.ToString());
-        var (window, box, view) = Show(path);
+        var (window, box, view) = Show(path, span: span);
         try
         {
             await Settle(view);
             Assert.Equal(0, view.Range.Start);
             Assert.StartsWith("record 0000000 jjjj", box.Text, StringComparison.Ordinal);
 
-            for (var step = 0; step < 60 && view.Range.End < text.Length; step++)
+            // Left at the top, it has read its span of the file, or the
+            // screen when the screen's own records come to more, and the
+            // screen is full either way.
+            const int record = 40_017;
+            var scroll = Scroll(box);
+            var onScreen = ((box.GetLastVisibleLineIndex() - box.GetFirstVisibleLineIndex() + 1) / 2) + 2;
+            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight, double.MaxValue);
+            Assert.InRange(view.Range.End, 1, Math.Max(span, onScreen * record) + record);
+
+            // Each time the reader reaches the end of what it holds, it
+            // reads on, and never spans much more of the file than that.
+            for (var step = 0; step < 12; step++)
             {
+                var held = view.Range.End;
                 box.ScrollToEnd();
                 await Settle(view);
+                Assert.InRange(view.Range.End, held + record, text.Length);
+                Assert.InRange(view.Range.End - view.Range.Start, 1, Math.Max(span, onScreen * record) + (4 * record));
             }
 
+            // And End is the last record, with the screen full above it.
             // Every record is two lines: its first characters, and how
             // much more of it there is.
+            view.GoToEnd();
+            await Settle(view);
+            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight, double.MaxValue);
+            Assert.InRange(view.Range.End - view.Range.Start, 1, Math.Max(span, onScreen * record) + (4 * record));
             Assert.Equal(text.Length, view.Range.End);
             var lines = box.Text.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
             Assert.StartsWith("record 0000299 jjjj", lines[^2], StringComparison.Ordinal);
             Assert.Equal(TextFileReader.ShownOfALongLine, lines[^2].Length);
             Assert.Equal(TextFileReader.LineGoesOn(40_017 - TextFileReader.ShownOfALongLine), lines[^1]);
             Assert.All(lines, line => Assert.InRange(line.Length, 1, TextFileReader.ShownOfALongLine));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AFileOfLongLinesIsReadNoFurtherAheadThanItsBudgetOfTheFile() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // Forty megabytes in four hundred lines, at the sizes the window
+        // uses. Each line is two thousand characters in the box, so the
+        // budget of characters is never reached: all four hundred are
+        // under half of it.
+        var path = Path.Combine(temp.Path, "records.log");
+        var line = Encoding.ASCII.GetBytes(new string('j', 100_000 - 1) + "\n");
+        using (var file = File.Create(path))
+        {
+            for (var i = 0; i < 400; i++)
+            {
+                file.Write(line);
+            }
+        }
+
+        var (window, box, view) = Show(path, TextFileView.HeadBytes, TextFileView.PieceBytes, TextFileView.HeldCharacters, TextFileView.HeldBytes);
+        try
+        {
+            // Left at its first line, it reads its budget of the file
+            // and stops, with screens of lines in hand below the reader.
+            await Settle(view);
+            var scroll = Scroll(box);
+            Assert.Equal(0, view.Range.Start);
+            Assert.InRange(view.Range.End, TextFileView.HeldBytes, TextFileView.HeldBytes + 200_000);
+            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight * 3, double.MaxValue);
+
+            // Scrolled, it reads on and lets go behind, and never spans
+            // more of the file than that.
+            for (var step = 0; step < 60 && view.Range.End < 40_000_000; step++)
+            {
+                box.ScrollToEnd();
+                await Settle(view);
+                Assert.InRange(view.Range.End - view.Range.Start, 1, TextFileView.HeldBytes + 400_000);
+            }
+
+            Assert.Equal(40_000_000, view.Range.End);
+            Assert.EndsWith(TextFileReader.LineGoesOn(100_000 - TextFileReader.ShownOfALongLine) + "\r\n", box.Text, StringComparison.Ordinal);
         }
         finally
         {
@@ -545,6 +619,20 @@ public sealed class TextFileViewTests
         Assert.Equal(
             new string('x', TextFileReader.ShownOfALongLine) + "\r\n" + TextFileReader.LineGoesOn(300_002 - TextFileReader.ShownOfALongLine) + "\r\n",
             stepped.Text);
+
+        // A file that opens on a line with no end within the reader's
+        // reach keeps the cut too. Read on, it would cost the reach for
+        // every two lines on screen and show a sample of one line each time.
+        var endless = Path.Combine(temp.Path, "endless.log");
+        using (var file = File.Create(endless))
+        {
+            file.Write(Encoding.ASCII.GetBytes(new string('x', TextFileReader.FarthestLineEnd + 1_000_000)));
+            file.Write(Encoding.ASCII.GetBytes("\r\n" + longer));
+        }
+
+        var kept = PreviewWindow.OpenTextDocument(endless, TextPreviewLoader.TryLoad(endless))!;
+        Assert.Null(kept.Reader);
+        Assert.StartsWith(new string('x', PreviewWindow.LongLineDisplayLimit) + "\n\nShowing the first", kept.Text, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -678,10 +766,15 @@ public sealed class TextFileViewTests
         text[(int)range.Start..(int)range.End];
 
     /// <summary>The view in a parked window of its own, with small pieces and a small budget.</summary>
-    private static (Window Window, TextBox Box, TextFileView View) Show(string path)
+    private static (Window Window, TextBox Box, TextFileView View) Show(
+        string path,
+        int headBytes = Head,
+        int pieceBytes = Piece,
+        int characters = Budget,
+        long span = Span)
     {
         var reader = TextFileReader.TryOpen(path)!;
-        var head = TextFileView.TryReadHead(reader, Head)!;
+        var head = TextFileView.TryReadHead(reader, headBytes)!;
         var box = new TextBox
         {
             Text = head.Text,
@@ -693,7 +786,7 @@ public sealed class TextFileViewTests
             FontFamily = new FontFamily("Consolas"),
             FontSize = 13
         };
-        var view = new TextFileView(box, reader, head, Head, Piece, Budget);
+        var view = new TextFileView(box, reader, head, headBytes, pieceBytes, characters, span);
         var window = new Window
         {
             Content = box,

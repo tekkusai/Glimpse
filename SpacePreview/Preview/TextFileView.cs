@@ -38,6 +38,16 @@ internal sealed class TextFileView
     internal const int HeldCharacters = 2_000_000;
 
     /// <summary>
+    /// The most of the file the box spans, in the file's bytes. Ordinary
+    /// text never comes near it: two million characters are two to six
+    /// megabytes. It is what bounds a file of very long lines, where a
+    /// line is two thousand characters in the box and megabytes of the
+    /// file to read past. Reading ahead of the reader stops here. Only
+    /// what is on screen is read whatever it costs.
+    /// </summary>
+    internal const long HeldBytes = 16 * 1024 * 1024;
+
+    /// <summary>
     /// How near an end of what the box holds the reader comes before it
     /// reads on, in screens. The box holds this many screens of lines
     /// whatever the budget says.
@@ -53,6 +63,7 @@ internal sealed class TextFileView
     private readonly int _headBytes;
     private readonly int _pieceBytes;
     private readonly int _heldCharacters;
+    private readonly long _heldBytes;
     private readonly LinkedList<Held> _held = new();
     private ScrollViewer? _scroll;
     private int _characters;
@@ -68,13 +79,15 @@ internal sealed class TextFileView
         TextPiece head,
         int headBytes = HeadBytes,
         int pieceBytes = PieceBytes,
-        int heldCharacters = HeldCharacters)
+        int heldCharacters = HeldCharacters,
+        long heldBytes = HeldBytes)
     {
         _box = box;
         _reader = reader;
         _headBytes = headBytes;
         _pieceBytes = pieceBytes;
         _heldCharacters = heldCharacters;
+        _heldBytes = heldBytes;
         Hold(head);
 
         // Staged content joins the window collapsed, and a collapsed box
@@ -114,13 +127,15 @@ internal sealed class TextFileView
 
     /// <summary>
     /// The opening text for a file read this way: its first lines. Null
-    /// when they are the whole file. There is nothing to read on to then,
-    /// and of a file that is one long line the loader's cut shows more.
+    /// when they are the whole file, or when the file opens on a line with
+    /// no end within the reader's reach. Of a file that is one long line
+    /// the loader's cut shows more, and reading it on a run at a time
+    /// would cost the reach for every two lines on screen.
     /// </summary>
     public static TextPiece? TryReadHead(TextFileReader reader, int headBytes = HeadBytes)
     {
         var head = reader.ReadAfter(reader.First, headBytes);
-        return head.Text.Length == 0 || head.End >= reader.Length ? null : head;
+        return head.Text.Length == 0 || head.StopsInALine || head.End >= reader.Length ? null : head;
     }
 
     /// <summary>To the file's last line, as the file is now.</summary>
@@ -259,7 +274,9 @@ internal sealed class TextFileView
     /// the end the box is not anchored to, a piece at a time while idle.
     /// A full box takes more at one end only by letting go at the other,
     /// and only of what the reader is further from (see MayDrop). A reader
-    /// at the very edge of what it holds is read to all the same.
+    /// at the very edge of what it holds is read to all the same. So what
+    /// the box reads with the reader at rest is its budget, or the screen
+    /// when the screen's own lines come to more of the file than that.
     /// </summary>
     private void Look()
     {
@@ -272,7 +289,8 @@ internal sealed class TextFileView
         var screens = _scroll.ViewportHeight * Screens;
         var above = _scroll.VerticalOffset;
         var below = _scroll.ExtentHeight - above - _scroll.ViewportHeight;
-        var full = _characters >= _heldCharacters && _scroll.ExtentHeight >= screens;
+        var full = Range.End - Range.Start >= _heldBytes
+            || (_characters >= _heldCharacters && _scroll.ExtentHeight >= screens);
         if (below <= screens && MayReadAfter && (!full || below < 1 || MayDrop(first: true)))
         {
             Extend(after: true);
@@ -312,11 +330,15 @@ internal sealed class TextFileView
         return first ? above - height > below : below - height > above;
     }
 
-    /// <summary>More than the budget, and more than the screens the box holds whatever they cost.</summary>
+    /// <summary>
+    /// More of the file than the box may span, or more characters than its
+    /// budget and more than the screens it holds whatever they come to.
+    /// </summary>
     private bool Over =>
-        _characters > _heldCharacters
-        && _scroll is { } scroll
-        && scroll.ExtentHeight > scroll.ViewportHeight * Screens;
+        Range.End - Range.Start > _heldBytes
+        || (_characters > _heldCharacters
+            && _scroll is { } scroll
+            && scroll.ExtentHeight > scroll.ViewportHeight * Screens);
 
     private bool MayReadAfter => Waited(_nothingAfterAt);
 

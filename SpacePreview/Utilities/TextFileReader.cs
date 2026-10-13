@@ -4,7 +4,14 @@ using System.Text;
 namespace SpacePreview.Utilities;
 
 /// <summary>A run of a text file: its text, and the bytes of the file it was read from.</summary>
-internal sealed record TextPiece(string Text, long Start, long End);
+internal sealed record TextPiece(string Text, long Start, long End)
+{
+    /// <summary>
+    /// The run stops at the reach, inside a line that has no end within
+    /// it. The read after this one goes on with the same line.
+    /// </summary>
+    public bool StopsInALine { get; init; }
+}
 
 /// <summary>
 /// A text file read a piece at a time, by position. The encoding is settled
@@ -123,8 +130,8 @@ internal sealed class TextFileReader
             return new TextPiece(Lines(bytes.AsSpan(0, length), atEnd), start, start + length);
         }
 
-        var end = LineEndAfter(start, start + bytes.Length - bytes.Length % _unit, out var ended);
-        return new TextPiece(Line(start, end, ended), start, end);
+        var end = LineEndAfter(start, start + bytes.Length - bytes.Length % _unit, out var ended, out var reached);
+        return new TextPiece(Line(start, end, ended), start, end) { StopsInALine = reached };
     }
 
     /// <summary>
@@ -215,9 +222,10 @@ internal sealed class TextFileReader
     /// or at the file's end. A line longer than the reach is said to end
     /// at the reach, between two characters.
     /// </summary>
-    private long LineEndAfter(long line, long from, out bool ended)
+    private long LineEndAfter(long line, long from, out bool ended, out bool reached)
     {
         ended = true;
+        reached = false;
         try
         {
             using var stream = Open(_path);
@@ -243,6 +251,7 @@ internal sealed class TextFileReader
 
                 if (from >= reach)
                 {
+                    reached = true;
                     return from - read + WholeCharacters(block.AsSpan(0, read));
                 }
             }

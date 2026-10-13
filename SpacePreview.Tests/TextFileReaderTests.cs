@@ -187,7 +187,8 @@ public sealed class TextFileReaderTests
         var reader = TextFileReader.TryOpen(path)!;
         var measure = encoding == "utf8" ? Encoding.UTF8 : Encoding.Unicode;
 
-        foreach (var pieces in new[] { Forward(reader, 64 * 1024), Backward(reader, 64 * 1024) })
+        var forward = Forward(reader, 64 * 1024);
+        foreach (var pieces in new[] { forward, Backward(reader, 64 * 1024) })
         {
             // The two ordinary lines, and the long one in two runs: one as
             // long as the reach to within a character, and the rest.
@@ -197,6 +198,12 @@ public sealed class TextFileReaderTests
             Assert.Equal(reader.First, pieces[0].Start);
             Assert.Equal(reader.Length, pieces[3].End);
             Assert.Contains(pieces, piece => piece.End - piece.Start is > TextFileReader.FarthestLineEnd - 4 and <= TextFileReader.FarthestLineEnd);
+
+            // Read forward, the run that stops at the reach says so, and
+            // nothing else does.
+            Assert.Equal(
+                ReferenceEquals(pieces, forward) ? [false, true, false, false] : [false, false, false, false],
+                pieces.Select(piece => piece.StopsInALine));
 
             foreach (var run in pieces.Skip(1).Take(2))
             {

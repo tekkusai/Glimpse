@@ -247,12 +247,15 @@ is read a piece at a time. It opens on its first lines, takes more while
 the thread is free, and takes more whenever the reader comes within three
 screens of either end of what it holds. It holds two million characters, or
 three screens of lines when those come to more, and past that lets go of
-the end the reader is further from. End goes to the file's last line
-as the file is then, Home to its first. A line longer than 32 KB (64 KB in
+the end the reader is further from. It never spans more than 16 MB of the
+file, a limit only very long lines reach: there it reads ahead of the
+reader up to that much, and past it only what is on screen. End goes to
+the file's last line as the file is then, Home to its first. A line longer than 32 KB (64 KB in
 UTF-16) shows its first 2 KB, and a line under it says how much more of it
 there is: "[This line goes on for another 4.9 MB. Open the file for the
 rest.]". The lines after it are read like any others. A file that is one
-long line keeps the cut of its first 120,000 characters.
+long line, or opens on a line with no end in its first 16 MB, keeps the cut
+of its first 120,000 characters.
 
 Pages Glimpse writes (code, markdown, text, media player, image viewer,
 spreadsheets, EPUB) take their colors from one stylesheet generated from both
