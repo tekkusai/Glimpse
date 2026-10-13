@@ -69,7 +69,13 @@ internal static class SignDrafts
     /// </summary>
     public static (FileStamp? File, SignDraft? Draft) Load(string pdfPath)
     {
-        var file = FileStamp.Of(pdfPath);
+        // A file that cannot be reached is not a file that changed: a
+        // share is down or a drive is out, and the draft waits for it.
+        if (FileStamp.Of(pdfPath) is not { } file)
+        {
+            return (null, null);
+        }
+
         lock (Io)
         {
             var draftPath = PathFor(pdfPath);

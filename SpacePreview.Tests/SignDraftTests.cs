@@ -66,6 +66,26 @@ public sealed class SignDraftTests
         Assert.False(File.Exists(SignDrafts.PathFor(pdf)));
     });
 
+    // A share that is down or a drive that is out is not a file that
+    // changed. 3.0.1 deleted the draft at the first look without its file.
+    [Fact]
+    public void ADraftWaitsWhileItsFileCannotBeReached() => InDataRoot(root =>
+    {
+        var pdf = WritePdf(root);
+        WriteDateDraft(pdf);
+        var away = pdf + ".away";
+        File.Move(pdf, away);
+
+        var (file, draft) = SignDrafts.Load(pdf);
+        Assert.Null(file);
+        Assert.Null(draft);
+        Assert.True(File.Exists(SignDrafts.PathFor(pdf)));
+
+        // The same file back in its place, and the work is still there.
+        File.Move(away, pdf);
+        Assert.Single(SignDrafts.Load(pdf).Draft!.Placements);
+    });
+
     [Fact]
     public void PlacementsWhoseInkIsGoneAreLetGo() => InDataRoot(root =>
     {
