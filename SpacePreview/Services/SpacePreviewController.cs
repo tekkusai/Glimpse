@@ -66,7 +66,7 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly Func<int, bool, KeyPress> _readKey;
     private readonly Action<ExplorerSelection, long> _showPreview;
     private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
-        (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
+        async (hwnd, isDesktop, delta) => await Arrived(await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta)));
     private readonly Func<IntPtr, PreviewAccessWarningInfo?> _readAccessWarning =
         window => ProcessIntegrityService.TryGetPreviewAccessWarning(window, out var warning) ? warning : null;
     private readonly uint _processId = (uint)Environment.ProcessId;
@@ -802,6 +802,7 @@ internal sealed class SpacePreviewController : IDisposable
             case KeyAction.CancelOpen:
                 _openRequestGeneration++;
                 _openPending = false;
+                BorrowedFiles.StopWaiting();
                 DiagnosticLog.Write("escape -> open cancelled");
                 return;
             case KeyAction.Hide:
@@ -1691,8 +1692,19 @@ internal sealed class SpacePreviewController : IDisposable
         });
 
         diagnostics.WriteIfSlow(origin, selection is not null);
-        return selection;
+        return await Arrived(selection);
     }
+
+    /// <summary>
+    /// The selection once its file can be shown. A file on a phone or in a
+    /// zip folder is shown from a copy, and the copy may still be on its
+    /// way. It is waited for here, after the shell's thread has answered
+    /// and gone on to the next question, so a phone that is slow or has
+    /// stopped answering holds up nothing but its own file. Null when the
+    /// copy did not arrive.
+    /// </summary>
+    internal static async Task<ExplorerSelection?> Arrived(ExplorerSelection? selection) =>
+        selection is null || await BorrowedFiles.WhenReady(selection.Path) ? selection : null;
 
     private void QueueOpen(ForegroundSelectionContext context, long inputStamp)
     {

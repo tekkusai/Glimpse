@@ -64,6 +64,7 @@ public sealed class BorrowedSelectionTests
         var zip = WriteZip(temp, ("IMG_0412.jpg", Jpeg()));
         var view = new SelectedItems(Path.Combine(zip, "IMG_0412.jpg"));
         var path = ShellViews.ReadSelection(view, ordered: false, out _, item => BorrowedFiles.TryBorrow(item)).AnchorPath!;
+        Assert.True(await BorrowedFiles.WhenReady(path));
         var window = Park();
         try
         {
