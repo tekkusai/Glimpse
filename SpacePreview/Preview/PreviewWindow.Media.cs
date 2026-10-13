@@ -313,10 +313,14 @@ public partial class PreviewWindow
         _ => BuildErrorPreview("Can't preview this image", "This image may be damaged.")
     };
 
+    private static FrameworkElement BuildRawFailurePreview() =>
+        BuildErrorPreview("Can't preview this image", "This is a camera RAW photo.", RawFix);
+
     // One definition per fix: the failure cards offer them, and Settings
     // does too while this PC lacks them.
     internal static readonly PreviewAction HevcFix = new("Get HEVC support", HevcVideoExtensionStoreUri, "Opens HEVC Video Extensions in Microsoft Store");
     internal static readonly PreviewAction HeifFix = new("Get HEIF support", HeifImageExtensionStoreUri, "Opens HEIF Image Extensions in Microsoft Store");
+    internal static readonly PreviewAction RawFix = new("Get RAW support", RawImageExtensionStoreUri, "Opens Raw Image Extension in Microsoft Store");
     // HEVC is the one video codec WebView2 borrows from Windows. It has
     // decoded AV1 itself since Edge 121, so no Store page can fix an AV1
     // failure and the card offers none.

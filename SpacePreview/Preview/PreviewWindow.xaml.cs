@@ -45,6 +45,7 @@ public partial class PreviewWindow : Window
     internal const double StageMinHeight = 480;
     private const string HevcVideoExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7";
     private const string HeifImageExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9PMMSR1CGPWG";
+    private const string RawImageExtensionStoreUri = "ms-windows-store://pdp/?ProductId=9NCTDW2W1BH8";
     private const double PdfPageRailWidth = 132;
     private const double PdfPageRailCollapsedWidth = 32;
     private const int PdfPageRailInitialPages = 10;
@@ -564,6 +565,16 @@ public partial class PreviewWindow : Window
             {
                 DiagnosticLog.Write($"image decode failed {path}: heif brand={FileSignatures.HeifBrandText(path)}");
                 return BuildHeifFailurePreview(await Task.Run(() => FileSignatures.ClassifyHeifFailure(path), token));
+            }
+
+            // The Store is offered only when this PC has no RAW decoder at
+            // all. With one, a RAW that will not open is a camera it does
+            // not know or a damaged file, and gets the file's card.
+            if (FileKinds.IsCameraRaw(path)
+                && await Task.Run(() => MediaCodecs.HasImageDecoder(MediaCodecs.RawContainer), token) == false)
+            {
+                DiagnosticLog.Write($"image decode failed {path}: no raw decoder");
+                return BuildRawFailurePreview();
             }
         }
 

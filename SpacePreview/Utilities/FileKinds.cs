@@ -22,6 +22,15 @@ internal static partial class FileKinds
         ".bmp", ".dib", ".gif", ".ico", ".jpg", ".jpeg", ".jpe", ".jfif", ".png", ".tif", ".tiff", ".webp", ".heic", ".heif"
     };
 
+    // What cameras save before any processing, as Windows' Raw Image
+    // Extension reads it. The extensions that also name other things are
+    // left out: ".raw" is any unprocessed data and ".cap" a network capture.
+    private static readonly HashSet<string> CameraRawExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".3fr", ".arw", ".cr2", ".cr3", ".crw", ".dcr", ".dng", ".erf", ".fff", ".iiq", ".kdc", ".mef", ".mrw",
+        ".nef", ".nrw", ".orf", ".pef", ".raf", ".rw2", ".rwl", ".sr2", ".srf", ".srw", ".x3f"
+    };
+
     private static readonly HashSet<string> BrowserImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
         ".svg", ".avif", ".webp"
@@ -47,7 +56,9 @@ internal static partial class FileKinds
         ".dockerfile", ".gradle", ".lock", ".reg", ".res", ".str", ".meta", ".info", ".version", ".nfo"
     };
 
-    public static bool IsImage(string path) => ImageExtensions.Contains(Path.GetExtension(path));
+    public static bool IsImage(string path) => ImageExtensions.Contains(Path.GetExtension(path)) || IsCameraRaw(path);
+
+    public static bool IsCameraRaw(string path) => CameraRawExtensions.Contains(Path.GetExtension(path));
 
     public static bool IsBrowserImage(string path) => BrowserImageExtensions.Contains(Path.GetExtension(path));
 

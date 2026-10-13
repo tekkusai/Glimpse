@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows.Media.Imaging;
+using SpacePreview.Native;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
@@ -138,6 +139,15 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
                 stream,
                 BitmapCreateOptions.DelayCreation | BitmapCreateOptions.IgnoreColorProfile,
                 BitmapCacheOption.None);
+            // Most RAW files are built on TIFF. Without the RAW decoder,
+            // Windows opens one as that TIFF and hands back the thumbnail
+            // inside, which is not the photo. Only the RAW decoder's word
+            // is taken for a RAW.
+            if (FileKinds.IsCameraRaw(path) && decoder.CodecInfo?.ContainerFormat != MediaCodecs.RawContainer)
+            {
+                return null;
+            }
+
             var frame = LargestFrame(decoder);
             return new ImageHeader(
                 Math.Max(1, frame.PixelWidth),

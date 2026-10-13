@@ -11,9 +11,10 @@ namespace SpacePreview.Native;
 /// </summary>
 internal static class MediaCodecs
 {
-    // MFVideoFormat_HEVC and GUID_ContainerFormatHeif.
+    // MFVideoFormat_HEVC, GUID_ContainerFormatHeif and GUID_ContainerFormatRaw.
     internal static readonly Guid HevcVideo = new("43564548-0000-0010-8000-00AA00389B71");
     internal static readonly Guid HeifContainer = new("E1E62521-6787-405B-A339-500715B5763F");
+    internal static readonly Guid RawContainer = new("FE99CE60-F19C-433C-A3AE-00ACEFA9CA21");
 
     private static readonly Guid VideoDecoderCategory = new("D6C02D4B-6833-45B4-971A-05A4B04BAB91");
     private static readonly Guid VideoMajorType = new("73646976-0000-0010-8000-00AA00389B71");

@@ -18,9 +18,10 @@ internal static class MissingPieces
     public static IReadOnlyList<MissingPiece> Find() => Describe(
         OfficeDocumentPdfConverter.IsAvailable,
         MediaCodecs.HasVideoDecoder(MediaCodecs.HevcVideo),
-        MediaCodecs.HasImageDecoder(MediaCodecs.HeifContainer));
+        MediaCodecs.HasImageDecoder(MediaCodecs.HeifContainer),
+        MediaCodecs.HasImageDecoder(MediaCodecs.RawContainer));
 
-    internal static IReadOnlyList<MissingPiece> Describe(bool officeEngine, bool? hevcDecoder, bool? heifDecoder)
+    internal static IReadOnlyList<MissingPiece> Describe(bool officeEngine, bool? hevcDecoder, bool? heifDecoder, bool? rawDecoder = null)
     {
         var pieces = new List<MissingPiece>();
         if (!officeEngine)
@@ -38,6 +39,11 @@ internal static class MissingPieces
         if (heifDecoder == false)
         {
             pieces.Add(new(hevcDecoder == false ? "HEIF photos won't open." : "HEIC and HEIF photos won't open.", PreviewWindow.HeifFix));
+        }
+
+        if (rawDecoder == false)
+        {
+            pieces.Add(new("Camera RAW photos won't open.", PreviewWindow.RawFix));
         }
 
         return pieces;

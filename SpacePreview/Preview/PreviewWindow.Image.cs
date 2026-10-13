@@ -334,6 +334,13 @@ public partial class PreviewWindow
     /// </summary>
     internal static BitmapSource? TryDecodeImage(string path, ImageHeader? header, int longSide = MaxImageDecodePixels)
     {
+        // A RAW decodes only under a header, and only the RAW decoder
+        // gives it one: any other decoder would show the thumbnail inside.
+        if (header is null && FileKinds.IsCameraRaw(path))
+        {
+            return null;
+        }
+
         try
         {
             // Opened to share with every reader and writer. Given the path

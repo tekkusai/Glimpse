@@ -1,6 +1,7 @@
 using System.IO;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using SpacePreview.Native;
 
 namespace SpacePreview.Preview;
 
@@ -70,7 +71,12 @@ internal static class ImageOrientation
     {
         try
         {
-            if (MetadataQueryFor(path) is { } query
+            // The RAW decoder leaves a portrait shot on its side and says
+            // so here, whatever the camera's own format calls the tag.
+            var query = frame.Decoder?.CodecInfo?.ContainerFormat == MediaCodecs.RawContainer
+                ? "System.Photo.Orientation"
+                : MetadataQueryFor(path);
+            if (query is not null
                 && frame.Metadata is BitmapMetadata metadata
                 && metadata.GetQuery(query) is ushort value
                 && value is >= 1 and <= 8)
