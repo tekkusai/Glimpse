@@ -190,8 +190,11 @@ public sealed class OfficeDocumentPdfConverterTests
             observationCancellation.Cancel();
         }
 
-        Assert.NotNull(converted);
-        Assert.False(await observation);
+        // This test failed once in a full run and its message was not kept.
+        // Each way it can fail now says what happened.
+        Assert.True(converted is not null, "The conversion gave nothing. " + ConversionLog());
+        var contact = await observation;
+        Assert.True(contact is null, "Something connected to the linked host: " + contact);
     }
 
     [Fact]
@@ -334,21 +337,97 @@ public sealed class OfficeDocumentPdfConverterTests
         }
     }
 
-    private static async Task<bool> ObserveConnectionAsync(TcpListener listener, CancellationToken cancellationToken)
+    /// <summary>
+    /// What connected, or null when nothing did: the first line it sent
+    /// and, where Windows still knows, the program it came from. A
+    /// connection counts from the moment it is accepted, whatever follows.
+    /// </summary>
+    private static async Task<string?> ObserveConnectionAsync(TcpListener listener, CancellationToken cancellationToken)
     {
+        TcpClient client;
         try
         {
-            using var client = await listener.AcceptTcpClientAsync(cancellationToken);
-            using var stream = client.GetStream();
-            var request = new byte[2048];
-            _ = await stream.ReadAsync(request, cancellationToken);
-            var response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray();
-            await stream.WriteAsync(response, cancellationToken);
-            return true;
+            client = await listener.AcceptTcpClientAsync(cancellationToken);
         }
         catch (OperationCanceledException)
         {
-            return false;
+            return null;
+        }
+
+        using (client)
+        {
+            // Asked first: a sender that hangs up at once is soon forgotten.
+            var sender = Sender(client);
+            var said = "nothing";
+            try
+            {
+                using var patience = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+                var stream = client.GetStream();
+                var request = new byte[2048];
+                var read = await stream.ReadAsync(request, patience.Token);
+                said = "\"" + Encoding.ASCII.GetString(request, 0, read).Split('\r', '\n')[0] + "\"";
+                await stream.WriteAsync("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"u8.ToArray(), patience.Token);
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or SocketException)
+            {
+                said += $" ({ex.GetType().Name})";
+            }
+
+            return $"{sender} sent {said}.";
+        }
+    }
+
+    /// <summary>The program at the other end of a loopback connection, by the port it called from.</summary>
+    private static string Sender(TcpClient client)
+    {
+        var port = ((System.Net.IPEndPoint)client.Client.RemoteEndPoint!).Port;
+        try
+        {
+            using var netstat = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("netstat", "-ano -p TCP")
+            {
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            })!;
+            var table = netstat.StandardOutput.ReadToEnd();
+            netstat.WaitForExit();
+            foreach (var row in table.Split('\n'))
+            {
+                var cells = row.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                if (cells.Length >= 5 && cells[1] == $"127.0.0.1:{port}" && int.TryParse(cells[^1], out var id))
+                {
+                    try
+                    {
+                        using var process = System.Diagnostics.Process.GetProcessById(id);
+                        return $"{process.ProcessName} (process {id})";
+                    }
+                    catch (ArgumentException)
+                    {
+                        return $"Process {id}, which has ended,";
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
+        {
+        }
+
+        return $"A sender Windows no longer lists (port {port})";
+    }
+
+    /// <summary>What the log says of the engine's last runs.</summary>
+    private static string ConversionLog()
+    {
+        try
+        {
+            var lines = File.ReadLines(SpacePreview.Services.DiagnosticLog.Pathname)
+                .Where(line => line.Contains("office ", StringComparison.Ordinal))
+                .TakeLast(8);
+            return "The log's last lines about the engine: " + string.Join(" | ", lines);
+        }
+        catch (IOException ex)
+        {
+            return "The log could not be read: " + ex.Message;
         }
     }
 
