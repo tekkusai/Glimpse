@@ -12,7 +12,11 @@ namespace SpacePreview.Preview;
 
 internal static partial class EpubPreviewLoader
 {
-    private const int MaxBookCharacters = 500_000;
+    // A book is one page, and the browser takes a long one in its stride:
+    // eight million characters build in 50 ms and load in 90. That is
+    // longer than War and Peace, the Bible or the complete Shakespeare.
+    // Past it the page says the book goes on.
+    internal const int MaxBookCharacters = 8_000_000;
     private const long MaxImageBytes = 2 * 1024 * 1024;
     private const long MaxXmlBytes = 5 * 1024 * 1024;
 
@@ -26,7 +30,7 @@ internal static partial class EpubPreviewLoader
     /// <summary>What the rail lists: the page's own titled sections, and whether the book goes on.</summary>
     internal sealed record EpubContents(IReadOnlyList<EpubSection> Sections, bool Truncated);
 
-    public static string? TryBuildBody(string path, CancellationToken cancellationToken = default)
+    public static string? TryBuildBody(string path, CancellationToken cancellationToken = default, int maxCharacters = MaxBookCharacters)
     {
         try
         {
@@ -50,7 +54,7 @@ internal static partial class EpubPreviewLoader
             var titles = LoadNavigationTitles(archive, package, manifest, cancellationToken);
             var title = MetadataValue(package, "title") ?? Path.GetFileNameWithoutExtension(path);
             var creator = MetadataValue(package, "creator");
-            var budget = new BookBudget(MaxBookCharacters, MaxBookImageBytes);
+            var budget = new BookBudget(maxCharacters, MaxBookImageBytes);
             var cover = FindCoverDataUri(archive, package, manifest, budget, cancellationToken);
             var protectedBook = archive.GetEntry("META-INF/encryption.xml") is not null;
 

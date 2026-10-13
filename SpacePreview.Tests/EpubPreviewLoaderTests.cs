@@ -93,11 +93,28 @@ public sealed class EpubPreviewLoaderTests
         var path = Path.Combine(temp.Path, "long.epub");
         CreateMinimalEpub(path, chapter2Text: new string('x', 510_000) + "TAIL");
 
-        var body = EpubPreviewLoader.TryBuildBody(path);
+        var body = EpubPreviewLoader.TryBuildBody(path, maxCharacters: 500_000);
 
         Assert.NotNull(body);
         Assert.Contains("Showing the beginning of this book. Open the book for the rest.", body!, StringComparison.Ordinal);
         Assert.DoesNotContain("TAIL", body, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ALongNovelIsShownToItsLastWord()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "novel.epub");
+
+        // Three times what the page used to stop at.
+        CreateMinimalEpub(path, chapter2Text: new string('x', 1_600_000) + "TAIL");
+
+        var body = EpubPreviewLoader.TryBuildBody(path);
+
+        Assert.NotNull(body);
+        Assert.Contains("TAIL", body!, StringComparison.Ordinal);
+        Assert.DoesNotContain("Showing the beginning of this book", body, StringComparison.Ordinal);
+        Assert.True(EpubPreviewLoader.MaxBookCharacters >= 5_500_000, "the complete Shakespeare fits");
     }
 
     [Fact]
@@ -120,7 +137,9 @@ public sealed class EpubPreviewLoaderTests
     {
         using var temp = new TempDirectory();
         var path = Path.Combine(temp.Path, "long.epub");
-        CreateBook(path, chapters: 6, charactersPerChapter: 150_000);
+
+        // Six chapters that pass the page's budget inside the fourth.
+        CreateBook(path, chapters: 6, charactersPerChapter: EpubPreviewLoader.MaxBookCharacters * 3 / 10);
 
         var page = GeneratedHtmlPreview.TryBuildEpub(path);
         var contents = EpubPreviewLoader.ReadContents(page!.HtmlPath);
