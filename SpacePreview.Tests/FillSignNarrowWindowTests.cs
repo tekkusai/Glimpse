@@ -76,7 +76,27 @@ public sealed class FillSignNarrowWindowTests
         AssertReadWhole(surface, sentence);
 
         // The choices it brings back are all still there to press.
-        foreach (var choice in new[] { "Keep editing", "Discard", "Replace the original", "Save a signed copy" })
+        foreach (var choice in new[] { "Keep editing", "Replace the original", "Save a signed copy" })
+        {
+            AssertWhole(surface, Pill(surface, choice));
+        }
+    });
+
+    [Fact]
+    public void TheLeavingQuestionIsReadWholeWithItsAnswers() => Sta.Run(() =>
+    {
+        var surface = Narrow();
+        surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+        Assert.False(surface.TryLeave());
+
+        for (var width = 320.0; width <= 1600; width += 7)
+        {
+            AssertReadWhole(surface, "Your changes aren't saved.", width);
+        }
+
+        AssertReadWhole(surface, "Your changes aren't saved.");
+        foreach (var choice in new[] { "Keep editing", "Discard", "Save a signed copy" })
         {
             AssertWhole(surface, Pill(surface, choice));
         }

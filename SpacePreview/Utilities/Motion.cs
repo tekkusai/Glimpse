@@ -67,6 +67,35 @@ internal static class Motion
     }
 
     /// <summary>
+    /// Lights an element twice and leaves it as it was: the answer to a
+    /// press that can change nothing else on screen. The light is on in the
+    /// press's own frame, holds long enough to be seen, and fades. With
+    /// motion off it lights once and goes out with no fade, because the
+    /// press still needs its answer.
+    /// </summary>
+    public static void Flash(UIElement element, double peak)
+    {
+        static KeyTime At(int milliseconds) => KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(milliseconds));
+
+        var flash = new DoubleAnimationUsingKeyFrames { FillBehavior = FillBehavior.Stop };
+        flash.KeyFrames.Add(new DiscreteDoubleKeyFrame(peak, At(0)));
+        if (Enabled)
+        {
+            flash.KeyFrames.Add(new LinearDoubleKeyFrame(peak, At(110)));
+            flash.KeyFrames.Add(new LinearDoubleKeyFrame(0, At(290)));
+            flash.KeyFrames.Add(new DiscreteDoubleKeyFrame(peak, At(350)));
+            flash.KeyFrames.Add(new LinearDoubleKeyFrame(peak, At(460)));
+            flash.KeyFrames.Add(new LinearDoubleKeyFrame(0, At(640)));
+        }
+        else
+        {
+            flash.KeyFrames.Add(new DiscreteDoubleKeyFrame(0, At(400)));
+        }
+
+        element.BeginAnimation(UIElement.OpacityProperty, flash);
+    }
+
+    /// <summary>
     /// A sideways slide for a template part, set from a trigger: a XAML
     /// storyboard cannot ask the switch, so a part that slides is moved
     /// from here (the settings toggle's thumb).

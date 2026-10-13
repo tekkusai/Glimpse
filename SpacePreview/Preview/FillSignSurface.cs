@@ -29,10 +29,12 @@ internal sealed class FillSignSurface : Grid
 {
     private const string Hint = "Pick Signature, Date or Stamp, then click the page.";
     private const string RestoredNotice = "Your earlier work is back.";
+    private const string UnsavedLine = "Your changes aren't saved.";
     private const double BarHeight = 48;
     private const double ChipSize = 22;
     private const double HandleSize = 12;
     private const double DateHeight = 0.028;
+    private const double FlashPeak = 0.3;
 
     private readonly List<SignPlacement> _placements = [];
     private readonly Grid _pageHost;
@@ -62,6 +64,9 @@ internal sealed class FillSignSurface : Grid
     private Button _nextPageChip = null!;
     private ButtonBase _cancelPill = null!;
     private ButtonBase _savePill = null!;
+    private ButtonBase _discardPill = null!;
+    private ButtonBase _replacePill = null!;
+    private Border _saveFlash = null!;
     private TextBlock _saveStatus = null!;
     private TextBlock _newsRowText = null!;
     private TextBlock _inkTitle = null!;
@@ -290,8 +295,9 @@ internal sealed class FillSignSurface : Grid
 
     /// <summary>
     /// True when leaving loses nothing: no work, or work this file could
-    /// never save. Otherwise the save choice opens, Discard included, and
-    /// the caller stays. Every way out of sign mode asks this first.
+    /// never save. Otherwise the caller stays and the bar asks what becomes
+    /// of the work: keep editing, discard it, or save a copy. Every way out
+    /// of sign mode asks this first.
     /// </summary>
     public bool TryLeave()
     {
@@ -300,7 +306,26 @@ internal sealed class FillSignSurface : Grid
             return true;
         }
 
-        ShowSaveChoice();
+        // A save that is running answers for itself.
+        if (!_saveBar.IsEnabled)
+        {
+            return false;
+        }
+
+        // An exit asked for over a question already on screen would change
+        // nothing a user can see. The bar flashes instead: answer this first.
+        var asked = _saveBar.Visibility == Visibility.Visible;
+        if (!asked || _discardPill.Visibility != Visibility.Visible)
+        {
+            CloseSignaturePicker();
+            ShowSaveBar(leaving: true);
+        }
+
+        if (asked)
+        {
+            Motion.Flash(_saveFlash, FlashPeak);
+        }
+
         return false;
     }
 
@@ -312,7 +337,7 @@ internal sealed class FillSignSurface : Grid
         }
     }
 
-    /// <summary>Offers the save choice: a copy, the original, or discarding the work.</summary>
+    /// <summary>Save was pressed: a copy, or the original. Discarding is not a way to save.</summary>
     public void ShowSaveChoice()
     {
         if (!HasWork || _problem is not null)
@@ -321,7 +346,19 @@ internal sealed class FillSignSurface : Grid
         }
 
         CloseSignaturePicker();
-        SetSaveStatus(null, failed: false);
+        ShowSaveBar(leaving: false);
+    }
+
+    /// <summary>
+    /// One bar, two questions. Saving offers both files; leaving says the
+    /// work is unsaved and offers to drop it or keep it in a copy. Keep
+    /// editing answers either.
+    /// </summary>
+    private void ShowSaveBar(bool leaving)
+    {
+        _discardPill.Visibility = leaving ? Visibility.Visible : Visibility.Collapsed;
+        _replacePill.Visibility = leaving ? Visibility.Collapsed : Visibility.Visible;
+        SetSaveStatus(leaving ? UnsavedLine : null, failed: false);
         ShowBar(_saveBar);
     }
 
@@ -466,6 +503,11 @@ internal sealed class FillSignSurface : Grid
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
+        // Behind the pills, and nothing until an exit is asked for twice.
+        _saveFlash = new Border { Background = Theme.Brush(palette.Accent), Opacity = 0, IsHitTestVisible = false };
+        SetColumnSpan(_saveFlash, 3);
+        bar.Children.Add(_saveFlash);
+
         var back = HousePill.Build("Keep editing", HideSaveChoice, PillRole.Ghost);
         back.Margin = new Thickness(12, 0, 0, 0);
         bar.Children.Add(back);
@@ -473,6 +515,9 @@ internal sealed class FillSignSurface : Grid
         _saveStatus = BuildLine();
         bar.Children.Add(BuildLineCell(_saveStatus));
 
+        // Only one of these two shows: the question decides which.
+        _discardPill = HousePill.Build("Discard", () => ExitRequested?.Invoke());
+        _replacePill = HousePill.Build("Replace the original", () => RequestSave(overwrite: true));
         var copy = HousePill.Build("Save a signed copy", () => RequestSave(overwrite: false), PillRole.Accent);
         copy.Margin = new Thickness(0);
         var choices = new StackPanel
@@ -480,12 +525,7 @@ internal sealed class FillSignSurface : Grid
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 12, 0),
-            Children =
-            {
-                HousePill.Build("Discard", () => ExitRequested?.Invoke(), PillRole.Ghost),
-                HousePill.Build("Replace the original", () => RequestSave(overwrite: true)),
-                copy
-            }
+            Children = { _discardPill, _replacePill, copy }
         };
         SetColumn(choices, 2);
         bar.Children.Add(choices);

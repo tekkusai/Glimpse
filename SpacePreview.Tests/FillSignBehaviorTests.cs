@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Preview;
 using SpacePreview.Services;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
@@ -360,6 +361,114 @@ public sealed class FillSignBehaviorTests
             unsignable.Place(SignPlacementKind.Date, 0.5, 0.5);
             unsignable.ApplyCheck(new PdfSignCheck(0, PdfFillSignWriter.UnsupportedStructure));
             Assert.True(unsignable.TryLeave());
+        });
+    }
+
+    // Saving and leaving are two questions, and each offers its own answers:
+    // nobody presses Save to throw the work away, or leaves to overwrite a file.
+    [Fact]
+    public void SavingOffersBothFilesAndLeavingOffersToDropTheWorkOrKeepACopy()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+
+            Click(Pill(surface, "Save"));
+            Assert.True(Shown(Pill(surface, "Keep editing")));
+            Assert.True(Shown(Pill(surface, "Replace the original")));
+            Assert.True(Shown(Pill(surface, "Save a signed copy")));
+            Assert.False(Shown(Pill(surface, "Discard")));
+            Assert.False(Shown(Text(surface, Unsaved)));
+
+            Click(Pill(surface, "Keep editing"));
+            Click(Pill(surface, "Cancel"));
+            Assert.True(Shown(Pill(surface, "Keep editing")));
+            Assert.True(Shown(Pill(surface, "Discard")));
+            Assert.True(Shown(Pill(surface, "Save a signed copy")));
+            Assert.False(Shown(Pill(surface, "Replace the original")));
+            Assert.True(Shown(Text(surface, Unsaved)));
+        });
+    }
+
+    // The X on a window whose bar already asks changed nothing a user could
+    // see, a hundred presses running. The bar answers each one.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AnExitAskedOverAQuestionAlreadyUpFlashesIt(bool motion)
+    {
+        OnSta(() =>
+        {
+            Motion.Override = motion;
+            try
+            {
+                var surface = new FillSignSurface(0, 1, BlankPage());
+                surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+                var flash = Fields.Get<Border>(surface, "_saveFlash");
+
+                // The first ask is answered by the bar coming up.
+                Assert.False(surface.TryLeave());
+                Assert.True(Shown(Pill(surface, "Discard")));
+                Assert.False(flash.HasAnimatedProperties);
+
+                Assert.False(surface.TryLeave());
+                Assert.True(flash.HasAnimatedProperties);
+                Assert.True(Shown(Pill(surface, "Discard")));
+
+                // Over the Save question, the bar turns to the leaving one and flashes too.
+                var saving = new FillSignSurface(0, 1, BlankPage());
+                saving.Place(SignPlacementKind.Date, 0.5, 0.5);
+                saving.ShowSaveChoice();
+                Assert.False(saving.TryLeave());
+                Assert.True(Shown(Pill(saving, "Discard")));
+                Assert.False(Shown(Pill(saving, "Replace the original")));
+                Assert.True(Shown(Text(saving, Unsaved)));
+                Assert.True(Fields.Get<Border>(saving, "_saveFlash").HasAnimatedProperties);
+            }
+            finally
+            {
+                Motion.Override = null;
+            }
+        });
+    }
+
+    [Fact]
+    public void AskingToLeaveAgainKeepsWhyTheSaveFailed()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+            Assert.False(surface.TryLeave());
+            surface.SetSaving(true);
+            surface.ShowSaveFailure(PreviewWindow.ChangedSinceSigningBegan);
+
+            Assert.False(surface.TryLeave());
+
+            Assert.True(Shown(Text(surface, PreviewWindow.ChangedSinceSigningBegan)));
+            Assert.True(Shown(Pill(surface, "Discard")));
+        });
+    }
+
+    // A save in flight answers for itself. An exit asked for meanwhile used
+    // to wipe the word that says it is running.
+    [Fact]
+    public void AnExitAskedWhileASaveRunsWaitsAndChangesNothing()
+    {
+        OnSta(() =>
+        {
+            var surface = new FillSignSurface(0, 1, BlankPage());
+            surface.Place(SignPlacementKind.Date, 0.5, 0.5);
+            surface.ShowSaveChoice();
+            surface.SetSaving(true);
+
+            Assert.False(surface.TryLeave());
+
+            Assert.True(Shown(Text(surface, "Saving\u2026")));
+            Assert.True(Shown(Pill(surface, "Replace the original")));
+            Assert.False(Shown(Pill(surface, "Discard")));
+            Assert.False(Fields.Get<Border>(surface, "_saveFlash").HasAnimatedProperties);
         });
     }
 
@@ -737,6 +846,8 @@ public sealed class FillSignBehaviorTests
     // ------------------------------------------------------------------
     // Helpers.
     // ------------------------------------------------------------------
+
+    private const string Unsaved = "Your changes aren't saved.";
 
     private static void OnSta(Action action) => Sta.Run(action);
 

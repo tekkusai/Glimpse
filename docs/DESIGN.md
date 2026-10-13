@@ -161,6 +161,11 @@ loading states are still.
 | Browse, same shape | The next item dissolves over the current one in 140 ms. No blank beat. |
 | Browse, new shape | The current item fades out in 90 ms, the window takes the new shape in one step, the next item dissolves in. |
 | Close | 90 ms fade, ease-in. |
+| A second ask | An exit asked for while sign mode's bar already holds a save question flashes that bar in the accent, twice in 640 ms. The first light is on in the frame of the press. |
+
+The flash is the one motion that does not vanish with animations off: the
+bar lights once for 400 ms with no fade, because a press that changes nothing
+else still needs an answer.
 
 Web content dissolves inside the page (its background is transparent, so the
 canvas or stand-in shows through). The PDF viewer is opaque and appears in one
@@ -222,6 +227,10 @@ PostScript Illustrator file its title, then the app that wrote it and when.
 - In sign mode a line that carries news is never cut. It sits in the bar's
   center when it fits in two lines, and otherwise takes a row of its own
   under the bar.
+- Sign mode's bar asks one of two questions. Save offers a signed copy or
+  replacing the original. Leaving with unsaved work says "Your changes
+  aren't saved." and offers Discard or a signed copy. Keep editing answers
+  both. The accent pill is always the answer that cannot lose anything.
 
 ## Web pages
 

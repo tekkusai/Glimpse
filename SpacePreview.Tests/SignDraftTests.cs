@@ -493,7 +493,7 @@ public sealed class SignDraftTests
             switch (end)
             {
                 case "Discard":
-                    working.ShowSaveChoice();
+                    Assert.False(working.TryLeave());
                     Press(working, "Discard");
                     break;
                 case "close":
@@ -625,7 +625,16 @@ public sealed class SignDraftTests
         var surface = await EnterAsync(window, pdf);
         Assert.Single(surface.Placements);
 
-        surface.ShowSaveChoice();
+        // Discard answers leaving, and the two saves answer Save.
+        if (choice == "Discard")
+        {
+            Assert.False(surface.TryLeave());
+        }
+        else
+        {
+            surface.ShowSaveChoice();
+        }
+
         Press(surface, choice);
         // A finished save shows its file next, in a viewer a test never starts.
         Fields.Set(window, "_loadVersion", Fields.Get<long>(window, "_loadVersion") + 1);

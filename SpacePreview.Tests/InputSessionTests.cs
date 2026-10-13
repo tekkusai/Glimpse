@@ -90,6 +90,29 @@ public sealed class InputSessionTests
     }
 
     [Fact]
+    public void HeaderCloseOverAQuestionAlreadyUpFlashesItAndNeverDiscards()
+    {
+        WithSigningPreview((controller, window, surface) =>
+        {
+            var exits = 0;
+            surface.ExitRequested += () => exits++;
+            Fields.Call(controller, "OnDismissRequested", window);
+            var flash = Fields.Get<System.Windows.Controls.Border>(surface, "_saveFlash");
+            Assert.False(flash.HasAnimatedProperties);
+
+            for (var press = 0; press < 100; press++)
+            {
+                Fields.Call(controller, "OnDismissRequested", window);
+            }
+
+            Assert.True(flash.HasAnimatedProperties);
+            Assert.True(Fields.Get<bool>(controller, "_previewVisible"));
+            Assert.Single(surface.Placements);
+            Assert.Equal(0, exits);
+        });
+    }
+
+    [Fact]
     public void BrowsingOverSigningWorkAsksAndQueuesNoStep()
     {
         WithSigningPreview((controller, window, surface) =>
