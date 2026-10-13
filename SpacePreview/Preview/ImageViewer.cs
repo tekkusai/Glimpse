@@ -95,6 +95,7 @@ internal sealed class ImageViewer : IZoomableImage
     private readonly PictureTextLayer _text = new();
     private readonly DispatcherTimer _readDelay = new() { Interval = ReadDelay };
     private readonly int _sourceLongSide;
+    private readonly bool _photograph;
     private BitmapSource _bitmap;
 
     // A larger decode of the same view, shown only while the picture is on
@@ -114,8 +115,9 @@ internal sealed class ImageViewer : IZoomableImage
     private Point _pressedAt;
     private bool _overText;
 
-    public ImageViewer(BitmapSource bitmap, int sourceLongSide, ImageRotationSession? rotation)
+    public ImageViewer(BitmapSource bitmap, int sourceLongSide, ImageRotationSession? rotation, bool photograph = false)
     {
+        _photograph = photograph;
         _bitmap = bitmap;
         _sourceLongSide = sourceLongSide;
         _image = new Image { Source = bitmap, Stretch = Stretch.Fill };
@@ -334,8 +336,9 @@ internal sealed class ImageViewer : IZoomableImage
         // which also keeps a capped decode shown at 100% soft, not blocky.
         // The larger decode is never far from its own size on screen, so
         // the graphics card's filter does: the careful one runs on the
-        // processor over every pixel, at every step of a zoom.
-        var magnified = ZoomGestures.ShowsPixels(_scale, _atFit);
+        // processor over every pixel, at every step of a zoom. A photograph
+        // has no pixels worth showing as squares, at any zoom.
+        var magnified = !_photograph && ZoomGestures.ShowsPixels(_scale, _atFit);
         RenderOptions.SetBitmapScalingMode(
             _image,
             magnified ? BitmapScalingMode.NearestNeighbor

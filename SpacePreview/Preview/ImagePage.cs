@@ -73,6 +73,7 @@ html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
 <script>
 const STEP = {{Number(ZoomGestures.WheelStep)}}, MAX = {{Number(ZoomGestures.MaxScale)}}, EPS = {{Number(ZoomGestures.Tolerance)}}, PIXEL = {{Number(ZoomGestures.PixelScale)}};
 const VECTOR = {{(isSvg ? "true" : "false")}}, HINT_W = {{Number(svgSize.Width)}}, HINT_H = {{Number(svgSize.Height)}};
+const PHOTO = {{(FileKinds.IsPhotograph(imagePath) ? "true" : "false")}};
 const pic = document.getElementById('pic');
 const hud = document.getElementById('hud');
 let natW = 0, natH = 0, scale = 1, fit = 1, x = 0, y = 0, atFit = true;
@@ -108,7 +109,7 @@ function layout() {
   pic.style.width = w + 'px';
   pic.style.height = h + 'px';
   pic.style.transform = `translate(${Math.round(x * r) / r}px, ${Math.round(y * r) / r}px)`;
-  pic.classList.toggle('pixelated', !VECTOR && scale > 1 + EPS && (!atFit || scale >= PIXEL - EPS));
+  pic.classList.toggle('pixelated', !VECTOR && !PHOTO && scale > 1 + EPS && (!atFit || scale >= PIXEL - EPS));
   document.body.style.cursor = w > innerWidth + 0.5 || h > innerHeight + 0.5 ? 'move' : '';
 }
 

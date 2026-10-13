@@ -133,7 +133,7 @@ public partial class PreviewWindow
             }
         }
 
-        var viewer = new ImageViewer(session.CurrentBitmap, header?.LongSide ?? 0, session);
+        var viewer = new ImageViewer(session.CurrentBitmap, header?.LongSide ?? 0, session, FileKinds.IsPhotograph(path));
         session.NotSaved += result => OnRotationNotSaved(session, viewer, result);
 
         // The session holds a turn back from the disk until this ends too,

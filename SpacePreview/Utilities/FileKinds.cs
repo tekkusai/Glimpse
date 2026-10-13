@@ -127,6 +127,19 @@ internal static partial class FileKinds
 
     public static bool IsGif(string path) => Path.GetExtension(path).Equals(".gif", StringComparison.OrdinalIgnoreCase);
 
+    private static readonly HashSet<string> PhotographExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".jpe", ".jfif", ".heic", ".heif", ".avif"
+    };
+
+    /// <summary>
+    /// A format cameras and phones write. Zoomed in, such a picture is
+    /// smoothed and never drawn as squares: closer up it is still a
+    /// photograph. A PNG, a GIF or an icon keeps its pixels.
+    /// </summary>
+    public static bool IsPhotograph(string path) =>
+        IsCameraRaw(path) || PhotographExtensions.Contains(Path.GetExtension(path));
+
     public static bool IsSvg(string path) => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsHeif(string path)

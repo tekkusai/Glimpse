@@ -255,6 +255,9 @@ One gesture set for every zoomable view:
 - Fit fills the view, small images included, as in 2.0. A gentle fit is
   smoothed; at 3x or more, and whenever the user zooms in past 1:1, pixels
   stay square, so an icon reads as an icon.
+- A photograph (JPEG, HEIC, AVIF, camera RAW) is smoothed at every zoom.
+  Closer up it is still a photograph, and squares read as a picture too
+  small for the zoom.
 - Zoom goes down to fit or 1:1, whichever is smaller.
 - Wheel zooms around the cursor by 1.15 per notch.
 - Double-click toggles fit and 1:1 device pixels (or 2x when fit is
