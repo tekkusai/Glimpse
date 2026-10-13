@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using SpacePreview.Services;
@@ -16,9 +17,15 @@ namespace SpacePreview.Preview;
 /// file of any size is read through at the cost of what is on screen. End
 /// goes to the file's real last line and Home back to its first. What a
 /// very long line looks like is the reader's business: here every piece is
-/// lines of text. The file may be on a share that has stopped answering,
-/// so nothing here asks the reader anything on the window's thread: every
-/// question goes through Task.Run.
+/// lines of text.
+///
+/// Two rules bound what the file can cost. With the reader at rest the box
+/// reads its budget of the file and stops, whether or not that fills the
+/// window: what reads on from there is the reader, by the wheel, a key or
+/// the scroll bar. And the file may be on a share that has stopped
+/// answering, so nothing here asks it anything on the window's thread
+/// (every question goes through Task.Run), and one question is out at a
+/// time: a second waits for the first to come back.
 /// </summary>
 internal sealed class TextFileView
 {
@@ -42,10 +49,12 @@ internal sealed class TextFileView
     /// text never comes near it: two million characters are two to six
     /// megabytes. It is what bounds a file of very long lines, where a
     /// line is two thousand characters in the box and megabytes of the
-    /// file to read past. Reading ahead of the reader stops here. Only
-    /// what is on screen is read whatever it costs.
+    /// file to read past. This is all the box reads with the reader at
+    /// rest, the screen's own lines included. It fills a tall window with
+    /// lines of a megabyte each, as a database dump has. Of longer lines
+    /// it shows as many as this buys, and the reader scrolls for more.
     /// </summary>
-    internal const long HeldBytes = 16 * 1024 * 1024;
+    internal const long HeldBytes = 64 * 1024 * 1024;
 
     /// <summary>
     /// How near an end of what the box holds the reader comes before it
@@ -70,6 +79,14 @@ internal sealed class TextFileView
     private int _turn;
     private bool _busy;
     private bool _left;
+
+    // The jump asked for while a read was out: to the end, or to the
+    // start. Only the newest waits.
+    private bool? _jump;
+
+    // Which way the reader last moved, until a look has taken note of it:
+    // below zero toward the start, above toward the end.
+    private int _moved;
     private long? _nothingAfterAt;
     private long? _nothingBeforeAt;
 
@@ -106,7 +123,20 @@ internal sealed class TextFileView
         box.Unloaded += (_, _) =>
         {
             _left = true;
+            _jump = null;
             box.LayoutUpdated -= OnLayout;
+        };
+
+        // The wheel and the keys say where the reader wants to go even
+        // when there is nowhere left to scroll, which is exactly when it
+        // matters: at the edge of what the box holds.
+        box.PreviewMouseWheel += (_, e) => ReaderMoved(e.Delta < 0 ? 1 : -1);
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key is Key.Down or Key.PageDown or Key.Up or Key.PageUp)
+            {
+                ReaderMoved(e.Key is Key.Down or Key.PageDown ? 1 : -1);
+            }
         };
     }
 
@@ -139,9 +169,46 @@ internal sealed class TextFileView
     }
 
     /// <summary>To the file's last line, as the file is now.</summary>
-    public async void GoToEnd()
+    public void GoToEnd() => Jump(toEnd: true);
+
+    /// <summary>Back to the file's first line.</summary>
+    public void GoToStart() => Jump(toEnd: false);
+
+    /// <summary>
+    /// The reader has moved, or tried to: toward the end when
+    /// <paramref name="direction"/> is above zero, toward the start below.
+    /// </summary>
+    public void ReaderMoved(int direction)
     {
-        var turn = Begin();
+        _moved = direction;
+        Look();
+    }
+
+    /// <summary>
+    /// One question is put to the file at a time. A jump asked for while a
+    /// read is out waits for it, and only the newest one waits. A key held
+    /// down on a share that has stopped answering leaves one read out
+    /// there, not one for every repeat of the key.
+    /// </summary>
+    private void Jump(bool toEnd)
+    {
+        if (_busy)
+        {
+            _jump = toEnd;
+        }
+        else if (toEnd)
+        {
+            ToEnd();
+        }
+        else
+        {
+            ToStart();
+        }
+    }
+
+    private async void ToEnd()
+    {
+        Begin();
         try
         {
             // Far from the end, the box lets go of what it holds and takes
@@ -149,7 +216,7 @@ internal sealed class TextFileView
             // box reads on from where it is.
             var held = Range.End;
             var tail = await Task.Run(() => _reader.Length - held <= _headBytes ? null : _reader.ReadBefore(_reader.Length, _headBytes));
-            if (turn != _turn || _left)
+            if (_left)
             {
                 return;
             }
@@ -167,7 +234,7 @@ internal sealed class TextFileView
             {
                 var end = Range.End;
                 var more = await Task.Run(() => _reader.ReadAfter(end, _pieceBytes));
-                if (turn != _turn || _left)
+                if (_left)
                 {
                     return;
                 }
@@ -189,23 +256,19 @@ internal sealed class TextFileView
         }
         finally
         {
-            if (Finish(turn) && !_left)
-            {
-                LookLater(DispatcherPriority.ApplicationIdle);
-            }
+            Finish();
         }
     }
 
-    /// <summary>Back to the file's first line.</summary>
-    public async void GoToStart()
+    private async void ToStart()
     {
-        var turn = Begin();
+        Begin();
         try
         {
             if (Range.Start > _reader.First)
             {
                 var head = await Task.Run(() => _reader.ReadAfter(_reader.First, _headBytes));
-                if (turn != _turn || _left)
+                if (_left)
                 {
                     return;
                 }
@@ -226,10 +289,7 @@ internal sealed class TextFileView
         }
         finally
         {
-            if (Finish(turn) && !_left)
-            {
-                LookLater(DispatcherPriority.ApplicationIdle);
-            }
+            Finish();
         }
     }
 
@@ -258,8 +318,13 @@ internal sealed class TextFileView
     private void OnScrolled(object sender, ScrollChangedEventArgs e)
     {
         // The box's own growing and shrinking scroll it too. Only where the
-        // reader has gone is a reason to read.
-        if (e.VerticalChange != 0 || e.ViewportHeightChange != 0)
+        // reader has gone is a reason to read, and a window made taller
+        // is room to fill, not a move.
+        if (e.VerticalChange != 0)
+        {
+            ReaderMoved(e.VerticalChange > 0 ? 1 : -1);
+        }
+        else if (e.ViewportHeightChange != 0)
         {
             Look();
         }
@@ -274,28 +339,32 @@ internal sealed class TextFileView
     /// the end the box is not anchored to, a piece at a time while idle.
     /// A full box takes more at one end only by letting go at the other,
     /// and only of what the reader is further from (see MayDrop). A reader
-    /// at the very edge of what it holds is read to all the same. So what
-    /// the box reads with the reader at rest is its budget, or the screen
-    /// when the screen's own lines come to more of the file than that.
+    /// who moves toward the very edge of what a full box holds is read to
+    /// all the same, a piece for each move. So what the box reads with the
+    /// reader at rest is its budget, and what it reads past that is what
+    /// the reader went to.
     /// </summary>
     private void Look()
     {
-        // A box that has no size yet has nowhere the reader could be.
+        // A box that has no size yet has nowhere the reader could be. A
+        // move made while a read is out is kept for the look after it.
         if (_scroll is null || _busy || _left || _scroll.ViewportHeight <= 0)
         {
             return;
         }
 
+        var moved = _moved;
+        _moved = 0;
         var screens = _scroll.ViewportHeight * Screens;
         var above = _scroll.VerticalOffset;
         var below = _scroll.ExtentHeight - above - _scroll.ViewportHeight;
         var full = Range.End - Range.Start >= _heldBytes
             || (_characters >= _heldCharacters && _scroll.ExtentHeight >= screens);
-        if (below <= screens && MayReadAfter && (!full || below < 1 || MayDrop(first: true)))
+        if (below <= screens && MayReadAfter && (!full || (moved > 0 && below < 1) || MayDrop(first: true)))
         {
             Extend(after: true);
         }
-        else if (above <= screens && MayReadBefore && (!full || above < 1 || MayDrop(first: false)))
+        else if (above <= screens && MayReadBefore && (!full || (moved < 0 && above < 1) || MayDrop(first: false)))
         {
             Extend(after: false);
         }
@@ -350,12 +419,12 @@ internal sealed class TextFileView
 
     private async void Extend(bool after)
     {
-        var turn = Begin();
+        Begin();
         try
         {
             var (start, end) = Range;
             var piece = await Task.Run(() => after ? _reader.ReadAfter(end, _pieceBytes) : _reader.ReadBefore(start, _pieceBytes));
-            if (turn != _turn || _left)
+            if (_left)
             {
                 return;
             }
@@ -400,12 +469,7 @@ internal sealed class TextFileView
         }
         finally
         {
-            if (Finish(turn) && !_left)
-            {
-                // Still near an end, or room left to fill: after input and
-                // drawing have had the thread.
-                LookLater(DispatcherPriority.ApplicationIdle);
-            }
+            Finish();
         }
     }
 
@@ -493,22 +557,34 @@ internal sealed class TextFileView
         _scroll.UpdateLayout();
     }
 
-    private int Begin()
+    private void Begin()
     {
         _busy = true;
-        return ++_turn;
+        _turn++;
     }
 
-    /// <summary>True when this turn was still the one under way.</summary>
-    private bool Finish(int turn)
+    /// <summary>
+    /// The read is back. A jump that waited for it goes now. Otherwise the
+    /// box looks again once input and drawing have had the thread: it may
+    /// still be near an end, or have room left to fill.
+    /// </summary>
+    private void Finish()
     {
-        if (turn != _turn)
+        _busy = false;
+        if (_left)
         {
-            return false;
+            return;
         }
 
-        _busy = false;
-        return true;
+        if (_jump is { } toEnd)
+        {
+            _jump = null;
+            Jump(toEnd);
+        }
+        else
+        {
+            LookLater(DispatcherPriority.ApplicationIdle);
+        }
     }
 
     private static ScrollViewer? FindScroll(DependencyObject parent)

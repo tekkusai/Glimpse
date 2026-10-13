@@ -469,7 +469,8 @@ public sealed class TextFileViewTests
 
         // Three hundred records of 40,000 characters, as a file of JSON
         // lines can be. The box may span a megabyte of the file, which is
-        // more than a screen of them, or a tenth of that, which is less.
+        // more than a screen of them, or a tenth of that, which is less
+        // than one.
         var records = new StringBuilder();
         for (var i = 0; i < 300; i++)
         {
@@ -484,39 +485,157 @@ public sealed class TextFileViewTests
             Assert.Equal(0, view.Range.Start);
             Assert.StartsWith("record 0000000 jjjj", box.Text, StringComparison.Ordinal);
 
-            // Left at the top, it has read its span of the file, or the
-            // screen when the screen's own records come to more, and the
-            // screen is full either way.
+            // Left at the top, it has read its span of the file and
+            // stopped, whether that fills the window or not. Nothing a
+            // file holds makes it read more than that with the reader at
+            // rest.
             const int record = 40_017;
             var scroll = Scroll(box);
-            var onScreen = ((box.GetLastVisibleLineIndex() - box.GetFirstVisibleLineIndex() + 1) / 2) + 2;
-            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight, double.MaxValue);
-            Assert.InRange(view.Range.End, 1, Math.Max(span, onScreen * record) + record);
+            var fills = span >= 1024 * 1024;
+            Assert.InRange(view.Range.End, 1, span + (2 * record));
+            Assert.Equal(fills, scroll.ExtentHeight >= scroll.ViewportHeight);
 
-            // Each time the reader reaches the end of what it holds, it
-            // reads on, and never spans much more of the file than that.
+            // What reads on from there is the reader: the wheel, turned
+            // at the end of what the box holds, brings more each time.
+            // Once there is a screen of it, what is behind is let go.
+            var rows = (int)(scroll.ViewportHeight / (scroll.ExtentHeight / box.LineCount)) + 1;
+            var most = Math.Max(span, ((rows / 2) + 2) * record) + (4 * record);
             for (var step = 0; step < 12; step++)
             {
                 var held = view.Range.End;
                 box.ScrollToEnd();
+                Wheel(box, down: true);
                 await Settle(view);
                 Assert.InRange(view.Range.End, held + record, text.Length);
-                Assert.InRange(view.Range.End - view.Range.Start, 1, Math.Max(span, onScreen * record) + (4 * record));
+                Assert.InRange(view.Range.End - view.Range.Start, 1, most);
             }
 
-            // And End is the last record, with the screen full above it.
+            // A page key says the same as the wheel, to the box when it
+            // has the keyboard and to the window when it has not.
+            for (var step = 0; step < 3; step++)
+            {
+                var held = view.Range.End;
+                box.ScrollToEnd();
+                box.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(box)!, 0, Key.PageDown)
+                {
+                    RoutedEvent = UIElement.PreviewKeyDownEvent
+                });
+                await Settle(view);
+                Assert.InRange(view.Range.End, held + record, text.Length);
+            }
+
+            var keys = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.Text.cs", "ScrollTextByKey");
+            Assert.Contains("box.PageDown();\r\n                file?.ReaderMoved(1);", keys, StringComparison.Ordinal);
+            Assert.Contains("box.PageUp();\r\n                file?.ReaderMoved(-1);", keys, StringComparison.Ordinal);
+
+            // End is the last record, read back for a span and no more.
             // Every record is two lines: its first characters, and how
             // much more of it there is.
             view.GoToEnd();
             await Settle(view);
-            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight, double.MaxValue);
-            Assert.InRange(view.Range.End - view.Range.Start, 1, Math.Max(span, onScreen * record) + (4 * record));
             Assert.Equal(text.Length, view.Range.End);
+            Assert.InRange(view.Range.End - view.Range.Start, 1, span + (2 * record));
+            Assert.Equal(fills, scroll.ExtentHeight >= scroll.ViewportHeight);
+
+            // And the wheel turned the other way reads back from there.
+            var first = view.Range.Start;
+            box.ScrollToHome();
+            Wheel(box, down: false);
+            await Settle(view);
+            Assert.InRange(view.Range.Start, 0, first - record);
+            view.GoToEnd();
+            await Settle(view);
             var lines = box.Text.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
             Assert.StartsWith("record 0000299 jjjj", lines[^2], StringComparison.Ordinal);
             Assert.Equal(TextFileReader.ShownOfALongLine, lines[^2].Length);
             Assert.Equal(TextFileReader.LineGoesOn(40_017 - TextFileReader.ShownOfALongLine), lines[^1]);
             Assert.All(lines, line => Assert.InRange(line.Length, 1, TextFileReader.ShownOfALongLine));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task LinesThatOutgrowTheSpanAreReadToTheLastByTheWheelAlone() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // Forty records of 40,000 characters and a span of two and a half
+        // of them: the window is never full, there is never anything to
+        // scroll, and every record is still reached, one turn of the
+        // wheel after another.
+        var records = new StringBuilder();
+        for (var i = 0; i < 40; i++)
+        {
+            records.Append("record ").Append(i.ToString("0000000")).Append(' ').Append('j', 40_000).Append("\r\n");
+        }
+
+        var (path, text) = Write(temp, records.ToString());
+        var (window, box, view) = Show(path, span: 100 * 1024);
+        try
+        {
+            await Settle(view);
+            var seen = new HashSet<string>();
+            for (var step = 0; step < 120 && view.Range.End < text.Length; step++)
+            {
+                seen.UnionWith(box.Text.Split("\r\n").Where(line => line.StartsWith("record ", StringComparison.Ordinal)).Select(line => line[..14]));
+                box.ScrollToEnd();
+                Wheel(box, down: true);
+                await Settle(view);
+            }
+
+            seen.UnionWith(box.Text.Split("\r\n").Where(line => line.StartsWith("record ", StringComparison.Ordinal)).Select(line => line[..14]));
+            Assert.Equal(text.Length, view.Range.End);
+            Assert.Equal(Enumerable.Range(0, 40).Select(i => $"record {i:0000000}"), seen.Order());
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task EndHeldDownPutsOneQuestionToTheFileAtATime() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var (path, _) = Write(temp, Lines(0, 6500));
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            var asked = view.Turns;
+
+            // Thirty repeats of End, as a held key sends them, before the
+            // first has its answer. On a share that has stopped answering
+            // no answer comes, and each question put to it is a thread
+            // that waits: so one is put, and the rest wait for it.
+            for (var i = 0; i < 30; i++)
+            {
+                view.GoToEnd();
+            }
+
+            Assert.Equal(asked + 1, view.Turns);
+
+            // What is asked for last is what happens next.
+            view.GoToStart();
+            Assert.Equal(asked + 1, view.Turns);
+            await Settle(view);
+            Assert.Equal(0, view.Range.Start);
+            Assert.Equal(0, Scroll(box).VerticalOffset);
+            Assert.StartsWith("line 0000000 the quick brown fox\r\n", box.Text, StringComparison.Ordinal);
+
+            // And End alone, however long it is held, is the last line.
+            for (var i = 0; i < 30; i++)
+            {
+                view.GoToEnd();
+            }
+
+            await Settle(view);
+            Assert.EndsWith("line 0006499 the quick brown fox\r\n", box.Text, StringComparison.Ordinal);
+            var scroll = Scroll(box);
+            Assert.InRange(scroll.VerticalOffset, scroll.ScrollableHeight - 1, scroll.ScrollableHeight + 1);
         }
         finally
         {
@@ -543,7 +662,9 @@ public sealed class TextFileViewTests
             }
         }
 
-        var (window, box, view) = Show(path, TextFileView.HeadBytes, TextFileView.PieceBytes, TextFileView.HeldCharacters, TextFileView.HeldBytes);
+        // The box may span sixteen megabytes of it: under half the file.
+        const long span = 16 * 1024 * 1024;
+        var (window, box, view) = Show(path, TextFileView.HeadBytes, TextFileView.PieceBytes, TextFileView.HeldCharacters, span);
         try
         {
             // Left at its first line, it reads its budget of the file
@@ -551,7 +672,7 @@ public sealed class TextFileViewTests
             await Settle(view);
             var scroll = Scroll(box);
             Assert.Equal(0, view.Range.Start);
-            Assert.InRange(view.Range.End, TextFileView.HeldBytes, TextFileView.HeldBytes + 200_000);
+            Assert.InRange(view.Range.End, span, span + 200_000);
             Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight * 3, double.MaxValue);
 
             // Scrolled, it reads on and lets go behind, and never spans
@@ -560,7 +681,7 @@ public sealed class TextFileViewTests
             {
                 box.ScrollToEnd();
                 await Settle(view);
-                Assert.InRange(view.Range.End - view.Range.Start, 1, TextFileView.HeldBytes + 400_000);
+                Assert.InRange(view.Range.End - view.Range.Start, 1, span + 400_000);
             }
 
             Assert.Equal(40_000_000, view.Range.End);
@@ -746,6 +867,13 @@ public sealed class TextFileViewTests
 
         return text.ToString();
     }
+
+    /// <summary>One notch of the wheel over the box, as the window is told of it.</summary>
+    private static void Wheel(TextBox box, bool down) =>
+        box.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, Environment.TickCount, down ? -120 : 120)
+        {
+            RoutedEvent = UIElement.PreviewMouseWheelEvent
+        });
 
     /// <summary>How the line at the top of the box begins.</summary>
     private static string TopLine(TextBox box)

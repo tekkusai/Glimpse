@@ -191,12 +191,16 @@ public partial class PreviewWindow
 
                 return true;
 
+            // A page key at the edge of what a long file's box holds
+            // scrolls nothing, and still says which way the reader is going.
             case Key.PageDown when modifiers == ModifierKeys.None && !box.IsKeyboardFocusWithin:
                 box.PageDown();
+                file?.ReaderMoved(1);
                 return true;
 
             case Key.PageUp when modifiers == ModifierKeys.None && !box.IsKeyboardFocusWithin:
                 box.PageUp();
+                file?.ReaderMoved(-1);
                 return true;
 
             default:

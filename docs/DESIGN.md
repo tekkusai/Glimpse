@@ -247,10 +247,14 @@ is read a piece at a time. It opens on its first lines, takes more while
 the thread is free, and takes more whenever the reader comes within three
 screens of either end of what it holds. It holds two million characters, or
 three screens of lines when those come to more, and past that lets go of
-the end the reader is further from. It never spans more than 16 MB of the
-file, a limit only very long lines reach: there it reads ahead of the
-reader up to that much, and past it only what is on screen. End goes to
-the file's last line as the file is then, Home to its first. A line longer than 32 KB (64 KB in
+the end the reader is further from. With the reader at rest it reads at
+most 64 MB of the file, whether or not that fills the window. Only very
+long lines reach that limit, and past it the reader reads on: each turn
+of the wheel, page key or move of the scroll bar at the edge of what the
+box holds brings another piece. One question is out to the file at a time,
+so a key held down on a share that has stopped answering leaves one read
+waiting there. End goes to the file's last line as the file is then, Home
+to its first. A line longer than 32 KB (64 KB in
 UTF-16) shows its first 2 KB, and a line under it says how much more of it
 there is: "[This line goes on for another 4.9 MB. Open the file for the
 rest.]". The lines after it are read like any others. A file that is one
