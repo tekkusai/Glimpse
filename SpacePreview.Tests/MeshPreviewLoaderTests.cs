@@ -125,6 +125,103 @@ public sealed class MeshPreviewLoaderTests
         Assert.All(preview.Mesh.Positions, p => Assert.True(double.IsFinite(p.X) && double.IsFinite(p.Y) && double.IsFinite(p.Z)));
     }
 
+    // A model saved in map coordinates sits millions of units from zero,
+    // where a float steps by half a unit. 2.0 kept doubles until it had
+    // centered the model; 3.0 cast first, and a small part lost its shape:
+    // this cube came out with four corners and no thickness.
+    [Theory]
+    [InlineData("obj")]
+    [InlineData("stl")]
+    [InlineData("ply")]
+    public void ASmallPartFarFromZeroKeepsItsShape(string kind)
+    {
+        using var temp = new TempDirectory();
+        var cube = CubeQuads();
+        string At(Vector3 v) => FormattableString.Invariant($"{500000 + 0.1 * v.X:R} {4500000 + 0.1 * v.Y:R} {0.1 * v.Z:R}");
+        var text = new StringBuilder();
+        switch (kind)
+        {
+            case "obj":
+                foreach (var v in cube.Vertices)
+                {
+                    text.Append("v ").Append(At(v)).Append('\n');
+                }
+
+                foreach (var face in cube.Faces)
+                {
+                    text.Append("f ").AppendJoin(' ', face.Select(index => index + 1)).Append('\n');
+                }
+
+                break;
+            case "stl":
+                text.Append("solid cube\n");
+                foreach (var (a, b, c) in CubeTriangles())
+                {
+                    text.Append("facet normal 0 0 0\nouter loop\n");
+                    foreach (var v in new[] { a, b, c })
+                    {
+                        text.Append("vertex ").Append(At(v)).Append('\n');
+                    }
+
+                    text.Append("endloop\nendfacet\n");
+                }
+
+                text.Append("endsolid cube\n");
+                break;
+            default:
+                text.Append($"ply\nformat ascii 1.0\nelement vertex {cube.Vertices.Length}\nproperty double x\nproperty double y\nproperty double z\nelement face {cube.Faces.Length}\nproperty list uchar int vertex_indices\nend_header\n");
+                foreach (var v in cube.Vertices)
+                {
+                    text.Append(At(v)).Append('\n');
+                }
+
+                foreach (var face in cube.Faces)
+                {
+                    text.Append("4 ").AppendJoin(' ', face).Append('\n');
+                }
+
+                break;
+        }
+
+        var path = Path.Combine(temp.Path, "far." + kind);
+        File.WriteAllText(path, text.ToString());
+
+        var preview = Load(path);
+
+        Assert.Equal(8, preview.Mesh.Positions.Distinct().Count());
+        var bounds = preview.Mesh.Bounds;
+        Assert.True(bounds.SizeY > 0, "The cube has no thickness.");
+        Assert.InRange(bounds.SizeY / bounds.SizeX, 0.99, 1.01);
+        Assert.InRange(bounds.SizeZ / bounds.SizeX, 0.99, 1.01);
+    }
+
+    // Coordinates are measured from the first vertex, so the first vertex
+    // has to be one: a stray "not a number" spoils only itself.
+    [Fact]
+    public void AVertexThatIsNotANumberIsNotWhereTheModelIsMeasuredFrom()
+    {
+        using var temp = new TempDirectory();
+        var cube = CubeQuads();
+        var text = new StringBuilder("v NaN 0 0\n");
+        foreach (var v in cube.Vertices)
+        {
+            text.Append(FormattableString.Invariant($"v {v.X:R} {v.Y:R} {v.Z:R}\n"));
+        }
+
+        foreach (var face in cube.Faces)
+        {
+            text.Append("f ").AppendJoin(' ', face.Select(index => index + 2)).Append('\n');
+        }
+
+        var path = Path.Combine(temp.Path, "stray.obj");
+        File.WriteAllText(path, text.ToString());
+
+        var preview = Load(path);
+
+        Assert.Equal(8, preview.Mesh.Positions.Distinct().Count());
+        Assert.All(preview.Mesh.Positions, p => Assert.True(double.IsFinite(p.X + p.Y + p.Z)));
+    }
+
     [Fact]
     public void BinaryAndAsciiPlyReadQuadFaces()
     {

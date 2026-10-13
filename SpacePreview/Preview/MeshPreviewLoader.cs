@@ -131,12 +131,12 @@ internal static class MeshPreviewLoader
             var line = text.AsSpan();
             if (!NextToken(ref line, out var keyword)
                 || !keyword.Equals("vertex", StringComparison.OrdinalIgnoreCase)
-                || !TryReadVector(ref line, out var vertex))
+                || !TryReadVector(ref line, out var x, out var y, out var z))
             {
                 continue;
             }
 
-            var index = mesh.AddVertex(vertex);
+            var index = mesh.AddVertex(x, y, z);
             switch (pending++)
             {
                 case 0:
@@ -232,9 +232,9 @@ internal static class MeshPreviewLoader
 
             if (keyword is "v")
             {
-                if (TryReadVector(ref line, out var vertex))
+                if (TryReadVector(ref line, out var x, out var y, out var z))
                 {
-                    mesh.AddVertex(vertex);
+                    mesh.AddVertex(x, y, z);
                 }
             }
             else if (keyword is "f")
@@ -2281,6 +2281,8 @@ internal static class MeshPreviewLoader
     {
         private Vector3[] _positions = new Vector3[1024];
         private int[] _corners = new int[3 * 1024];
+        private double _originX, _originY, _originZ;
+        private bool _hasOrigin;
 
         public int VertexCount { get; private set; }
 
@@ -2303,7 +2305,23 @@ internal static class MeshPreviewLoader
             return VertexCount++;
         }
 
-        public int AddVertex(double x, double y, double z) => AddVertex(new Vector3((float)x, (float)y, (float)z));
+        /// <summary>
+        /// A vertex read as text or as doubles, measured from the first one
+        /// before it becomes floats. A model saved in map coordinates sits
+        /// millions of units from zero, where a float steps by half a unit
+        /// and a small part loses its shape. The viewer centers every model
+        /// anyway, so where it is measured from changes nothing else.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveOptimization)]
+        public int AddVertex(double x, double y, double z)
+        {
+            if (!_hasOrigin && double.IsFinite(x + y + z))
+            {
+                (_originX, _originY, _originZ, _hasOrigin) = (x, y, z, true);
+            }
+
+            return AddVertex(new Vector3((float)(x - _originX), (float)(y - _originY), (float)(z - _originZ)));
+        }
 
         /// <summary>A corner outside the vertex list drops its triangle.</summary>
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -2390,18 +2408,12 @@ internal static class MeshPreviewLoader
     }
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static bool TryReadVector(ref ReadOnlySpan<char> line, out Vector3 vector)
+    private static bool TryReadVector(ref ReadOnlySpan<char> line, out double x, out double y, out double z)
     {
-        vector = default;
-        if (!NextToken(ref line, out var xText) || !NextToken(ref line, out var yText) || !NextToken(ref line, out var zText)
-            || !double.TryParse(xText, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
-            || !double.TryParse(yText, NumberStyles.Float, CultureInfo.InvariantCulture, out var y)
-            || !double.TryParse(zText, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
-        {
-            return false;
-        }
-
-        vector = new Vector3((float)x, (float)y, (float)z);
-        return true;
+        x = y = z = 0;
+        return NextToken(ref line, out var xText) && NextToken(ref line, out var yText) && NextToken(ref line, out var zText)
+            && double.TryParse(xText, NumberStyles.Float, CultureInfo.InvariantCulture, out x)
+            && double.TryParse(yText, NumberStyles.Float, CultureInfo.InvariantCulture, out y)
+            && double.TryParse(zText, NumberStyles.Float, CultureInfo.InvariantCulture, out z);
     }
 }
