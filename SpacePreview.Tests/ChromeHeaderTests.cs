@@ -410,6 +410,10 @@ public sealed class ChromeHeaderTests
         {
             window.ShowPreview(image, IntPtr.Zero);
             await WaitForRevealAsync(window);
+            // The viewer follows the theme from its Loaded on, which can
+            // come a turn after the load is finished. Under load this test
+            // used to change the theme in between and read the old squares.
+            await WaitUntilAsync(() => ((FrameworkElement)window.PreviewContent.Content).IsLoaded, TimeSpan.FromSeconds(10));
             window.SetPinned(true);
 
             Theme.Use(ThemePreference.Light);
