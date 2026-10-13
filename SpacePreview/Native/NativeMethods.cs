@@ -652,6 +652,13 @@ internal static class NativeMethods
             : TimeSpan.Zero;
     }
 
+    /// <summary>The tick stamp of the last keyboard or mouse input in this session. Zero when Windows cannot say.</summary>
+    public static uint LastInputTick()
+    {
+        var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+        return GetLastInputInfo(ref info) ? info.dwTime : 0;
+    }
+
     /// <summary>QUERY_USER_NOTIFICATION_STATE, from shellapi.h.</summary>
     internal enum UserNotificationState
     {

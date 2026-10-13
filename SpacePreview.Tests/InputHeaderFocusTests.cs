@@ -75,7 +75,8 @@ public sealed class InputHeaderFocusTests
         Read(watch, 2);
         Assert.True(watch.IsPlain(Explorer));
 
-        // A click moved the focus from Sort into the search box.
+        // A click moved the focus from Sort into the search box. No key
+        // said so: the next look does.
         header.Plain = false;
         watch.Tick(Now);
         Assert.False(watch.IsPlain(Explorer));
@@ -121,7 +122,10 @@ public sealed class InputHeaderFocusTests
         Assert.True(watch.IsPlain(Explorer));
     }
 
-    /// <summary>A read takes a millisecond, and a key can land inside it.</summary>
+    /// <summary>
+    /// A read takes a millisecond, and a key can land inside it. That read
+    /// saw the header as it was before the key.
+    /// </summary>
     [Fact]
     public void AKeyDuringAReadDiscardsThatRead()
     {
@@ -138,6 +142,27 @@ public sealed class InputHeaderFocusTests
         Assert.False(watch.IsPlain(Explorer));
         watch.Tick(Now);
         Assert.True(watch.IsPlain(Explorer));
+    }
+
+    /// <summary>
+    /// The watcher can be stopped between its last check and its write
+    /// while the hook thread lets Ctrl+E through and then meets a Space.
+    /// An answer carries the key count it was read under, so one published
+    /// late is good for no later key.
+    /// </summary>
+    [Fact]
+    public void AnAnswerIsGoodOnlyForTheKeyCountItWasReadUnder()
+    {
+        var watch = new Header().Watch();
+        Read(watch, 2);
+        Assert.True(watch.IsPlain(Explorer));
+
+        // The count moves and nothing else is told: no look runs.
+        for (var key = 0; key < 3; key++)
+        {
+            watch.KeyWentBy(walks: false);
+            Assert.False(watch.IsPlain(Explorer));
+        }
     }
 
     [Fact]
@@ -186,8 +211,31 @@ public sealed class InputHeaderFocusTests
         Assert.Equal(reads, header.Reads);
     }
 
+    /// <summary>
+    /// The user brought another Explorer window forward while the read was
+    /// out. The answer is that window's, and both share one process.
+    /// </summary>
     [Fact]
-    public void WatchingAnotherExplorerWindowStartsFromNothing()
+    public void AReadThatEndsWithAnotherWindowInFrontDoesNotCount()
+    {
+        var header = new Header();
+        var watch = header.Watch();
+        watch.Tick(Now);
+
+        header.DuringRead = () => header.Front = Other;
+        watch.Tick(Now);
+        header.DuringRead = null;
+        header.Front = Explorer;
+
+        Assert.False(watch.IsPlain(Explorer));
+        watch.Tick(Now);
+        Assert.False(watch.IsPlain(Explorer));
+        watch.Tick(Now);
+        Assert.True(watch.IsPlain(Explorer));
+    }
+
+    [Fact]
+    public void WatchingAnotherWindowEndsWhatWasTrustedOfThisOne()
     {
         var header = new Header();
         var watch = header.Watch();
@@ -203,6 +251,35 @@ public sealed class InputHeaderFocusTests
         watch.Tick(Now);
         Assert.True(watch.IsPlain(Other));
         Assert.False(watch.IsPlain(Explorer));
+
+        // There and back, before any look: what was trusted of the first
+        // window when it left the front is not trusted on its return.
+        watch.Watch(Explorer);
+        watch.Watch(Other);
+        Assert.False(watch.IsPlain(Other));
+        Read(watch, 2);
+        Assert.True(watch.IsPlain(Other));
+    }
+
+    /// <summary>
+    /// A change of window arms the timer while a look can still be out with
+    /// Explorer. A second look must not run beside it: the older one would
+    /// publish over the newer one's refusal.
+    /// </summary>
+    [Fact]
+    public void ALookStillOutIsNotJoinedByAnother()
+    {
+        var header = new Header();
+        var watch = header.Watch();
+
+        header.DuringRead = () =>
+        {
+            header.DuringRead = null;
+            watch.Tick(Now);
+        };
+        watch.Tick(Now);
+
+        Assert.Equal(1, header.Reads);
     }
 
     /// <summary>
@@ -222,25 +299,113 @@ public sealed class InputHeaderFocusTests
         Assert.True(watch.IsPlain(Explorer));
     }
 
+    /// <summary>
+    /// The interval is how long a click from a button into the search box
+    /// can go unseen, so while the user is at the PC every look asks.
+    /// </summary>
     [Fact]
-    public void AHeaderLeftAloneIsAskedLessOftenAndStillInTime()
+    public void WhileTheUserIsAtItEveryLookAsks()
     {
-        var watch = new Header().Watch();
-        var wait = 0;
-        for (var read = 0; read < 19; read++)
-        {
-            wait = watch.Tick(Now);
-            Assert.Equal(ExplorerHeaderFocus.IntervalMilliseconds, wait);
-        }
+        var header = new Header();
+        var watch = header.Watch();
 
-        wait = watch.Tick(Now);
-        Assert.Equal(ExplorerHeaderFocus.RestingIntervalMilliseconds, wait);
+        Read(watch, 100);
+
+        Assert.Equal(100, header.Reads);
         Assert.True(watch.IsPlain(Explorer));
-        Assert.True(ExplorerHeaderFocus.RestingIntervalMilliseconds * 2 < ExplorerHeaderFocus.FreshMilliseconds);
+        Assert.True(ExplorerHeaderFocus.IntervalMilliseconds * 3 < ExplorerHeaderFocus.FreshMilliseconds);
+    }
 
-        // A key brings the short wait back.
-        watch.KeyWentBy(walks: false);
-        Assert.Equal(ExplorerHeaderFocus.IntervalMilliseconds, watch.Tick(Now));
+    /// <summary>
+    /// The cost this exists for: twenty reads a second took 2 % of a core
+    /// in Explorer for as long as the keyboard sat on a tab. The focus
+    /// moves when the user does something, so with hands off the PC the
+    /// last answer stands and Explorer is not asked.
+    /// </summary>
+    [Fact]
+    public void OnceHandsAreOffExplorerIsNotAskedAgain()
+    {
+        var header = new Header();
+        header.HandsOff();
+        var watch = header.Watch();
+
+        Read(watch, 100);
+
+        Assert.Equal(ExplorerHeaderFocus.ReadsToTrust, header.Reads);
+        Assert.True(watch.IsPlain(Explorer));
+
+        // Each look still says the answer stands. Without one it runs out.
+        Thread.Sleep((int)ExplorerHeaderFocus.FreshMilliseconds + 50);
+        Assert.False(watch.IsPlain(Explorer));
+        watch.Tick(Now);
+        Assert.True(watch.IsPlain(Explorer), "The answer ran out while nobody touched anything.");
+        Assert.Equal(ExplorerHeaderFocus.ReadsToTrust, header.Reads);
+
+        // The same with the keyboard in the search box: one read says so.
+        var typing = new Header { Plain = false };
+        typing.HandsOff();
+        Read(typing.Watch(), 100);
+        Assert.Equal(1, typing.Reads);
+    }
+
+    [Fact]
+    public void ATouchAfterTheQuietAsksAgain()
+    {
+        var header = new Header();
+        header.HandsOff();
+        var watch = header.Watch();
+        Read(watch, 10);
+        var reads = header.Reads;
+
+        // A click from the tab into the search box.
+        header.Touch();
+        header.Plain = false;
+        watch.Tick(Now);
+
+        Assert.Equal(reads + 1, header.Reads);
+        Assert.False(watch.IsPlain(Explorer));
+    }
+
+    /// <summary>
+    /// A click can move the focus a moment after it lands. A read made
+    /// while the user was still at it settles nothing: the asking goes on
+    /// until one is made in the quiet.
+    /// </summary>
+    [Fact]
+    public void AReadMadeBeforeTheQuietDoesNotEndTheAsking()
+    {
+        var header = new Header();
+        header.Touch();
+        var watch = header.Watch();
+        var touched = Now;
+
+        watch.Tick(touched + 50);
+        watch.Tick(touched + 100);
+        watch.Tick(touched + 150);
+        Assert.Equal(3, header.Reads);
+
+        watch.Tick(touched + ExplorerHeaderFocus.QuietMilliseconds + 50);
+        Assert.Equal(4, header.Reads);
+        watch.Tick(touched + ExplorerHeaderFocus.QuietMilliseconds + 100);
+        watch.Tick(touched + ExplorerHeaderFocus.QuietMilliseconds + 150);
+        Assert.Equal(4, header.Reads);
+    }
+
+    /// <summary>A program can bring an Explorer window forward with nobody at the PC. It is still read twice.</summary>
+    [Fact]
+    public void AWindowThatComesForwardInTheQuietIsReadUntilTrusted()
+    {
+        var header = new Header();
+        header.HandsOff();
+        var watch = header.Watch();
+        Read(watch, 10);
+
+        header.Front = Other;
+        watch.Watch(Other);
+        Read(watch, 10);
+
+        Assert.True(watch.IsPlain(Other));
+        Assert.Equal(ExplorerHeaderFocus.ReadsToTrust * 2, header.Reads);
     }
 
     /// <summary>
@@ -284,6 +449,41 @@ public sealed class InputHeaderFocusTests
         Assert.Equal(0, header.Reads);
     }
 
+    /// <summary>A Tab pressed in the file list a while ago says nothing about a click on a tab now.</summary>
+    [Fact]
+    public void AnOldTabOutsideTheHeaderIsNoWalk()
+    {
+        var header = new Header { In = false };
+        var watch = header.Watch();
+
+        watch.KeyWentBy(walks: true);
+        watch.Tick(Now + ExplorerHeaderFocus.WalkMilliseconds + 1);
+        header.In = true;
+        Read(watch, 2);
+
+        Assert.True(watch.IsPlain(Explorer));
+    }
+
+    /// <summary>
+    /// The hook sees a Tab in a file picker or in a preview too. Nothing
+    /// looks at the header while those are in front, so that Tab would
+    /// stand as a walk for good, and Space after a click on a tab would
+    /// give no preview until a file was clicked.
+    /// </summary>
+    [Fact]
+    public void ATabPressedInAnotherWindowIsNoWalkHere()
+    {
+        var header = new Header();
+        var watch = header.Watch();
+
+        watch.Watch(IntPtr.Zero);
+        watch.KeyWentBy(walks: true);
+        watch.Watch(Explorer);
+        Read(watch, 2);
+
+        Assert.True(watch.IsPlain(Explorer));
+    }
+
     private static long Now => Environment.TickCount64;
 
     private static void Read(ExplorerHeaderFocus watch, int times)
@@ -303,6 +503,16 @@ public sealed class InputHeaderFocusTests
         public int Reads { get; private set; }
         public Action? DuringRead { get; set; }
 
+        // The stamp of the last key, click or mouse move. Until a test
+        // says otherwise the user is at the PC and it is always now.
+        private uint? _input;
+
+        /// <summary>Nothing pressed, clicked or moved for five seconds, and nothing from here on.</summary>
+        public void HandsOff() => _input = unchecked((uint)Environment.TickCount64 - 5000);
+
+        /// <summary>One key, click or mouse move, now.</summary>
+        public void Touch() => _input = unchecked((uint)Environment.TickCount64);
+
         public ExplorerHeaderFocus Watch()
         {
             var watch = new ExplorerHeaderFocus(
@@ -313,7 +523,8 @@ public sealed class InputHeaderFocusTests
                     Reads++;
                     DuringRead?.Invoke();
                     return Plain;
-                });
+                },
+                () => _input ?? unchecked((uint)Environment.TickCount64));
             watch.Watch(Explorer);
             return watch;
         }

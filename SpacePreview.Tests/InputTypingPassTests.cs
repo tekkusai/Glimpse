@@ -119,7 +119,7 @@ public sealed class InputTypingPassTests
     [Fact]
     public Task AKeyThatReachesExplorerForgetsTheHeaderAndOneGlimpseTakesDoesNot() => WithController(controller =>
     {
-        var header = new ExplorerHeaderFocus(() => Owner, _ => true, _ => true);
+        var header = new ExplorerHeaderFocus(() => Owner, _ => true, _ => true, () => unchecked((uint)Environment.TickCount64));
         Fields.Set(controller, "_headerFocus", header);
         header.Watch(Owner);
 
@@ -136,6 +136,13 @@ public sealed class InputTypingPassTests
         Trust(header);
         Assert.False(HookThread.KeyDown(controller, At(NativeMethods.VK_LEFT)));
         Assert.False(header.IsPlain(Owner), "An arrow that reached Explorer left the header trusted.");
+
+        // With no state to decide from every key passes, and still counts:
+        // Ctrl+F then puts the keyboard in the search box.
+        Trust(header);
+        Fields.Set(controller, "_keyState", null);
+        Assert.False(HookThread.KeyDown(controller, At(NativeMethods.VK_F)));
+        Assert.False(header.IsPlain(Owner), "A key passed for want of state left the header trusted.");
         return Task.CompletedTask;
     });
 

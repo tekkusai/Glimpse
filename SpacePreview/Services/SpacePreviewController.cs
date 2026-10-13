@@ -576,6 +576,7 @@ internal sealed class SpacePreviewController : IDisposable
                 _spaceKey.Press(time, acted: false);
             }
 
+            _headerFocus.KeyWentBy(walks: false);
             return false;
         }
 
