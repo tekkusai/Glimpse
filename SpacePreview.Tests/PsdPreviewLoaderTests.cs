@@ -151,6 +151,101 @@ public sealed class PsdPreviewLoaderTests
         Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 1024 * 1024);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GrayscaleIsTheSameValueInEveryColor(bool packBits)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "gray.psd");
+        WritePsd(path, width: 2, height: 2, [[0, 128, 255, 7]], packBits, mode: 1);
+
+        Assert.Equal(
+            new byte[] { 0, 0, 0, 255, 128, 128, 128, 255, 255, 255, 255, 255, 7, 7, 7, 255 },
+            Pixels(PsdPreviewLoader.TryLoad(path)!));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void GrayscaleTakesOneExtraChannelAsTransparency(bool packBits)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "gray-alpha.psd");
+        WritePsd(path, width: 2, height: 1, [[10, 20], [255, 0]], packBits, mode: 1);
+
+        Assert.Equal(
+            new byte[] { 10, 10, 10, 255, 20, 20, 20, 0 },
+            Pixels(PsdPreviewLoader.TryLoad(path)!));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CmykInksAreMultipliedWithTheKey(bool packBits)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "print.psd");
+        // Stored inverted: 255 is no ink. Paper, full cyan, full black,
+        // and a mix that rounds down in every channel.
+        byte[][] planes =
+        [
+            [255, 0, 255, 200],
+            [255, 255, 255, 100],
+            [255, 255, 255, 50],
+            [255, 255, 0, 128]
+        ];
+        WritePsd(path, width: 4, height: 1, planes, packBits, mode: 4);
+
+        Assert.Equal(
+            new byte[]
+            {
+                255, 255, 255, 255,
+                255, 255, 0, 255,
+                0, 0, 0, 255,
+                25, 50, 100, 255
+            },
+            Pixels(PsdPreviewLoader.TryLoad(path)!));
+    }
+
+    [Fact]
+    public void ACmykSpotChannelIsNotTransparency()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "spot.psd");
+        // A fifth channel of zeros: a cut line or white ink, not holes.
+        byte[][] planes = [[255, 255], [255, 255], [255, 255], [255, 255], [0, 0]];
+        WritePsd(path, width: 2, height: 1, planes, packBits: true, mode: 4);
+
+        Assert.Equal(
+            new byte[] { 255, 255, 255, 255, 255, 255, 255, 255 },
+            Pixels(PsdPreviewLoader.TryLoad(path)!));
+    }
+
+    [Fact]
+    public void ABroughtDownPictureAveragesEveryColorAndItsTransparency()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "wide-alpha.psd");
+        // 8200 wide comes down by three. Each channel is flat but for its
+        // last box, which holds one column: 8200 = 2733 threes and a one.
+        const int width = 8200;
+        byte[] Flat(byte value, byte last)
+        {
+            var plane = Enumerable.Repeat(value, width).ToArray();
+            plane[^1] = last;
+            return plane;
+        }
+
+        WritePsd(path, width, height: 1, [Flat(30, 90), Flat(60, 120), Flat(200, 10), Flat(255, 40)], packBits: true);
+
+        var pixels = Pixels(PsdPreviewLoader.TryLoad(path)!);
+        Assert.Equal(2734 * 4, pixels.Length);
+        Assert.Equal(new byte[] { 200, 60, 30, 255 }, pixels[..4]);
+        Assert.Equal(new byte[] { 200, 60, 30, 255 }, pixels[(2732 * 4)..(2733 * 4)]);
+        Assert.Equal(new byte[] { 10, 120, 90, 40 }, pixels[(2733 * 4)..]);
+    }
+
     [Fact]
     public void EachPlaneStartsWhereThePlanesBeforeItEnd()
     {
@@ -233,7 +328,8 @@ public sealed class PsdPreviewLoaderTests
         bool packBits,
         int depth = 8,
         bool large = false,
-        int layerBytes = 0)
+        int layerBytes = 0,
+        int mode = 3)
     {
         using var writer = new BinaryWriter(File.Create(path));
         void U16(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((ushort)value));
@@ -245,7 +341,7 @@ public sealed class PsdPreviewLoaderTests
         U32(height);
         U32(width);
         U16(depth);
-        U16(3);
+        U16(mode);
         U32(0); // color mode data
         U32(0); // image resources
         if (large)

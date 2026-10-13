@@ -13,7 +13,8 @@ namespace SpacePreview.Preview;
 /// files take: 8-bit RGB, grayscale, and CMYK (naive ink conversion, close
 /// enough for a preview), raw or RLE, plus raw 16-bit taken at 8. Any legal
 /// PSD size decodes row-streamed and integer-downsampled, so a 10800x7200
-/// print file costs a 4K preview's memory, not its own. Each output pixel is
+/// print file costs a 4K preview's memory, not its own, and each plane is
+/// written straight into the picture's pixels. Each output pixel is
 /// the average of its box of document pixels, so a downsampled preview is
 /// smooth, not aliased. The color planes decode in parallel. A large
 /// document (PSB) is the same file with wider counts. Lab and 32-bit fall
@@ -179,7 +180,6 @@ internal static class PsdPreviewLoader
         var planesWanted = color == PsdColor.Cmyk
             ? colorChannels
             : Math.Min(channels, colorChannels + 1);
-        var planes = new byte[planesWanted][];
 
         if (compression is not (0 or 1) || (compression == 1 && depth != 8))
         {
@@ -219,15 +219,29 @@ internal static class PsdPreviewLoader
             return null;
         }
 
+        // Every plane is written straight into its place in the picture,
+        // one byte in four. A copy of each plane beside the picture was
+        // 260 MB more than a 10000 by 9000 file needs. The picture starts
+        // opaque, and a plane of transparency writes over that.
+        var pixels = new byte[checked(planeBytes * 4)];
+        Array.Fill(pixels, (byte)255);
+
+        // Where a plane's byte sits in a blue, green, red, alpha pixel.
+        // Grayscale goes to blue and is copied across afterwards. The CMYK
+        // key waits in the alpha byte until the inks are multiplied.
+        int Slot(int plane) => color == PsdColor.Grayscale
+            ? plane == 0 ? 0 : 3
+            : plane < 3 ? 2 - plane : 3;
+
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-        byte[] DecodePlane(int plane)
+        void DecodePlane(int plane)
         {
             using var source = OpenRead(path);
             source.Position = planeStarts[plane];
             var rowBuffer = new byte[rowBytes];
             var compressed = new byte[longestRow];
             var sums = new int[outWidth];
-            var target = new byte[planeBytes];
+            var slot = Slot(plane);
             for (var row = 0; row < height; row++)
             {
                 if ((row & 255) == 0)
@@ -251,39 +265,21 @@ internal static class PsdPreviewLoader
                 var rowsInBox = row % factor + 1;
                 if (rowsInBox == factor || row == height - 1)
                 {
-                    WriteBoxAverages(sums, target.AsSpan(row / factor * outWidth, outWidth), width, factor, rowsInBox);
+                    WriteBoxAverages(sums, pixels, row / factor * outWidth * 4 + slot, width, factor, rowsInBox);
                     Array.Clear(sums);
                 }
             }
-
-            return target;
         }
 
-        Parallel.For(0, planesWanted, new ParallelOptions { CancellationToken = token }, plane => planes[plane] = DecodePlane(plane));
+        Parallel.For(0, planesWanted, new ParallelOptions { CancellationToken = token }, DecodePlane);
 
-        var alpha = planesWanted > colorChannels ? planes[colorChannels] : null;
-        var pixels = new byte[(long)planeBytes * 4];
         switch (color)
         {
             case PsdColor.Grayscale:
-                for (var i = 0; i < planeBytes; i++)
+                for (var i = 0; i < pixels.Length; i += 4)
                 {
-                    var value = planes[0][i];
-                    pixels[i * 4] = value;
-                    pixels[i * 4 + 1] = value;
-                    pixels[i * 4 + 2] = value;
-                    pixels[i * 4 + 3] = alpha?[i] ?? 255;
-                }
-
-                break;
-
-            case PsdColor.Rgb:
-                for (var i = 0; i < planeBytes; i++)
-                {
-                    pixels[i * 4] = planes[2][i];
-                    pixels[i * 4 + 1] = planes[1][i];
-                    pixels[i * 4 + 2] = planes[0][i];
-                    pixels[i * 4 + 3] = alpha?[i] ?? 255;
+                    pixels[i + 1] = pixels[i];
+                    pixels[i + 2] = pixels[i];
                 }
 
                 break;
@@ -293,13 +289,13 @@ internal static class PsdPreviewLoader
                 // uncalibrated conversion is a straight multiply with the
                 // inverted key. Profile-true color needs the embedded ICC;
                 // this stays within preview honesty.
-                for (var i = 0; i < planeBytes; i++)
+                for (var i = 0; i < pixels.Length; i += 4)
                 {
-                    var key = planes[3][i];
-                    pixels[i * 4] = (byte)(planes[2][i] * key / 255);
-                    pixels[i * 4 + 1] = (byte)(planes[1][i] * key / 255);
-                    pixels[i * 4 + 2] = (byte)(planes[0][i] * key / 255);
-                    pixels[i * 4 + 3] = alpha?[i] ?? 255;
+                    var key = pixels[i + 3];
+                    pixels[i] = (byte)(pixels[i] * key / 255);
+                    pixels[i + 1] = (byte)(pixels[i + 1] * key / 255);
+                    pixels[i + 2] = (byte)(pixels[i + 2] * key / 255);
+                    pixels[i + 3] = 255;
                 }
 
                 break;
@@ -373,12 +369,12 @@ internal static class PsdPreviewLoader
     }
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static void WriteBoxAverages(int[] sums, Span<byte> target, int width, int factor, int rows)
+    private static void WriteBoxAverages(int[] sums, byte[] target, int offset, int width, int factor, int rows)
     {
         for (var box = 0; box < sums.Length; box++)
         {
             var pixels = (Math.Min(width, (box + 1) * factor) - box * factor) * rows;
-            target[box] = (byte)((sums[box] + pixels / 2) / pixels);
+            target[offset + box * 4] = (byte)((sums[box] + pixels / 2) / pixels);
         }
     }
 
