@@ -1,7 +1,10 @@
+using System.Reflection;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using SpacePreview.Preview;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
@@ -11,6 +14,38 @@ namespace SpacePreview.Tests;
 [Collection(WpfCollection.Name)]
 public sealed class CardsFolderRowsTests
 {
+    // The list's scrollbar was the one thing that still faded with Windows
+    // animations turned off: it never asked the switch.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheListsScrollbarFadesOnlyWhenMotionIsOn(bool motion) => Sta.Run(() =>
+    {
+        Motion.Override = motion;
+        try
+        {
+            var scroll = new ScrollViewer { Content = new Border { Height = 2000 } };
+            scroll.Measure(new Size(300, 200));
+            scroll.Arrange(new Rect(0, 0, 300, 200));
+            scroll.UpdateLayout();
+            var bar = (ScrollBar)scroll.Template.FindName("PART_VerticalScrollBar", scroll);
+            bar.Opacity = 0;
+
+            typeof(PreviewWindow).GetMethod("FadeScrollBars", BindingFlags.NonPublic | BindingFlags.Static)!
+                .Invoke(null, [scroll, 1.0, 120]);
+
+            Assert.Equal(motion, bar.HasAnimatedProperties);
+            if (!motion)
+            {
+                Assert.Equal(1, bar.Opacity);
+            }
+        }
+        finally
+        {
+            Motion.Override = null;
+        }
+    });
+
     // The walk used to stop after 25,000 entries, long before its clock, so
     // every large folder read "At least".
     [Fact]

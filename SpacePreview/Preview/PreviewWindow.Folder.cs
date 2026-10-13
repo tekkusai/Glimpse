@@ -281,10 +281,7 @@ public partial class PreviewWindow
     {
         foreach (var bar in FindVisualChildren<System.Windows.Controls.Primitives.ScrollBar>(scroll))
         {
-            bar.BeginAnimation(OpacityProperty, new DoubleAnimation(to, TimeSpan.FromMilliseconds(milliseconds))
-            {
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            });
+            Motion.Fade(bar, to, TimeSpan.FromMilliseconds(milliseconds));
         }
     }
 
