@@ -4,7 +4,7 @@ namespace SpacePreview.Tests;
 
 /// <summary>
 /// The dev probe's step grammar is a contract with the regression scripts
-/// and with every agent that captures the app: a verb they use must be one
+/// and with anyone who writes a capture: a verb they use must be one
 /// the runner knows, or a capture silently shows the wrong state.
 /// </summary>
 public sealed class ProbeGrammarTests
