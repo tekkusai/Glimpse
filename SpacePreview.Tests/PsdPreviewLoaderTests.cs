@@ -61,6 +61,97 @@ public sealed class PsdPreviewLoaderTests
     }
 
     [Fact]
+    public void AskedForMoreTheCompositeComesAtItsOwnSize()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "wide.psd");
+        const int width = 8200;
+        const int height = 3;
+        var plane = new byte[width * height];
+        for (var i = 0; i < plane.Length; i++)
+        {
+            plane[i] = (byte)(i % width % 2 == 0 ? 0 : 255);
+        }
+
+        WritePsd(path, width, height, [plane, plane, plane], packBits: true);
+
+        // Every column as the file has it: nothing averaged away.
+        var whole = PsdPreviewLoader.TryLoad(path, longSide: width)!;
+        Assert.Equal((width, height), (whole.PixelWidth, whole.PixelHeight));
+        var pixels = Pixels(whole);
+        Assert.Equal(0, pixels[0]);
+        Assert.Equal(255, pixels[4]);
+        Assert.Equal(0, pixels[8]);
+
+        // Short of its own size it still comes down by a whole number.
+        Assert.Equal(4100, PsdPreviewLoader.TryLoad(path, longSide: 5000)!.PixelWidth);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ALargeDocumentDecodesLikeAnyOther(bool packBits)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "large.psb");
+        byte[][] planes =
+        [
+            [255, 0, 0, 10, 20, 30],
+            [0, 255, 0, 40, 50, 60],
+            [0, 0, 255, 70, 80, 90]
+        ];
+
+        // Layer data in front of the picture, as a real file has: its
+        // length is eight bytes here and four in a PSD.
+        WritePsd(path, width: 3, height: 2, planes, packBits, large: true, layerBytes: 37);
+
+        var bitmap = PsdPreviewLoader.TryLoad(path)!;
+
+        Assert.Equal((3, 2), (bitmap.PixelWidth, bitmap.PixelHeight));
+        var pixels = Pixels(bitmap);
+        Assert.Equal(new byte[] { 0, 0, 255, 255 }, pixels[..4]);
+        Assert.Equal(new byte[] { 70, 40, 10, 255 }, pixels[12..16]);
+    }
+
+    [Fact]
+    public void AFileThatClaimsMoreThanItHoldsCostsNothing()
+    {
+        using var temp = new TempDirectory();
+
+        // Twenty-six bytes of header and three empty sections, claiming a
+        // 300,000 pixel square with every row packed.
+        var claims = Path.Combine(temp.Path, "claims.psb");
+        WritePsd(claims, width: 3, height: 2, [new byte[6], new byte[6], new byte[6]], packBits: true, large: true);
+        var bytes = File.ReadAllBytes(claims);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(14), 300_000);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(18), 300_000);
+        File.WriteAllBytes(claims, bytes);
+
+        // A real picture whose row table says one row is far longer than a
+        // packed row can be, with the bytes there to back the claim.
+        var longRow = Path.Combine(temp.Path, "long-row.psb");
+        WritePsd(longRow, width: 3, height: 2, [new byte[6], new byte[6], new byte[6]], packBits: true, large: true);
+        bytes = File.ReadAllBytes(longRow);
+        var table = 26 + 4 + 4 + 8 + 2;
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(table), 2_000_000);
+        File.WriteAllBytes(longRow, [.. bytes, .. new byte[2_000_000]]);
+
+        // The same claim with rows stored as they are: no table to miss.
+        var raw = Path.Combine(temp.Path, "raw.psb");
+        WritePsd(raw, width: 3, height: 2, [new byte[6], new byte[6], new byte[6]], packBits: false, large: true);
+        bytes = File.ReadAllBytes(raw);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(14), 300_000);
+        BinaryPrimitives.WriteUInt32BigEndian(bytes.AsSpan(18), 300_000);
+        File.WriteAllBytes(raw, bytes);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        Assert.Null(PsdPreviewLoader.TryLoad(claims));
+        Assert.Null(PsdPreviewLoader.TryLoad(longRow));
+        Assert.Null(PsdPreviewLoader.TryLoad(raw));
+        Assert.InRange(GC.GetAllocatedBytesForCurrentThread() - before, 0, 1024 * 1024);
+    }
+
+    [Fact]
     public void EachPlaneStartsWhereThePlanesBeforeItEnd()
     {
         using var temp = new TempDirectory();
@@ -134,13 +225,21 @@ public sealed class PsdPreviewLoaderTests
         return pixels;
     }
 
-    private static void WritePsd(string path, int width, int height, byte[][] planes, bool packBits, int depth = 8)
+    internal static void WritePsd(
+        string path,
+        int width,
+        int height,
+        byte[][] planes,
+        bool packBits,
+        int depth = 8,
+        bool large = false,
+        int layerBytes = 0)
     {
         using var writer = new BinaryWriter(File.Create(path));
         void U16(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((ushort)value));
         void U32(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((uint)value));
         writer.Write("8BPS"u8);
-        U16(1);
+        U16(large ? 2 : 1);
         writer.Write(new byte[6]);
         U16(planes.Length);
         U32(height);
@@ -149,7 +248,13 @@ public sealed class PsdPreviewLoaderTests
         U16(3);
         U32(0); // color mode data
         U32(0); // image resources
-        U32(0); // layer and mask info
+        if (large)
+        {
+            U32(0); // layer and mask info: eight bytes of length in a large document
+        }
+
+        U32(layerBytes);
+        writer.Write(Enumerable.Repeat((byte)0xEE, layerBytes).ToArray());
         U16(packBits ? 1 : 0);
         if (!packBits)
         {
@@ -165,7 +270,14 @@ public sealed class PsdPreviewLoaderTests
             .Select(row => PackBits(plane.AsSpan(row * width, width).ToArray()))).ToList();
         foreach (var row in rows)
         {
-            U16(row.Length);
+            if (large)
+            {
+                U32(row.Length);
+            }
+            else
+            {
+                U16(row.Length);
+            }
         }
 
         foreach (var row in rows)

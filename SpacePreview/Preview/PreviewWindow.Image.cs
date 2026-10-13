@@ -168,9 +168,49 @@ public partial class PreviewWindow
                 version);
         }
 
-        var viewer = new ImageViewer(composite, header?.LongSide ?? 0, rotation: null);
+        var viewer = new ImageViewer(composite, header?.LongSide ?? 0, rotation: null, FileKinds.IsPhotograph(path));
+        viewer.SharperWanted += () => _ = SharpenPhotoshopAsync(path, viewer, version, token);
         RegisterImageZoom(viewer.Element, viewer);
         return viewer.Element;
+    }
+
+    /// <summary>
+    /// A Photoshop file zoomed past the composite it opened with: the
+    /// composite is decoded again, at its own size or the budget's.
+    /// </summary>
+    private async Task SharpenPhotoshopAsync(string path, ImageViewer viewer, long version, CancellationToken token)
+    {
+        try
+        {
+            await _imageDecodeGate.WaitAsync(token);
+            BitmapSource? bitmap;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                bitmap = await Task.Run(
+                    () => PsdPreviewLoader.TryReadPixelSize(path, out var size)
+                        ? PsdPreviewLoader.TryLoad(path, token, SharpLongSide((int)size.Width, (int)size.Height))
+                        : null,
+                    token);
+            }
+            finally
+            {
+                _imageDecodeGate.Release();
+            }
+
+            if (bitmap is not null && !token.IsCancellationRequested && version == _loadVersion && viewer.TakeSharper(bitmap))
+            {
+                DiagnosticLog.Write($"psd sharp decode ready {bitmap.PixelWidth}x{bitmap.PixelHeight} {path}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The picture left before it was decoded.
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"psd sharp decode failed {path}: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     /// <summary>The content area this item's stage will have, in device pixels.</summary>

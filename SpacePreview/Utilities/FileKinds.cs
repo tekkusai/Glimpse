@@ -133,12 +133,13 @@ internal static partial class FileKinds
     };
 
     /// <summary>
-    /// A format cameras and phones write. Zoomed in, such a picture is
-    /// smoothed and never drawn as squares: closer up it is still a
-    /// photograph. A PNG, a GIF or an icon keeps its pixels.
+    /// A format cameras and phones write, or the one photographs and
+    /// paintings are worked on in. Zoomed in, such a picture is smoothed
+    /// and never drawn as squares: closer up it is still a photograph. A
+    /// PNG, a GIF or an icon keeps its pixels.
     /// </summary>
     public static bool IsPhotograph(string path) =>
-        IsCameraRaw(path) || PhotographExtensions.Contains(Path.GetExtension(path));
+        IsCameraRaw(path) || IsPhotoshop(path) || PhotographExtensions.Contains(Path.GetExtension(path));
 
     public static bool IsSvg(string path) => Path.GetExtension(path).Equals(".svg", StringComparison.OrdinalIgnoreCase);
 
@@ -168,7 +169,13 @@ internal static partial class FileKinds
 
     public static bool IsMesh(string path) => MeshExtensions.Contains(Path.GetExtension(path));
 
-    public static bool IsPhotoshop(string path) => Path.GetExtension(path).Equals(".psd", StringComparison.OrdinalIgnoreCase);
+    public static bool IsPhotoshop(string path)
+    {
+        // A large document (.psb) is the same file with wider counts.
+        var extension = Path.GetExtension(path);
+        return extension.Equals(".psd", StringComparison.OrdinalIgnoreCase)
+            || extension.Equals(".psb", StringComparison.OrdinalIgnoreCase);
+    }
 
     public static bool IsStep(string path)
     {

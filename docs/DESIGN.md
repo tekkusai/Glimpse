@@ -255,9 +255,9 @@ One gesture set for every zoomable view:
 - Fit fills the view, small images included, as in 2.0. A gentle fit is
   smoothed; at 3x or more, and whenever the user zooms in past 1:1, pixels
   stay square, so an icon reads as an icon.
-- A photograph (JPEG, HEIC, AVIF, camera RAW) is smoothed at every zoom.
-  Closer up it is still a photograph, and squares read as a picture too
-  small for the zoom.
+- A photograph or a painting (JPEG, HEIC, AVIF, camera RAW, Photoshop) is
+  smoothed at every zoom. Closer up it is still a photograph, and squares
+  read as a picture too small for the zoom.
 - Zoom goes down to fit or 1:1, whichever is smaller.
 - Wheel zooms around the cursor by 1.15 per notch.
 - Double-click toggles fit and 1:1 device pixels (or 2x when fit is
@@ -268,7 +268,9 @@ One gesture set for every zoomable view:
   Zoomed in past those pixels it is decoded again at its own size, up to 128
   megapixels, and that decode is the one on screen until the zoom comes back
   under the first. At fit and below, the first decode is drawn as before.
-  The larger one is not kept when the picture leaves.
+  The larger one is not kept when the picture leaves. A Photoshop file
+  opens from its composite brought down by a whole number, and is decoded
+  again the same way.
 - Images with transparency sit on a subtle two-tone checkerboard.
 - A sentence the image has to say, such as a rotation that did not save,
   appears where the zoom readout does, in the same glass and type, and holds

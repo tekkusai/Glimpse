@@ -62,10 +62,11 @@ public sealed class FileKindsTests
     }
 
     [Fact]
-    public void PsbIsNotClaimedAsPhotoshopCompositeWithoutPsbDecoder()
+    public void ALargeDocumentIsAPhotoshopFileLikeAnyOther()
     {
-        Assert.False(FileKinds.IsPhotoshop("large-format.psb"));
+        Assert.True(FileKinds.IsPhotoshop("large-format.psb"));
         Assert.True(FileKinds.IsPhotoshop("layered.psd"));
+        Assert.False(FileKinds.IsPhotoshop("script.psd1"));
     }
 
     [Fact]

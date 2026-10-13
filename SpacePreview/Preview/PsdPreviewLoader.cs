@@ -15,22 +15,29 @@ namespace SpacePreview.Preview;
 /// PSD size decodes row-streamed and integer-downsampled, so a 10800x7200
 /// print file costs a 4K preview's memory, not its own. Each output pixel is
 /// the average of its box of document pixels, so a downsampled preview is
-/// smooth, not aliased. The color planes decode in parallel. Lab, 32-bit,
-/// and PSB fall back to the file card rather than guess.
+/// smooth, not aliased. The color planes decode in parallel. A large
+/// document (PSB) is the same file with wider counts. Lab and 32-bit fall
+/// back to the file card rather than guess.
 /// </summary>
 internal static class PsdPreviewLoader
 {
-    /// <summary>PSD (version 1) caps each side at 30,000 pixels.</summary>
+    /// <summary>PSD (version 1) caps each side at 30,000 pixels, PSB (version 2) at 300,000.</summary>
     private const int MaxDocumentDimension = 30_000;
+    private const int MaxLargeDocumentDimension = 300_000;
 
     private const int MaxOutputDimension = 4096;
 
-    public static BitmapSource? TryLoad(string path, CancellationToken token = default)
+    /// <summary>
+    /// The composite, brought down by a whole number until its long side
+    /// is at most <paramref name="longSide"/>. The preview opens at the
+    /// default; zoomed in past that, the window asks again for more.
+    /// </summary>
+    public static BitmapSource? TryLoad(string path, CancellationToken token = default, int longSide = MaxOutputDimension)
     {
         try
         {
             using var stream = OpenRead(path);
-            return Decode(stream, path, token);
+            return Decode(stream, path, Math.Max(1, longSide), token);
         }
         catch (OperationCanceledException)
         {
@@ -80,7 +87,7 @@ internal static class PsdPreviewLoader
     }
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static BitmapSource? Decode(Stream stream, string path, CancellationToken token)
+    private static BitmapSource? Decode(Stream stream, string path, int longSide, CancellationToken token)
     {
         Span<byte> header = stackalloc byte[26];
         stream.ReadExactly(header);
@@ -96,15 +103,18 @@ internal static class PsdPreviewLoader
         var depth = ReadUInt16(header[22..]);
         var mode = ReadUInt16(header[24..]);
 
-        // Version 2 is PSB; its section sizes are 64-bit. Rare enough that the
-        // card fallback is the correct fallback.
-        if (version != 1)
+        // Version 2 is PSB, what Photoshop writes once a document passes
+        // 30,000 pixels a side or 2 GB. It differs in two counts: the layer
+        // section's length is eight bytes, and a packed row's is four.
+        if (version is not (1 or 2))
         {
-            DiagnosticLog.Write($"psd preview skipped {path}: PSB large document");
+            DiagnosticLog.Write($"psd preview skipped {path}: version {version}");
             return null;
         }
 
-        if (width <= 0 || height <= 0 || width > MaxDocumentDimension || height > MaxDocumentDimension)
+        var large = version == 2;
+        var side = large ? MaxLargeDocumentDimension : MaxDocumentDimension;
+        if (width <= 0 || height <= 0 || width > side || height > side)
         {
             DiagnosticLog.Write($"psd preview skipped {path}: {width}x{height} outside PSD bounds");
             return null;
@@ -147,9 +157,9 @@ internal static class PsdPreviewLoader
 
         // Color mode data, image resources, then layer info; the composite
         // image data section follows them.
-        SkipSection(stream);
-        SkipSection(stream);
-        SkipSection(stream);
+        SkipSection(stream, wide: false);
+        SkipSection(stream, wide: false);
+        SkipSection(stream, wide: large);
 
         Span<byte> two = stackalloc byte[2];
         stream.ReadExactly(two);
@@ -157,10 +167,10 @@ internal static class PsdPreviewLoader
 
         // Rows and columns shrink by an integer factor while decoding, so
         // plane memory is bounded by the preview, not the document.
-        var factor = Math.Max(1, (int)Math.Ceiling(Math.Max(width, height) / (double)MaxOutputDimension));
+        var factor = Math.Max(1, (int)Math.Ceiling(Math.Max(width, height) / (double)longSide));
         var outWidth = (width + factor - 1) / factor;
         var outHeight = (height + factor - 1) / factor;
-        var planeBytes = outWidth * outHeight;
+        var planeBytes = checked(outWidth * outHeight);
 
         // RGB and grayscale treat one extra channel as transparency, like
         // every common PSD reader. CMYK extras are almost always spot
@@ -180,9 +190,17 @@ internal static class PsdPreviewLoader
         // Big-endian 16-bit samples: the high byte is the 8-bit value.
         var bytesPerSample = depth / 8;
         var rowBytes = (long)width * bytesPerSample;
-        // PackBits puts a row-length table for every channel row first.
-        var rowCounts = compression == 1 ? ReadRowCounts(stream, channels * height) : null;
+        // PackBits puts a row-length table for every channel row first. A
+        // packed row is never longer than twice the row it holds, whatever
+        // wrote it, and a table that says otherwise is not believed: it
+        // would size the buffer every plane reads into.
+        var rowCounts = compression == 1 ? ReadRowCounts(stream, (long)channels * height, large ? 4 : 2) : null;
         var longestRow = rowCounts is null ? 0 : rowCounts.Max();
+        if (longestRow > rowBytes * 2 + 2)
+        {
+            DiagnosticLog.Write($"psd preview skipped {path}: a packed row of {longestRow} bytes for a row of {rowBytes}");
+            return null;
+        }
 
         // Each plane is one run of rows in the file, so the planes decode
         // side by side, each from its own stream.
@@ -191,6 +209,14 @@ internal static class PsdPreviewLoader
         for (var plane = 1; plane < planesWanted; plane++)
         {
             planeStarts[plane] = planeStarts[plane - 1] + PlaneLength(rowCounts, plane - 1, height, rowBytes);
+        }
+
+        // What the header claims has to be in the file before anything is
+        // set aside for it.
+        if (planeStarts[^1] + PlaneLength(rowCounts, planesWanted - 1, height, rowBytes) > stream.Length)
+        {
+            DiagnosticLog.Write($"psd preview skipped {path}: the file ends before its {width}x{height} image does");
+            return null;
         }
 
         [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -292,7 +318,7 @@ internal static class PsdPreviewLoader
         bufferSize: 1 << 16,
         FileOptions.SequentialScan);
 
-    private static long PlaneLength(ushort[]? rowCounts, int plane, int height, long rowBytes)
+    private static long PlaneLength(int[]? rowCounts, int plane, int height, long rowBytes)
     {
         if (rowCounts is null)
         {
@@ -308,14 +334,23 @@ internal static class PsdPreviewLoader
         return length;
     }
 
-    private static ushort[] ReadRowCounts(Stream stream, int rows)
+    private static int[] ReadRowCounts(Stream stream, long rows, int countBytes)
     {
-        var table = new byte[rows * 2];
-        stream.ReadExactly(table);
-        var counts = new ushort[rows];
-        for (var i = 0; i < rows; i++)
+        // The table is in the file or the file is not a picture: nothing
+        // is set aside for a table a short file only claims.
+        if (rows * countBytes > stream.Length - stream.Position)
         {
-            counts[i] = ReadUInt16(table.AsSpan(i * 2));
+            throw new EndOfStreamException();
+        }
+
+        var table = new byte[rows * countBytes];
+        stream.ReadExactly(table);
+        var counts = new int[rows];
+        for (var i = 0; i < counts.Length; i++)
+        {
+            counts[i] = countBytes == 2
+                ? ReadUInt16(table.AsSpan(i * 2))
+                : checked((int)ReadUInt32(table.AsSpan(i * 4)));
         }
 
         return counts;
@@ -377,12 +412,14 @@ internal static class PsdPreviewLoader
         }
     }
 
-    private static void SkipSection(Stream stream)
+    private static void SkipSection(Stream stream, bool wide)
     {
-        Span<byte> four = stackalloc byte[4];
-        stream.ReadExactly(four);
-        var length = ReadUInt32(four);
-        stream.Seek(length, SeekOrigin.Current);
+        Span<byte> length = stackalloc byte[wide ? 8 : 4];
+        stream.ReadExactly(length);
+        var bytes = wide
+            ? checked((long)(((ulong)ReadUInt32(length) << 32) | ReadUInt32(length[4..])))
+            : ReadUInt32(length);
+        stream.Seek(bytes, SeekOrigin.Current);
     }
 
     private static ushort ReadUInt16(ReadOnlySpan<byte> bytes) => (ushort)((bytes[0] << 8) | bytes[1]);

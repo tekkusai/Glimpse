@@ -239,6 +239,23 @@ internal sealed class ImageViewer : IZoomableImage
     /// <summary>The window found the picture sharp enough when it looked. A later zoom may ask again.</summary>
     internal void SharperDeclined() => _askedForSharper = false;
 
+    /// <summary>
+    /// A larger decode of the picture on screen, for one that has no
+    /// rotation session to hold it. False when it holds no more pixels
+    /// than the picture here.
+    /// </summary>
+    internal bool TakeSharper(BitmapSource sharper)
+    {
+        if (Math.Max(sharper.PixelWidth, sharper.PixelHeight) <= Math.Max(_bitmap.PixelWidth, _bitmap.PixelHeight))
+        {
+            return false;
+        }
+
+        _sharp = sharper;
+        Layout();
+        return true;
+    }
+
     // On screen, the picture's long side is more device pixels than the
     // first decode has.
     private bool Stretched =>
