@@ -28,6 +28,3 @@ SpacePreview/installer/assets/*.msi
 
 # Probe artifacts
 probe-*.png
-
-# Local agent collaboration rooms
-.agent-collab/
