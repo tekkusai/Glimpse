@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.2/Glimpse-Setup-3.0.2.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.3/Glimpse-Setup-3.0.3.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
 </p>
 
-<p align="center"><sub>Free · Windows 10 and 11 · <a href="https://github.com/tekkusai/Glimpse/releases/latest">What's new in 3.0.2</a></sub></p>
+<p align="center"><sub>Free · Windows 10 and 11 · <a href="https://github.com/tekkusai/Glimpse/releases/latest">What's new in 3.0.3</a></sub></p>
 
 <p align="center">
   <img src="docs/readme/hero.png" alt="A photo and a PDF open in Glimpse">
@@ -90,7 +90,7 @@
 <h2 align="center">Get Glimpse</h2>
 
 <p align="center">
-  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.2/Glimpse-Setup-3.0.2.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.3/Glimpse-Setup-3.0.3.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
 </p>
 
 <p align="center">

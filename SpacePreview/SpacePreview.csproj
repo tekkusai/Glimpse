@@ -10,7 +10,7 @@
     <ApplicationIcon>Assets\Glimpse.ico</ApplicationIcon>
     <StartupObject>SpacePreview.Program</StartupObject>
     <AssemblyName>Glimpse</AssemblyName>
-    <Version>3.0.2</Version>
+    <Version>3.0.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>Glimpse</Product>
     <Company>Glimpse</Company>
