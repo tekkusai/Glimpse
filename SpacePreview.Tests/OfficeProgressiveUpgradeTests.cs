@@ -126,6 +126,38 @@ public sealed class OfficeProgressiveUpgradeTests
         Assert.Equal(9, await deck.SwappedAtAsync());
     });
 
+    // The last slide chosen is the one that counts. 3.0.1 never forgot a
+    // slide asked for while it was on the way: a reader who then chose one
+    // already there was carried off to the first when the rest landed.
+    [Fact]
+    public Task ASlideChosenAfterOneStillOnTheWayIsTheOneThatCounts() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        Assert.True(deck.Choose(9));
+        Assert.False(deck.Choose(2));
+        await deck.ScrollToSlideAsync(2);
+
+        deck.Land();
+
+        await deck.HeldAsync(Ready);
+    });
+
+    // The same change of mind, a moment later: the whole deck is already
+    // staging at slide 9 when the reader chooses slide 2.
+    [Fact]
+    public Task ASlideChosenWhileTheWholeDeckStagesElsewhereIsWhereTheReaderEnds() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        Assert.True(deck.Choose(9));
+        deck.Land();
+        await deck.StagedAsync();
+
+        Assert.False(deck.Choose(2));
+
+        Assert.Equal(9, await deck.SwappedAtAsync());
+        await deck.ShowsSlideAsync(2);
+    });
+
     [Fact]
     public Task ARestThatFailsSaysSoAndTheRailStopsPromisingIt() => WpfApp.RunAsync(async () =>
     {

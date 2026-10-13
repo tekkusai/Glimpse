@@ -269,6 +269,10 @@ public partial class PreviewWindow
         {
             if (page <= partial.PartialPages)
             {
+                // The last page chosen is the one that counts: one asked
+                // for while it was on the way is no longer wanted. A swap
+                // already staging lands where it was sent, then follows.
+                askedPage = upgrading ? page : null;
                 return false;
             }
 
