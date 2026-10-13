@@ -58,6 +58,7 @@ internal sealed class TextFileView
     private bool _busy;
     private bool _left;
     private long? _nothingAfterAt;
+    private long? _nothingBeforeAt;
 
     public TextFileView(
         TextBox box,
@@ -102,6 +103,9 @@ internal sealed class TextFileView
 
     /// <summary>True while a read or a jump is under way.</summary>
     internal bool Busy => _busy;
+
+    /// <summary>How many reads and jumps there have been.</summary>
+    internal int Turns => _turn;
 
     /// <summary>The text box this reads into.</summary>
     internal TextBox Box => _box;
@@ -314,10 +318,13 @@ internal sealed class TextFileView
         && _scroll is { } scroll
         && scroll.ExtentHeight > scroll.ViewportHeight * Screens;
 
-    private bool MayReadAfter =>
-        _nothingAfterAt is not { } at || Environment.TickCount64 - at >= EndRetry.TotalMilliseconds;
+    private bool MayReadAfter => Waited(_nothingAfterAt);
 
-    private bool MayReadBefore => Range.Start > _reader.First;
+    private bool MayReadBefore => Range.Start > _reader.First && Waited(_nothingBeforeAt);
+
+    /// <summary>A read that came back empty is not asked for again within the second.</summary>
+    private static bool Waited(long? since) =>
+        since is not { } at || Environment.TickCount64 - at >= EndRetry.TotalMilliseconds;
 
     private async void Extend(bool after)
     {
@@ -333,11 +340,16 @@ internal sealed class TextFileView
 
             if (piece.Text.Length == 0)
             {
+                // The end of the file, or a file that has gone away. A log
+                // may grow and a drive may come back: ask again later, not
+                // at every notch of the wheel and not in a loop.
                 if (after)
                 {
-                    // The end of the file. A log may grow: ask again later,
-                    // not at every notch of the wheel.
                     _nothingAfterAt = Environment.TickCount64;
+                }
+                else
+                {
+                    _nothingBeforeAt = Environment.TickCount64;
                 }
 
                 return;
@@ -412,6 +424,7 @@ internal sealed class TextFileView
         _held.AddLast(new Held(piece.Start, piece.End, piece.Text.Length));
         _characters = piece.Text.Length;
         _nothingAfterAt = null;
+        _nothingBeforeAt = null;
     }
 
     /// <summary>

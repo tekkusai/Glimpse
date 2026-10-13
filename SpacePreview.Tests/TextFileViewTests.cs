@@ -358,6 +358,38 @@ public sealed class TextFileViewTests
     });
 
     [Fact]
+    public Task AFileThatGoesAwayIsNotAskedAgainAndAgain() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var (path, _) = Write(temp, Lines(0, 6500));
+        var (window, box, view) = Show(path);
+        try
+        {
+            view.GoToEnd();
+            await Settle(view);
+            Assert.True(view.Range.Start > 0);
+            var held = box.Text;
+
+            // Deleted with its last lines on screen, and the reader goes
+            // back up to the top of what the box holds.
+            File.Delete(path);
+            box.ScrollToHome();
+            await Settle(view);
+
+            // There is nothing to read, so nothing is: the box keeps what
+            // it had, and the view is at rest and not asking in a loop.
+            Assert.Equal(held, box.Text);
+            var asked = view.Turns;
+            await Task.Delay(300);
+            Assert.Equal(asked, view.Turns);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task AVeryLongLineIsSteppedOver() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
