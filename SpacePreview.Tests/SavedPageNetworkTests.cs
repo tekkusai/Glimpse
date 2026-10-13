@@ -69,6 +69,23 @@ public sealed class SavedPageNetworkTests
         Assert.Empty(await hinted.RequestsAsync());
     });
 
+    // The cut cost every page 9 ms: the browser could no longer fetch its
+    // own feature configuration, and without one it makes a view in 20 ms
+    // where 3.0.0 took 11. That one host goes around the proxy. Nothing
+    // else may, and loopback must stay named: Chromium lets it around any
+    // proxy unless told otherwise.
+    [Fact]
+    public void OnlyTheBrowsersOwnConfigurationHostGoesAroundTheProxy()
+    {
+        var arguments = WebViewEnvironment.BrowserArguments.Split(' ');
+        var bypass = Assert.Single(arguments, argument => argument.StartsWith("--proxy-bypass-list=", StringComparison.Ordinal));
+
+        Assert.Equal(
+            ["<-loopback>", "config.edge.skype.com"],
+            bypass["--proxy-bypass-list=".Length..].Split(';'));
+        Assert.Contains("--proxy-server=http://127.0.0.1:9", arguments);
+    }
+
     // A page Glimpse writes has no frames. Should one ever get in, it
     // loads nothing and asks for nothing, a sandboxed one included.
     [Fact]
