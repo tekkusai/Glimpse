@@ -445,7 +445,7 @@ public partial class PreviewWindow
             return false;
         }
 
-        if (_stageFitVersion != _loadVersion && !UsesDefaultStageWithoutProbe(contentPath))
+        if (_stageFitVersion != _loadVersion && !UsesDefaultStageWithoutProbe(contentPath, _facts))
         {
             return null;
         }
@@ -1138,6 +1138,7 @@ public partial class PreviewWindow
         _presentation = null;
         CurrentPath = null;
         _shortcutTarget = null;
+        _facts = ItemFacts.Unknown;
         _escapeYieldsToContent = false;
         _lastContentClickInViewerChrome = false;
         _userEngagedContent = false;
@@ -1390,14 +1391,14 @@ public partial class PreviewWindow
         }
     }
 
-    private static bool UsesDefaultStageWithoutProbe(string path)
+    private static bool UsesDefaultStageWithoutProbe(string path, ItemFacts facts)
     {
-        if (Directory.Exists(path))
+        if (facts.IsDirectory)
         {
             return true;
         }
 
-        if (!File.Exists(path))
+        if (!facts.IsFile)
         {
             return false;
         }

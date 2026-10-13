@@ -695,7 +695,7 @@ public sealed class RevealSequencingTests
 
             // A load that was replaced while its last step ran ends late.
             var folder = temp.CreateDirectory("folder");
-            await (Task)Fields.Call(window, "LoadPreviewAsync", folder, folder, 0L, CancellationToken.None, false)!;
+            await (Task)Fields.Call(window, "LoadPreviewAsync", folder, ItemFacts.ReadAsync(folder, CancellationToken.None), true, 0L, CancellationToken.None, false)!;
 
             Assert.False(Fields.Get<bool>(view, "_isDisposed"));
             view.Dispose();
@@ -1097,7 +1097,7 @@ public sealed class RevealSequencingTests
         var window = new PreviewWindow();
         try
         {
-            Fields.Call(window, "TrySetIntrinsicStageFit", path, 0L);
+            Fields.Call(window, "TrySetIntrinsicStageFit", path, ItemFacts.ReadAsync(path, CancellationToken.None).Result, 0L);
             return Fields.Get<StageFitHint?>(window, "_stageFitHint");
         }
         finally

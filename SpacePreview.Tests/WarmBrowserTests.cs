@@ -423,7 +423,7 @@ public sealed class WarmBrowserTests
             try
             {
                 var path = Path.Combine(Path.GetTempPath(), name);
-                var load = (Task)Fields.Call(window, "LoadPreviewAsync", path, path, 1L, new CancellationToken(canceled: true), false)!;
+                var load = (Task)Fields.Call(window, "LoadPreviewAsync", path, Task.FromResult(ItemFacts.Unknown), true, 1L, new CancellationToken(canceled: true), false)!;
                 started = WarmBrowserStarted(window);
                 await load;
             }

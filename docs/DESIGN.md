@@ -142,6 +142,14 @@ weekday within the last week, `Aug 27` this year and `Aug 27, 2025` before.
 The words are the interface's English; the clock follows the user's region,
 so a 24-hour reader sees `Today 16:35`. The full time shows on hover.
 
+The details, the chevron's menu and whether the item is a folder come from
+one question to the disk, asked once as the item opens. A disk of this PC
+answers on the spot. A network share is asked on another thread and given
+100 ms. One that takes longer shows the name alone until it answers, and the
+window goes on working meanwhile: Esc closes it and the arrows step on. A
+share is asked one question at a time, so stepping through a folder on one
+that has stopped answering leaves one question waiting there.
+
 Browse arrows sit before the identity when browsing is possible, with the
 position (`2 of 14`) beside them when a multi-selection is open.
 

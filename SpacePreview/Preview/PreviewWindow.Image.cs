@@ -117,14 +117,15 @@ public partial class PreviewWindow
 
             // The details line was written as the window opened. When the
             // file has been written since, its size and time there are
-            // from before, and are read again along with its pixels.
-            var written = decoded.Stamp is { } now
-                && _headerItem is FileInfo { Exists: true } then
-                && string.Equals(then.FullName, now.Path, StringComparison.OrdinalIgnoreCase)
-                && (then.Length != now.Length || then.LastWriteTimeUtc.Ticks != now.LastWriteUtcTicks);
-            if (written)
+            // from before, and the decode read them again with the pixels.
+            var written = false;
+            if (decoded.Stamp is { } now
+                && _facts.Item is { IsDirectory: false } then
+                && string.Equals(CurrentPath, now.Path, StringComparison.OrdinalIgnoreCase)
+                && (then.Length != now.Length || then.ModifiedUtc.Ticks != now.LastWriteUtcTicks))
             {
-                _headerItem = null;
+                written = true;
+                _facts = _facts with { Item = new DiskEntry(false, now.Length, new DateTime(now.LastWriteUtcTicks, DateTimeKind.Utc)) };
             }
 
             if (written || _headerFact != PixelSize(header))

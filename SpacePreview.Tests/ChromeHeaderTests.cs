@@ -112,7 +112,7 @@ public sealed class ChromeHeaderTests
             await WaitForRevealAsync(window);
             var version = Fields.Get<long>(window, "_loadVersion");
             Fields.Call(window, "ResetForNewItem");
-            Fields.Call(window, "ShowHeader", pdf, pdf, 1, false, version, CancellationToken.None);
+            Fields.Call(window, "ShowHeader", pdf, pdf, ItemFacts.ReadAsync(pdf, CancellationToken.None).Result, 1, false, version, CancellationToken.None);
             Fields.Set(window, "_fillSignPath", pdf);
             Assert.Equal(Visibility.Visible, window.BrowseControls.Visibility);
 
@@ -283,7 +283,7 @@ public sealed class ChromeHeaderTests
             var version = Fields.Get<long>(window, "_loadVersion");
             Fields.Call(window, "ResetForNewItem");
             Fields.Set(window, "CurrentPath", pdf);
-            Fields.Call(window, "ShowHeader", pdf, pdf, 1, false, version, CancellationToken.None);
+            Fields.Call(window, "ShowHeader", pdf, pdf, ItemFacts.ReadAsync(pdf, CancellationToken.None).Result, 1, false, version, CancellationToken.None);
             var pdfSize = FileKinds.FormatSize(new FileInfo(pdf).Length);
             Assert.StartsWith($"{pdfSize} · Today ", window.SubtitleText.Text, StringComparison.Ordinal);
 

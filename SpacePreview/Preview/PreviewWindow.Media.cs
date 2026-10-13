@@ -238,16 +238,7 @@ public partial class PreviewWindow
                     && reasonElement.ValueKind == JsonValueKind.String
                         ? reasonElement.GetString()
                         : null;
-                var codecs = Mp4CodecSniffer.TryRead(path);
-                var codecText = codecs is null ? string.Empty : $" codecs {codecs.DiagnosticText}";
-                DiagnosticLog.Write($"media decode failed {path}: {detail}{(string.IsNullOrWhiteSpace(reason) ? string.Empty : $" {reason}")}{codecText}");
-                if (IsCurrentContentPath(path))
-                {
-                    SetPreviewContent(
-                        BuildMediaFailurePreview(path, codecs),
-                        null);
-                }
-
+                _ = ShowMediaFailureAsync(path, detail, reason);
                 return;
             }
 
@@ -286,6 +277,21 @@ public partial class PreviewWindow
         return codecs?.HasHevcVideo == true
             ? "This video uses HEVC."
             : MediaOpenInsteadText(path);
+    }
+
+    /// <summary>
+    /// The failure card gives help for the file's codecs, and the log names
+    /// them. They are read from the file, off this thread.
+    /// </summary>
+    private async Task ShowMediaFailureAsync(string path, string? detail, string? reason)
+    {
+        var codecs = await Task.Run(() => Mp4CodecSniffer.TryRead(path));
+        var codecText = codecs is null ? string.Empty : $" codecs {codecs.DiagnosticText}";
+        DiagnosticLog.Write($"media decode failed {path}: {detail}{(string.IsNullOrWhiteSpace(reason) ? string.Empty : $" {reason}")}{codecText}");
+        if (IsCurrentContentPath(path))
+        {
+            SetPreviewContent(BuildMediaFailurePreview(path, codecs), null);
+        }
     }
 
     private static FrameworkElement BuildMediaFailurePreview(string path, Mp4CodecInfo? codecs)

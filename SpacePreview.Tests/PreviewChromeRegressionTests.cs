@@ -194,8 +194,10 @@ public sealed class PreviewChromeRegressionTests
         // The card names the outcome and gives codec-specific help only
         // after the media engine fails and the container confirms it.
         Assert.Contains("Can't play this file", windowSource, StringComparison.Ordinal);
-        Assert.Contains("Mp4CodecSniffer.TryRead(path)", messageBody, StringComparison.Ordinal);
-        Assert.Contains("BuildMediaFailurePreview(path, codecs)", messageBody, StringComparison.Ordinal);
+        var failureBody = ReadMethod(windowSource, "private async Task ShowMediaFailureAsync");
+        Assert.Contains("ShowMediaFailureAsync(path, detail, reason)", messageBody, StringComparison.Ordinal);
+        Assert.Contains("Task.Run(() => Mp4CodecSniffer.TryRead(path))", failureBody, StringComparison.Ordinal);
+        Assert.Contains("BuildMediaFailurePreview(path, codecs)", failureBody, StringComparison.Ordinal);
         Assert.Contains("MediaCodecStoreAction(codecs)", windowSource, StringComparison.Ordinal);
         Assert.Contains("ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7", windowSource, StringComparison.Ordinal);
         Assert.Contains("UseShellExecute = true", windowSource, StringComparison.Ordinal);

@@ -28,7 +28,8 @@ public partial class PreviewWindow
                 return BuildConvertedOfficePreview(cached, null, version, token);
             }
 
-            var job = OfficeDocumentPdfConverter.Convert(path, kind, token);
+            // Starting the job asks the disk for the file's size and time.
+            var job = await Task.Run(() => OfficeDocumentPdfConverter.Convert(path, kind, token), token);
             if (OfficeDocumentPdfConverter.EngineName is { } engine)
             {
                 // The one wait worth a line: the stand-in names it after a beat.

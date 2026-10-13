@@ -411,4 +411,10 @@ public partial class PreviewWindow
     /// never comes on screen.
     /// </summary>
     internal StageMonitor? ParkedMonitor { get; set; }
+
+    /// <summary>
+    /// Tests only: stands in for the disk when the window asks what an item
+    /// is, so a test can be a share that is slow to answer.
+    /// </summary>
+    internal Func<string, DiskEntry?>? DiskForTests { get; set; }
 }

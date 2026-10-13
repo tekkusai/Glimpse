@@ -57,10 +57,10 @@ public partial class PreviewWindow
     private OpenTarget _openTarget = new(null, null);
     private HeaderTool _headerTool;
     private int _selectedCount = 1;
-    // The item the details describe, read once per item, and the one fact
-    // beside its size: an image's pixels, or what the content learned later,
-    // such as a PDF's pages. A fact that lands re-renders without the disk.
-    private FileSystemInfo? _headerItem;
+    // What the disk said of the item on screen, and the one fact beside
+    // its size: an image's pixels, or what the content learned later, such
+    // as a PDF's pages. A fact that lands re-renders without the disk.
+    private ItemFacts _facts = ItemFacts.Unknown;
     private string? _headerFact;
 
     /// <summary>
@@ -89,13 +89,15 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The header for one item: names and registry reads only. The file and
-    /// app icons land asynchronously; until they do the previous ones stay,
-    /// so stepping through a folder never blinks.
+    /// The header for one item: names, registry reads, and what the disk
+    /// has said of it already. The file and app icons land asynchronously;
+    /// until they do the previous ones stay, so stepping through a folder
+    /// never blinks.
     /// </summary>
-    private void ShowHeader(string path, string contentPath, int selectedCount, bool fileDialogMode, long version, CancellationToken token)
+    private void ShowHeader(string path, string contentPath, ItemFacts facts, int selectedCount, bool fileDialogMode, long version, CancellationToken token)
     {
-        var isDirectory = Directory.Exists(contentPath);
+        _facts = facts;
+        var isDirectory = facts.IsDirectory;
         FileNameText.Text = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         if (string.IsNullOrWhiteSpace(FileNameText.Text))
         {
@@ -103,11 +105,10 @@ public partial class PreviewWindow
         }
 
         _selectedCount = selectedCount;
-        _headerItem = null;
         _headerFact = null;
         ApplyHeaderSubtitle(path, _shortcutTarget);
 
-        _openActions = BuildOpenActions(path, contentPath, isDirectory);
+        _openActions = BuildOpenActions(path, contentPath, facts);
         ShowOpenTarget(ResolveOpenTarget(contentPath, isDirectory));
         OpenControl.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
         PinButton.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
@@ -504,23 +505,21 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// The details line and the time it names. The directory entry is read
-    /// on the item's first line only. The one fact beside the size arrives
+    /// The details line and the time it names, from what the disk said of
+    /// the item when it was asked. The one fact beside the size arrives
     /// through ShowHeaderFact: an image's pixels from the header read that
     /// shapes the stage, a document's pages from its viewer. Nothing when
-    /// the item is gone.
+    /// the item is gone, or its disk has not answered yet.
     /// </summary>
     private (string Details, DateTime? Modified) DescribeHeaderItem(string path)
     {
-        try
-        {
-            _headerItem ??= Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path);
-            return (FileKinds.Describe(_headerItem, _headerFact, DateTime.Now, CultureInfo.CurrentCulture), _headerItem.LastWriteTime);
-        }
-        catch
+        if (_facts.Item is not { } item)
         {
             return (string.Empty, null);
         }
+
+        var modified = item.ModifiedUtc.ToLocalTime();
+        return (FileKinds.Describe(item.IsDirectory, Path.GetExtension(path), item.Length, modified, _headerFact, DateTime.Now, CultureInfo.CurrentCulture), modified);
     }
 
     /// <summary>A fact the content found after the header went up, for the item still showing.</summary>
@@ -535,7 +534,11 @@ public partial class PreviewWindow
         ApplyHeaderSubtitle(path, _shortcutTarget);
     }
 
-    private static string? TryResolveShortcutTarget(string path)
+    /// <summary>
+    /// Where a shortcut points, when that is a place a preview may show.
+    /// Whether anything is there is for the caller to ask.
+    /// </summary>
+    internal static string? ReadShortcutTarget(string path)
     {
         object? shell = null;
         object? shortcut = null;
@@ -561,12 +564,7 @@ public partial class PreviewWindow
             }
 
             target = Environment.ExpandEnvironmentVariables(target);
-            if (!IsSafeLocalPreviewTarget(target))
-            {
-                return null;
-            }
-
-            return File.Exists(target) || Directory.Exists(target) ? target : null;
+            return IsSafeLocalPreviewTarget(target) ? target : null;
         }
         catch
         {
@@ -702,10 +700,10 @@ public partial class PreviewWindow
     /// The chevron's menu: another app first, then where the item lives,
     /// then what only this kind can do.
     /// </summary>
-    private List<(string Label, Action Action)> BuildOpenActions(string path, string contentPath, bool isDirectory)
+    private List<(string Label, Action Action)> BuildOpenActions(string path, string contentPath, ItemFacts facts)
     {
         var actions = new List<(string Label, Action Action)>();
-        var contentIsFile = !isDirectory && File.Exists(contentPath);
+        var contentIsFile = facts.IsFile;
         if (contentIsFile && !FileKinds.IsExecutableLike(contentPath))
         {
             actions.Add((OpenWithLabelText, () => ShowOpenWithDialog(contentPath)));
@@ -716,7 +714,7 @@ public partial class PreviewWindow
         // A borrowed copy lives in a folder of Glimpse's own, which is not
         // where the file is.
         var borrowed = BorrowedFiles.IsBorrowed(path);
-        if (!borrowed && (File.Exists(path) || Directory.Exists(path)))
+        if (!borrowed && facts.Item is not null)
         {
             actions.Add(("Show in Explorer", () => RevealInExplorer(path)));
         }
@@ -731,12 +729,12 @@ public partial class PreviewWindow
             actions.Add(("Show target in Explorer", () => RevealInExplorer(target)));
         }
 
-        if (!borrowed && CanRunAsAdministrator(contentPath))
+        if (!borrowed && contentIsFile && CanRunAsAdministrator(contentPath))
         {
             actions.Add(("Run as administrator", () => RunAsAdministrator(contentPath)));
         }
 
-        if (isDirectory)
+        if (facts.IsDirectory)
         {
             actions.Add(("Open in Terminal", () => OpenInTerminal(contentPath)));
         }

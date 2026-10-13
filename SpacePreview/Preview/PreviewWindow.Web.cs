@@ -189,7 +189,7 @@ public partial class PreviewWindow
         return uri.LocalPath;
     }
 
-    private static bool LooksLikeLocalDrivePath(string path)
+    internal static bool LooksLikeLocalDrivePath(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
         {

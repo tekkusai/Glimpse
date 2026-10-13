@@ -26,10 +26,11 @@ public partial class PreviewWindow
     /// <summary>
     /// Offered only when the shell has a "runas" verb for the file's type:
     /// an .exe has one, a .dll does not, so the menu never holds a dead item.
+    /// Asked of a file that is known to be there.
     /// </summary>
     internal static bool CanRunAsAdministrator(string path)
     {
-        if (!FileKinds.IsExecutableLike(path) || !File.Exists(path))
+        if (!FileKinds.IsExecutableLike(path))
         {
             return false;
         }
@@ -128,7 +129,7 @@ public partial class PreviewWindow
     /// </summary>
     private FrameworkElement? BuildExecutableSwitches(string path)
     {
-        if (!Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+        if (!Path.GetExtension(path).Equals(".exe", StringComparison.OrdinalIgnoreCase) || !_facts.IsFile)
         {
             return null;
         }

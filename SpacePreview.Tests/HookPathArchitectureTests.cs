@@ -363,7 +363,7 @@ public sealed class HookPathArchitectureTests
         var scanRunner = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RunFolderSizeScanAsync");
         var revealScheduler = TestSource.CodeMethod(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "RunAfter");
 
-        var folderBranch = loader.IndexOf("Directory.Exists(contentPath)", StringComparison.Ordinal);
+        var folderBranch = loader.IndexOf("facts.IsDirectory", StringComparison.Ordinal);
         var sniff = loader.IndexOf("FileSignatures.Detect(contentPath)", StringComparison.Ordinal);
         Assert.True(folderBranch >= 0 && sniff > folderBranch);
         Assert.DoesNotContain("ShellThumbnailProvider.", cardBuilder, StringComparison.Ordinal);

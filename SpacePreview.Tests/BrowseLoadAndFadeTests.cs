@@ -29,7 +29,7 @@ public sealed class BrowseLoadAndFadeTests
             Fields.Set(window, "_loadAtWork", busy);
 
             var longer = Task.Delay(40);
-            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, temp.Path, 1L, CancellationToken.None, true)!;
+            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, ItemFacts.ReadAsync(temp.Path, CancellationToken.None), true, 1L, CancellationToken.None, true)!;
             Assert.Same(busy, Fields.Get<Task>(window, "_loadAtWork"));
             while (ReferenceEquals(Fields.Get<Task>(window, "_loadAtWork"), busy) && !load.IsCompleted)
             {
@@ -55,7 +55,7 @@ public sealed class BrowseLoadAndFadeTests
             var idle = Task.CompletedTask;
             Fields.Set(window, "_loadAtWork", idle);
 
-            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, temp.Path, 1L, CancellationToken.None, true)!;
+            var load = (Task)Fields.Call(window, "LoadPreviewAsync", temp.Path, ItemFacts.ReadAsync(temp.Path, CancellationToken.None), true, 1L, CancellationToken.None, true)!;
 
             Assert.NotSame(idle, Fields.Get<Task>(window, "_loadAtWork"));
             await load;

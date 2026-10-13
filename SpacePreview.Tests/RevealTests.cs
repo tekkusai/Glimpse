@@ -152,7 +152,7 @@ public sealed class StandInTests
         var window = new PreviewWindow();
         try
         {
-            Fields.Call(window, "TrySetIntrinsicStageFit", path, 0L);
+            Fields.Call(window, "TrySetIntrinsicStageFit", path, ItemFacts.ReadAsync(path, CancellationToken.None).Result, 0L);
             return Fields.Get<StageFitHint?>(window, "_stageFitHint");
         }
         finally

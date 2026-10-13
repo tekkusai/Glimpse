@@ -347,21 +347,25 @@ internal static partial class FileKinds
     /// folder, a file without an extension), the size, the one
     /// <paramref name="fact"/> the content knows, and when it last changed.
     /// </summary>
-    public static string Describe(FileSystemInfo item, string? fact, DateTime now, CultureInfo culture)
+    public static string Describe(FileSystemInfo item, string? fact, DateTime now, CultureInfo culture) =>
+        Describe(item is not FileInfo, item.Extension, item is FileInfo file ? file.Length : 0, item.LastWriteTime, fact, now, culture);
+
+    /// <summary>The same line from what was read of the item earlier, with no word to the disk.</summary>
+    public static string Describe(bool isFolder, string extension, long length, DateTime modified, string? fact, DateTime now, CultureInfo culture)
     {
         var parts = new List<string>(4);
-        if (item is FileInfo file)
+        if (isFolder)
         {
-            if (string.IsNullOrEmpty(file.Extension))
+            parts.Add("Folder");
+        }
+        else
+        {
+            if (string.IsNullOrEmpty(extension))
             {
                 parts.Add("File");
             }
 
-            parts.Add(FormatSize(file.Length, culture));
-        }
-        else
-        {
-            parts.Add("Folder");
+            parts.Add(FormatSize(length, culture));
         }
 
         if (!string.IsNullOrEmpty(fact))
@@ -369,7 +373,7 @@ internal static partial class FileKinds
             parts.Add(fact);
         }
 
-        parts.Add(DescribeWhen(item.LastWriteTime, now, culture));
+        parts.Add(DescribeWhen(modified, now, culture));
         return string.Join(" · ", parts);
     }
 

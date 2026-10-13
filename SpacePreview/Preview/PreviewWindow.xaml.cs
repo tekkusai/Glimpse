@@ -260,12 +260,20 @@ public partial class PreviewWindow : Window
         RestoreFromNativeMinimize();
 
         CurrentPath = path;
+
+        // What the disk says of the item: at once from a disk of this PC,
+        // and from a network within a moment or not yet. Until a network
+        // has answered, the item is its name, and its load brings the rest.
+        var reading = ItemFacts.ReadAsync(path, token, DiskForTests);
+        var heard = Heard(reading);
+        var facts = heard ? reading.Result : ItemFacts.Unknown;
+
         // Previewing a shortcut should preview what it points at, like Quick
         // Look does for aliases. Opening still goes through the .lnk itself.
-        _shortcutTarget = FileKinds.IsShortcut(path) ? TryResolveShortcutTarget(path) : null;
+        _shortcutTarget = facts.ShortcutTarget;
         var contentPath = _shortcutTarget ?? path;
 
-        ShowHeader(path, contentPath, selectedCount, fileDialogMode, version, token);
+        ShowHeader(path, contentPath, facts, selectedCount, fileDialogMode, version, token);
 
         // A dragged size is local intent: it lives exactly as long as the
         // item under it. The next item's content rules again, and it
@@ -282,7 +290,7 @@ public partial class PreviewWindow : Window
         // nothing of the item shows. No load is current yet, so these are
         // only recorded: the swap below is what acts on them.
         var headed = Stopwatch.GetTimestamp();
-        TrySetIntrinsicStageFit(contentPath, version);
+        TrySetIntrinsicStageFit(contentPath, facts, version);
         var probed = Stopwatch.GetTimestamp();
 
         // A window still waiting at zero alpha has shown nothing yet, so
@@ -336,9 +344,28 @@ public partial class PreviewWindow : Window
         }
 
         ScheduleWait(presentation);
-        _ = LoadPreviewAsync(path, contentPath, version, token, coalesce: !freshOpen);
+        _ = LoadPreviewAsync(path, reading, heard, version, token, coalesce: !freshOpen);
         Advance(presentation);
         return presented;
+    }
+
+    /// <summary>
+    /// Whether the disk has said what the item is, after waiting
+    /// <see cref="ItemFacts.Patience"/> for a network to. The wait is as
+    /// still as the read it stands in for: nothing else runs on this
+    /// thread while it lasts.
+    /// </summary>
+    private bool Heard(Task<ItemFacts> reading)
+    {
+        if (!reading.IsCompleted)
+        {
+            using (Dispatcher.DisableProcessing())
+            {
+                reading.Wait(ItemFacts.Patience);
+            }
+        }
+
+        return reading.IsCompletedSuccessfully;
     }
 
     /// <summary>
@@ -358,6 +385,7 @@ public partial class PreviewWindow : Window
         ResetForNewItem();
         CurrentPath = null;
         _shortcutTarget = null;
+        _facts = ItemFacts.Unknown;
         ShowWelcomeHeader();
 
         var freshOpen = !IsVisible || _windowAlpha == 0;
@@ -456,7 +484,7 @@ public partial class PreviewWindow : Window
         }, Panel.BackgroundProperty, "Theme.CanvasBg");
     }
 
-    private async Task LoadPreviewAsync(string path, string contentPath, long version, CancellationToken token, bool coalesce)
+    private async Task LoadPreviewAsync(string path, Task<ItemFacts> reading, bool heard, long version, CancellationToken token, bool coalesce)
     {
         TaskCompletionSource? atWork = null;
         try
@@ -477,9 +505,21 @@ public partial class PreviewWindow : Window
             atWork = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             _loadAtWork = atWork.Task;
 
+            // What the disk says of the item is in already, unless the item
+            // is on a network that was slow to answer. Then the header went
+            // up with the name alone, and takes the rest here.
+            var facts = await reading.WaitAsync(token);
+            var contentPath = facts.ShortcutTarget ?? path;
+            if (!heard)
+            {
+                token.ThrowIfCancellationRequested();
+                _shortcutTarget = facts.ShortcutTarget;
+                ShowHeader(path, contentPath, facts, _selectedCount, _isFileDialogMode, version, token);
+            }
+
             FrameworkElement content;
             string? fillSignPath = null;
-            if (Directory.Exists(contentPath))
+            if (facts.IsDirectory)
             {
                 // A folder's first frame is entirely local UI. Shell icons,
                 // recursive sizing, and signature work are enrichment; none
@@ -593,8 +633,9 @@ public partial class PreviewWindow : Window
 
             if (FileKinds.IsHeif(path) || signature == FileSignatureKind.Heif)
             {
-                DiagnosticLog.Write($"image decode failed {path}: heif brand={FileSignatures.HeifBrandText(path)}");
-                return BuildHeifFailurePreview(await Task.Run(() => FileSignatures.ClassifyHeifFailure(path), token));
+                var (brand, failure) = await Task.Run(() => (FileSignatures.HeifBrandText(path), FileSignatures.ClassifyHeifFailure(path)), token);
+                DiagnosticLog.Write($"image decode failed {path}: heif brand={brand}");
+                return BuildHeifFailurePreview(failure);
             }
 
             // The Store is offered only when this PC has no RAW decoder at
@@ -610,7 +651,12 @@ public partial class PreviewWindow : Window
 
         if (FileKinds.IsBrowserImage(path) || (useSignatureRouting && FileSignatures.IsBrowserImage(signature)))
         {
-            if (FileKinds.IsSvg(path) && SvgSizeProbe.TryReadCanvasSize(path, out var svgSize))
+            // The stage took an SVG's size as the window opened when the
+            // file's bytes were at hand. From a network it is read here,
+            // off this thread.
+            if (FileKinds.IsSvg(path)
+                && _stageFitVersion != version
+                && await Task.Run(() => SvgSizeProbe.TryReadCanvasSize(path, out var size) ? size : (Size?)null, token) is { } svgSize)
             {
                 SetStageFitHint(StageFitHint.ImagePixels(svgSize.Width, svgSize.Height), version);
             }
@@ -995,7 +1041,7 @@ public partial class PreviewWindow : Window
     /// blank beat. Shape is a nicety - on any doubt the default stage is
     /// always correct.
     /// </summary>
-    private void TrySetIntrinsicStageFit(string contentPath, long version)
+    private void TrySetIntrinsicStageFit(string contentPath, ItemFacts facts, long version)
     {
         try
         {
@@ -1008,7 +1054,7 @@ public partial class PreviewWindow : Window
             // Shapeless content you scroll through all opens at one size.
             // A folder can carry any name, and it is a card.
             if ((FileKinds.IsHtml(contentPath) || FileKinds.IsMarkdown(contentPath) || FileKinds.IsText(contentPath))
-                && !Directory.Exists(contentPath))
+                && !facts.IsDirectory)
             {
                 SetStageFitHint(StageFitHint.Scroll(), version);
                 return;
@@ -1016,7 +1062,7 @@ public partial class PreviewWindow : Window
 
             // Spreadsheets convert to HTML, not pages: no PDF to probe and
             // no page size to declare. They scroll, like a page.
-            if (FileKinds.IsSpreadsheet(contentPath) && !Directory.Exists(contentPath))
+            if (FileKinds.IsSpreadsheet(contentPath) && !facts.IsDirectory)
             {
                 SetStageFitHint(StageFitHint.Scroll(), version);
                 return;
@@ -1089,19 +1135,13 @@ public partial class PreviewWindow : Window
     /// </summary>
     private static bool HasBytesAtHand(string path)
     {
-        if (!LooksLikeLocalDrivePath(path))
+        if (ItemFacts.OnANetwork(path))
         {
             return false;
         }
 
         try
         {
-            var root = Path.GetPathRoot(path.StartsWith(@"\\?\", StringComparison.Ordinal) ? path[4..] : path);
-            if (root is null || new DriveInfo(root).DriveType == DriveType.Network)
-            {
-                return false;
-            }
-
             var attributes = File.GetAttributes(path);
             return !attributes.HasFlag(FileAttributes.Directory) && !IsPlaceholder(attributes);
         }
