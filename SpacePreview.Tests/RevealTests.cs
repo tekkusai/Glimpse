@@ -205,11 +205,21 @@ public sealed class StandInTests
             var shift = Fields.Get<TranslateTransform>(standIn, "_sheenShift");
             standIn.StartSheen();
             var clock = AppliedClock(shift, TranslateTransform.XProperty);
-            await Task.Delay(150);
+            await TickedTo(ClockState.Active);
             Assert.Equal(ClockState.Active, clock.CurrentState);
 
             standIn.Stop();
-            await Task.Delay(150);
+            await TickedTo(ClockState.Stopped);
+
+            // A clock changes state at WPF's next tick. A fixed 150 ms was
+            // not always enough on a busy PC, and the test read the old state.
+            async Task TickedTo(ClockState state)
+            {
+                for (var waited = 0; waited < 5000 && clock.CurrentState != state; waited += 25)
+                {
+                    await Task.Delay(25);
+                }
+            }
 
             // A clock only detached would still be Active, ticking WPF's
             // renderer at 64 Hz until a GC found it.

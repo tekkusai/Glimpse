@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Windows;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Services;
@@ -107,6 +108,18 @@ public sealed class TrayWindowTests
             NativeMethods.SendMessage(window, NativeMethods.WM_DPICHANGED, (IntPtr)0x00900090, IntPtr.Zero);
             Assert.Empty(calls);
             await Dispatcher.CurrentDispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            if (calls.Count != 1)
+            {
+                // This failed once in a loop of full runs with nothing drawn,
+                // and nothing explains it yet. It now says whether the
+                // redraw was late or never came, and where it was sent.
+                var atOnce = calls.Count;
+                var app = Application.Current;
+                var where = app is null ? "no application" : app.Dispatcher == Dispatcher.CurrentDispatcher ? "this thread" : "another thread";
+                await Task.Delay(2000);
+                Assert.Fail($"After one idle turn the shell had {atOnce} calls, and {calls.Count} two seconds later. The redraw was sent to {where}.");
+            }
+
             var redrawn = Assert.Single(calls);
             Assert.Equal((NativeMethods.NIM_MODIFY, NativeMethods.NIF_ICON), (redrawn.Message, redrawn.Flags));
             Assert.NotEqual(modified, redrawn.Icon);
