@@ -96,6 +96,12 @@ internal sealed class ImageViewer : IZoomableImage
     private readonly DispatcherTimer _readDelay = new() { Interval = ReadDelay };
     private readonly int _sourceLongSide;
     private BitmapSource _bitmap;
+
+    // A larger decode of the same view, shown only while the picture is on
+    // screen larger than the one above. At fit and below, the first decode
+    // is the picture, drawn exactly as it always was.
+    private BitmapSource? _sharp;
+    private bool _askedForSharper;
     private double _scale = 1;
     private double _x;
     private double _y;
@@ -199,7 +205,13 @@ internal sealed class ImageViewer : IZoomableImage
             rotation.ViewChanged += () =>
             {
                 ReplaceBitmap(rotation.CurrentBitmap);
+                _sharp = rotation.SharpBitmap;
                 _atFit = true;
+                Layout();
+            };
+            rotation.Sharpened += () =>
+            {
+                _sharp = rotation.SharpBitmap;
                 Layout();
             };
             rotation.QualityUpgraded += () =>
@@ -211,6 +223,24 @@ internal sealed class ImageViewer : IZoomableImage
     }
 
     public FrameworkElement Element => _root;
+
+    /// <summary>
+    /// The picture is on screen larger than its decode and has more pixels
+    /// of its own. Raised once. The window decodes it again, larger.
+    /// </summary>
+    public event Action? SharperWanted;
+
+    /// <summary>True while the decode is stretched on screen, the picture has more pixels, and no larger decode is here.</summary>
+    internal bool WantsSharper =>
+        _sharp is null && _sourceLongSide > Math.Max(_bitmap.PixelWidth, _bitmap.PixelHeight) && Stretched;
+
+    /// <summary>The window found the picture sharp enough when it looked. A later zoom may ask again.</summary>
+    internal void SharperDeclined() => _askedForSharper = false;
+
+    // On screen, the picture's long side is more device pixels than the
+    // first decode has.
+    private bool Stretched =>
+        _scale * _sourceLongSide > Math.Max(_bitmap.PixelWidth, _bitmap.PixelHeight) * (1 + ZoomGestures.Tolerance);
 
     public void ZoomBy(int direction)
     {
@@ -293,13 +323,32 @@ internal sealed class ImageViewer : IZoomableImage
         _text.Height = _frame.Height;
         _text.Margin = new Thickness(Canvas.GetLeft(_frame), Canvas.GetTop(_frame), 0, 0);
 
+        var shown = _sharp is not null && Stretched ? _sharp : _bitmap;
+        if (!ReferenceEquals(_image.Source, shown))
+        {
+            _image.Source = shown;
+        }
+
         // Zoomed past 1:1 the pixels stay square, so pixel art reads as
         // pixels; a gentle fit and anything at or below 1:1 is filtered,
         // which also keeps a capped decode shown at 100% soft, not blocky.
+        // The larger decode is never far from its own size on screen, so
+        // the graphics card's filter does: the careful one runs on the
+        // processor over every pixel, at every step of a zoom.
         var magnified = ZoomGestures.ShowsPixels(_scale, _atFit);
-        RenderOptions.SetBitmapScalingMode(_image, magnified ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
+        RenderOptions.SetBitmapScalingMode(
+            _image,
+            magnified ? BitmapScalingMode.NearestNeighbor
+            : ReferenceEquals(shown, _sharp) ? BitmapScalingMode.Linear
+            : BitmapScalingMode.HighQuality);
         _canPan = width > view.Width + 0.5 || height > view.Height + 0.5;
         ShowCursor();
+
+        if (!_askedForSharper && WantsSharper)
+        {
+            _askedForSharper = true;
+            SharperWanted?.Invoke();
+        }
     }
 
     // Over a word the pointer is a text cursor; elsewhere it says whether

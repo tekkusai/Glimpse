@@ -15,8 +15,9 @@ public partial class PreviewWindow
     // ---------------------------------------------------------------------
     // Images: the header is read once and names the true pixels. The first
     // frame is the quickest image that is sharp at the stage's size, and a
-    // giant image decodes in full a beat later for zoom. One viewer owns the
-    // gestures (docs/DESIGN.md, Zoom and pan).
+    // giant image decodes to the cap a beat later. Zoomed in past that, it
+    // decodes once more at its own size. One viewer owns the gestures
+    // (docs/DESIGN.md, Zoom and pan).
     // ---------------------------------------------------------------------
 
     // The window's keyboard zoom reaches whichever image is on screen.
@@ -134,6 +135,11 @@ public partial class PreviewWindow
 
         var viewer = new ImageViewer(session.CurrentBitmap, header?.LongSide ?? 0, session);
         session.NotSaved += result => OnRotationNotSaved(session, viewer, result);
+
+        // The session holds a turn back from the disk until this ends too,
+        // so the decode never reads a file that is being written.
+        viewer.SharperWanted += () =>
+            session.FullDecode = SharpenImageAsync(path, session, viewer, session.FullDecode, version, token);
         RegisterImageZoom(viewer.Element, viewer);
         return viewer.Element;
     }
@@ -331,6 +337,91 @@ public partial class PreviewWindow
     }
 
     /// <summary>
+    /// The long side a picture of this size is decoded to when it is zoomed
+    /// past the cap: its own, or the one that keeps it inside the budget.
+    /// </summary>
+    internal static int SharpLongSide(int width, int height)
+    {
+        var pixels = (long)width * height;
+        var scale = pixels > SharpImageDecodePixels ? Math.Sqrt((double)SharpImageDecodePixels / pixels) : 1;
+        return (int)Math.Min(Math.Floor(Math.Max(width, height) * scale), SharpImageDecodeLongSide);
+    }
+
+    /// <summary>
+    /// The viewer is showing more of the picture than its decode holds.
+    /// The picture is decoded again, larger, and takes the place of the one
+    /// on screen without moving. A turn on its way to the file lands first
+    /// and the file is read as it then is. The larger decode is not kept
+    /// once the picture leaves: reopened, it starts from the cap again.
+    /// </summary>
+    private async Task SharpenImageAsync(
+        string path,
+        ImageRotationSession session,
+        ImageViewer viewer,
+        Task earlier,
+        long version,
+        CancellationToken token)
+    {
+        try
+        {
+            // A first frame's own decode lands first. It may be all the
+            // zoom on screen needs, and the viewer may ask again later.
+            await Task.WhenAny(earlier);
+            await session.WhenWritten().WaitAsync(token);
+            if (!viewer.WantsSharper)
+            {
+                viewer.SharperDeclined();
+                return;
+            }
+
+            var landed = session.Landed;
+            await _imageDecodeGate.WaitAsync(token);
+            ImageHeader? header;
+            BitmapSource? bitmap;
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                (header, bitmap) = await Task.Run<(ImageHeader?, BitmapSource?)>(() =>
+                {
+                    if (ImageHeader.TryRead(path, token: token) is not { } read)
+                    {
+                        return (null, null);
+                    }
+
+                    var longSide = SharpLongSide(read.Width, read.Height);
+                    return (read, longSide > MaxImageDecodePixels ? TryDecodeImage(path, read, longSide) : null);
+                }, token);
+            }
+            finally
+            {
+                _imageDecodeGate.Release();
+            }
+
+            if (header is null
+                || bitmap is null
+                || token.IsCancellationRequested
+                || version != _loadVersion
+                || !ReferenceEquals(_rotationSession, session))
+            {
+                return;
+            }
+
+            if (session.TrySharpen(bitmap, header.Orientation, landed))
+            {
+                DiagnosticLog.Write($"image sharp decode ready {bitmap.PixelWidth}x{bitmap.PixelHeight} {path}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The picture left before it was decoded.
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"image sharp decode failed {path}: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
     /// Decodes at most <paramref name="longSide"/> pixels on the long side.
     /// A JPEG scales while it decodes, which is what makes a stage-size first
     /// frame cheap. An icon decodes its largest frame.
@@ -400,13 +491,15 @@ public partial class PreviewWindow
     /// anyway, it is the picture. It is the look the photographer chose and
     /// what Explorer's thumbnail shows, and it opened in 30 ms where the
     /// sensor data took 450. A small one is a thumbnail, and the decoder's
-    /// rendering of the sensor is shown instead.
+    /// rendering of the sensor is shown instead. Which of the two is the
+    /// picture is settled at the cap, whatever size is asked for: zoomed
+    /// in, a photo is the same photo, larger.
     /// </summary>
     private static BitmapSource DecodeRaw(Stream stream, ImageHeader header, int longSide)
     {
         var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.None);
         BitmapSource picture = decoder.Preview is { } preview
-            && CamerasOwnJpegIsThePicture(Math.Max(preview.PixelWidth, preview.PixelHeight), header.LongSide, longSide)
+            && CamerasOwnJpegIsThePicture(Math.Max(preview.PixelWidth, preview.PixelHeight), header.LongSide)
                 ? preview
                 : decoder.Frames[0];
         var have = Math.Max(picture.PixelWidth, picture.PixelHeight);
@@ -422,8 +515,8 @@ public partial class PreviewWindow
         return copy;
     }
 
-    internal static bool CamerasOwnJpegIsThePicture(int jpegLongSide, int sensorLongSide, int longSide) =>
-        jpegLongSide >= Math.Min(sensorLongSide, longSide);
+    internal static bool CamerasOwnJpegIsThePicture(int jpegLongSide, int sensorLongSide) =>
+        jpegLongSide >= Math.Min(sensorLongSide, MaxImageDecodePixels);
 
     // The image on screen owns the keyboard zoom: it claims it when it joins
     // the window and lets go when it leaves, unless a newer image took it.

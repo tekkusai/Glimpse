@@ -54,6 +54,13 @@ public partial class PreviewWindow : Window
     private const double EpubChapterRailWidth = 168;
     private const int PdfPageRailMaxPages = 120;
     private const int MaxImageDecodePixels = 4096;
+
+    // Zoomed in past what that decode holds, a picture is decoded again at
+    // its own size. A 61-megapixel photo is 183 MB at that size, so one
+    // with more pixels than this is brought down to it, and no side is
+    // longer than a graphics card draws in one piece.
+    private const long SharpImageDecodePixels = 64_000_000;
+    private const int SharpImageDecodeLongSide = 16384;
     private static readonly TimeSpan LargeImageFullDecodeDelay = TimeSpan.FromMilliseconds(420);
     private const string PinGlyph = "\uE718";
     private const string UnpinGlyph = "\uE77A";

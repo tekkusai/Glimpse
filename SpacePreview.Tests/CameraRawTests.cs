@@ -168,7 +168,7 @@ public sealed class CameraRawTests
     [InlineData(6048, 6064, true)]
     [InlineData(1600, 1600, true)]
     public void TheCamerasOwnJpegIsThePictureOnlyWhenItIsLargeEnough(int jpegLongSide, int sensorLongSide, bool expected) =>
-        Assert.Equal(expected, PreviewWindow.CamerasOwnJpegIsThePicture(jpegLongSide, sensorLongSide, longSide: 4096));
+        Assert.Equal(expected, PreviewWindow.CamerasOwnJpegIsThePicture(jpegLongSide, sensorLongSide));
 
     // Windows 11 reads a real DNG with a decoder of its own, ahead of Raw
     // Image Extension. Both read a camera's data; the TIFF decoder does not.

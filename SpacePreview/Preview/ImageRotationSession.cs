@@ -31,12 +31,26 @@ internal sealed class ImageRotationSession
     private BitmapSource? _current;
     private int _baseOrientation;
 
+    // A larger decode of the same picture, for a view zoomed past the one
+    // above. It was read from the file later, so it has its own
+    // orientation; the view's turns go on top of both.
+    private BitmapSource? _sharp;
+    private BitmapSource? _currentSharp;
+    private int _sharpOrientation;
+
     // Quarter turns the view shows on top of the decoded pixels, and how
     // many of those the file has not been asked to take yet.
     private int _turns;
     private int _unsaved;
     private bool _committed;
     private DispatcherTimer? _commitTimer;
+
+    // Turns the file has taken that the first decode's orientation does
+    // not count yet, the writes still out, and how many have reported back.
+    private int _written;
+    private int _saving;
+    private int _landed;
+    private TaskCompletionSource? _writing;
 
     public string Path { get; }
 
@@ -52,6 +66,12 @@ internal sealed class ImageRotationSession
     /// </summary>
     public Task FullDecode { get; set; } = Task.CompletedTask;
 
+    /// <summary>How many of this session's writes have reported back.</summary>
+    public int Landed => _landed;
+
+    /// <summary>Completes once every write this session handed to the disk has reported back here.</summary>
+    public Task WhenWritten() => _writing?.Task ?? Task.CompletedTask;
+
     /// <summary>Raised on the UI thread whenever the displayed bitmap changes.</summary>
     public event Action? ViewChanged;
 
@@ -60,6 +80,9 @@ internal sealed class ImageRotationSession
     /// composition is the same, so viewers preserve their current zoom/pan.
     /// </summary>
     public event Action? QualityUpgraded;
+
+    /// <summary>Raised when <see cref="SharpBitmap"/> first has a picture.</summary>
+    public event Action? Sharpened;
 
     /// <summary>
     /// Raised on the UI thread when a rotation did not reach the file. The
@@ -79,6 +102,15 @@ internal sealed class ImageRotationSession
 
     public BitmapSource CurrentBitmap =>
         _current ??= ImageOrientation.Apply(_decoded, ImageOrientation.RotateCw(_baseOrientation, _turns));
+
+    /// <summary>
+    /// The same view with more of the picture's own pixels, once it has
+    /// been zoomed past the ones it opened with. Null until then.
+    /// </summary>
+    public BitmapSource? SharpBitmap =>
+        _sharp is null
+            ? null
+            : _currentSharp ??= ImageOrientation.Apply(_sharp, ImageOrientation.RotateCw(_sharpOrientation, _turns));
 
     /// <summary>
     /// Completes once nothing is queued for this file any more: no rotation
@@ -176,6 +208,7 @@ internal sealed class ImageRotationSession
     {
         _turns = Quarter(_turns + direction);
         _current = null;
+        _currentSharp = null;
         ViewChanged?.Invoke();
 
         _commitTimer?.Stop();
@@ -210,6 +243,37 @@ internal sealed class ImageRotationSession
         _baseOrientation = baseOrientation;
         _current = null;
         QualityUpgraded?.Invoke();
+        return true;
+    }
+
+    /// <summary>
+    /// Takes a larger decode of the file as it is now, for a picture zoomed
+    /// past the pixels it opened with. Unlike a first frame's upgrade this
+    /// may follow a turn the file has taken. <paramref name="landedSeen"/>
+    /// is <see cref="Landed"/> as it was when the file was read. With no
+    /// write out then or now and none landed in between, every turn the
+    /// file took is in the new pixels: those turns move from the view's
+    /// own into the first decode's orientation, and the view does not
+    /// change. Any write in that time refuses it, since nothing says which
+    /// file was read. So does a decode that holds no more than the first.
+    /// </summary>
+    public bool TrySharpen(BitmapSource decoded, int orientation, int landedSeen)
+    {
+        if (HasLeft
+            || _saving != 0
+            || _landed != landedSeen
+            || Math.Max(decoded.PixelWidth, decoded.PixelHeight) <= Math.Max(_decoded.PixelWidth, _decoded.PixelHeight))
+        {
+            return false;
+        }
+
+        _baseOrientation = ImageOrientation.RotateCw(_baseOrientation, _written);
+        _turns = Quarter(_turns - _written);
+        _written = 0;
+        _sharp = decoded;
+        _sharpOrientation = orientation;
+        _currentSharp = null;
+        Sharpened?.Invoke();
         return true;
     }
 
@@ -255,6 +319,8 @@ internal sealed class ImageRotationSession
         // over carrying the rotation.
         _unsaved = 0;
         _committed = true;
+        _saving++;
+        _writing ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var key = System.IO.Path.GetFullPath(Path);
         Enqueue(key, () => ImageRotationService.SaveQuarterTurns(key, turns)).ContinueWith(
@@ -263,6 +329,23 @@ internal sealed class ImageRotationSession
     }
 
     private void OnSaved(int turns, RotationSaveResult result)
+    {
+        _landed++;
+        if (result == RotationSaveResult.Saved)
+        {
+            _written = Quarter(_written + turns);
+        }
+
+        Settle(turns, result);
+        if (--_saving == 0)
+        {
+            var written = _writing;
+            _writing = null;
+            written?.SetResult();
+        }
+    }
+
+    private void Settle(int turns, RotationSaveResult result)
     {
         if (result == RotationSaveResult.Saved)
         {
@@ -293,6 +376,7 @@ internal sealed class ImageRotationSession
             _turns = Quarter(_turns - turns - _unsaved);
             _unsaved = 0;
             _current = null;
+            _currentSharp = null;
             if (!HasLeft)
             {
                 ViewChanged?.Invoke();
