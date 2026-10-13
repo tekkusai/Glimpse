@@ -245,8 +245,9 @@ compact default.
 A text file longer than the text box lays out at once (400,000 characters)
 is read a piece at a time. It opens on its first lines, takes more while
 the thread is free, and takes more whenever the reader comes within three
-screens of either end of what it holds. It holds two million characters at
-most and lets go of the far end past that. End goes to the file's last line
+screens of either end of what it holds. It holds two million characters, or
+three screens of lines when those come to more, and past that lets go of
+the end the reader is further from. End goes to the file's last line
 as the file is then, Home to its first. A line longer than 32,768 characters
 is not laid out: a line of text says it is there.
 

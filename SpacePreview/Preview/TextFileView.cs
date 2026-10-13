@@ -27,12 +27,21 @@ internal sealed class TextFileView
     /// <summary>
     /// The most the box holds. The text box lays out only the lines it is
     /// given, so this is a matter of memory and of how long select-all
-    /// takes, not of how the file scrolls.
+    /// takes, not of how the file scrolls. Three screens of lines are held
+    /// whatever they come to: lines of 30,000 characters fill a screen with
+    /// more than this.
     /// </summary>
     internal const int HeldCharacters = 2_000_000;
 
     /// <summary>A line longer than this is not laid out: one line of a megabyte stalls the box.</summary>
     internal const int LongestLine = 32_768;
+
+    /// <summary>
+    /// How near an end of what the box holds the reader comes before it
+    /// reads on, in screens. The box holds this many screens of lines
+    /// whatever the budget says.
+    /// </summary>
+    private const int Screens = 3;
 
     private const string LongLineAfter = "\r\nA very long line follows. Open the file for the rest.";
     private const string LongLineBefore = "A very long line comes before this. Open the file to see it.\r\n";
@@ -245,6 +254,9 @@ internal sealed class TextFileView
     /// Reads toward the reader when an end of what the box holds is within
     /// a few screens. Otherwise, with room in the budget, it fills on from
     /// the end the box is not anchored to, a piece at a time while idle.
+    /// A full box takes more at one end only by letting go at the other,
+    /// and only of what the reader is further from (see MayDrop). A reader
+    /// at the very edge of what it holds is read to all the same.
     /// </summary>
     private void Look()
     {
@@ -254,22 +266,54 @@ internal sealed class TextFileView
             return;
         }
 
-        var screens = _scroll.ViewportHeight * 3;
-        var nearEnd = _scroll.VerticalOffset + _scroll.ViewportHeight + screens >= _scroll.ExtentHeight;
-        var nearStart = _scroll.VerticalOffset <= screens;
-        if (nearEnd && MayReadAfter)
+        var screens = _scroll.ViewportHeight * Screens;
+        var above = _scroll.VerticalOffset;
+        var below = _scroll.ExtentHeight - above - _scroll.ViewportHeight;
+        var full = _characters >= _heldCharacters && _scroll.ExtentHeight >= screens;
+        if (below <= screens && MayReadAfter && (!full || below < 1 || MayDrop(first: true)))
         {
-            Extend(after: true, trim: true);
+            Extend(after: true);
         }
-        else if (nearStart && MayReadBefore)
+        else if (above <= screens && MayReadBefore && (!full || above < 1 || MayDrop(first: false)))
         {
-            Extend(after: false, trim: true);
+            Extend(after: false);
         }
-        else if (_characters < _heldCharacters && (MayReadAfter || MayReadBefore))
+        else if (!full && (MayReadAfter || MayReadBefore))
         {
-            Extend(after: MayReadAfter, trim: false);
+            Extend(after: MayReadAfter);
         }
     }
+
+    /// <summary>
+    /// Whether the piece at one end may be let go: it is off the screen,
+    /// and with it gone that end is still further from the reader than the
+    /// other. That is what keeps a box of very wide lines still. Three
+    /// screens each way do not fit the budget there, and without this a
+    /// read at one end would drop the lines on screen at the other, and
+    /// the next read would bring them back.
+    /// </summary>
+    private bool MayDrop(bool first)
+    {
+        if (_scroll is null || _held.Count <= 2 || _box.LineCount <= 0)
+        {
+            return false;
+        }
+
+        // Every line of the box is as tall as the next.
+        var lines = first
+            ? _box.GetLineIndexFromCharacterIndex(_held.First!.Value.Characters)
+            : _box.LineCount - _box.GetLineIndexFromCharacterIndex(_characters - _held.Last!.Value.Characters);
+        var height = _scroll.ExtentHeight * lines / _box.LineCount;
+        var above = _scroll.VerticalOffset;
+        var below = Math.Max(0, _scroll.ExtentHeight - above - _scroll.ViewportHeight);
+        return first ? above - height > below : below - height > above;
+    }
+
+    /// <summary>More than the budget, and more than the screens the box holds whatever they cost.</summary>
+    private bool Over =>
+        _characters > _heldCharacters
+        && _scroll is { } scroll
+        && scroll.ExtentHeight > scroll.ViewportHeight * Screens;
 
     private bool MayReadAfter =>
         !_held.Last!.Value.Notice
@@ -277,7 +321,7 @@ internal sealed class TextFileView
 
     private bool MayReadBefore => !_held.First!.Value.Notice && Range.Start > _reader.First;
 
-    private async void Extend(bool after, bool trim)
+    private async void Extend(bool after)
     {
         var turn = Begin();
         try
@@ -304,7 +348,7 @@ internal sealed class TextFileView
             if (after)
             {
                 TakeAfter(piece);
-                while (trim && _characters > _heldCharacters && _held.Count > 2)
+                while (Over && MayDrop(first: true))
                 {
                     KeepingPlace(above: true, DropFirst);
                 }
@@ -312,7 +356,7 @@ internal sealed class TextFileView
             else
             {
                 TakeBefore(piece);
-                while (trim && _characters > _heldCharacters && _held.Count > 2)
+                while (Over && MayDrop(first: false))
                 {
                     KeepingPlace(above: false, DropLast);
                 }

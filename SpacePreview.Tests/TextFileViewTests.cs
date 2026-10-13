@@ -232,6 +232,132 @@ public sealed class TextFileViewTests
     });
 
     [Fact]
+    public Task AFileOfVeryWideLinesStaysWhereTheReaderIs() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // Lines of 3,000 characters: the budget is thirteen of them, and
+        // the window shows more than that at once.
+        var (path, text) = Write(temp, WideLines(0, 600));
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            var scroll = Scroll(box);
+
+            // At rest, at the top: the file's first line is still there,
+            // and the box holds the screen and two more to scroll into.
+            Assert.Equal(0, view.Range.Start);
+            Assert.StartsWith("wide 0000000 ", box.Text, StringComparison.Ordinal);
+            Assert.Equal(Slice(text, view.Range), box.Text);
+            Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight * 3, scroll.ViewportHeight * 5);
+
+            // Scrolled to the end of what it holds, it reads on and lets
+            // go above. The line the reader is on stays where it is, they
+            // are left in the middle of what is held, and that is never
+            // much more than the three screens.
+            for (var step = 0; step < 60 && view.Range.End < text.Length; step++)
+            {
+                box.ScrollToEnd();
+                box.UpdateLayout();
+                var looking = TopLine(box);
+                await Settle(view);
+
+                Assert.Equal(looking, TopLine(box));
+                Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight * 2.5, scroll.ViewportHeight * 4);
+                if (view.Range.End < text.Length)
+                {
+                    Assert.InRange(scroll.VerticalOffset, scroll.ViewportHeight * 0.5, scroll.ViewportHeight * 2);
+                }
+            }
+
+            Assert.Equal(text.Length, view.Range.End);
+            Assert.True(view.Range.Start > 0);
+            Assert.Equal(Slice(text, view.Range), box.Text);
+
+            // And back up, to its first.
+            for (var step = 0; step < 60 && view.Range.Start > 0; step++)
+            {
+                box.ScrollToHome();
+                box.UpdateLayout();
+                var looking = TopLine(box);
+                await Settle(view);
+
+                Assert.Equal(looking, TopLine(box));
+                Assert.InRange(scroll.ExtentHeight, scroll.ViewportHeight * 2.5, scroll.ViewportHeight * 4);
+            }
+
+            Assert.Equal(0, view.Range.Start);
+            Assert.Equal(Slice(text, view.Range), box.Text);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AReaderAtTheEdgeOfAFullBoxIsStillReadTo() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // Two hundred ordinary lines, then wide ones. The box is full with
+        // the ordinary lines still on screen above the wide ones, so there
+        // is nothing off the screen to let go of.
+        var (path, text) = Write(temp, Lines(0, 200) + WideLines(0, 120));
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            Assert.Equal(0, view.Range.Start);
+
+            for (var step = 0; step < 60 && view.Range.End < text.Length; step++)
+            {
+                box.ScrollToEnd();
+                await Settle(view);
+            }
+
+            Assert.Equal(text.Length, view.Range.End);
+            Assert.Equal(Slice(text, view.Range), box.Text);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AReaderAtTheTopEdgeOfAFullBoxIsStillReadTo() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // The same the other way up: wide lines, then two hundred ordinary
+        // ones that are still on screen below them when the box is full.
+        var (path, text) = Write(temp, WideLines(0, 120) + Lines(0, 200));
+        var (window, box, view) = Show(path);
+        try
+        {
+            view.GoToEnd();
+            await Settle(view);
+            Assert.Equal(text.Length, view.Range.End);
+            Assert.True(view.Range.Start > 0);
+
+            for (var step = 0; step < 60 && view.Range.Start > 0; step++)
+            {
+                box.ScrollToHome();
+                await Settle(view);
+            }
+
+            Assert.Equal(0, view.Range.Start);
+            Assert.Equal(Slice(text, view.Range), box.Text);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task AVeryLongLineIsSaidAndNotLaidOut() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
@@ -394,6 +520,24 @@ public sealed class TextFileViewTests
         }
 
         return text.ToString();
+    }
+
+    private static string WideLines(int first, int count)
+    {
+        var text = new StringBuilder(count * 3000);
+        for (var i = first; i < first + count; i++)
+        {
+            text.Append("wide ").Append(i.ToString("0000000")).Append(' ').Append('w', 2985).Append("\r\n");
+        }
+
+        return text.ToString();
+    }
+
+    /// <summary>How the line at the top of the box begins.</summary>
+    private static string TopLine(TextBox box)
+    {
+        var line = box.GetLineText(box.GetFirstVisibleLineIndex());
+        return line[..Math.Min(line.Length, 12)];
     }
 
     private static (string Path, string Text) Write(TempDirectory temp, string text)
