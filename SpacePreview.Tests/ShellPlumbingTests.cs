@@ -60,6 +60,74 @@ public sealed class ShellPlumbingTests
         Assert.Equal(Utilities.ThemePreference.Light, loaded.Theme);
     }
 
+    // A workbook's sheets are read from its cache folder one tab at a
+    // time. 3.0.1 pruned the folder of a workbook that was still open,
+    // once it was ten minutes old and the cache was over its cap.
+    [Fact]
+    public void HousekeepingLeavesWhatAnOpenPreviewHolds()
+    {
+        using var temp = new TempDirectory();
+        var now = DateTime.UtcNow;
+        var book = Directory.CreateDirectory(Path.Combine(temp.Path, "DocumentCache", "book 2")).FullName;
+        var second = Path.Combine(book, "sheet 2.html");
+        File.WriteAllText(second, "<table>");
+        Directory.SetLastWriteTimeUtc(book, now.AddDays(-20));
+        // A neighbor whose name is only the start of the held one is not held.
+        var neighbor = Directory.CreateDirectory(Path.Combine(temp.Path, "DocumentCache", "book")).FullName;
+        Directory.SetLastWriteTimeUtc(neighbor, now.AddDays(-20));
+
+        // Two views on the one workbook: a pinned preview and a glance.
+        var pinned = CacheHousekeeping.Hold(Path.Combine(book, "sheet 1.html"));
+        var glance = CacheHousekeeping.Hold(Path.Combine(book, "sheet 1.html"));
+        Assert.Equal(1, CacheHousekeeping.Run(temp.Path, now));
+        Assert.True(File.Exists(second));
+        Assert.False(Directory.Exists(neighbor));
+
+        // The glance ends, and ending twice changes nothing: the pinned one still reads.
+        glance.Dispose();
+        glance.Dispose();
+        Assert.Equal(0, CacheHousekeeping.Run(temp.Path, now));
+        Assert.True(File.Exists(second));
+
+        pinned.Dispose();
+        Assert.Equal(1, CacheHousekeeping.Run(temp.Path, now));
+        Assert.False(Directory.Exists(book));
+    }
+
+    // Over its cap, the cache gives up its oldest entries first, and an
+    // open preview's entry is the oldest there is.
+    [Fact]
+    public void HousekeepingOverItsCapStillLeavesWhatIsHeld()
+    {
+        using var temp = new TempDirectory();
+        var now = DateTime.UtcNow;
+        var cache = Directory.CreateDirectory(Path.Combine(temp.Path, "DocumentCache")).FullName;
+        string Entry(string name, int minutesOld)
+        {
+            var folder = Directory.CreateDirectory(Path.Combine(cache, name)).FullName;
+            using (var file = File.Create(Path.Combine(folder, "document.pdf")))
+            {
+                file.SetLength(200L * 1024 * 1024);
+            }
+
+            Directory.SetLastWriteTimeUtc(folder, now.AddMinutes(-minutesOld));
+            return folder;
+        }
+
+        var open = Entry("open", 120);
+        var idle = Entry("idle", 60);
+        var late = Entry("late", 30);
+
+        using (CacheHousekeeping.Hold(Path.Combine(open, "document.pdf")))
+        {
+            Assert.Equal(1, CacheHousekeeping.Run(temp.Path, now));
+        }
+
+        Assert.True(Directory.Exists(open));
+        Assert.False(Directory.Exists(idle));
+        Assert.True(Directory.Exists(late));
+    }
+
     [Fact]
     public void HousekeepingPrunesLooseFilesAndRetiredFolders()
     {

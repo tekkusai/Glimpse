@@ -648,6 +648,34 @@ public sealed class RevealSequencingTests
         }
     });
 
+    // The view itself holds the cache entry it loads from, from the load
+    // to its disposal, so no kind of preview has to remember to.
+    [Fact]
+    public Task AnOpenPreviewKeepsTheCacheEntryItReadsFrom() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var now = DateTime.UtcNow;
+        var entry = Directory.CreateDirectory(Path.Combine(temp.Path, "DocumentCache", "book")).FullName;
+        var page = Path.Combine(entry, "sheet.html");
+        File.WriteAllText(page, "<!DOCTYPE html><html><body><p>one</p></body></html>");
+        Directory.SetLastWriteTimeUtc(entry, now.AddDays(-20));
+        var window = await OpenAsync(page);
+        try
+        {
+            Assert.Equal(0, SpacePreview.Services.CacheHousekeeping.Run(temp.Path, now));
+            Assert.True(File.Exists(page));
+
+            // The glance ends the way every glance does, and the entry is old again.
+            window.HidePreview();
+            await WaitUntilAsync(() => SpacePreview.Services.CacheHousekeeping.Run(temp.Path, now) == 1);
+            Assert.False(Directory.Exists(entry));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
     [Fact]
     public Task AReplacedLoadDisposesNothingItDidNotBuild() => WpfApp.RunAsync(async () =>
     {

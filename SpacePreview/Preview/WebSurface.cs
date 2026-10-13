@@ -31,6 +31,7 @@ internal enum WebSurfaceKind
 internal sealed class StagedWebView : WebView2
 {
     private readonly TaskCompletionSource _mayNavigate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private IDisposable? _cacheHold;
 
     public StagedWebView(WebSurfaceKind kind)
     {
@@ -64,6 +65,25 @@ internal sealed class StagedWebView : WebView2
     public Task MayNavigate => _mayNavigate.Task;
 
     public void AllowNavigation() => _mayNavigate.TrySetResult();
+
+    /// <summary>
+    /// Loads an address, and holds the cache entry it lies in for as long
+    /// as this view shows it. Cache housekeeping would otherwise call a
+    /// folder old ten minutes after it was written, with its preview open.
+    /// </summary>
+    public void Open(Uri address)
+    {
+        _cacheHold?.Dispose();
+        _cacheHold = address.IsFile ? CacheHousekeeping.Hold(address.LocalPath) : null;
+        Source = address;
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        _cacheHold?.Dispose();
+        _cacheHold = null;
+        base.Dispose(disposing);
+    }
 
     /// <summary>Stopwatch timestamps for the load breakdown.</summary>
     public long? EngineReady { get; set; }

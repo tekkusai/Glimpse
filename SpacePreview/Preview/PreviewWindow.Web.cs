@@ -582,7 +582,7 @@ public partial class PreviewWindow
 
                 sourceAssigned = true;
                 webView.NavigationStarted = Stopwatch.GetTimestamp();
-                webView.Source = uri;
+                webView.Open(uri);
             }
             catch (Exception ex)
             {
