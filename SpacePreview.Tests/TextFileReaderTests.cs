@@ -6,7 +6,9 @@ namespace SpacePreview.Tests;
 /// <summary>
 /// A text file read a piece at a time comes out as the same text the
 /// whole-file loader decodes, in every encoding it knows, whatever size the
-/// pieces are and whichever way they are read.
+/// pieces are and whichever way they are read. A line too long to lay out
+/// comes out as its first characters and how much more of it there is, the
+/// same from either side.
 /// </summary>
 public sealed class TextFileReaderTests
 {
@@ -37,7 +39,6 @@ public sealed class TextFileReaderTests
         Assert.Equal(expected, string.Concat(pieces.Select(piece => piece.Text)));
         Assert.All(pieces, piece => Assert.InRange(piece.End - piece.Start, 1, pieceBytes));
         Assert.All(pieces.SkipLast(1), piece => Assert.EndsWith("\n", piece.Text, StringComparison.Ordinal));
-        Assert.All(pieces, piece => Assert.False(piece.SplitsALine));
         Assert.Equal(reader.Length, pieces[^1].End);
     }
 
@@ -63,26 +64,153 @@ public sealed class TextFileReaderTests
     [InlineData("utf8")]
     [InlineData("utf16")]
     [InlineData("utf16-be")]
-    public void ALineLongerThanAReadIsCutBetweenCharactersNeverInsideOne(string encoding)
+    public void ALineLongerThanAReadIsAPieceOfItsOwn(string encoding)
     {
         using var temp = new TempDirectory();
 
-        // One line of characters that take four bytes in UTF-8 and two
-        // units in UTF-16, between two ordinary lines.
+        // One line of fifteen thousand bytes between two ordinary ones:
+        // fifteen reads long, and not too long to lay out.
         var line = string.Concat(Enumerable.Repeat("a\U0001F600é日", 1500));
         var (path, expected) = Write(temp, encoding, "first\r\n" + line + "\r\nlast\r\n");
         var reader = TextFileReader.TryOpen(path)!;
 
-        // The repeat is ten bytes in either encoding, and a read of 1003
-        // is not a whole number of them: the cuts fall everywhere in turn.
         var forward = Forward(reader, 1003);
         Assert.Equal(expected, string.Concat(forward.Select(piece => piece.Text)));
-        Assert.Contains(forward, piece => piece.SplitsALine);
-        Assert.DoesNotContain('�', string.Concat(forward.Select(piece => piece.Text)));
+        Assert.Contains(forward, piece => piece.Text == line + "\r\n");
 
         var backward = Backward(reader, 1003);
         Assert.Equal(expected, string.Concat(backward.Select(piece => piece.Text)));
-        Assert.Contains(backward, piece => piece.SplitsALine);
+        Assert.Contains(backward, piece => piece.Text == line + "\r\n");
+    }
+
+    public static TheoryData<string, int> EncodingsAndReads()
+    {
+        var data = new TheoryData<string, int>();
+        foreach (var encoding in new[] { "utf8", "utf16", "utf16-be", "ansi" })
+        {
+            // Shorter than the line, about its size, and the whole file.
+            foreach (var read in new[] { 1003, 64 * 1024, 1024 * 1024 })
+            {
+                data.Add(encoding, read);
+            }
+        }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(EncodingsAndReads))]
+    public void AVeryLongLineIsItsFirstCharactersAndHowMuchMoreThereIs(string encoding, int readBytes)
+    {
+        using var temp = new TempDirectory();
+
+        // A line far too long to lay out, of characters that take one to
+        // four bytes so the cut can fall inside one. It is there twice:
+        // between ordinary lines, and as the file's last with no line end.
+        // The ANSI file's long line is plain letters, because what its
+        // other bytes mean depends on the PC.
+        var unit = encoding.StartsWith("utf16", StringComparison.Ordinal) ? 2 : 1;
+        var line = encoding == "ansi"
+            ? string.Concat(Enumerable.Repeat("plain letters ", 9000))
+            : string.Concat(Enumerable.Repeat("a\U0001F600é日", 20_000));
+        var (path, whole) = Write(temp, encoding, "first café\r\n" + line + "\r\nlast\r\n" + line);
+        var reader = TextFileReader.TryOpen(path)!;
+
+        // What is shown of it: the whole characters that fit the bytes.
+        var measure = unit == 2 ? Encoding.Unicode : Encoding.UTF8;
+        var shown = 0;
+        foreach (var rune in line.EnumerateRunes())
+        {
+            if (measure.GetByteCount(line.AsSpan(0, shown + rune.Utf16SequenceLength)) > TextFileReader.ShownOfALongLine * unit)
+            {
+                break;
+            }
+
+            shown += rune.Utf16SequenceLength;
+        }
+
+        var more = measure.GetByteCount(line) - measure.GetByteCount(line.AsSpan(0, shown));
+        Assert.InRange(shown, 500, TextFileReader.ShownOfALongLine);
+        var expected = whole[..whole.IndexOf(line, StringComparison.Ordinal)]
+            + line[..shown] + "\r\n" + TextFileReader.LineGoesOn(more + (2 * unit)) + "\r\n"
+            + "last\r\n"
+            + line[..shown] + "\r\n" + TextFileReader.LineGoesOn(more);
+
+        var forward = Forward(reader, readBytes);
+        Assert.Equal(expected, string.Concat(forward.Select(piece => piece.Text)));
+        Assert.Equal(reader.Length, forward[^1].End);
+
+        var backward = Backward(reader, readBytes);
+        Assert.Equal(expected, string.Concat(backward.Select(piece => piece.Text)));
+        Assert.Equal(reader.First, backward[0].Start);
+    }
+
+    [Theory]
+    [InlineData("utf8")]
+    [InlineData("utf16")]
+    public void ALineIsLongByItsBytesAndTwiceAsManyInUtf16(string encoding)
+    {
+        using var temp = new TempDirectory();
+
+        // Thirty thousand letters are a line the box lays out, in either
+        // encoding. Forty thousand are not.
+        var fits = new string('x', 30_000);
+        var (path, expected) = Write(temp, encoding, "first\r\n" + fits + "\r\n" + new string('y', 40_000) + "\r\nlast\r\n");
+        var reader = TextFileReader.TryOpen(path)!;
+
+        var text = string.Concat(Forward(reader, 1024 * 1024).Select(piece => piece.Text));
+
+        Assert.Contains(fits + "\r\n", text, StringComparison.Ordinal);
+        Assert.DoesNotContain(new string('y', TextFileReader.ShownOfALongLine + 1), text, StringComparison.Ordinal);
+        Assert.Contains(new string('y', TextFileReader.ShownOfALongLine) + "\r\n[This line goes on for another ", text, StringComparison.Ordinal);
+        Assert.NotEqual(expected, text);
+    }
+
+    [Theory]
+    [InlineData("utf8", "last")]
+    [InlineData("utf16", "end")]
+    public void ALineLongerThanTheReachIsTakenARunAtATimeBetweenCharacters(string encoding, string after)
+    {
+        using var temp = new TempDirectory();
+
+        // Eighteen megabytes with no line end, of characters the reach
+        // falls inside from either side: three bytes each in UTF-8, pairs
+        // of units in UTF-16 set off by one letter.
+        var line = encoding == "utf8"
+            ? new string('日', 6_000_000)
+            : "a" + new StringBuilder().Insert(0, "\U0001F600", 4_500_000);
+        var path = Path.Combine(temp.Path, "reach.log");
+        var bytes = encoding == "utf8"
+            ? new UTF8Encoding(false).GetBytes("first\r\n" + line + "\r\n" + after + "\r\n")
+            : [.. Encoding.Unicode.GetPreamble(), .. Encoding.Unicode.GetBytes("first\r\n" + line + "\r\n" + after + "\r\n")];
+        File.WriteAllBytes(path, bytes);
+        var reader = TextFileReader.TryOpen(path)!;
+        var measure = encoding == "utf8" ? Encoding.UTF8 : Encoding.Unicode;
+
+        foreach (var pieces in new[] { Forward(reader, 64 * 1024), Backward(reader, 64 * 1024) })
+        {
+            // The two ordinary lines, and the long one in two runs: one as
+            // long as the reach to within a character, and the rest.
+            Assert.Equal(4, pieces.Count);
+            Assert.Equal("first\r\n", pieces[0].Text);
+            Assert.Equal(after + "\r\n", pieces[3].Text);
+            Assert.Equal(reader.First, pieces[0].Start);
+            Assert.Equal(reader.Length, pieces[3].End);
+            Assert.Contains(pieces, piece => piece.End - piece.Start is > TextFileReader.FarthestLineEnd - 4 and <= TextFileReader.FarthestLineEnd);
+
+            foreach (var run in pieces.Skip(1).Take(2))
+            {
+                // Each run is whole characters of the line, then how much
+                // of the run is not shown.
+                var first = run.Text[..run.Text.IndexOf('\r')];
+                Assert.InRange(first.Length, 600, TextFileReader.ShownOfALongLine);
+                Assert.DoesNotContain('�', first);
+                Assert.Contains(first, line, StringComparison.Ordinal);
+                Assert.Equal(
+                    first + "\r\n" + TextFileReader.LineGoesOn(run.End - run.Start - measure.GetByteCount(first)) + "\r\n",
+                    run.Text);
+            }
+        }
     }
 
     [Fact]
@@ -154,14 +282,19 @@ public sealed class TextFileReaderTests
 
         Assert.StartsWith("line 0000000", first.Text, StringComparison.Ordinal);
         Assert.InRange(first.End - first.Start, 60 * 1024, 64 * 1024);
-        Assert.Equal(200L * 1024 * 1024, middle.Start);
 
-        // Bytes of zero are not characters, here as in the loader.
-        Assert.Equal(string.Empty, middle.Text);
-        Assert.Equal(reader.Length, last.End);
+        // Zeros have no line end among them, so they are one line longer
+        // than the reach, and a read takes a run of it and no more. Bytes
+        // of zero are not characters, here as in the loader: nothing of
+        // the run is shown but how long it is.
+        var run = TextFileReader.LineGoesOn(TextFileReader.FarthestLineEnd - TextFileReader.ShownOfALongLine);
+        Assert.Equal((200L * 1024 * 1024, (200L * 1024 * 1024) + TextFileReader.FarthestLineEnd), (middle.Start, middle.End));
+        Assert.Equal("\r\n" + run + "\r\n", middle.Text);
+        Assert.Equal((reader.Length - TextFileReader.FarthestLineEnd, reader.Length), (last.Start, last.End));
+        Assert.Equal("\r\n" + run, last.Text);
 
-        // Three reads of 64 KB: their bytes and their text, and nothing
-        // that grows with the 300 MB behind them.
+        // Three reads: their bytes and their text, and nothing that grows
+        // with the 300 MB behind them or with how far two of them looked.
         Assert.InRange(cost, 0, 4 * 1024 * 1024);
     }
 

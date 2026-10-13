@@ -54,8 +54,8 @@ public partial class PreviewWindow
         }
 
         // Past what the box lays out at once, the file is read a piece at
-        // a time, unwrapped as the cut text always was. One whose first
-        // line is too long for that keeps the cut and its notice.
+        // a time, unwrapped as the cut text always was. One the first read
+        // takes whole keeps the cut and its notice.
         if (ExceedsDisplay(preview!)
             && TextFileReader.TryOpen(path) is { } reader
             && TextFileView.TryReadHead(reader) is { } head)
@@ -76,9 +76,8 @@ public partial class PreviewWindow
         // WPF's TextBox lays out everything it is given on the UI thread;
         // past these sizes the first layout visibly stutters. Ordinary text
         // over the limit is read a piece at a time instead (see
-        // OpenTextDocument), and this cut is what remains for a file whose
-        // first line is too long for that: bencoded metadata, minified
-        // source maps, lockfiles, malformed CSV and log records.
+        // OpenTextDocument), and this cut is what remains for a file that
+        // is one long line: bencoded metadata, minified source maps.
         if (preview is null)
         {
             return null;

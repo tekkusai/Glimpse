@@ -564,7 +564,7 @@ internal static class TextPreviewLoader
     }
 
     /// <summary>Bytes at the end that start a UTF-8 character the buffer does not finish.</summary>
-    internal static int IncompleteUtf8Tail(byte[] buffer)
+    internal static int IncompleteUtf8Tail(ReadOnlySpan<byte> buffer)
     {
         for (var back = 1; back <= Math.Min(3, buffer.Length); back++)
         {

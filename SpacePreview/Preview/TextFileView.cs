@@ -14,7 +14,9 @@ namespace SpacePreview.Preview;
 /// the thread, and takes more again whenever the reader comes near either
 /// end of what it holds. Past its budget it lets go of the far end, so a
 /// file of any size is read through at the cost of what is on screen. End
-/// goes to the file's real last line and Home back to its first.
+/// goes to the file's real last line and Home back to its first. What a
+/// very long line looks like is the reader's business: here every piece is
+/// lines of text.
 /// </summary>
 internal sealed class TextFileView
 {
@@ -33,9 +35,6 @@ internal sealed class TextFileView
     /// </summary>
     internal const int HeldCharacters = 2_000_000;
 
-    /// <summary>A line longer than this is not laid out: one line of a megabyte stalls the box.</summary>
-    internal const int LongestLine = 32_768;
-
     /// <summary>
     /// How near an end of what the box holds the reader comes before it
     /// reads on, in screens. The box holds this many screens of lines
@@ -43,11 +42,9 @@ internal sealed class TextFileView
     /// </summary>
     private const int Screens = 3;
 
-    private const string LongLineAfter = "\r\nA very long line follows. Open the file for the rest.";
-    private const string LongLineBefore = "A very long line comes before this. Open the file to see it.\r\n";
     private static readonly TimeSpan EndRetry = TimeSpan.FromSeconds(1);
 
-    private readonly record struct Held(long Start, long End, int Characters, bool Notice);
+    private readonly record struct Held(long Start, long End, int Characters);
 
     private readonly TextBox _box;
     private readonly TextFileReader _reader;
@@ -110,13 +107,14 @@ internal sealed class TextFileView
     internal TextBox Box => _box;
 
     /// <summary>
-    /// The opening text for a file read this way: its first lines, or null
-    /// when its first line is too long to lay out.
+    /// The opening text for a file read this way: its first lines. Null
+    /// when they are the whole file. There is nothing to read on to then,
+    /// and of a file that is one long line the loader's cut shows more.
     /// </summary>
     public static TextPiece? TryReadHead(TextFileReader reader, int headBytes = HeadBytes)
     {
         var head = reader.ReadAfter(reader.First, headBytes);
-        return head.Text.Length == 0 || HasLongLine(head) ? null : head;
+        return head.Text.Length == 0 || head.End >= reader.Length ? null : head;
     }
 
     /// <summary>To the file's last line, as the file is now.</summary>
@@ -126,8 +124,7 @@ internal sealed class TextFileView
         try
         {
             // Far from the end, the box lets go of what it holds and takes
-            // the file's last lines. A file that ends in one very long line
-            // has no last lines to show, and the box stays where it is.
+            // the file's last lines.
             var near = _reader.Length - Range.End <= _headBytes;
             if (!near)
             {
@@ -137,7 +134,7 @@ internal sealed class TextFileView
                     return;
                 }
 
-                if (tail.Text.Length > 0 && !HasLongLine(tail))
+                if (tail.Text.Length > 0)
                 {
                     _box.Text = tail.Text;
                     Hold(tail);
@@ -147,7 +144,7 @@ internal sealed class TextFileView
 
             // The last of a file whose end the box had nearly reached, and
             // whatever was written since. A few pieces, never the file.
-            for (var pieces = 0; near && pieces < 8 && !_held.Last!.Value.Notice; pieces++)
+            for (var pieces = 0; near && pieces < 8; pieces++)
             {
                 var end = Range.End;
                 var more = await Task.Run(() => _reader.ReadAfter(end, _pieceBytes));
@@ -156,10 +153,12 @@ internal sealed class TextFileView
                     return;
                 }
 
-                if (more.Text.Length == 0 || !TakeAfter(more))
+                if (more.Text.Length == 0)
                 {
                     break;
                 }
+
+                TakeAfter(more);
             }
 
             _box.UpdateLayout();
@@ -184,15 +183,15 @@ internal sealed class TextFileView
         var turn = Begin();
         try
         {
-            if (Range.Start > _reader.First || _held.First!.Value.Notice)
+            if (Range.Start > _reader.First)
             {
-                var head = await Task.Run(() => TryReadHead(_reader, _headBytes));
+                var head = await Task.Run(() => _reader.ReadAfter(_reader.First, _headBytes));
                 if (turn != _turn || _left)
                 {
                     return;
                 }
 
-                if (head is not null)
+                if (head.Text.Length > 0)
                 {
                     _box.Text = head.Text;
                     Hold(head);
@@ -316,10 +315,9 @@ internal sealed class TextFileView
         && scroll.ExtentHeight > scroll.ViewportHeight * Screens;
 
     private bool MayReadAfter =>
-        !_held.Last!.Value.Notice
-        && (_nothingAfterAt is not { } at || Environment.TickCount64 - at >= EndRetry.TotalMilliseconds);
+        _nothingAfterAt is not { } at || Environment.TickCount64 - at >= EndRetry.TotalMilliseconds;
 
-    private bool MayReadBefore => !_held.First!.Value.Notice && Range.Start > _reader.First;
+    private bool MayReadBefore => Range.Start > _reader.First;
 
     private async void Extend(bool after)
     {
@@ -377,32 +375,18 @@ internal sealed class TextFileView
         }
     }
 
-    /// <summary>Adds a piece at the end. False when it holds a line too long to lay out: a line says so in its place.</summary>
-    private bool TakeAfter(TextPiece piece)
+    private void TakeAfter(TextPiece piece)
     {
-        if (HasLongLine(piece))
-        {
-            KeepingPlace(above: false, () => _box.AppendText(LongLineAfter));
-            _held.AddLast(new Held(piece.Start, piece.Start, LongLineAfter.Length, Notice: true));
-            _characters += LongLineAfter.Length;
-            return false;
-        }
-
         KeepingPlace(above: false, () => _box.AppendText(piece.Text));
-        _held.AddLast(new Held(piece.Start, piece.End, piece.Text.Length, Notice: false));
+        _held.AddLast(new Held(piece.Start, piece.End, piece.Text.Length));
         _characters += piece.Text.Length;
-        return true;
     }
 
     private void TakeBefore(TextPiece piece)
     {
-        var tooLong = HasLongLine(piece);
-        var text = tooLong ? LongLineBefore : piece.Text;
-        KeepingPlace(above: true, () => Replace(0, 0, text));
-        _held.AddFirst(tooLong
-            ? new Held(piece.End, piece.End, text.Length, Notice: true)
-            : new Held(piece.Start, piece.End, text.Length, Notice: false));
-        _characters += text.Length;
+        KeepingPlace(above: true, () => Replace(0, 0, piece.Text));
+        _held.AddFirst(new Held(piece.Start, piece.End, piece.Text.Length));
+        _characters += piece.Text.Length;
     }
 
     private void DropFirst()
@@ -425,7 +409,7 @@ internal sealed class TextFileView
     private void Hold(TextPiece piece)
     {
         _held.Clear();
-        _held.AddLast(new Held(piece.Start, piece.End, piece.Text.Length, Notice: false));
+        _held.AddLast(new Held(piece.Start, piece.End, piece.Text.Length));
         _characters = piece.Text.Length;
         _nothingAfterAt = null;
     }
@@ -490,30 +474,6 @@ internal sealed class TextFileView
 
         _busy = false;
         return true;
-    }
-
-    /// <summary>A piece that stops inside a line, or holds one longer than the box lays out.</summary>
-    private static bool HasLongLine(TextPiece piece)
-    {
-        if (piece.SplitsALine)
-        {
-            return true;
-        }
-
-        var run = 0;
-        foreach (var character in piece.Text)
-        {
-            if (character is '\r' or '\n')
-            {
-                run = 0;
-            }
-            else if (++run > LongestLine)
-            {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     private static ScrollViewer? FindScroll(DependencyObject parent)

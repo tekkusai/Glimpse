@@ -358,28 +358,74 @@ public sealed class TextFileViewTests
     });
 
     [Fact]
-    public Task AVeryLongLineIsSaidAndNotLaidOut() => WpfApp.RunAsync(async () =>
+    public Task AVeryLongLineIsSteppedOver() => WpfApp.RunAsync(async () =>
     {
         using var temp = new TempDirectory();
         var before = Lines(0, 300);
         var after = Lines(300, 300);
-        var (path, _) = Write(temp, before + new string('x', 100_000) + "\r\n" + after);
+        var (path, text) = Write(temp, before + new string('x', 100_000) + "\r\n" + after);
+        var shown = before
+            + new string('x', TextFileReader.ShownOfALongLine) + "\r\n"
+            + TextFileReader.LineGoesOn(100_002 - TextFileReader.ShownOfALongLine) + "\r\n"
+            + after;
         var (window, box, view) = Show(path);
         try
         {
             await Settle(view);
 
-            // Read forward, it stops in front of the line and says so.
-            Assert.EndsWith("A very long line follows. Open the file for the rest.", box.Text, StringComparison.Ordinal);
-            Assert.DoesNotContain("xxxx", box.Text, StringComparison.Ordinal);
-            Assert.InRange(view.Range.End, 1, before.Length);
+            // Read forward: the lines before it, the first of it, how much
+            // more of it there is, and the lines after it to the file's end.
+            Assert.Equal(shown, box.Text);
+            Assert.Equal((0L, (long)text.Length), view.Range);
 
-            // From the end, the lines after it, and the same said above them.
+            // And the same read back from the end.
             view.GoToEnd();
             await Settle(view);
             Assert.EndsWith("line 0000599 the quick brown fox\r\n", box.Text, StringComparison.Ordinal);
-            Assert.StartsWith("A very long line comes before this. Open the file to see it.\r\n", box.Text, StringComparison.Ordinal);
-            Assert.DoesNotContain("xxxx", box.Text, StringComparison.Ordinal);
+            Assert.Equal(shown, box.Text);
+            Assert.Equal((0L, (long)text.Length), view.Range);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
+    public Task AFileOfVeryLongLinesIsReadThroughToItsLast() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+
+        // Three hundred records of 40,000 characters, as a file of JSON
+        // lines can be.
+        var records = new StringBuilder();
+        for (var i = 0; i < 300; i++)
+        {
+            records.Append("record ").Append(i.ToString("0000000")).Append(' ').Append('j', 40_000).Append("\r\n");
+        }
+
+        var (path, text) = Write(temp, records.ToString());
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            Assert.Equal(0, view.Range.Start);
+            Assert.StartsWith("record 0000000 jjjj", box.Text, StringComparison.Ordinal);
+
+            for (var step = 0; step < 60 && view.Range.End < text.Length; step++)
+            {
+                box.ScrollToEnd();
+                await Settle(view);
+            }
+
+            // Every record is two lines: its first characters, and how
+            // much more of it there is.
+            Assert.Equal(text.Length, view.Range.End);
+            var lines = box.Text.Split("\r\n", StringSplitOptions.RemoveEmptyEntries);
+            Assert.StartsWith("record 0000299 jjjj", lines[^2], StringComparison.Ordinal);
+            Assert.Equal(TextFileReader.ShownOfALongLine, lines[^2].Length);
+            Assert.Equal(TextFileReader.LineGoesOn(40_017 - TextFileReader.ShownOfALongLine), lines[^1]);
+            Assert.All(lines, line => Assert.InRange(line.Length, 1, TextFileReader.ShownOfALongLine));
         }
         finally
         {
@@ -413,12 +459,27 @@ public sealed class TextFileViewTests
         Assert.StartsWith(first.Text, longer, StringComparison.Ordinal);
         Assert.DoesNotContain("Showing the first", first.Text, StringComparison.Ordinal);
 
-        // One line too long to lay out keeps the cut and its notice.
-        var single = Path.Combine(temp.Path, "single.map");
-        File.WriteAllText(single, new string('x', PreviewWindow.LongLineDisplayLimit + 10));
-        var cut = PreviewWindow.OpenTextDocument(single, TextPreviewLoader.TryLoad(single))!;
-        Assert.Null(cut.Reader);
-        Assert.Contains("Showing the first", cut.Text, StringComparison.Ordinal);
+        // A file that is one long line keeps the cut and its notice, as
+        // it always did: the cut shows more of it, and there is nothing
+        // after it to read on to.
+        foreach (var length in new[] { PreviewWindow.LongLineDisplayLimit + 10, 600_000 })
+        {
+            var single = Path.Combine(temp.Path, $"single{length}.map");
+            File.WriteAllText(single, new string('x', length));
+            var cut = PreviewWindow.OpenTextDocument(single, TextPreviewLoader.TryLoad(single))!;
+            Assert.Null(cut.Reader);
+            Assert.StartsWith(new string('x', PreviewWindow.LongLineDisplayLimit) + "\n\nShowing the first", cut.Text, StringComparison.Ordinal);
+        }
+
+        // A long line with lines after it is read a piece at a time, like
+        // any other file, wherever the line is.
+        var record = Path.Combine(temp.Path, "records.log");
+        File.WriteAllText(record, new string('x', 300_000) + "\r\n" + longer);
+        var stepped = PreviewWindow.OpenTextDocument(record, TextPreviewLoader.TryLoad(record))!;
+        Assert.NotNull(stepped.Reader);
+        Assert.Equal(
+            new string('x', TextFileReader.ShownOfALongLine) + "\r\n" + TextFileReader.LineGoesOn(300_002 - TextFileReader.ShownOfALongLine) + "\r\n",
+            stepped.Text);
     }
 
     [Fact]
