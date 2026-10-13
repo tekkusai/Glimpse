@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
 
 namespace SpacePreview.Tests;
 
@@ -42,12 +43,33 @@ public sealed class ReleaseHygieneTests
             TestSource.Read("SECURITY.md")
         });
 
-        Assert.Contains("# Glimpse", text, StringComparison.Ordinal);
+        Assert.Contains("alt=\"Glimpse\"", text, StringComparison.Ordinal);
         Assert.Contains("Glimpse-Setup-<version>.exe", text, StringComparison.Ordinal);
         Assert.Contains(@"%LOCALAPPDATA%\Glimpse", text, StringComparison.Ordinal);
         Assert.DoesNotContain("SpacePreview-Setup", text, StringComparison.Ordinal);
         Assert.DoesNotContain("SpacePreview.exe", text, StringComparison.Ordinal);
         Assert.DoesNotContain(@"%LOCALAPPDATA%\SpacePreview", text, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// The README's button downloads the installer itself, so it names a
+    /// version. A version bump that forgot it would hand out the old one.
+    /// </summary>
+    [Fact]
+    public void TheReadmesDownloadIsTheProjectsVersion()
+    {
+        var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
+        var version = Regex.Match(project, "<Version>([^<]+)</Version>").Groups[1].Value;
+        var readme = TestSource.Read("README.md");
+        var links = Regex.Matches(readme, @"releases/download/v([^/]+)/Glimpse-Setup-(.+?)\.exe");
+
+        Assert.NotEmpty(links);
+        Assert.All(links, link =>
+        {
+            Assert.Equal(version, link.Groups[1].Value);
+            Assert.Equal(version, link.Groups[2].Value);
+        });
+        Assert.Contains($"What's new in {version}<", readme, StringComparison.Ordinal);
     }
 
     [Fact]

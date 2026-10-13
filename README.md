@@ -1,107 +1,187 @@
-# Glimpse
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme/title-dark.png">
+    <img src="docs/readme/title-light.png" width="177" alt="Glimpse">
+  </picture>
+</p>
 
-Glimpse is Quick Look for Windows. Select a file in File Explorer, on the desktop or in an Open or upload dialog, press Space, and Glimpse shows it. Press Space or Esc to close it.
+<h3 align="center">One glance at any file.</h3>
 
-![The Glimpse welcome: the Space key, and how to use it](docs/hero.png)
+<p align="center">
+  Click a file and press <kbd>Space</kbd>. There it is.<br>
+  Press <kbd>Space</kbd> again and it's gone.
+</p>
 
-| Photos | PDFs, with a page rail |
-|---|---|
-| ![Earthrise from Apollo 8 in Glimpse](docs/screenshots/photo.png) | ![A PDF in Glimpse in light theme](docs/screenshots/pdf.png) |
-| **Markdown** | **Code** |
-| ![This README in Glimpse](docs/screenshots/markdown.png) | ![A C# file in Glimpse in light theme](docs/screenshots/code.png) |
+<p align="center">
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.2/Glimpse-Setup-3.0.2.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+</p>
 
-Glimpse is a native WPF app. It reads the selection through the Windows shell, so it doesn't take over file associations or replace your default apps.
+<p align="center"><sub>Free · Windows 10 and 11 · <a href="https://github.com/tekkusai/Glimpse/releases/latest">What's new in 3.0.2</a></sub></p>
 
-## Getting Glimpse
+<p align="center">
+  <img src="docs/readme/hero.png" alt="A photo and a PDF open in Glimpse">
+</p>
 
-Download `Glimpse-Setup-<version>.exe` from the [latest release](https://github.com/tekkusai/Glimpse/releases/latest) and run it. GitHub's "Source code" archives are only for building Glimpse yourself.
+<h2 align="center">See a file before you open it</h2>
 
-Setup installs for the current user and can start Glimpse when you sign in. It installs WebView2 only when Windows doesn't already have it. For full Word, Excel and PowerPoint previews it can also add LibreOffice, and it shows the size of that download before anything happens.
+<p align="center">
+  You know the file is in this folder. You don't know which one it is.<br>
+  Click the first, press Space, and walk down the list with the arrow keys.<br>
+  Each file shows as you reach it, and Enter opens the one you want.
+</p>
 
-After that, Glimpse keeps itself up to date. It installs a new release while you're away from your PC, never while a preview is open or a game or presentation is full screen, and only when the release is signed by its developer. Settings has a switch to turn this off and an Install now button.
+<p align="center">
+  It works in File Explorer, on the desktop, and in the window<br>
+  where you pick a file to attach to an email or upload to a website.<br>
+  On a Mac this is called Quick Look. Glimpse brings it to Windows.
+</p>
 
-## What it shows
+<h2 align="center">It opens almost anything</h2>
 
-- Photos and images, including HEIC, WebP, AVIF, SVG and Photoshop files. Images zoom around the cursor, and Ctrl+R turns a photo and saves the turn.
-- PDFs and Illustrator files in the WebView2 PDF viewer, with a page rail beside them.
-- Word, Excel and PowerPoint files through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
-- Markdown, code with syntax colors, JSON, logs and plain text.
-- Your own web pages, with scripts off and nothing loaded from the internet.
-- Video and audio, with the track's cover and tags.
-- Folders and archives as a list of what's inside, largest first.
-- Fonts as a full specimen in their own face.
-- 3D models (STL, OBJ, PLY, 3MF, GLB) as solid shapes you can turn, and STEP files as a wireframe.
-- EPUB books, programs, shortcuts and app packages.
+<p align="center">
+  <b>Photos</b> · <b>PDFs</b> · <b>Word, Excel and PowerPoint</b> · <b>Videos and music</b><br>
+  <b>Folders and zip files</b> · <b>Code and notes</b> · <b>Fonts</b> · <b>3D models</b> · <b>E-books</b> · <b>Web pages</b>
+</p>
 
-Each kind opens in a window shaped for it. Photos, video and pages take their own shape. Anything you scroll through opens at the size of a desktop browser window. Everything else opens in a compact window.
+<p align="center">
+  No Microsoft Office needed. Every kind gets a window shaped for it.<br>
+  The <a href="#everything-it-opens">full list</a> is further down.
+</p>
 
-## Using it
+<h2 align="center">Sign a PDF and send it back</h2>
+
+<p align="center">
+  A form arrives by email. Press Space on it and choose Sign.<br>
+  Place your signature, a date or a stamp, and save a signed copy next to the original.<br>
+  You print nothing and you scan nothing.
+</p>
+
+<p align="center">
+  <img src="docs/readme/pdf.png" alt="A PDF in Glimpse, with its page rail and the Sign button">
+</p>
+
+<h2 align="center">Keep a file in view</h2>
+
+<p align="center">
+  Pin a preview and it stays open while you go on browsing.<br>
+  Keep an invoice beside the spreadsheet you're filling in, or line up six photos to compare.
+</p>
+
+<h2 align="center">Read code without opening an editor</h2>
+
+<p align="center">
+  Code opens in color with line numbers.<br>
+  A Markdown file opens as the page it describes.
+</p>
+
+<p align="center">
+  <img src="docs/readme/code.png" alt="A C# file in Glimpse, with syntax colors">
+</p>
+
+<h2 align="center">Quiet and private</h2>
+
+<p align="center">
+  Your files never leave your PC.<br>
+  Your default apps stay as they are.<br>
+  Glimpse listens for Space only while File Explorer, the desktop or a file window is in front.<br>
+  It updates itself while you're away, and only with a release signed by its developer.
+</p>
+
+<h2 align="center">Get Glimpse</h2>
+
+<p align="center">
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.2/Glimpse-Setup-3.0.2.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+</p>
+
+<p align="center">
+  <b>1.</b> Download it. &nbsp;&nbsp; <b>2.</b> Open the file you downloaded. &nbsp;&nbsp; <b>3.</b> Click any file and press Space.
+</p>
+
+<p align="center">
+  Your browser and Windows may ask if you're sure, because the installer isn't code-signed yet.<br>
+  In the blue "Windows protected your PC" box, choose More info, then Run anyway.
+</p>
+
+<p align="center">
+  Setup doesn't need administrator rights. It asks whether Glimpse should start when you sign in,<br>
+  and whether to add LibreOffice for Word, Excel and PowerPoint, with the size of that download shown first.<br>
+  After that, Glimpse keeps itself up to date.
+</p>
+
+<br>
+
+## Keys
 
 | Key | What it does |
 |---|---|
-| Space, Esc | Close the preview |
+| <kbd>Space</kbd> or <kbd>Esc</kbd> | Close the preview |
 | Arrow keys | The next or previous file in the folder |
-| Enter | Open the file in its app |
-| Ctrl+Plus, Ctrl+Minus, Ctrl+0 | Zoom in, out, and back to fit |
-| Ctrl+R, Ctrl+Shift+R | Turn an image right or left |
-| F11 | Fill the screen |
+| <kbd>Enter</kbd> | Open the file in its app |
+| <kbd>Ctrl</kbd> <kbd>+</kbd>, <kbd>Ctrl</kbd> <kbd>-</kbd>, <kbd>Ctrl</kbd> <kbd>0</kbd> | Zoom in, out, and back to fit |
+| <kbd>Ctrl</kbd> <kbd>R</kbd>, <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>R</kbd> | Turn an image right or left |
+| <kbd>F11</kbd> | Fill the screen |
 
-Select several files before pressing Space and the arrows step through only those. The grid button shows them all at once, and a slideshow plays them.
+Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. The menu beside Open has Open with, Show in Explorer and Share.
 
-The pin keeps a preview open while you go on browsing, up to six at a time. Right-click a preview to copy its text, the file or its path, and use the menu beside Open for Open with, Show in Explorer and Share.
+## Everything it opens
 
-**Fill & Sign.** A PDF's Sign button lets you place a signature, a date or a stamp on any page, then save a signed copy beside the original or sign it in place. Signatures you draw are saved for next time. If Glimpse closes before you save, Sign reads Resume the next time you open that PDF.
+- **Photos and images.** JPEG, PNG, HEIC, WebP, AVIF, SVG and Photoshop files. Images zoom around the cursor, and Ctrl+R turns a photo and saves the turn.
+- **PDFs and Illustrator files.** In the WebView2 PDF viewer, with a page rail beside them.
+- **Word, Excel and PowerPoint.** Through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
+- **Text.** Markdown, code with syntax colors, JSON, logs and plain text.
+- **Web pages.** Your own saved pages, with scripts off and nothing loaded from the internet.
+- **Video and audio.** With the track's cover and tags.
+- **Folders and archives.** A list of what's inside, largest first.
+- **Fonts.** A full specimen in the font's own face.
+- **3D models.** STL, OBJ, PLY, 3MF and GLB as solid shapes you can turn, and STEP files as a wireframe.
+- **More.** EPUB books, programs, shortcuts and app packages.
+
+Photos, video and pages take their own shape. Anything you scroll through opens at the size of a desktop browser window. Everything else opens in a compact window.
+
+## Privacy and security
+
+Glimpse reads a file only when you ask to preview it. Files never leave your PC, and Glimpse doesn't change their default apps. The only request Glimpse makes on its own is to GitHub, to look for a new release.
+
+The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Before a document is converted, Glimpse removes links that point outside the file from modern Office and OpenDocument files, and the converter's web access is blocked. Old-format Office files (`.doc`, `.xls`, `.ppt`, `.rtf`) can't be cleaned that way yet: one that links a picture from a shared folder can make the converter contact that folder when the file is previewed.
+
+Updates install while you're away from your PC, never while a preview is open or a game or presentation is full screen, and only when their signature matches the key built into the app. Settings has a switch to turn this off and an Install now button. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
+
+Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## Requirements
 
 - Windows 10 1809 or newer on x64. ARM64 works through Windows' x64 emulation.
 - WebView2 Runtime, which Setup installs when it's missing.
 - Optional: LibreOffice or OpenOffice for full Office previews.
-- To build from source: the .NET 10 SDK, and Inno Setup 6 for the installer.
 
-## Building from source
+## Build from source
+
+You need the .NET 10 SDK, and Inno Setup 6 for the installer. GitHub's "Source code" archives are only for this.
 
 ```powershell
 git clone https://github.com/tekkusai/Glimpse.git
 cd Glimpse
 dotnet build .\SpacePreview.sln -c Release
+dotnet test .\SpacePreview.sln -c Release
 ```
 
 The build lands at `.\SpacePreview\bin\Release\net10.0-windows10.0.17763.0\Glimpse.exe`, and you can run it directly.
 
-## Tests
-
 ```powershell
-dotnet test .\SpacePreview.sln -c Release
-.\SpacePreview\scripts\regression.ps1
-.\SpacePreview\scripts\smoke.ps1
+.\SpacePreview\scripts\regression.ps1       # renders previews off screen in a throwaway data folder
+.\SpacePreview\scripts\smoke.ps1            # drives File Explorer for real, with Glimpse already running
+.\SpacePreview\scripts\build-installer.ps1  # publishes, packages with Inno Setup, signs the checksum
 ```
 
-The regression suite renders previews off screen in a throwaway data folder. The smoke test drives File Explorer for real and expects Glimpse to be running already.
+[docs/RELEASE.md](docs/RELEASE.md) has the full release checklist, and [docs/DESIGN.md](docs/DESIGN.md) has the rules for how Glimpse looks and moves.
 
-## Publishing
-
-```powershell
-.\SpacePreview\scripts\build-installer.ps1
-```
-
-This publishes a self-contained build, packages it with Inno Setup, and signs the checksum with the release key. [docs/RELEASE.md](docs/RELEASE.md) has the full checklist, and [docs/DESIGN.md](docs/DESIGN.md) has the rules for how Glimpse looks and moves.
-
-## Startup commands
+The installed app takes three commands:
 
 ```powershell
 Glimpse.exe --install-startup     # start when you sign in
 Glimpse.exe --uninstall-startup   # stop starting when you sign in
 Glimpse.exe --quit                # quit the running copy
 ```
-
-## Security and privacy
-
-Glimpse reads a file only when you ask to preview it. Files never leave your PC, and Glimpse doesn't change their default apps. The only request Glimpse makes on its own is to GitHub, to look for a new release.
-
-The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Before a document is converted, Glimpse removes links that point outside the file from modern Office and OpenDocument files, and the converter's web access is blocked. Old-format Office files (`.doc`, `.xls`, `.ppt`, `.rtf`) can't be cleaned that way yet: one that links a picture from a shared folder can make the converter contact that folder when the file is previewed. Updates install only when their signature matches the key built into the app. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
-
-Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 
 ## License
 

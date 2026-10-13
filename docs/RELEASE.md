@@ -58,6 +58,8 @@ Copies on 3.0 or later install a release on their own 48 hours after it is publi
 
 Copies still on 2.x get no such window, for every release, for as long as any 2.x copy exists. 2.0's own updater offers each newer release to its user at its next check, within hours of publishing, and the people who accept install it at once, without asking GitHub again. Test every release fully before it goes public.
 
+The README's Download button links to this release's installer by name, and a test fails until both of its links and its "What's new" line carry the project's version. That link is dead from the push of the version commit until the release is published, so do the two in one sitting.
+
 Write release notes for people using the app, not as a dump of commit messages. Start with what changed in day-to-day use, mention any compatibility or installation concerns, and include the installer's SHA-256. If the build isn't code-signed, say so plainly so the SmartScreen warning isn't a surprise.
 
 Before publishing, confirm that the release tag points to the commit used for the installer. Install that artifact silently for the current user, preserve the user's startup choice, relaunch Glimpse if it was running, and compare the installed payload with the publish directory.
