@@ -208,7 +208,29 @@ public partial class PreviewWindow : Window
     private bool _pinnedAlwaysOnTop = true;
     private bool _topmostSuppressed;
 
-    public string? CurrentPath { get; private set; }
+    // What keeps a borrowed copy from being cleared away under this window.
+    private IDisposable? _borrowedCopy;
+
+    /// <summary>
+    /// The file this window shows. When that is a copy borrowed for a file
+    /// with no path of its own, the copy is held for as long as the window
+    /// shows it, pinned or not, whatever draws it: text is read from it as
+    /// the reader scrolls, and a picture is decoded from it again when it
+    /// is zoomed.
+    /// </summary>
+    public string? CurrentPath
+    {
+        get;
+        private set
+        {
+            // The new hold first, so showing the same copy again never
+            // leaves it unheld.
+            var copy = BorrowedFiles.IsBorrowed(value) ? CacheHousekeeping.Hold(value!) : null;
+            _borrowedCopy?.Dispose();
+            _borrowedCopy = copy;
+            field = value;
+        }
+    }
 
     /// <summary>Cached for the keyboard hook thread; set once on SourceInitialized.</summary>
     public IntPtr Hwnd { get; private set; }

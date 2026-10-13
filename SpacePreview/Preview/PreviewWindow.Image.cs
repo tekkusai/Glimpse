@@ -664,6 +664,8 @@ public partial class PreviewWindow
     {
         _rotationSession?.Commit();
         _rotationSession = null;
+        _borrowedCopy?.Dispose();
+        _borrowedCopy = null;
         base.OnClosed(e);
     }
 

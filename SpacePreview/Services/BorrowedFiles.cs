@@ -203,7 +203,10 @@ internal static class BorrowedFiles
         }
     }
 
-    /// <summary>Keeps the newest copies and whatever an open preview reads; the rest go.</summary>
+    /// <summary>
+    /// Keeps the newest copies and whatever a window is showing (it holds
+    /// its copy through PreviewWindow.CurrentPath); the rest go.
+    /// </summary>
     private static void Trim(string keep)
     {
         var others = new DirectoryInfo(Root).EnumerateDirectories()

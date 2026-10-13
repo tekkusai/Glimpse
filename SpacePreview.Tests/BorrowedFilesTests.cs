@@ -1,6 +1,9 @@
 using System.IO.Compression;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Windows;
 using SpacePreview.Native;
+using SpacePreview.Preview;
 using SpacePreview.Services;
 
 namespace SpacePreview.Tests;
@@ -77,6 +80,59 @@ public sealed class BorrowedFilesTests
 
         BorrowedFiles.Clear();
         Assert.All(copies, copy => Assert.False(File.Exists(copy), copy));
+    });
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public Task ACopyAWindowShowsIsKeptForAsLongAsItShowsIt(bool hidden) => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var names = Enumerable.Range(1, 8).Select(i => $"notes{i}.txt").ToArray();
+        var zip = WriteZip(temp, [.. names.Select((name, i) => (name, Encoding.ASCII.GetBytes($"file {i}\r\n"), DateTime.Now))]);
+        var shown = Borrow(zip, names[0])!;
+        var dpi = (uint)Math.Round(PreviewWindow.ReadMonitor(IntPtr.Zero).Scale * 96);
+        var window = new PreviewWindow { ParkedMonitor = StageMonitor.FromPixels(new Rect(-30000, 0, 1920, 1040), dpi) };
+        try
+        {
+            window.ShowPreview(shown, IntPtr.Zero);
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+            while (!Fields.Get<bool>(window, "_loadFinished"))
+            {
+                Assert.True(DateTime.UtcNow < deadline, "Timed out waiting for the window.");
+                await Task.Delay(10);
+            }
+
+            // Six more are borrowed while it is on screen, as they are
+            // behind a window pinned for the afternoon. Its text is read
+            // from the copy as the reader scrolls, and a picture is
+            // decoded from it again when zoomed.
+            foreach (var name in names[1..7])
+            {
+                Borrow(zip, name);
+                Thread.Sleep(20);
+            }
+
+            Assert.True(File.Exists(shown));
+
+            // Once the window lets go of it, hidden or closed, it is a
+            // copy like any other.
+            if (hidden)
+            {
+                window.HidePreview();
+            }
+            else
+            {
+                window.Close();
+            }
+
+            Borrow(zip, names[7]);
+            Assert.False(File.Exists(shown));
+        }
+        finally
+        {
+            window.Close();
+        }
     });
 
     [Theory]
