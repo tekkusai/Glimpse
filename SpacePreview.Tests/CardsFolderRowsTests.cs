@@ -74,7 +74,8 @@ public sealed class CardsFolderRowsTests
                     window.ShowPreview(folder, IntPtr.Zero);
                     await WaitUntilAsync(() => Texts(window).Any(text => text.EndsWith(" files", StringComparison.Ordinal)), TimeSpan.FromSeconds(10));
 
-                    Assert.Contains("700 B · 26 folders · 26,001 files", Texts(window));
+                    // Counts are grouped the region's way, so the expectation is too.
+                    Assert.Contains($"700 B · 26 folders · {26001:N0} files", Texts(window));
                 }
                 finally
                 {

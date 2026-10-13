@@ -95,7 +95,8 @@ public sealed class CardsListingTests
             // The archive's name as the title, what it holds as the one fact.
             var texts = Texts(window);
             Assert.Contains("bundle.zip", texts);
-            Assert.Contains("4 files · 2.3 KB uncompressed", texts);
+            // A size takes the region's decimal sign, so the expectation does too.
+            Assert.Contains($"4 files · {2.3:0.#} KB uncompressed", texts);
 
             // The folder's rows, largest first, each with its size and bar;
             // the folder inside opens to its own rows.

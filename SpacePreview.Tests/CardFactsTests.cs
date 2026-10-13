@@ -95,7 +95,8 @@ public sealed class CardFactsTests
 
         Assert.Null(MeshPreviewLoader.TryLoad(binary, CancellationToken.None));
         Assert.Null(MeshPreviewLoader.TryLoad(text, CancellationToken.None));
-        Assert.Equal(new[] { "1,200 triangles" }, CardFacts.Stl(binary, CancellationToken.None));
+        // Counts are grouped the region's way, so the expectation is too.
+        Assert.Equal(new[] { $"{1200:N0} triangles" }, CardFacts.Stl(binary, CancellationToken.None));
         Assert.Equal(new[] { "3 triangles" }, CardFacts.Stl(text, CancellationToken.None));
         Assert.Empty(CardFacts.Stl(temp.CreateFile("words.stl", "not a mesh at all"), CancellationToken.None));
     }

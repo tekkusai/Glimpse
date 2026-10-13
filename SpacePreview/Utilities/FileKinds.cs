@@ -296,7 +296,8 @@ internal static partial class FileKinds
         }
     }
 
-    public static string FormatSize(long bytes)
+    /// <summary>A size in the region's digits: 5.3 KB here, 5,3 KB in Berlin.</summary>
+    public static string FormatSize(long bytes, CultureInfo? culture = null)
     {
         string[] units = ["B", "KB", "MB", "GB", "TB"];
         double size = bytes;
@@ -307,7 +308,7 @@ internal static partial class FileKinds
             unit++;
         }
 
-        return unit == 0 ? $"{bytes} B" : $"{size:0.#} {units[unit]}";
+        return unit == 0 ? $"{bytes} B" : $"{size.ToString("0.#", culture ?? CultureInfo.CurrentCulture)} {units[unit]}";
     }
 
     /// <summary>
@@ -325,7 +326,7 @@ internal static partial class FileKinds
                 parts.Add("File");
             }
 
-            parts.Add(FormatSize(file.Length));
+            parts.Add(FormatSize(file.Length, culture));
         }
         else
         {
