@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -388,6 +389,38 @@ public sealed class TextFileViewTests
             window.Close();
         }
     });
+
+    /// <summary>
+    /// The file may be on a share that has stopped answering, and a
+    /// question put to it on the window's thread stops the window with it.
+    /// Every use of the reader in the view is the one number it already
+    /// has, or sits inside a Task.Run.
+    /// </summary>
+    [Fact]
+    public void TheViewAsksTheFileNothingOnTheWindowsThread()
+    {
+        var source = TestSource.Read(@"SpacePreview\Preview\TextFileView.cs");
+        var background = new List<(int Start, int End)>();
+        for (var at = source.IndexOf("Task.Run(", StringComparison.Ordinal); at >= 0; at = source.IndexOf("Task.Run(", at + 1, StringComparison.Ordinal))
+        {
+            var depth = 0;
+            var end = at + "Task.Run".Length;
+            do
+            {
+                depth += source[end] == '(' ? 1 : source[end] == ')' ? -1 : 0;
+                end++;
+            }
+            while (depth > 0);
+            background.Add((at, end));
+        }
+
+        var asked = Regex.Matches(source, @"_reader\.(?!First\b)\w+");
+        Assert.NotEmpty(background);
+        Assert.NotEmpty(asked);
+        Assert.All(asked, use => Assert.True(
+            background.Any(run => use.Index > run.Start && use.Index < run.End),
+            $"{use.Value} on line {source[..use.Index].Count(c => c == (char)10) + 1} is asked on the window's thread"));
+    }
 
     [Fact]
     public Task AVeryLongLineIsSteppedOver() => WpfApp.RunAsync(async () =>

@@ -16,7 +16,9 @@ namespace SpacePreview.Preview;
 /// file of any size is read through at the cost of what is on screen. End
 /// goes to the file's real last line and Home back to its first. What a
 /// very long line looks like is the reader's business: here every piece is
-/// lines of text.
+/// lines of text. The file may be on a share that has stopped answering,
+/// so nothing here asks the reader anything on the window's thread: every
+/// question goes through Task.Run.
 /// </summary>
 internal sealed class TextFileView
 {
@@ -128,22 +130,20 @@ internal sealed class TextFileView
         try
         {
             // Far from the end, the box lets go of what it holds and takes
-            // the file's last lines.
-            var near = _reader.Length - Range.End <= _headBytes;
-            if (!near)
+            // the file's last lines. Near it there is no tail to take: the
+            // box reads on from where it is.
+            var held = Range.End;
+            var tail = await Task.Run(() => _reader.Length - held <= _headBytes ? null : _reader.ReadBefore(_reader.Length, _headBytes));
+            if (turn != _turn || _left)
             {
-                var tail = await Task.Run(() => _reader.ReadBefore(_reader.Length, _headBytes));
-                if (turn != _turn || _left)
-                {
-                    return;
-                }
+                return;
+            }
 
-                if (tail.Text.Length > 0)
-                {
-                    _box.Text = tail.Text;
-                    Hold(tail);
-                    near = true;
-                }
+            var near = tail is null or { Text.Length: > 0 };
+            if (tail is { Text.Length: > 0 })
+            {
+                _box.Text = tail.Text;
+                Hold(tail);
             }
 
             // The last of a file whose end the box had nearly reached, and
