@@ -25,9 +25,17 @@ public sealed class InputTypingPassTests
     [Fact]
     public Task AKeyTypedIntoATextBoxPostsNothing() => WithController(controller =>
     {
-        // Counts what is posted to this dispatcher from here on, from any thread.
+        // Counts what the hook thread posts to this dispatcher. Counted
+        // from any thread, another test class starting its own turn here
+        // made this read 2 for 1, twice in 79 full runs on a busy PC.
         var posts = 0;
-        DispatcherHookEventHandler count = (_, _) => Interlocked.Increment(ref posts);
+        DispatcherHookEventHandler count = (_, _) =>
+        {
+            if (HookThread.IsHere)
+            {
+                Interlocked.Increment(ref posts);
+            }
+        };
         var hooks = Dispatcher.CurrentDispatcher.Hooks;
         hooks.OperationPosted += count;
         try
@@ -65,7 +73,13 @@ public sealed class InputTypingPassTests
         Fields.Call(controller, "PublishKeyState");
 
         var posts = 0;
-        DispatcherHookEventHandler count = (_, _) => Interlocked.Increment(ref posts);
+        DispatcherHookEventHandler count = (_, _) =>
+        {
+            if (HookThread.IsHere)
+            {
+                Interlocked.Increment(ref posts);
+            }
+        };
         var hooks = Dispatcher.CurrentDispatcher.Hooks;
         hooks.OperationPosted += count;
         try

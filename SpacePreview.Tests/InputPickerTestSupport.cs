@@ -139,10 +139,31 @@ internal static class HookThread
     public static void KeyUp(SpacePreviewController controller, int vk) =>
         OffDispatcher(() => Fields.Call(controller, "OnKeyUp", vk));
 
+    [ThreadStatic]
+    private static bool _here;
+
+    /// <summary>
+    /// True on the thread standing in for the hook thread, while its call
+    /// runs. A test that counts what a key posts counts only from here: the
+    /// dispatcher is shared, and other test classes post to it as well.
+    /// </summary>
+    public static bool IsHere => _here;
+
     /// <summary>Runs the call on another thread and spins for it: the dispatcher pumps nothing meanwhile.</summary>
     public static T OffDispatcher<T>(Func<T> call)
     {
-        var task = Task.Run(call);
+        var task = Task.Run(() =>
+        {
+            _here = true;
+            try
+            {
+                return call();
+            }
+            finally
+            {
+                _here = false;
+            }
+        });
         var waited = Stopwatch.StartNew();
         while (!task.IsCompleted)
         {
