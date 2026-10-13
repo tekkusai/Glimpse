@@ -265,7 +265,7 @@ One gesture set for every zoomable view:
 - Ctrl+Plus, Ctrl+Minus and Ctrl+0 work whenever the view is zoomable.
 - Pan is clamped to the content's edges.
 - A picture longer than 4096 pixels opens from a decode of that size.
-  Zoomed in past those pixels it is decoded again at its own size, up to 64
+  Zoomed in past those pixels it is decoded again at its own size, up to 128
   megapixels, and that decode is the one on screen until the zoom comes back
   under the first. At fit and below, the first decode is drawn as before.
   The larger one is not kept when the picture leaves.

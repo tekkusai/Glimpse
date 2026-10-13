@@ -56,10 +56,11 @@ public partial class PreviewWindow : Window
     private const int MaxImageDecodePixels = 4096;
 
     // Zoomed in past what that decode holds, a picture is decoded again at
-    // its own size. A 61-megapixel photo is 183 MB at that size, so one
-    // with more pixels than this is brought down to it, and no side is
-    // longer than a graphics card draws in one piece.
-    private const long SharpImageDecodePixels = 64_000_000;
+    // its own size. A 10000 by 9000 picture is 343 MB at that size and
+    // decodes faster whole than brought down, so the budget sits above it:
+    // 488 MB of pixels at most. One with more is brought down to that,
+    // and no side is longer than a graphics card draws in one piece.
+    private const long SharpImageDecodePixels = 128_000_000;
     private const int SharpImageDecodeLongSide = 16384;
     private static readonly TimeSpan LargeImageFullDecodeDelay = TimeSpan.FromMilliseconds(420);
     private const string PinGlyph = "\uE718";
