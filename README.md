@@ -99,7 +99,7 @@ Glimpse.exe --quit                # quit the running copy
 
 Glimpse reads a file only when you ask to preview it. Files never leave your PC, and Glimpse doesn't change their default apps. The only request Glimpse makes on its own is to GitHub, to look for a new release.
 
-The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Office conversion runs with its network blocked. Updates install only when their signature matches the key built into the app. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
+The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Before a document is converted, Glimpse removes links that point outside the file from modern Office and OpenDocument files, and the converter's web access is blocked. Old-format Office files (`.doc`, `.xls`, `.ppt`, `.rtf`) can't be cleaned that way yet: one that links a picture from a shared folder can make the converter contact that folder when the file is previewed. Updates install only when their signature matches the key built into the app. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
 
 Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 
