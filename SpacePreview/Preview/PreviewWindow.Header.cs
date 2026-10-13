@@ -919,6 +919,11 @@ public partial class PreviewWindow
 
         menu.Items.Add(new Separator { Style = separator });
         menu.Items.Add(MenuItemFor(string.IsNullOrEmpty(selectedText) ? "Copy" : "Copy file", CopyCurrentFile));
+        if (CanCopyPictureText)
+        {
+            menu.Items.Add(MenuItemFor("Copy text", () => _ = CopyPictureTextAsync()));
+        }
+
         menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
     }
 

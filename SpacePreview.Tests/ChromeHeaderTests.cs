@@ -392,7 +392,12 @@ public sealed class ChromeHeaderTests
             window.FillContextMenu(menu, selectedText: null);
             labels = menu.Items.OfType<MenuItem>().Select(item => (string)item.Header).ToArray();
             Assert.DoesNotContain("Copy file", labels);
-            Assert.Equal("Copy", labels[^2]);
+
+            // The copies close the menu: the file, the words in the picture
+            // where this PC's Windows can read them, the path.
+            Assert.Equal(
+                PictureText.IsAvailable ? ["Copy", "Copy text", "Copy path"] : ["Copy", "Copy path"],
+                labels[^(PictureText.IsAvailable ? 3 : 2)..]);
         }
         finally
         {

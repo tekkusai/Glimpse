@@ -442,6 +442,59 @@ public partial class PreviewWindow
     /// <summary>Dev probe: the double-click gesture at the center of the image on screen.</summary>
     internal void ProbeImageToggle() => _imageZoom?.ToggleActualSize();
 
+    // A picture in the image viewer, on a PC whose Windows can read text.
+    private bool CanCopyPictureText => _imageZoom is ImageViewer && _rotationSession is not null && PictureText.IsAvailable;
+
+    /// <summary>
+    /// Copies the words in the picture on screen, read as it is shown. The
+    /// viewer's notice says what happened. <paramref name="copy"/> is the
+    /// clipboard, or a test's stand-in for it.
+    /// </summary>
+    internal async Task CopyPictureTextAsync(Action<string>? copy = null)
+    {
+        if (_imageZoom is not ImageViewer viewer || _rotationSession is not { } session)
+        {
+            return;
+        }
+
+        var version = _loadVersion;
+        try
+        {
+            var reading = PictureText.ReadAsync(session.CurrentBitmap);
+
+            // A large photo takes a moment. Past that moment the notice
+            // says the click was taken.
+            if (await Task.WhenAny(reading, Task.Delay(PictureTextPatience)) != reading)
+            {
+                viewer.ShowNotice("Reading the text");
+            }
+
+            var text = await reading;
+            if (version != _loadVersion)
+            {
+                // The reader has moved to another file. Text arriving on
+                // the clipboard now would be a surprise.
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                viewer.ShowNotice("No text found in this picture.");
+                return;
+            }
+
+            (copy ?? (words => SetClipboard(() => Clipboard.SetText(words), "copy picture text")))(text);
+            viewer.ShowNotice("Text copied.");
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"picture text failed {session.Path}: {ex.GetType().Name}: {ex.Message}");
+            viewer.ShowNotice("Couldn't read the text in this picture.");
+        }
+    }
+
+    private static readonly TimeSpan PictureTextPatience = TimeSpan.FromMilliseconds(300);
+
     private void UpdateRotateButtons()
     {
         var suffix = RotateTooltipSuffix(_rotationSession?.Persistence);

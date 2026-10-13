@@ -304,6 +304,9 @@ internal sealed class ImageViewer : IZoomableImage
     /// </summary>
     public void ShowNotice(string text) => ShowHud(text, NoticeHold);
 
+    /// <summary>What the notice last said.</summary>
+    internal string NoticeText => _hudText.Text;
+
     private void ShowHud() => ShowHud($"{Math.Round(_scale * 100)}%", ZoomGestures.HudHold);
 
     private void ShowHud(string text, TimeSpan hold)

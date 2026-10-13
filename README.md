@@ -121,7 +121,7 @@
 | <kbd>Ctrl</kbd> <kbd>R</kbd>, <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>R</kbd> | Turn an image right or left |
 | <kbd>F11</kbd> | Fill the screen |
 
-Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. The menu beside Open has Open with, Show in Explorer and Share.
+Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. On a photo, Copy text reads the words in the picture, on your PC, in the languages your Windows has. The menu beside Open has Open with, Show in Explorer and Share.
 
 ## Everything it opens
 
