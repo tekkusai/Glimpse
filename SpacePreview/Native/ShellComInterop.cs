@@ -164,11 +164,85 @@ internal interface IShellItem
 
     [PreserveSig]
     int GetDisplayName(uint sigdnName, out IntPtr ppszName);
+
+    [PreserveSig]
+    int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+internal struct PropertyKey(Guid formatId, uint propertyId)
+{
+    public Guid FormatId = formatId;
+    public uint PropertyId = propertyId;
+}
+
+/// <summary>
+/// IShellItem with its properties. Every slot is declared, in the order
+/// Windows lays them out, so the three this app calls land where they are.
+/// </summary>
+[ComImport]
+[Guid("7E9FB0D3-919F-4307-AB2E-9B1860310C93")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IShellItem2
+{
+    [PreserveSig]
+    int BindToHandler(IntPtr pbc, ref Guid bhid, ref Guid riid, out IntPtr ppv);
+
+    [PreserveSig]
+    int GetParent(out IntPtr ppsi);
+
+    [PreserveSig]
+    int GetDisplayName(uint sigdnName, out IntPtr ppszName);
+
+    [PreserveSig]
+    int GetAttributes(uint sfgaoMask, out uint psfgaoAttribs);
+
+    [PreserveSig]
+    int Compare(IntPtr psi, uint hint, out int piOrder);
+
+    [PreserveSig]
+    int GetPropertyStore(int flags, ref Guid riid, out IntPtr ppv);
+
+    [PreserveSig]
+    int GetPropertyStoreWithCreateObject(int flags, IntPtr punkCreateObject, ref Guid riid, out IntPtr ppv);
+
+    [PreserveSig]
+    int GetPropertyStoreForKeys(IntPtr rgKeys, uint cKeys, int flags, ref Guid riid, out IntPtr ppv);
+
+    [PreserveSig]
+    int GetPropertyDescriptionList(IntPtr keyType, ref Guid riid, out IntPtr ppv);
+
+    [PreserveSig]
+    int Update(IntPtr pbc);
+
+    [PreserveSig]
+    int GetProperty(ref PropertyKey key, IntPtr ppropvar);
+
+    [PreserveSig]
+    int GetCLSID(ref PropertyKey key, out Guid pclsid);
+
+    [PreserveSig]
+    int GetFileTime(ref PropertyKey key, out long pft);
+
+    [PreserveSig]
+    int GetInt32(ref PropertyKey key, out int pi);
+
+    [PreserveSig]
+    int GetString(ref PropertyKey key, out IntPtr ppsz);
+
+    [PreserveSig]
+    int GetUInt32(ref PropertyKey key, out uint pui);
+
+    [PreserveSig]
+    int GetUInt64(ref PropertyKey key, out ulong pull);
+
+    [PreserveSig]
+    int GetBool(ref PropertyKey key, out int pf);
 }
 
 /// <summary>What a folder view says is selected.</summary>
 /// <param name="Count">Every selected item, files or not.</param>
-/// <param name="AnchorPath">The anchor's filesystem path; null when the anchor is not a file or folder on disk.</param>
+/// <param name="AnchorPath">The anchor's filesystem path, or the path of a copy borrowed for it; null when the anchor is neither a file or folder on disk nor one that could be borrowed.</param>
 /// <param name="OrderedPaths">The selected filesystem paths in view order, when asked for.</param>
 internal readonly record struct FolderViewSelection(
     int Count,
@@ -326,9 +400,11 @@ internal static class ShellViews
     /// <summary>
     /// The selection's size and anchor, and its members in view order when
     /// <paramref name="ordered"/> asks and there is more than one. Without
-    /// the view-order flag the shell lists the anchor first.
+    /// the view-order flag the shell lists the anchor first. An anchor with
+    /// no path on disk (a file on a phone, in a zip folder) is handed to
+    /// <paramref name="borrow"/>, which may answer with the path of a copy.
     /// </summary>
-    public static FolderViewSelection ReadSelection(IFolderView view, bool ordered, out int hr)
+    public static FolderViewSelection ReadSelection(IFolderView view, bool ordered, out int hr, Func<IShellItem, string?>? borrow = null)
     {
         hr = view.ItemCount(SvgioSelection, out var count);
         if (hr != 0 || count <= 0)
@@ -336,14 +412,14 @@ internal static class ShellViews
             return new FolderViewSelection(0, null, null);
         }
 
-        var anchor = ReadPaths(view, SvgioSelection, maxItems: 1, out hr);
+        var anchor = ReadPaths(view, SvgioSelection, maxItems: 1, borrow, out hr);
         if (hr != 0)
         {
             return new FolderViewSelection(count, null, null);
         }
 
         var members = ordered && count > 1
-            ? ReadPaths(view, SvgioSelection | SvgioFlagViewOrder, maxItems: 256, out _)
+            ? ReadPaths(view, SvgioSelection | SvgioFlagViewOrder, maxItems: 256, borrow: null, out _)
             : null;
         return new FolderViewSelection(count, anchor is { Count: > 0 } ? anchor[0] : null, members);
     }
@@ -516,10 +592,11 @@ internal static class ShellViews
 
     /// <summary>
     /// Filesystem paths of a view's items. A member with no path on disk (a
-    /// zip entry, a phone, a library node) takes no slot; for the anchor that
-    /// means "not a file".
+    /// zip entry, a phone, a library node) takes no slot unless
+    /// <paramref name="borrow"/> answers for it; for the anchor an empty
+    /// list means "not a file".
     /// </summary>
-    private static List<string>? ReadPaths(IFolderView view, uint flags, int maxItems, out int hr)
+    private static List<string>? ReadPaths(IFolderView view, uint flags, int maxItems, Func<IShellItem, string?>? borrow, out int hr)
     {
         var iid = ShellItemArrayIid;
         hr = view.Items(flags, ref iid, out var arrayPtr);
@@ -542,7 +619,7 @@ internal static class ShellViews
             var take = maxItems == 1 ? Math.Min(count, 1u) : count;
             for (uint i = 0; i < take && paths.Count < maxItems; i++)
             {
-                if (TryReadPath(items, i) is { } path)
+                if (TryReadPath(items, i, borrow) is { } path)
                 {
                     paths.Add(path);
                 }
@@ -557,7 +634,7 @@ internal static class ShellViews
         }
     }
 
-    private static string? TryReadPath(IShellItemArray items, uint index)
+    private static string? TryReadPath(IShellItemArray items, uint index, Func<IShellItem, string?>? borrow = null)
     {
         if (items.GetItemAt(index, out var itemPtr) != 0 || itemPtr == IntPtr.Zero)
         {
@@ -570,7 +647,7 @@ internal static class ShellViews
             item = (IShellItem)Marshal.GetUniqueObjectForIUnknown(itemPtr);
             if (item.GetDisplayName(SigdnFilesysPath, out var namePtr) != 0 || namePtr == IntPtr.Zero)
             {
-                return null;
+                return borrow?.Invoke(item);
             }
 
             try

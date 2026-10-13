@@ -73,7 +73,7 @@ internal static class CacheHousekeeping
     }
 
     /// <summary>The entry itself is held, or something inside it is.</summary>
-    private static bool IsHeld(FileSystemInfo entry)
+    internal static bool IsHeld(FileSystemInfo entry)
     {
         var root = entry.FullName;
         lock (Held)

@@ -552,6 +552,9 @@ internal static class ExplorerSelectionService
     /// is skipped in the direction the user is going; at the folder's end
     /// the selection goes back where it started.
     /// </summary>
+    // A selected file with no path on disk is shown from a copy.
+    private static readonly Func<IShellItem, string?> Borrow = item => BorrowedFiles.TryBorrow(item);
+
     private static ExplorerSelection? Step(IFolderView view, IntPtr targetHwnd, int delta)
     {
         var start = ShellViews.GetPosition(view);
@@ -566,7 +569,7 @@ internal static class ExplorerSelectionService
         var skipped = false;
         while (true)
         {
-            var selection = ShellViews.ReadSelection(view, ordered: false, out _);
+            var selection = ShellViews.ReadSelection(view, ordered: false, out _, Borrow);
             if (selection.AnchorPath is { } path)
             {
                 if (skipped)
@@ -624,7 +627,7 @@ internal static class ExplorerSelectionService
                 return null;
             }
 
-            selection = ShellViews.ReadSelection(view, includeMultiSelectionPaths, out hr);
+            selection = ShellViews.ReadSelection(view, includeMultiSelectionPaths, out hr, Borrow);
         }
 
         try

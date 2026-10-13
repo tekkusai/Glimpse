@@ -111,6 +111,10 @@ public partial class App : Application
             _controller.Start();
             CacheHousekeeping.Start();
 
+            // Copies of files from a phone or a zip folder never outlive
+            // the session that made them.
+            _ = Task.Run(BorrowedFiles.Clear);
+
             // Once, right after install: the app introduces itself with its
             // own preview window and is dismissed with the gesture it teaches.
             if (!Settings.Current.WelcomeShown)

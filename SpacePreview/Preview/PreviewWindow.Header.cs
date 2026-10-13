@@ -169,7 +169,9 @@ public partial class PreviewWindow
             return HeaderTool.Rotate;
         }
 
-        return Path.GetExtension(contentPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
+        // A copy made to show a file from a phone or a zip folder is not
+        // the file: a signature saved into it would reach nothing.
+        return Path.GetExtension(contentPath).Equals(".pdf", StringComparison.OrdinalIgnoreCase) && !BorrowedFiles.IsBorrowed(contentPath)
             ? HeaderTool.Sign
             : HeaderTool.None;
     }
@@ -711,7 +713,10 @@ public partial class PreviewWindow
 
         // Not every preview was reached through an Explorer selection (file
         // dialogs, folder browsing), so every preview answers "where is it".
-        if (File.Exists(path) || Directory.Exists(path))
+        // A borrowed copy lives in a folder of Glimpse's own, which is not
+        // where the file is.
+        var borrowed = BorrowedFiles.IsBorrowed(path);
+        if (!borrowed && (File.Exists(path) || Directory.Exists(path)))
         {
             actions.Add(("Show in Explorer", () => RevealInExplorer(path)));
         }
@@ -726,7 +731,7 @@ public partial class PreviewWindow
             actions.Add(("Show target in Explorer", () => RevealInExplorer(target)));
         }
 
-        if (CanRunAsAdministrator(contentPath))
+        if (!borrowed && CanRunAsAdministrator(contentPath))
         {
             actions.Add(("Run as administrator", () => RunAsAdministrator(contentPath)));
         }
@@ -924,7 +929,10 @@ public partial class PreviewWindow
             menu.Items.Add(MenuItemFor("Copy text", () => _ = CopyPictureTextAsync()));
         }
 
-        menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
+        if (!BorrowedFiles.IsBorrowed(CurrentPath))
+        {
+            menu.Items.Add(MenuItemFor("Copy path", CopyCurrentPath));
+        }
     }
 
     private void OnWebContextMenuRequested(WebView2 webView, CoreWebView2ContextMenuRequestedEventArgs args)
