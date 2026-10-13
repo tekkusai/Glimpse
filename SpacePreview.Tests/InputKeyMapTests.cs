@@ -123,6 +123,17 @@ public sealed class InputKeyMapTests
         ("Space typed into another window's search box leaves the glance alone", Elsewhere(Space, OtherExplorerWindow) with { Typing = true }, false, KeyAction.None),
         ("Sign mode: Esc typed into a rename in Explorer is the rename's", Owner(Esc) with { FillSign = true, Typing = true }, false, KeyAction.None),
 
+        // Explorer's header keeps the keyboard when Esc is pressed there, so
+        // a glance that waited its turn would never get one. Esc is the glance's.
+        ("Esc in the header's search box ends the glance", Owner(Esc) with { Typing = true, HeaderFocus = true }, true, KeyAction.Hide),
+        ("Esc in the header over the index sheet closes the sheet first", Owner(Esc) with { EscapeLayer = true, Typing = true, HeaderFocus = true }, true, KeyAction.EscapeLayer),
+        ("Sign mode: Esc in the header walks the mode's own layers", Owner(Esc) with { FillSign = true, Typing = true, HeaderFocus = true }, true, KeyAction.FillSignEscape),
+        ("Esc in the header with nothing open is the header's", Idle(Esc, ExplorerWindow) with { Typing = true, HeaderFocus = true }, false, KeyAction.None),
+        ("Ctrl+Esc in the header is still Start", Owner(Esc) with { Ctrl = true, Typing = true, HeaderFocus = true }, false, KeyAction.None),
+        ("Space typed into the header's search box under a glance stays in the box", Owner(Space) with { Typing = true, HeaderFocus = true }, false, KeyAction.None),
+        ("Left in the header's address bar under a glance moves the caret", Owner(Left) with { Typing = true, HeaderFocus = true }, false, KeyAction.None),
+        ("Enter in the header's address bar goes there and ends the glance", Owner(Enter) with { Typing = true, HeaderFocus = true }, false, KeyAction.Hide),
+
         // Sign mode: placed ink is never browsed or dismissed away by a key.
         ("Sign mode: Space reaches the page", OnPreview(Space) with { FillSign = true }, false, KeyAction.None),
         ("Sign mode: Enter reaches the date editor", OnPreview(Enter) with { FillSign = true }, false, KeyAction.None),

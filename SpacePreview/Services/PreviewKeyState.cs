@@ -28,6 +28,12 @@ internal readonly record struct KeyPress
     /// </summary>
     public bool RootTyping { get; init; }
 
+    /// <summary>
+    /// The keyboard is in Explorer's header, which keeps it when Esc is
+    /// pressed there: measured on the search box, the address bar and Sort.
+    /// </summary>
+    public bool RootHeaderFocus { get; init; }
+
     /// <summary>It is a file picker whose file list holds focus.</summary>
     public bool RootFileListFocus { get; init; }
 

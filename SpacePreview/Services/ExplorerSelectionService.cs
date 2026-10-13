@@ -404,10 +404,12 @@ internal static class ExplorerSelectionService
     /// <summary>
     /// A text box in the window holds the keyboard, so every key is the text
     /// box's. Read from Windows alone and nothing here waits, so the hook
-    /// thread asks it at each key.
+    /// thread asks it at each key. <paramref name="header"/> says the place
+    /// is Explorer's header, which no key of the user's ends.
     /// </summary>
-    public static bool IsTyping(IntPtr root)
+    public static bool IsTyping(IntPtr root, out bool header)
     {
+        header = false;
         if (root == IntPtr.Zero)
         {
             return false;
@@ -421,12 +423,13 @@ internal static class ExplorerSelectionService
 
         return threadId != 0
             && NativeMethods.GetGUIThreadInfo(threadId, ref info)
-            && HasTextFocus(root, info.hwndFocus, info.hwndCaret);
+            && HasTextFocus(root, info.hwndFocus, info.hwndCaret, out header);
     }
 
     /// <summary>The three things that are a text box with the keyboard.</summary>
-    internal static bool HasTextFocus(IntPtr root, IntPtr focus, IntPtr caret)
+    internal static bool HasTextFocus(IntPtr root, IntPtr focus, IntPtr caret, out bool header)
     {
+        header = false;
         if (focus == IntPtr.Zero)
         {
             return false;
@@ -459,7 +462,8 @@ internal static class ExplorerSelectionService
             child = parent;
         }
 
-        return PreviewInputPolicy.IsHeaderIslandClass(NativeMethods.GetClassNameString(child));
+        header = PreviewInputPolicy.IsHeaderIslandClass(NativeMethods.GetClassNameString(child));
+        return header;
     }
 
     private static ExplorerSelection? BrowseExplorer(IntPtr explorerHwnd, int delta) =>

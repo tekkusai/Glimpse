@@ -81,6 +81,9 @@ internal readonly record struct KeyFacts
     /// </summary>
     public bool Typing { get; init; }
 
+    /// <summary>The text place is the header of the Explorer window the glance is over.</summary>
+    public bool HeaderFocus { get; init; }
+
     /// <summary>The owner picker's file list holds focus (not its name box or buttons).</summary>
     public bool PickerListFocus { get; init; }
 
@@ -235,6 +238,7 @@ internal static class PreviewKeyMap
             Source = state.Source,
             MultiSelection = state.MultiSelection,
             Typing = key.RootTyping && target is not (KeyTarget.Preview or KeyTarget.Pinned),
+            HeaderFocus = key.RootHeaderFocus && target == KeyTarget.Owner,
             PickerListFocus = target == KeyTarget.Owner
                 && state.Source == SelectionSource.CommonFileDialog
                 && (space || IsNavigation(key.Vk))
@@ -400,7 +404,12 @@ internal static class PreviewKeyMap
         // is heard and never taken. It commits the rename or the path, and
         // the glance over that window would go on showing a file under a
         // name, or in a folder, it has left. 3.0.0 closed it there.
-        if (f.Typing)
+        //
+        // Explorer's header is the one place Esc ends no typing. It keeps
+        // the keyboard, so a glance that waited its turn would never get
+        // one. Esc there is the glance's, as it was in 3.0.0.
+        var headerEsc = f.HeaderFocus && f.PreviewVisible && f.Vk == NativeMethods.VK_ESCAPE;
+        if (f.Typing && !headerEsc)
         {
             return f.Vk == NativeMethods.VK_RETURN
                 && !f.Ctrl && !f.Alt && !f.Win

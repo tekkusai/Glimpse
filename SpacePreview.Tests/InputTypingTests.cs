@@ -30,10 +30,10 @@ public sealed class InputTypingTests
 
         // Whichever of the island's two windows Windows gives the keyboard to.
         input.Focus();
-        Assert.True(ExplorerSelectionService.IsTyping(explorer.Handle));
+        Assert.True(Typing(explorer.Handle));
 
         island.Focus();
-        Assert.True(ExplorerSelectionService.IsTyping(explorer.Handle));
+        Assert.True(Typing(explorer.Handle));
     });
 
     /// <summary>
@@ -51,7 +51,7 @@ public sealed class InputTypingTests
 
         input.Focus();
 
-        Assert.False(ExplorerSelectionService.IsTyping(explorer.Handle));
+        Assert.False(Typing(explorer.Handle));
     });
 
     [Fact]
@@ -64,7 +64,7 @@ public sealed class InputTypingTests
 
         rename.Focus();
 
-        Assert.True(ExplorerSelectionService.IsTyping(explorer.Handle));
+        Assert.True(Typing(explorer.Handle));
     });
 
     /// <summary>
@@ -79,10 +79,10 @@ public sealed class InputTypingTests
         using var search = wrapper.Child("DirectUIHWND");
 
         search.Focus();
-        Assert.False(ExplorerSelectionService.IsTyping(dialog.Handle));
+        Assert.False(Typing(dialog.Handle));
 
         search.ShowCaret();
-        Assert.True(ExplorerSelectionService.IsTyping(dialog.Handle));
+        Assert.True(Typing(dialog.Handle));
     });
 
     [Fact]
@@ -95,11 +95,11 @@ public sealed class InputTypingTests
         using var tree = explorer.Child("SysTreeView32");
         using var button = explorer.Child("Button");
 
-        Assert.False(ExplorerSelectionService.IsTyping(explorer.Handle));
+        Assert.False(Typing(explorer.Handle));
         foreach (var place in new[] { list, tree, button })
         {
             place.Focus();
-            Assert.False(ExplorerSelectionService.IsTyping(explorer.Handle));
+            Assert.False(Typing(explorer.Handle));
         }
     });
 
@@ -118,12 +118,42 @@ public sealed class InputTypingTests
         list.Focus();
         editor.ShowCaret();
 
-        Assert.False(ExplorerSelectionService.IsTyping(dialog.Handle));
+        Assert.False(Typing(dialog.Handle));
     });
 
     [Fact]
     public void NoWindowIsNotTyping()
     {
-        Assert.False(ExplorerSelectionService.IsTyping(IntPtr.Zero));
+        Assert.False(Typing(IntPtr.Zero));
     }
+
+    /// <summary>
+    /// The header is the one text place that is asked about again: it
+    /// holds buttons too, and Esc there leaves the keyboard where it is.
+    /// A rename and a picker's boxes are text and nothing else.
+    /// </summary>
+    [Fact]
+    public void OnlyExplorersHeaderIsNamedAsTheHeader() => TestWindow.OnOwnThread(() =>
+    {
+        using var explorer = TestWindow.Root("CabinetWClass");
+        using var island = explorer.Child(HeaderIsland);
+        using var input = island.Child(HeaderInput);
+        using var view = explorer.Child("SHELLDLL_DefView");
+        using var list = view.Child("DirectUIHWND");
+        using var rename = list.Child("Edit");
+
+        input.Focus();
+        Assert.True(ExplorerSelectionService.IsTyping(explorer.Handle, out var header));
+        Assert.True(header);
+
+        rename.Focus();
+        Assert.True(ExplorerSelectionService.IsTyping(explorer.Handle, out header));
+        Assert.False(header);
+
+        list.Focus();
+        Assert.False(ExplorerSelectionService.IsTyping(explorer.Handle, out header));
+        Assert.False(header);
+    });
+
+    private static bool Typing(IntPtr root) => ExplorerSelectionService.IsTyping(root, out _);
 }

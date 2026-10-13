@@ -89,6 +89,67 @@ public sealed class InputTypingPassTests
     });
 
     /// <summary>
+    /// The fault: Esc in Explorer's header leaves the keyboard in the
+    /// header, so with every key there counted as typing, a glance opened
+    /// before Ctrl+L or a click on Sort could not be closed by Esc again
+    /// until a file was clicked. 3.0.0 closed it.
+    /// </summary>
+    [Fact]
+    public Task EscInTheHeaderIsTakenAndEndsTheGlance() => WithController(async controller =>
+    {
+        Fields.Set(controller, "_previewVisible", true);
+        Fields.Set(controller, "_previewOwnerRootHwnd", Owner);
+        Fields.Call(controller, "PublishKeyState");
+
+        Assert.False(HookThread.KeyDown(controller, Typed(NativeMethods.VK_ESCAPE)), "Esc in a rename was taken.");
+        HookThread.KeyUp(controller, NativeMethods.VK_ESCAPE);
+        await HookThread.Idle();
+        Assert.False(controller.NoPreviewOpen);
+
+        Assert.True(HookThread.KeyDown(controller, Typed(NativeMethods.VK_ESCAPE) with { RootHeaderFocus = true }));
+        await HookThread.Idle();
+        Assert.True(controller.NoPreviewOpen);
+    });
+
+    /// <summary>
+    /// What was read of the header holds only until a key reaches
+    /// Explorer: that key may have moved the focus into the search box.
+    /// A key Glimpse takes never arrives there and changes nothing.
+    /// </summary>
+    [Fact]
+    public Task AKeyThatReachesExplorerForgetsTheHeaderAndOneGlimpseTakesDoesNot() => WithController(controller =>
+    {
+        var header = new ExplorerHeaderFocus(() => Owner, _ => true, _ => true);
+        Fields.Set(controller, "_headerFocus", header);
+        header.Watch(Owner);
+
+        Trust(header);
+        Assert.True(HookThread.KeyDown(controller, At(Space)), "Space over the file list was not taken.");
+        HookThread.KeyUp(controller, Space);
+        Assert.True(header.IsPlain(Owner), "A key Glimpse took forgot the header.");
+
+        // A letter: never examined, always typed.
+        Assert.False(HookThread.KeyDown(controller, new KeyPress { Vk = 'A', Root = Owner }));
+        Assert.False(header.IsPlain(Owner), "A letter that reached Explorer left the header trusted.");
+
+        // An arrow with nothing open: examined, and Explorer's.
+        Trust(header);
+        Assert.False(HookThread.KeyDown(controller, At(NativeMethods.VK_LEFT)));
+        Assert.False(header.IsPlain(Owner), "An arrow that reached Explorer left the header trusted.");
+        return Task.CompletedTask;
+    });
+
+    private static void Trust(ExplorerHeaderFocus header)
+    {
+        for (var read = 0; read < ExplorerHeaderFocus.ReadsToTrust; read++)
+        {
+            header.Tick(Environment.TickCount64);
+        }
+
+        Assert.True(header.IsPlain(Owner));
+    }
+
+    /// <summary>
     /// The latch that tells a held Space from a new press is the hook
     /// thread's own, and it follows every Space, typed or not. Without it a
     /// Space still held when focus leaves a text box would open a preview.

@@ -77,6 +77,8 @@ public sealed class HookPathArchitectureTests
                 "CommonFileDialogSelectionService.HasFileListFocus",
                 "DeferredFileDialogPreviewIntentSlot.Cancel",
                 "DiagnosticLog.Write",
+                "ExplorerHeaderFocus.IsPlain",
+                "ExplorerHeaderFocus.KeyWentBy",
                 "ExplorerSelectionService.HasTextFocus",
                 "ExplorerSelectionService.IsTyping",
                 "ExplorerSelectionService.TryGetForegroundContext",

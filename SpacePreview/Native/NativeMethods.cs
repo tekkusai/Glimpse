@@ -46,6 +46,7 @@ internal static class NativeMethods
     public const uint WM_TRAYICON = WM_APP + 1;
     public const int NIN_BALLOONUSERCLICK = 0x0405;
 
+    public const int VK_TAB = 0x09;
     public const int VK_RETURN = 0x0D;
     public const int VK_ESCAPE = 0x1B;
     public const int VK_SPACE = 0x20;
@@ -69,6 +70,7 @@ internal static class NativeMethods
     public const int VK_CONTROL = 0x11;
     public const int VK_F = 0x46;
     public const int VK_R = 0x52;
+    public const int VK_F6 = 0x75;
     public const int VK_F11 = 0x7A;
     public const int VK_MENU = 0x12;
     public const int VK_LWIN = 0x5B;

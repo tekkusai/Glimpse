@@ -96,6 +96,12 @@ public sealed class InputKeyStateTests
         ("Space typed into another window's search box leaves the glance alone", At(OtherExplorer, Space) with { RootTyping = true }, Showing, false, KeyAction.None),
         ("Esc typed into a text box does not cancel an open on its way", At(Owner, Esc) with { RootTyping = true }, Opening, false, KeyAction.None),
 
+        // Explorer's header keeps the keyboard when Esc is pressed there.
+        ("Esc in the owner's header ends the glance", At(Owner, Esc) with { RootTyping = true, RootHeaderFocus = true }, Showing, true, KeyAction.Hide),
+        ("Esc in another window's header leaves the glance alone", At(OtherExplorer, Esc) with { RootTyping = true, RootHeaderFocus = true }, Showing, false, KeyAction.None),
+        ("Esc in the header with nothing open is the header's", At(Owner, Esc) with { RootTyping = true, RootHeaderFocus = true }, Idle, false, KeyAction.None),
+        ("Space typed into the owner's header stays in its search box", At(Owner, Space) with { RootTyping = true, RootHeaderFocus = true }, Showing, false, KeyAction.None),
+
         // Glimpse's own text places answer for themselves, caret or not.
         ("Esc in the glance ends it whatever caret Windows reports there", At(Glance, Esc) with { RootTyping = true }, Showing, true, KeyAction.Hide),
         ("Esc in a pinned window closes it whatever caret Windows reports there", At(Pin, Esc) with { RootTyping = true }, Pinned, true, KeyAction.ClosePinned),
@@ -251,6 +257,7 @@ public sealed class InputKeyStateTests
         var everything = new KeyPress
         {
             RootTyping = true,
+            RootHeaderFocus = true,
             RootFileListFocus = true,
             RootChildFocus = true
         };
@@ -280,6 +287,12 @@ public sealed class InputKeyStateTests
         Assert.True(Facts(everything with { Vk = Space, Root = Owner }, Idle).Typing);
         Assert.False(Facts(everything with { Vk = Left, Root = Glance }, Showing).Typing);
         Assert.False(Facts(everything with { Vk = Esc, Root = Pin }, Pinned).Typing);
+
+        // The header matters over the glance's owner only.
+        Assert.True(Facts(everything with { Vk = Esc, Root = Owner }, Showing).HeaderFocus);
+        Assert.False(Facts(everything with { Vk = Esc, Root = Stranger }, Showing).HeaderFocus);
+        Assert.False(Facts(everything with { Vk = Esc, Root = Glance }, Showing).HeaderFocus);
+        Assert.False(Facts(everything with { Vk = Esc, Root = Owner }, Idle).HeaderFocus);
 
         // List focus matters in a picker that owns the glance.
         Assert.True(Facts(everything with { Vk = Down, Root = Dialog }, PickerShowing).PickerListFocus);

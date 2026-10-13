@@ -53,6 +53,7 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly MouseHook _mouseHook;
     private readonly FullscreenInputSuspension _fullscreenInputSuspension;
     private readonly CommonFileDialogSelectionMonitor _commonFileDialogMonitor;
+    private readonly ExplorerHeaderFocus _headerFocus = new();
     private readonly NativeMethods.WinEventProc _foregroundChanged;
     private readonly DispatcherTimer _idleTrimTimer;
     private readonly DispatcherTimer _ownerLossTimer;
@@ -283,6 +284,10 @@ internal sealed class SpacePreviewController : IDisposable
         // next switch away takes the dead handle out, the switch back
         // installs a new one.
         SyncKeyState();
+        _headerFocus.Watch(
+            wanted && PreviewInputPolicy.IsExplorerWindowClass(NativeMethods.GetClassNameString(root))
+                ? root
+                : IntPtr.Zero);
         if (wanted)
         {
             _keyboardHook.Start();
@@ -551,6 +556,14 @@ internal sealed class SpacePreviewController : IDisposable
 
         if (!PreviewKeyMap.IsMapped(vk))
         {
+            // It reaches the app, and may move the focus in Explorer's
+            // header. A bare Tab or F6 walks it there.
+            _headerFocus.KeyWentBy(
+                vk is NativeMethods.VK_TAB or NativeMethods.VK_F6
+                && !NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL)
+                && !NativeMethods.IsKeyDown(NativeMethods.VK_MENU)
+                && !NativeMethods.IsKeyDown(NativeMethods.VK_LWIN)
+                && !NativeMethods.IsKeyDown(NativeMethods.VK_RWIN));
             return false;
         }
 
@@ -593,6 +606,13 @@ internal sealed class SpacePreviewController : IDisposable
         if (space)
         {
             _spaceKey.Press(time, acted: decision.Swallow || decision.Action != KeyAction.None);
+        }
+
+        // A key Glimpse takes never reaches the header. Any other may
+        // move the focus there.
+        if (!decision.Swallow)
+        {
+            _headerFocus.KeyWentBy(walks: false);
         }
 
         // A key typed into a text box is the text box's and means nothing
@@ -654,6 +674,7 @@ internal sealed class SpacePreviewController : IDisposable
         var root = NativeMethods.GetForegroundRoot();
         var space = vk == NativeMethods.VK_SPACE;
         var arrow = PreviewKeyMap.IsArrow(vk);
+        var typing = ExplorerSelectionService.IsTyping(root, out var header);
         var press = new KeyPress
         {
             Vk = vk,
@@ -664,7 +685,9 @@ internal sealed class SpacePreviewController : IDisposable
             SpaceRepeat = spaceRepeat,
             Root = root,
             RootIsDesktop = PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)),
-            RootTyping = ExplorerSelectionService.IsTyping(root),
+            // The header is typing until it was read as taking no text.
+            RootTyping = typing && !(header && _headerFocus.IsPlain(root)),
+            RootHeaderFocus = header,
             RootFileListFocus = (space || PreviewKeyMap.IsNavigation(vk))
                 && CommonFileDialogSelectionService.HasFileListFocus(root),
             RootChildFocus = (arrow || vk == NativeMethods.VK_RETURN) && HasChildFocus(root)
@@ -2479,6 +2502,7 @@ internal sealed class SpacePreviewController : IDisposable
         _fullscreenInputSuspension.SuspensionChanged -= OnFullscreenSuspensionChanged;
         _keyboardHook.Dispose();
         _mouseHook.Dispose();
+        _headerFocus.Dispose();
 
         // Ends the state watch.
         SyncKeyState();

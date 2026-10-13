@@ -43,6 +43,9 @@ internal static class PreviewInputPolicy
         !string.IsNullOrWhiteSpace(className)
         && (DesktopWindowClasses.Contains(className) || ExplorerWindowClasses.Contains(className));
 
+    internal static bool IsExplorerWindowClass(string? className) =>
+        !string.IsNullOrWhiteSpace(className) && ExplorerWindowClasses.Contains(className);
+
     /// <summary>A classic text box: an Edit, or any generation of RichEdit.</summary>
     public static bool IsTextEditingClass(string? focusClass) =>
         !string.IsNullOrWhiteSpace(focusClass)
