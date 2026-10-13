@@ -9,8 +9,8 @@ namespace SpacePreview.Preview;
 /// <summary>
 /// The text in a picture, read by the engine Windows ships. It runs on this
 /// PC and nothing leaves it. It reads the languages the user has installed
-/// in Windows; with none that it can read, there is no engine and the menu
-/// offers nothing.
+/// in Windows; with none that it can read, there is no engine and the
+/// viewer offers nothing.
 /// </summary>
 internal static class PictureText
 {
@@ -24,16 +24,43 @@ internal static class PictureText
     /// it holds none. The picture is read as it is shown, so one the
     /// viewer has turned upright is read upright.
     /// </summary>
-    public static async Task<string> ReadAsync(BitmapSource picture, CancellationToken token = default)
+    public static async Task<string> ReadAsync(BitmapSource picture, CancellationToken token = default) =>
+        (await RecognizeAsync(picture, token)).Text;
+
+    /// <summary>Every word in the picture with the place it was found.</summary>
+    public static async Task<PictureWords> RecognizeAsync(BitmapSource picture, CancellationToken token = default)
     {
-        if (Engine.Value is not { } engine)
+        // The engine is made away from the caller's thread: the first
+        // answer loads it.
+        if (await Task.Run(() => Engine.Value, token) is not { } engine)
         {
-            return string.Empty;
+            return PictureWords.None;
         }
 
         using var bitmap = await Task.Run(() => ToSoftwareBitmap(picture), token);
         var result = await engine.RecognizeAsync(bitmap).AsTask(token);
-        return string.Join(Environment.NewLine, result.Lines.Select(line => line.Text));
+        double width = bitmap.PixelWidth;
+        double height = bitmap.PixelHeight;
+        var words = new List<PictureWord>();
+        for (var line = 0; line < result.Lines.Count; line++)
+        {
+            foreach (var word in result.Lines[line].Words)
+            {
+                var box = word.BoundingRect;
+                words.Add(new PictureWord(
+                    word.Text,
+                    new System.Windows.Rect(box.X / width, box.Y / height, box.Width / width, box.Height / height),
+                    line));
+            }
+        }
+
+        // Chinese and Japanese run their characters together; the engine
+        // reports each as a word.
+        var language = engine.RecognizerLanguage.LanguageTag;
+        var joiner = language.StartsWith("zh", StringComparison.OrdinalIgnoreCase) || language.StartsWith("ja", StringComparison.OrdinalIgnoreCase)
+            ? string.Empty
+            : " ";
+        return new PictureWords(words, result.TextAngle ?? 0, width / height, joiner);
     }
 
     private static OcrEngine? Create()

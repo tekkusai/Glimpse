@@ -258,6 +258,10 @@ public partial class PreviewWindow
             {
                 richTextBox.Copy();
             }
+            else if (_imageZoom is ImageViewer { SelectedText: { Length: > 0 } words })
+            {
+                SetClipboard(() => Clipboard.SetText(words), "copy picture selection");
+            }
             else if (FindVisualChild<WebView2>(PreviewContent) is { } webView)
             {
                 DiagnosticLog.Write("ctrl+c reached window with webview present");
@@ -275,6 +279,14 @@ public partial class PreviewWindow
         if (ctrl
             && (Keyboard.Modifiers & ModifierKeys.Alt) != ModifierKeys.Alt
             && TryAdjustZoomFromShortcut(KeyInterop.VirtualKeyFromKey(e.Key == Key.System ? e.SystemKey : e.Key)))
+        {
+            e.Handled = true;
+            return;
+        }
+
+        // Every word in the picture, once it has been read. Before that,
+        // and on a picture without words, the key is nobody's.
+        if (ctrl && e.Key == Key.A && _imageZoom is ImageViewer picture && picture.SelectAllText())
         {
             e.Handled = true;
             return;

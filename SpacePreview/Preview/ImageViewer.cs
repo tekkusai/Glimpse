@@ -4,6 +4,8 @@ using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using SpacePreview.Services;
 using SpacePreview.Utilities;
 
 namespace SpacePreview.Preview;
@@ -77,11 +79,21 @@ internal sealed class ImageViewer : IZoomableImage
     // A sentence needs longer on screen than a number does.
     private static readonly TimeSpan NoticeHold = TimeSpan.FromSeconds(4);
 
+    // A picture is read for its words once it has stayed on screen this
+    // long. Arrowing through a folder never gets there, and costs nothing.
+    private static readonly TimeSpan ReadDelay = TimeSpan.FromMilliseconds(500);
+
+    // A press on a word becomes a selection once the pointer has gone this
+    // far, in device pixels, or reached another word.
+    private const double SelectSlop = 3;
+
     private readonly Grid _root;
     private readonly Border _frame;
     private readonly Image _image;
     private readonly Border _hud;
     private readonly TextBlock _hudText;
+    private readonly PictureTextLayer _text = new();
+    private readonly DispatcherTimer _readDelay = new() { Interval = ReadDelay };
     private readonly int _sourceLongSide;
     private BitmapSource _bitmap;
     private double _scale = 1;
@@ -91,6 +103,10 @@ internal sealed class ImageViewer : IZoomableImage
     private bool _canPan;
     private bool _dragging;
     private Point _lastDrag;
+    private CancellationTokenSource? _reading;
+    private int? _anchorWord;
+    private Point _pressedAt;
+    private bool _overText;
 
     public ImageViewer(BitmapSource bitmap, int sourceLongSide, ImageRotationSession? rotation)
     {
@@ -124,8 +140,11 @@ internal sealed class ImageViewer : IZoomableImage
         _root = new Grid
         {
             ClipToBounds = true,
-            Children = { canvas, _hud }
+            Children = { canvas, _hud, _text }
         };
+
+        // The notice speaks over a selection, not under it.
+        Panel.SetZIndex(_hud, 1);
 
         // The canvas follows the theme by resource; the checkerboard is
         // drawn from the palette, so a theme change draws it again.
@@ -138,13 +157,39 @@ internal sealed class ImageViewer : IZoomableImage
             ZoomAt(DevicePosition(e), _scale * Math.Pow(ZoomGestures.WheelStep, e.Delta / 120.0));
             e.Handled = true;
         };
-        _root.MouseLeftButtonDown += OnMouseDown;
-        _root.MouseMove += OnMouseMove;
+        _root.MouseLeftButtonDown += (_, e) =>
+        {
+            // A plain click on a picture that cannot move is still not
+            // this viewer's: it passes on, as it always has.
+            var held = PointerDown(DevicePosition(e), e.ClickCount);
+            if (held)
+            {
+                _root.CaptureMouse();
+            }
+
+            e.Handled = held || e.ClickCount == 2;
+        };
+        _root.MouseMove += (_, e) => PointerMove(DevicePosition(e));
         _root.MouseLeftButtonUp += (_, _) => _root.ReleaseMouseCapture();
         // The capture owns the drag: it ends on button-up or when the system
         // takes the capture away. A MouseLeave cancel would kill drags on
         // stale over-state, as the mesh viewer learned.
-        _root.LostMouseCapture += (_, _) => _dragging = false;
+        _root.LostMouseCapture += (_, _) => PointerUp();
+        _root.MouseLeave += (_, _) =>
+        {
+            _overText = false;
+            ShowCursor();
+        };
+
+        // The words are read while the picture is on screen and for the
+        // picture that is on screen: a turn or a sharper decode starts over.
+        _readDelay.Tick += (_, _) =>
+        {
+            _readDelay.Stop();
+            _ = ReadWordsAsync();
+        };
+        _root.Loaded += (_, _) => _readDelay.Start();
+        _root.Unloaded += (_, _) => ForgetWords();
 
         if (rotation is not null)
         {
@@ -243,47 +288,187 @@ internal sealed class ImageViewer : IZoomableImage
         Canvas.SetLeft(_frame, Math.Round(_x) / dpi);
         Canvas.SetTop(_frame, Math.Round(_y) / dpi);
 
+        // The selection lies exactly over the picture, wherever it is.
+        _text.Width = _frame.Width;
+        _text.Height = _frame.Height;
+        _text.Margin = new Thickness(Canvas.GetLeft(_frame), Canvas.GetTop(_frame), 0, 0);
+
         // Zoomed past 1:1 the pixels stay square, so pixel art reads as
         // pixels; a gentle fit and anything at or below 1:1 is filtered,
         // which also keeps a capped decode shown at 100% soft, not blocky.
         var magnified = ZoomGestures.ShowsPixels(_scale, _atFit);
         RenderOptions.SetBitmapScalingMode(_image, magnified ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
         _canPan = width > view.Width + 0.5 || height > view.Height + 0.5;
-        _root.Cursor = _canPan ? Cursors.SizeAll : null;
+        ShowCursor();
     }
 
-    private void OnMouseDown(object sender, MouseButtonEventArgs e)
+    // Over a word the pointer is a text cursor; elsewhere it says whether
+    // the picture can be moved.
+    private void ShowCursor() =>
+        _root.Cursor = _anchorWord is not null || _overText ? Cursors.IBeam : _canPan ? Cursors.SizeAll : null;
+
+    /// <summary>
+    /// A press at a point of the view, in device pixels. On a word it
+    /// begins a selection; twice on a word it selects the word. Anywhere
+    /// else it is what it was before pictures had words: twice zooms, once
+    /// takes hold of a picture larger than its view. True when the press
+    /// began something a release must end.
+    /// </summary>
+    internal bool PointerDown(Point position, int clicks)
     {
-        if (e.ClickCount == 2)
+        var word = WordAt(position);
+        if (clicks == 2)
         {
-            ZoomAt(DevicePosition(e), ZoomGestures.DoubleClickTarget(_scale, Fit()));
-            e.Handled = true;
-            return;
+            if (word is { } twice)
+            {
+                _text.Selection = (twice, twice);
+            }
+            else
+            {
+                ZoomAt(position, ZoomGestures.DoubleClickTarget(_scale, Fit()));
+            }
+
+            return false;
+        }
+
+        _text.Selection = null;
+        if (word is { } pressed)
+        {
+            _anchorWord = pressed;
+            _pressedAt = position;
+            ShowCursor();
+            return true;
         }
 
         if (!_canPan)
         {
-            return;
+            return false;
         }
 
         _dragging = true;
-        _lastDrag = DevicePosition(e);
-        _root.CaptureMouse();
-        e.Handled = true;
+        _lastDrag = position;
+        return true;
     }
 
-    private void OnMouseMove(object sender, MouseEventArgs e)
+    /// <summary>The pointer at a point of the view: a selection grows, a held picture moves, or the cursor is chosen.</summary>
+    internal void PointerMove(Point position)
     {
-        if (!_dragging)
+        if (_anchorWord is { } anchor)
         {
+            var reached = WordAt(position) ?? _text.Words.Nearest(ToPicture(position));
+            if (reached != anchor
+                || _text.Selection is not null
+                || Math.Abs(position.X - _pressedAt.X) >= SelectSlop
+                || Math.Abs(position.Y - _pressedAt.Y) >= SelectSlop)
+            {
+                _text.Selection = (anchor, reached);
+            }
+
             return;
         }
 
-        var position = DevicePosition(e);
-        _x += position.X - _lastDrag.X;
-        _y += position.Y - _lastDrag.Y;
-        _lastDrag = position;
-        Layout();
+        if (_dragging)
+        {
+            _x += position.X - _lastDrag.X;
+            _y += position.Y - _lastDrag.Y;
+            _lastDrag = position;
+            Layout();
+            return;
+        }
+
+        var over = WordAt(position) is not null;
+        if (over != _overText)
+        {
+            _overText = over;
+            ShowCursor();
+        }
+    }
+
+    /// <summary>The press has ended, by release or because the system took the pointer.</summary>
+    internal void PointerUp()
+    {
+        _dragging = false;
+        _anchorWord = null;
+        ShowCursor();
+    }
+
+    /// <summary>The words Windows found in the picture on screen. Empty until it has been read.</summary>
+    internal PictureWords Words => _text.Words;
+
+    /// <summary>The words the reader has selected, as they read, or null.</summary>
+    public string? SelectedText =>
+        _text.Selection is { } selection ? _text.Words.TextOf(selection.One, selection.Other) : null;
+
+    /// <summary>Selects every word. False when the picture has none, or has not been read yet.</summary>
+    public bool SelectAllText()
+    {
+        if (_text.Words.Count == 0)
+        {
+            return false;
+        }
+
+        _text.Selection = (0, _text.Words.Count - 1);
+        return true;
+    }
+
+    /// <summary>Where a word's middle is in the view, in device pixels.</summary>
+    internal Point WordCenter(int index)
+    {
+        var box = _text.Words[index].Box;
+        var source = Source;
+        var middle = new Point(box.X + box.Width / 2, box.Y + box.Height / 2);
+        if (_text.Words.Angle != 0)
+        {
+            // The boxes lie in the engine's level frame; the view shows the
+            // picture as it is.
+            var turn = new RotateTransform(_text.Words.Angle, source.Width / 2, source.Height / 2);
+            var turned = turn.Transform(new Point(middle.X * source.Width, middle.Y * source.Height));
+            middle = new Point(turned.X / source.Width, turned.Y / source.Height);
+        }
+
+        return new Point(_x + middle.X * source.Width * _scale, _y + middle.Y * source.Height * _scale);
+    }
+
+    /// <summary>A point of the view as fractions of the picture.</summary>
+    private Point ToPicture(Point position)
+    {
+        var source = Source;
+        return new Point((position.X - _x) / (source.Width * _scale), (position.Y - _y) / (source.Height * _scale));
+    }
+
+    private int? WordAt(Point position) =>
+        _text.Words.Count == 0 ? null : _text.Words.WordAt(ToPicture(position));
+
+    private async Task ReadWordsAsync()
+    {
+        var bitmap = _bitmap;
+        var reading = _reading = new CancellationTokenSource();
+        try
+        {
+            var words = await PictureText.RecognizeAsync(bitmap, reading.Token);
+            if (ReferenceEquals(bitmap, _bitmap) && !reading.IsCancellationRequested)
+            {
+                _text.Words = words;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The picture changed or left before it was read.
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"picture words failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void ForgetWords()
+    {
+        _readDelay.Stop();
+        _reading?.Cancel();
+        _reading = null;
+        _anchorWord = null;
+        _overText = false;
+        _text.Words = PictureWords.None;
     }
 
     private void ReplaceBitmap(BitmapSource bitmap)
@@ -291,12 +476,24 @@ internal sealed class ImageViewer : IZoomableImage
         _bitmap = bitmap;
         _image.Source = bitmap;
         ShowTransparency();
+
+        // The words belonged to the picture that was here.
+        ForgetWords();
+        if (_root.IsLoaded)
+        {
+            _readDelay.Start();
+        }
     }
 
     // Transparent pixels sit on a quiet two-tone checkerboard, so dark art
     // on a dark canvas (or light art on a light one) still shows its shape.
-    private void ShowTransparency() =>
+    private void ShowTransparency()
+    {
         _frame.Background = HasAlpha(_bitmap) ? Checkerboard(Theme.Current) : null;
+
+        // The selection is drawn in the theme's accent.
+        _text.InvalidateVisual();
+    }
 
     /// <summary>
     /// A sentence about this image, such as a rotation that did not save,

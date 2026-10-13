@@ -884,7 +884,8 @@ public partial class PreviewWindow
             menu.ClearValue(ContextMenu.PlacementTargetProperty);
             menu.ClearValue(ContextMenu.HorizontalOffsetProperty);
             menu.ClearValue(ContextMenu.VerticalOffsetProperty);
-            FillContextMenu(menu, selectedText: null);
+            // Words selected in a picture are a selection like any other.
+            FillContextMenu(menu, selectedText: (_imageZoom as ImageViewer)?.SelectedText);
         };
         _contextMenu = menu;
         RootChrome.ContextMenu = menu;

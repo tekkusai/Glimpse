@@ -97,7 +97,9 @@ public sealed class PictureTextTests
         try
         {
             window.ShowPreview(path, IntPtr.Zero);
-            await WaitUntilAsync(() => Revealed(window) && Viewer(window) is not null);
+
+            // The viewer answers for the picture once it has joined the window.
+            await WaitUntilAsync(() => Revealed(window) && Fields.Get<object?>(window, "_imageZoom") is ImageViewer);
             var copied = false;
             await window.CopyPictureTextAsync(_ => copied = true);
 

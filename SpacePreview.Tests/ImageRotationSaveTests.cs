@@ -372,7 +372,7 @@ public sealed class ImageRotationSaveTests
 
     /// <summary>The image and the readout of the viewer on screen, once it is there.</summary>
     private static (Image Picture, TextBlock Readout)? Viewer(PreviewWindow window) =>
-        window.PreviewContent.Content is Grid { Children: [Canvas { Children: [Border { Child: Image picture }] }, Border { Child: TextBlock readout }] }
+        window.PreviewContent.Content is Grid { Children: [Canvas { Children: [Border { Child: Image picture }] }, Border { Child: TextBlock readout }, ..] }
             ? (picture, readout)
             : null;
 
