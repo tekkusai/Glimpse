@@ -62,6 +62,6 @@ Download **Glimpse-Setup-3.0.1.exe** below and run it. Glimpse 3.0 installs this
 
 **SHA-256**
 
-`TO BE FILLED IN AT RELEASE`
+`ECBB7755880E941C68B29CBFFA74982304BEF5C919F420611550269EB69A9288`
 
 The installer is not code-signed yet, so Windows may show a SmartScreen warning.
