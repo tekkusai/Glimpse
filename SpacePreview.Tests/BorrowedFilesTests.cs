@@ -81,8 +81,42 @@ public sealed class BorrowedFilesTests
         Assert.All(copies.Take(3), copy => Assert.False(File.Exists(copy), copy));
         Assert.All(copies.Skip(3), copy => Assert.True(File.Exists(copy), copy));
 
-        BorrowedFiles.Clear();
+        BorrowedFiles.Clear(DateTime.UtcNow.AddMinutes(1));
         Assert.All(copies, copy => Assert.False(File.Exists(copy), copy));
+    });
+
+    [Fact]
+    public void AtStartOnlyTheCopiesOfTheLastRunAreCleared() => Sta.Run(() =>
+    {
+        using var temp = new TempDirectory();
+        var zip = WriteZip(temp, ("old.jpg", Bytes(200, seed: 1), DateTime.Now), ("kept.jpg", Bytes(200, seed: 2), DateTime.Now), ("half.jpg", Bytes(200, seed: 4), DateTime.Now), ("new.jpg", Bytes(200, seed: 3), DateTime.Now));
+        var old = Borrow(zip, "old.jpg")!;
+        var kept = Borrow(zip, "kept.jpg")!;
+
+        // The last run ended with this one half made: its folder is there
+        // and its file is not.
+        var half = Borrow(zip, "half.jpg")!;
+        File.SetAttributes(half, FileAttributes.Normal);
+        File.Delete(half);
+        Thread.Sleep(50);
+
+        // The app starts here. Space is answered from now on, and the
+        // clearing of what the last run left has not been reached yet.
+        var started = DateTime.UtcNow;
+        Thread.Sleep(50);
+        Assert.Equal(kept, Borrow(zip, "kept.jpg"));
+        Assert.Equal(half, Borrow(zip, "half.jpg"));
+        var fresh = Borrow(zip, "new.jpg")!;
+
+        BorrowedFiles.Clear(started);
+
+        // What was asked for since the start may be on screen already:
+        // the copy made now, the one found from the last run, and the
+        // one made now in a folder the last run left.
+        Assert.False(File.Exists(old));
+        Assert.True(File.Exists(kept));
+        Assert.True(File.Exists(half));
+        Assert.True(File.Exists(fresh));
     });
 
     [Fact]
@@ -115,23 +149,58 @@ public sealed class BorrowedFilesTests
     [Fact]
     public async Task AskingForACopyDoesNotWaitForIt()
     {
-        // The owner serves nothing until told to. The asking is done on
-        // the thread that reads Explorer's selection for every preview,
-        // so it has to come back while the owner is still silent.
+        // The owner says what the file is and then serves nothing until
+        // told to. The asking is done on the thread that reads Explorer's
+        // selection for every preview, so it has to come back while the
+        // owner is still silent.
         using var owner = new Silence();
-        var target = Target("held.bin");
-        var asking = Task.Run(() => Start(target, new OwnerStream(4000, owner.Wait)));
+        var asking = Task.Run(() => Owners.Ask("held.bin", new OwnerStream(4000, owner.Wait)));
 
         Assert.Same(asking, await Task.WhenAny(asking, Task.Delay(5000)));
-        Assert.Equal(target, await asking);
-        Assert.Null(await Ready(target, within: 300));
+        var target = await asking;
+        Assert.NotNull(target);
+        Assert.Null(await Owners.Ready(target, within: 300));
         Assert.False(File.Exists(target));
 
         owner.End();
-        Assert.True(await Ready(target));
+        Assert.True(await Owners.Ready(target));
         Assert.Equal(4000, new FileInfo(target).Length);
         Assert.True(File.GetAttributes(target).HasFlag(FileAttributes.ReadOnly));
-        await Settled();
+        await Owners.Settled();
+    }
+
+    [Fact]
+    public async Task AnOwnerSlowToSayWhatTheFileIsIsNotWaitedFor()
+    {
+        // Not even the file's name and size are asked for on the shell's
+        // thread. It waits a moment to hear them, and an owner that has
+        // said nothing by then has no file to show, as far as it goes.
+        using var silent = new Silence();
+        var stream = new OwnerStream(4000);
+        var asking = Task.Run(() => Owners.Ask("unsaid.bin", stream, patience: TimeSpan.FromMilliseconds(200), describing: silent.Wait));
+
+        Assert.Same(asking, await Task.WhenAny(asking, Task.Delay(5000)));
+        Assert.Null(await asking);
+        Assert.Equal(1, BorrowedFiles.Underway);
+
+        // Told late what the file is, the thread makes no copy that
+        // nobody is waiting for.
+        silent.End();
+        await Owners.Settled();
+        Assert.Equal(0, stream.Reads);
+    }
+
+    [Fact]
+    public async Task WhatIsNotAFileOrIsTooLargeIsNotCopied()
+    {
+        var stream = new OwnerStream(4000);
+
+        Assert.Null(Owners.Ask("album", stream, file: false));
+        Assert.Null(Owners.Ask("film.mp4", stream, size: BorrowedFiles.MaxBytes + 1));
+        Assert.Null(Owners.Ask("gone.bin", stream, describing: () => throw new InvalidOperationException("the phone was unplugged")));
+
+        await Owners.Settled();
+        Assert.Equal(0, stream.Reads);
     }
 
     [Fact]
@@ -140,11 +209,10 @@ public sealed class BorrowedFilesTests
         // A second of file at a kilobyte every tenth of a second, and a
         // third of a second to take it in.
         var slow = new OwnerStream(10_000, () => Thread.Sleep(100));
-        var target = Target("slow.bin");
-        Start(target, slow, deadline: TimeSpan.FromMilliseconds(300));
+        var target = Owners.Ask("slow.bin", slow, deadline: TimeSpan.FromMilliseconds(300))!;
 
-        Assert.False(await Ready(target));
-        await Settled();
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
         Assert.InRange(slow.Reads, 1, 8);
         Assert.False(Directory.Exists(Path.GetDirectoryName(target)));
     }
@@ -153,22 +221,20 @@ public sealed class BorrowedFilesTests
     public async Task AnOwnerThatNeverAnswersHoldsUpNothingButItsOwnFile()
     {
         using var never = new Silence();
-        var stuck = Target("stuck.bin");
-        Start(stuck, new OwnerStream(4000, never.Wait), deadline: TimeSpan.FromMilliseconds(300));
+        var stuck = Owners.Ask("stuck.bin", new OwnerStream(4000, never.Wait), deadline: TimeSpan.FromMilliseconds(300), identity: "stuck")!;
 
         // Whoever waits for it is told there is no file when its time is
         // up, and at once when they ask again.
-        Assert.False(await Ready(stuck));
-        Assert.Equal(stuck, Start(stuck, new OwnerStream(4000)));
-        Assert.False(await Ready(stuck, within: 100));
+        Assert.False(await Owners.Ready(stuck));
+        Assert.Equal(stuck, Owners.Ask("stuck.bin", new OwnerStream(4000), identity: "stuck"));
+        Assert.False(await Owners.Ready(stuck, within: 100));
 
         // Another file is copied as if nothing were wrong.
-        var other = Target("other.bin");
-        Start(other, new OwnerStream(4000));
-        Assert.True(await Ready(other));
+        var other = Owners.Ask("other.bin", new OwnerStream(4000))!;
+        Assert.True(await Owners.Ready(other));
 
         never.End();
-        await Settled();
+        await Owners.Settled();
     }
 
     [Fact]
@@ -177,14 +243,12 @@ public sealed class BorrowedFilesTests
         // The reader has moved on to another file while the first, a long
         // one, was still arriving.
         var first = new OwnerStream(200_000, () => Thread.Sleep(20));
-        var left = Target("left.bin");
-        Start(left, first);
-        var wanted = Target("wanted.bin");
-        Start(wanted, new OwnerStream(4000));
+        var left = Owners.Ask("left.bin", first)!;
+        var wanted = Owners.Ask("wanted.bin", new OwnerStream(4000))!;
 
-        Assert.True(await Ready(wanted));
-        Assert.False(await Ready(left));
-        await Settled();
+        Assert.True(await Owners.Ready(wanted));
+        Assert.False(await Owners.Ready(left));
+        await Owners.Settled();
         Assert.InRange(first.Reads, 0, 100);
         Assert.False(Directory.Exists(Path.GetDirectoryName(left)));
     }
@@ -193,13 +257,12 @@ public sealed class BorrowedFilesTests
     public async Task NobodyWaitingStopsTheCopy()
     {
         var stream = new OwnerStream(200_000, () => Thread.Sleep(20));
-        var target = Target("cancelled.bin");
-        Start(target, stream);
+        var target = Owners.Ask("cancelled.bin", stream)!;
 
         BorrowedFiles.StopWaiting();
 
-        Assert.False(await Ready(target));
-        await Settled();
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
         Assert.InRange(stream.Reads, 0, 100);
     }
 
@@ -207,20 +270,76 @@ public sealed class BorrowedFilesTests
     public async Task TheSameFileAskedForAgainJoinsTheCopyOnItsWay()
     {
         using var owner = new Silence();
-        var target = Target("joined.bin");
-        var opened = 0;
-        Start(target, new OwnerStream(4000, owner.Wait), opening: () => opened++);
-        Assert.Equal(target, Start(target, new OwnerStream(9000), opening: () => opened++));
+        var second = new OwnerStream(9000);
+        var target = Owners.Ask("joined.bin", new OwnerStream(4000, owner.Wait), identity: "joined")!;
+        Assert.Equal(target, Owners.Ask("joined.bin", second, identity: "joined"));
 
         owner.End();
-        Assert.True(await Ready(target));
-        Assert.Equal(1, opened);
+        Assert.True(await Owners.Ready(target));
+        Assert.Equal(0, second.Reads);
         Assert.Equal(4000, new FileInfo(target).Length);
-        await Settled();
+        await Owners.Settled();
     }
 
     [Fact]
-    public async Task NoCopyStartsWhileFourHaveNotComeBack()
+    public async Task ACopyThatFailsDoesNotTakeTheFolderOfOneStillComing()
+    {
+        // Two files of one owner share a folder here. The first is asked
+        // for and its owner is slow to open it. The second is asked for,
+        // fails, and clears up after itself with the folder holding
+        // nothing yet. Then the first is asked for again and arrives.
+        using var opening = new Silence();
+        var coming = Owners.Ask("coming.bin", new OwnerStream(4000), identity: "shared", opening: opening.Wait)!;
+        var failed = Owners.Ask("failed.bin", new OwnerStream(4000, () => throw new IOException("unplugged")), identity: "shared")!;
+        Assert.Equal(Path.GetDirectoryName(coming), Path.GetDirectoryName(failed));
+        Assert.False(await Owners.Ready(failed));
+        SpinWait.SpinUntil(() => BorrowedFiles.Underway == 1, TimeSpan.FromSeconds(5));
+
+        Assert.Equal(coming, Owners.Ask("coming.bin", new OwnerStream(9000), identity: "shared"));
+        opening.End();
+
+        Assert.True(await Owners.Ready(coming));
+        Assert.Equal(4000, new FileInfo(coming).Length);
+        await Owners.Settled();
+    }
+
+    [Fact]
+    public async Task NewerCopiesDoNotTakeTheFolderOfOneStillComing()
+    {
+        // The reader steps on from a slow file past four quick ones, and
+        // back. Only the newest four folders are kept, and the slow
+        // file's is the oldest by then, with nothing in it yet.
+        using var opening = new Silence();
+        var coming = Owners.Ask("coming.bin", new OwnerStream(4000), identity: "slow", opening: opening.Wait)!;
+        for (var i = 0; i < 4; i++)
+        {
+            Thread.Sleep(20);
+            Assert.True(await Owners.Ready(Owners.Ask($"quick{i}.bin", new OwnerStream(4000))!));
+        }
+
+        SpinWait.SpinUntil(() => BorrowedFiles.Underway == 1, TimeSpan.FromSeconds(5));
+        Assert.Equal(coming, Owners.Ask("coming.bin", new OwnerStream(9000), identity: "slow"));
+        opening.End();
+
+        Assert.True(await Owners.Ready(coming));
+        await Owners.Settled();
+    }
+
+    [Fact]
+    public async Task ClearingLeavesTheFolderOfACopyStillComing()
+    {
+        using var opening = new Silence();
+        var coming = Owners.Ask("coming.bin", new OwnerStream(4000), opening: opening.Wait)!;
+
+        BorrowedFiles.Clear(DateTime.UtcNow.AddMinutes(1));
+        opening.End();
+
+        Assert.True(await Owners.Ready(coming));
+        await Owners.Settled();
+    }
+
+    [Fact]
+    public async Task NoOwnerIsAskedWhileFourHaveNotComeBack()
     {
         // Four owners, each asked for a file and each silent in its first
         // read. A copy stops for a newer one only between reads, so these
@@ -229,75 +348,55 @@ public sealed class BorrowedFilesTests
         for (var i = 0; i < 4; i++)
         {
             var stream = new OwnerStream(4000, never.Wait);
-            Assert.NotNull(Start(Target($"stuck{i}.bin"), stream));
+            Assert.NotNull(Owners.Ask($"stuck{i}.bin", stream));
             SpinWait.SpinUntil(() => stream.Reads == 1, TimeSpan.FromSeconds(5));
             Assert.Equal(1, stream.Reads);
         }
 
-        var fifth = Target("fifth.bin");
-        Assert.Null(Start(fifth, new OwnerStream(4000)));
+        var described = 0;
+        Assert.Null(Owners.Ask("fifth.bin", new OwnerStream(4000), describing: () => described++));
+        Assert.Equal(0, described);
 
         never.End();
-        await Settled();
-        Assert.Equal(fifth, Start(fifth, new OwnerStream(4000)));
-        Assert.True(await Ready(fifth));
-        await Settled();
+        await Owners.Settled();
+        var fifth = Owners.Ask("fifth.bin", new OwnerStream(4000))!;
+        Assert.True(await Owners.Ready(fifth));
+        await Owners.Settled();
     }
 
     [Fact]
     public async Task WhatAnOwnerThrowsEndsItsCopyAndNothingElse()
     {
-        var target = Target("thrown.bin");
-        Start(target, new OwnerStream(4000, () => throw new InvalidOperationException("the phone was unplugged")));
+        var target = Owners.Ask("thrown.bin", new OwnerStream(4000, () => throw new InvalidOperationException("the phone was unplugged")))!;
 
-        Assert.False(await Ready(target));
-        await Settled();
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
 
-        var next = Target("next.bin");
-        Start(next, new OwnerStream(4000));
-        Assert.True(await Ready(next));
-        await Settled();
-    }
-
-    [Fact]
-    public async Task ASelectionIsHandedOnWhenItsCopyHasArrivedAndNotWhenItNeverDoes()
-    {
-        using var owner = new Silence();
-        var target = Target("selected.bin");
-        Start(target, new OwnerStream(4000, owner.Wait));
-        var selection = new ExplorerSelection(target, IntPtr.Zero);
-
-        var arriving = SpacePreviewController.Arrived(selection);
-        Assert.NotSame(arriving, await Task.WhenAny(arriving, Task.Delay(300)));
-        owner.End();
-        Assert.Same(selection, await arriving);
-        await Settled();
-
-        // A copy that does not come is no selection: Space does nothing,
-        // as it did before files with no path could be shown at all.
-        var lost = Target("lost.bin");
-        Start(lost, new OwnerStream(4000, () => throw new IOException("gone")));
-        Assert.Null(await SpacePreviewController.Arrived(new ExplorerSelection(lost, IntPtr.Zero)));
-        await Settled();
-
-        // A file of the user's own is not waited for, nor asked about.
-        var own = new ExplorerSelection(@"Z:\not there\report.pdf", IntPtr.Zero);
-        Assert.Same(own, await SpacePreviewController.Arrived(own));
-        Assert.Null(await SpacePreviewController.Arrived(null));
+        var next = Owners.Ask("next.bin", new OwnerStream(4000))!;
+        Assert.True(await Owners.Ready(next));
+        await Owners.Settled();
     }
 
     /// <summary>
-    /// Both ways a selection reaches a preview, the Space lookup and the
-    /// arrow keys' step, wait for the copy after the shell's thread has
-    /// answered. Waiting on that thread is what held every preview up.
+    /// The shell's thread asks an item for nothing but its ID list. The
+    /// selection lookups answer with where the copy will be and wait for
+    /// nothing: the wait is where the file is shown.
     /// </summary>
     [Fact]
-    public void EveryLookupWaitsForItsCopyOffTheShellsThread()
+    public void NothingWaitsForACopyOnTheShellsThread()
     {
-        var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
+        var borrow = TestSource.Method(@"SpacePreview\Services\BorrowedFiles.cs", "TryBorrow");
+        Assert.Contains("return Ask(new ShellOwner(item), maxBytes, Deadline, Patience);", borrow, StringComparison.Ordinal);
+        Assert.DoesNotContain("item.Get", borrow, StringComparison.Ordinal);
+        Assert.DoesNotContain("BindToHandler", borrow, StringComparison.Ordinal);
 
-        Assert.Contains("return await Arrived(selection);", TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "RunSelectionLookupAsync"), StringComparison.Ordinal);
-        Assert.Contains("await Arrived(await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta)))", controller, StringComparison.Ordinal);
+        // A copy is waited for by what shows it: the open that found it,
+        // and the glance that is already up.
+        var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
+        Assert.Equal(2, controller.Split("BorrowedFiles.WhenReady(").Length - 1);
+        Assert.Contains("BorrowedFiles.WhenReady(selection.Path)", TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "ShowPreviewFromContext"), StringComparison.Ordinal);
+        Assert.Contains("BorrowedFiles.WhenReady(selection.Path)", TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "ShowPreview"), StringComparison.Ordinal);
+        Assert.DoesNotContain("WhenReady", TestSource.Method(@"SpacePreview\Services\SpacePreviewController.cs", "RunSelectionLookupAsync"), StringComparison.Ordinal);
         Assert.DoesNotContain("WhenReady", TestSource.Read(@"SpacePreview\Services\ExplorerSelectionService.cs"), StringComparison.Ordinal);
         Assert.DoesNotContain("WhenReady", TestSource.Read(@"SpacePreview\Native\ShellComInterop.cs"), StringComparison.Ordinal);
     }
@@ -381,89 +480,6 @@ public sealed class BorrowedFilesTests
         }
     }
 
-    private static string Target(string name) =>
-        Path.Combine(BorrowedFiles.Root, Guid.NewGuid().ToString("N")[..16].ToUpperInvariant(), name);
-
-    private static string? Start(string target, OwnerStream stream, TimeSpan? deadline = null, Action? opening = null) =>
-        BorrowedFiles.Start(target, size: null, modified: null, BorrowedFiles.MaxBytes, deadline ?? TimeSpan.FromSeconds(10), () =>
-        {
-            opening?.Invoke();
-            return () => stream;
-        });
-
-    /// <summary>Whether the copy arrived, or null while that is still not known.</summary>
-    private static async Task<bool?> Ready(string path, int within = 5000)
-    {
-        var ready = BorrowedFiles.WhenReady(path);
-        return await Task.WhenAny(ready, Task.Delay(within)) == ready ? await ready : null;
-    }
-
-    /// <summary>Every copy has come back, so the next test starts with none on its way.</summary>
-    private static async Task Settled()
-    {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
-        while (BorrowedFiles.Underway > 0)
-        {
-            Assert.True(DateTime.UtcNow < deadline, "A copy never came back.");
-            await Task.Delay(10);
-        }
-    }
-
-    /// <summary>An owner saying nothing. It ends when the test does, however that ends, so no copy is left waiting on it.</summary>
-    private sealed class Silence : IDisposable
-    {
-        private readonly ManualResetEventSlim _over = new();
-
-        public void Wait() => _over.Wait();
-
-        public void End() => _over.Set();
-
-        public void Dispose() => _over.Set();
-    }
-
-    /// <summary>
-    /// A file's stream as its owner serves it: so many bytes, a kilobyte a
-    /// read, and before each read whatever the owner does first. That may
-    /// be to wait, to wait forever, or to fail.
-    /// </summary>
-    private sealed class OwnerStream(int bytes, Action? first = null) : IStream
-    {
-        private int _left = bytes;
-        private int _reads;
-
-        public int Reads => Volatile.Read(ref _reads);
-
-        public void Read(byte[] pv, int cb, IntPtr pcbRead)
-        {
-            Interlocked.Increment(ref _reads);
-            first?.Invoke();
-            var count = Math.Min(Math.Min(1000, cb), _left);
-            Array.Fill(pv, (byte)7, 0, count);
-            _left -= count;
-            Marshal.WriteInt32(pcbRead, count);
-        }
-
-        public void Write(byte[] pv, int cb, IntPtr pcbWritten) => throw new NotSupportedException();
-
-        public void Seek(long dlibMove, int dwOrigin, IntPtr plibNewPosition) => throw new NotSupportedException();
-
-        public void SetSize(long libNewSize) => throw new NotSupportedException();
-
-        public void CopyTo(IStream pstm, long cb, IntPtr pcbRead, IntPtr pcbWritten) => throw new NotSupportedException();
-
-        public void Commit(int grfCommitFlags) => throw new NotSupportedException();
-
-        public void Revert() => throw new NotSupportedException();
-
-        public void LockRegion(long libOffset, long cb, int dwLockType) => throw new NotSupportedException();
-
-        public void UnlockRegion(long libOffset, long cb, int dwLockType) => throw new NotSupportedException();
-
-        public void Stat(out System.Runtime.InteropServices.ComTypes.STATSTG pstatstg, int grfStatFlag) => throw new NotSupportedException();
-
-        public void Clone(out IStream ppstm) => throw new NotSupportedException();
-    }
-
     private static string WriteZip(TempDirectory temp, params (string Name, byte[] Bytes, DateTime Modified)[] entries)
     {
         var path = Path.Combine(temp.Path, $"card-{Guid.NewGuid():N}.zip");
@@ -488,4 +504,116 @@ public sealed class BorrowedFilesTests
 
     [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
     private static extern int SHCreateItemFromParsingName(string path, IntPtr bindContext, ref Guid riid, out IntPtr item);
+}
+
+/// <summary>Asks for the file of a stand-in owner, and waits as the app waits.</summary>
+internal static class Owners
+{
+    public static string? Ask(
+        string name,
+        OwnerStream stream,
+        TimeSpan? deadline = null,
+        TimeSpan? patience = null,
+        Action? describing = null,
+        Action? opening = null,
+        string? identity = null,
+        long? size = null,
+        bool file = true) =>
+        BorrowedFiles.Ask(
+            new Owner(name, identity ?? Guid.NewGuid().ToString("N"), stream, describing, opening, size, file),
+            BorrowedFiles.MaxBytes,
+            deadline ?? TimeSpan.FromSeconds(10),
+            patience ?? TimeSpan.FromSeconds(5));
+
+    /// <summary>Whether the copy arrived, or null while that is still not known.</summary>
+    public static async Task<bool?> Ready(string path, int within = 5000)
+    {
+        var ready = BorrowedFiles.WhenReady(path);
+        return await Task.WhenAny(ready, Task.Delay(within)) == ready ? await ready : null;
+    }
+
+    /// <summary>Every copy's thread has come back, what it left cleared up, so the next test starts with none.</summary>
+    public static async Task Settled()
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (BorrowedFiles.Underway > 0)
+        {
+            Assert.True(DateTime.UtcNow < deadline, "A copy never came back.");
+            await Task.Delay(10);
+        }
+    }
+
+    private sealed class Owner(string name, string identity, OwnerStream stream, Action? describing, Action? opening, long? size, bool file) : IFileOwner
+    {
+        public BorrowedFacts? Describe()
+        {
+            describing?.Invoke();
+            return file ? new BorrowedFacts(name, identity, size, null) : null;
+        }
+
+        public IStream Open()
+        {
+            opening?.Invoke();
+            return stream;
+        }
+
+        public void Dispose()
+        {
+        }
+    }
+}
+
+/// <summary>An owner saying nothing. It ends when the test does, however that ends, so no copy is left waiting on it.</summary>
+internal sealed class Silence : IDisposable
+{
+    private readonly ManualResetEventSlim _over = new();
+
+    public void Wait() => _over.Wait();
+
+    public void End() => _over.Set();
+
+    public void Dispose() => _over.Set();
+}
+
+/// <summary>
+/// A file's stream as its owner serves it: so many bytes, a kilobyte a
+/// read, and before each read whatever the owner does first. That may
+/// be to wait, to wait forever, or to fail.
+/// </summary>
+internal sealed class OwnerStream(int bytes, Action? first = null) : IStream
+{
+    private int _left = bytes;
+    private int _reads;
+
+    public int Reads => Volatile.Read(ref _reads);
+
+    public void Read(byte[] pv, int cb, IntPtr pcbRead)
+    {
+        Interlocked.Increment(ref _reads);
+        first?.Invoke();
+        var count = Math.Min(Math.Min(1000, cb), _left);
+        Array.Fill(pv, (byte)'a', 0, count);
+        _left -= count;
+        Marshal.WriteInt32(pcbRead, count);
+    }
+
+    public void Write(byte[] pv, int cb, IntPtr pcbWritten) => throw new NotSupportedException();
+
+    public void Seek(long dlibMove, int dwOrigin, IntPtr plibNewPosition) => throw new NotSupportedException();
+
+    public void SetSize(long libNewSize) => throw new NotSupportedException();
+
+    public void CopyTo(IStream pstm, long cb, IntPtr pcbRead, IntPtr pcbWritten) => throw new NotSupportedException();
+
+    public void Commit(int grfCommitFlags) => throw new NotSupportedException();
+
+    public void Revert() => throw new NotSupportedException();
+
+    public void LockRegion(long libOffset, long cb, int dwLockType) => throw new NotSupportedException();
+
+    public void UnlockRegion(long libOffset, long cb, int dwLockType) => throw new NotSupportedException();
+
+    public void Stat(out System.Runtime.InteropServices.ComTypes.STATSTG pstatstg, int grfStatFlag) => throw new NotSupportedException();
+
+    public void Clone(out IStream ppstm) => throw new NotSupportedException();
 }

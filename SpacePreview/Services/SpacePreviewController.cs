@@ -59,14 +59,22 @@ internal sealed class SpacePreviewController : IDisposable
     private readonly DispatcherTimer _ownerLossTimer;
     private readonly DispatcherTimer _fullscreenRecheckTimer;
 
-    // Tests stand in for the window in front, for the shell's browse, for
-    // what the hook thread reads at a key, for the rights of another app
-    // and for the preview window going up.
+    internal delegate Task<ExplorerSelection?> SelectionLookup(
+        string origin,
+        SelectionSource source,
+        IntPtr hwnd,
+        bool includeMultiSelectionPaths,
+        bool useForegroundWhenHwndMissing = false);
+
+    // Tests stand in for the window in front, for the shell's selection
+    // and its browse, for what the hook thread reads at a key, for the
+    // rights of another app and for the preview window going up.
     private readonly Func<IntPtr> _foregroundRoot = NativeMethods.GetForegroundRoot;
+    private readonly SelectionLookup _lookUpSelection = RunSelectionLookupAsync;
     private readonly Func<int, bool, KeyPress> _readKey;
     private readonly Action<ExplorerSelection, long> _showPreview;
     private readonly Func<IntPtr, bool, int, Task<ExplorerSelection?>> _browseRelative =
-        async (hwnd, isDesktop, delta) => await Arrived(await StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta)));
+        (hwnd, isDesktop, delta) => StaTask.Run(() => ExplorerSelectionService.TryBrowseRelative(hwnd, isDesktop, delta));
     private readonly Func<IntPtr, PreviewAccessWarningInfo?> _readAccessWarning =
         window => ProcessIntegrityService.TryGetPreviewAccessWarning(window, out var warning) ? warning : null;
     private readonly uint _processId = (uint)Environment.ProcessId;
@@ -122,6 +130,12 @@ internal sealed class SpacePreviewController : IDisposable
     private int _multiIndex;
     private int _openRequestGeneration;
     private bool _openPending;
+
+    // Moves with every file a glance is told to show, every word from
+    // Explorer on what is selected now, and every glance that ends. A file
+    // whose copy is still on its way is shown when it arrives only if
+    // this has not moved since.
+    private int _arrival;
     private readonly DeferredFileDialogPreviewIntentSlot _pendingFileDialogPreview = new();
     private readonly ConcurrentDictionary<long, byte> _elevationChecksInFlight = new();
     private readonly HashSet<(long Hwnd, uint ProcessId)> _observedAccessDialogs = [];
@@ -1390,6 +1404,13 @@ internal sealed class SpacePreviewController : IDisposable
         window.HidePreview();
     }
 
+    /// <summary>
+    /// Shows the selection: at once, or, for a file on a phone or in a zip
+    /// folder whose copy is still on its way, when the copy has arrived.
+    /// The lookups that read Explorer's selection answer with where the
+    /// copy will be and hold nothing while it comes, so the arrow keys and
+    /// a refresh go on working, and what they find next takes its place.
+    /// </summary>
     private void ShowPreview(ExplorerSelection selection, long inputStamp)
     {
         if (_disposed)
@@ -1397,6 +1418,49 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
+        var arrival = ++_arrival;
+        var ready = BorrowedFiles.WhenReady(selection.Path);
+        if (!ready.IsCompletedSuccessfully)
+        {
+            ShowOnArrival(selection, inputStamp, arrival, ready);
+        }
+        else if (ready.Result)
+        {
+            Present(selection, inputStamp);
+        }
+    }
+
+    private async void ShowOnArrival(ExplorerSelection selection, long inputStamp, int arrival, Task<bool> ready)
+    {
+        var arrived = await ready;
+
+        // Something else was shown, Explorer's selection has moved on, or
+        // the glance has ended.
+        if (_disposed || arrival != _arrival)
+        {
+            return;
+        }
+
+        if (!arrived)
+        {
+            // Not an empty selection: what is on screen stays.
+            DiagnosticLog.Write($"copy did not arrive -> {selection.Path}");
+            return;
+        }
+
+        // A glance that is not up is opened by its own lookup, which waits
+        // for the copy itself. And signing may have started on what is on
+        // screen while this one came.
+        if (!_previewVisible || !CanLeavePreview(_previewWindow))
+        {
+            return;
+        }
+
+        Present(selection, inputStamp);
+    }
+
+    private void Present(ExplorerSelection selection, long inputStamp)
+    {
         if (_previewOwnerRootHwnd == IntPtr.Zero)
         {
             _previewOwnerRootHwnd = selection.ExplorerHwnd;
@@ -1692,19 +1756,8 @@ internal sealed class SpacePreviewController : IDisposable
         });
 
         diagnostics.WriteIfSlow(origin, selection is not null);
-        return await Arrived(selection);
+        return selection;
     }
-
-    /// <summary>
-    /// The selection once its file can be shown. A file on a phone or in a
-    /// zip folder is shown from a copy, and the copy may still be on its
-    /// way. It is waited for here, after the shell's thread has answered
-    /// and gone on to the next question, so a phone that is slow or has
-    /// stopped answering holds up nothing but its own file. Null when the
-    /// copy did not arrive.
-    /// </summary>
-    internal static async Task<ExplorerSelection?> Arrived(ExplorerSelection? selection) =>
-        selection is null || await BorrowedFiles.WhenReady(selection.Path) ? selection : null;
 
     private void QueueOpen(ForegroundSelectionContext context, long inputStamp)
     {
@@ -1750,11 +1803,16 @@ internal sealed class SpacePreviewController : IDisposable
 
         // COM lookups are too slow for the UI thread, and the tab-identity
         // QueryService only answers on an STA thread.
-        var selection = await RunSelectionLookupAsync(
+        var selection = await _lookUpSelection(
             "open",
             context.Source,
             context.Hwnd,
             includeMultiSelectionPaths: true);
+
+        // A file on a phone or in a zip folder opens from a copy, and the
+        // copy may still be on its way. Waiting for it is part of the
+        // lookup: the open stays pending, and Esc or another Space ends it.
+        var arrived = selection is null || await BorrowedFiles.WhenReady(selection.Path);
 
         if (_disposed || generation != _openRequestGeneration)
         {
@@ -1765,7 +1823,7 @@ internal sealed class SpacePreviewController : IDisposable
 
         // If the user moved on while the lookup ran (Alt-Tab, click), popping
         // a topmost preview over the new foreground app is unexpected.
-        if (NativeMethods.GetForegroundWindow() != context.Hwnd)
+        if (_foregroundRoot() != context.Hwnd)
         {
             PublishKeyState();
             DiagnosticLog.Write("queued lookup -> foreground changed, dropping");
@@ -1779,10 +1837,17 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
+        if (!arrived)
+        {
+            PublishKeyState();
+            DiagnosticLog.Write($"queued lookup -> copy did not arrive {selection.Path}");
+            return;
+        }
+
         DiagnosticLog.Write($"queued lookup -> preview {selection.Path}");
         _lastSelectionSource = context.Source;
         _previewOwnerRootHwnd = context.Hwnd;
-        ShowPreview(selection, inputStamp);
+        Present(selection, inputStamp);
     }
 
     // The hook thread swallowed this Space on the selection it found
@@ -2127,6 +2192,9 @@ internal sealed class SpacePreviewController : IDisposable
         _previewVisible = false;
         ResetSession();
 
+        // A copy still on its way was for this glance.
+        BorrowedFiles.StopWaiting();
+
         // Before the window does its own leaving, which can take a while:
         // from here the hook thread claims no key for this glance.
         PublishKeyState();
@@ -2143,6 +2211,7 @@ internal sealed class SpacePreviewController : IDisposable
     /// </summary>
     private void ResetSession()
     {
+        _arrival++;
         _ownerLossTimer.Stop();
         ClearPendingFileDialogPreview();
         ClearNavigationRefreshTokens();
@@ -2259,7 +2328,7 @@ internal sealed class SpacePreviewController : IDisposable
                 var hwnd = _lastExplorerHwnd;
                 var ownerRoot = _previewOwnerRootHwnd;
                 _lastStartedRefreshGeneration = activeRequest.Generation;
-                var selection = await RunSelectionLookupAsync(
+                var selection = await _lookUpSelection(
                     "refresh",
                     source,
                     hwnd,
@@ -2281,6 +2350,10 @@ internal sealed class SpacePreviewController : IDisposable
                 {
                     return;
                 }
+
+                // Explorer has said what is selected now. A copy on its way
+                // for anything else is no longer waited for.
+                _arrival++;
 
                 // Shift navigation is intentional selection editing. If
                 // Explorer still reports the current item as its anchor, keep
@@ -2462,6 +2535,10 @@ internal sealed class SpacePreviewController : IDisposable
                     DiagnosticLog.Write($"browse {step:+0;-0} -> no result");
                     return;
                 }
+
+                // The step has landed. A copy on its way for where the
+                // last one landed is no longer waited for.
+                _arrival++;
 
                 DiagnosticLog.Write($"browse {step:+0;-0} ({selection.ViewIndex + 1} of {selection.ViewCount}) -> {selection.Path}");
                 if (!string.Equals(selection.Path, _previewWindow.CurrentPath, StringComparison.OrdinalIgnoreCase))

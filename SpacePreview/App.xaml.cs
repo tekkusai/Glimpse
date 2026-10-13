@@ -112,8 +112,11 @@ public partial class App : Application
             CacheHousekeeping.Start();
 
             // Copies of files from a phone or a zip folder never outlive
-            // the session that made them.
-            _ = Task.Run(BorrowedFiles.Clear);
+            // the session that made them. Space is already answered by
+            // now, so only what is older than this start goes: a copy
+            // asked for since is dated from the asking.
+            var started = System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime();
+            _ = Task.Run(() => BorrowedFiles.Clear(started));
 
             // Once, right after install: the app introduces itself with its
             // own preview window and is dismissed with the gesture it teaches.
