@@ -202,6 +202,20 @@ internal static class PsdPreviewLoader
             return null;
         }
 
+        // Nor is it ever shorter than a sixty-fourth of its row: two bytes
+        // become 128 at most. Every pixel the header claims is visited to
+        // bring the picture down, so the claim has to be backed by bytes.
+        // With this and the check below that the planes are in the file,
+        // the work is at most 64 times the file's own size, whatever the
+        // header says. A table of empty rows once passed for a picture
+        // 300,000 pixels square in a file of 3.6 MB.
+        var shortestRow = rowCounts is null ? 0 : rowCounts.Min();
+        if (rowCounts is not null && shortestRow < (rowBytes + 127) / 128 * 2)
+        {
+            DiagnosticLog.Write($"psd preview skipped {path}: a packed row of {shortestRow} bytes cannot fill a row of {rowBytes}");
+            return null;
+        }
+
         // Each plane is one run of rows in the file, so the planes decode
         // side by side, each from its own stream.
         var planeStarts = new long[planesWanted];

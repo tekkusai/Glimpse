@@ -152,6 +152,48 @@ public sealed class PsdPreviewLoaderTests
     }
 
     [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 0)]
+    [InlineData(false, 31)]
+    [InlineData(true, 31)]
+    public void PackedRowsTooShortToFillTheirRowsAreNotBelieved(bool large, int packedRow)
+    {
+        using var temp = new TempDirectory();
+
+        // Two thousand pixels a row. PackBits makes 128 bytes of two at
+        // most, so 32 bytes are the fewest a row can be. A table of
+        // shorter rows claims a picture the file does not hold: with rows
+        // of no bytes at all, a 3.6 MB file claimed 300,000 pixels square,
+        // and every one of them was visited to bring it down.
+        var path = Path.Combine(temp.Path, large ? "short-rows.psb" : "short-rows.psd");
+        WritePackedRows(path, large, side: 2000, [.. Enumerable.Repeat((byte)0x80, packedRow)]);
+
+        Assert.Null(PsdPreviewLoader.TryLoad(path));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheFewestBytesThatFillARowAreBelieved(bool large)
+    {
+        using var temp = new TempDirectory();
+
+        // A flat color as Photoshop packs it: fifteen runs of 128 and one
+        // of 80, in 32 bytes.
+        byte[] row = [.. Enumerable.Repeat(new byte[] { 0x81, 200 }, 15).SelectMany(run => run), 0xB1, 200];
+        var path = Path.Combine(temp.Path, large ? "flat.psb" : "flat.psd");
+        WritePackedRows(path, large, side: 2000, row);
+
+        var bitmap = PsdPreviewLoader.TryLoad(path);
+
+        Assert.NotNull(bitmap);
+        Assert.Equal((2000, 2000), (bitmap!.PixelWidth, bitmap.PixelHeight));
+        var pixels = Pixels(bitmap);
+        Assert.Equal(new byte[] { 200, 200, 200, 255 }, pixels[..4]);
+        Assert.Equal(new byte[] { 200, 200, 200, 255 }, pixels[^4..]);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public void GrayscaleIsTheSameValueInEveryColor(bool packBits)
@@ -379,6 +421,47 @@ public sealed class PsdPreviewLoaderTests
         foreach (var row in rows)
         {
             writer.Write(row);
+        }
+    }
+
+    /// <summary>A square RGB picture whose every row, in every plane, is the same packed bytes.</summary>
+    private static void WritePackedRows(string path, bool large, int side, byte[] packedRow)
+    {
+        using var writer = new BinaryWriter(File.Create(path));
+        void U16(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((ushort)value));
+        void U32(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((uint)value));
+        writer.Write("8BPS"u8);
+        U16(large ? 2 : 1);
+        writer.Write(new byte[6]);
+        U16(3);
+        U32(side);
+        U32(side);
+        U16(8);
+        U16(3);
+        U32(0);
+        U32(0);
+        if (large)
+        {
+            U32(0);
+        }
+
+        U32(0);
+        U16(1);
+        for (var row = 0; row < 3 * side; row++)
+        {
+            if (large)
+            {
+                U32(packedRow.Length);
+            }
+            else
+            {
+                U16(packedRow.Length);
+            }
+        }
+
+        for (var row = 0; row < 3 * side; row++)
+        {
+            writer.Write(packedRow);
         }
     }
 
