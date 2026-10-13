@@ -23,6 +23,7 @@ public partial class SettingsWindow : Window
     private readonly AppUpdater _updates;
     private readonly Action<ThemePreference> _themePicked;
     private readonly Func<IReadOnlyList<MissingPiece>> _findMissingPieces;
+    private readonly Func<IntPtr, Rect> _workArea;
     private readonly DispatcherTimer _copiedTimer;
     private IReadOnlyList<MissingPiece> _missingPieces = [];
     private IReadOnlyList<(string Path, DateTime Written)> _signatures = [];
@@ -33,14 +34,17 @@ public partial class SettingsWindow : Window
     private bool _syncing;
 
     /// <param name="findMissingPieces">Runs off the UI thread; tests pass their own.</param>
+    /// <param name="workArea">The work area of the screen a window is on, in DIPs; tests pass their own.</param>
     internal SettingsWindow(
         AppUpdater updates,
         Action<ThemePreference> themePicked,
-        Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null)
+        Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null,
+        Func<IntPtr, Rect>? workArea = null)
     {
         _updates = updates;
         _themePicked = themePicked;
         _findMissingPieces = findMissingPieces ?? MissingPieces.Find;
+        _workArea = workArea ?? PreviewWindow.GetWorkAreaDips;
         InitializeComponent();
         Title = $"{Branding.Name} settings";
         WindowFrame.AttachDialog(this, TitleBar);
@@ -82,6 +86,19 @@ public partial class SettingsWindow : Window
         // re-reads the world instead of trusting a snapshot.
         Activated += (_, _) => SyncAll();
         SizeChanged += (_, _) => KeepOnScreen();
+        // The wheel turns the saved signatures until the list ends, then the
+        // rows around it: a list that kept the wheel there would strand it.
+        SignaturesViewer.PreviewMouseWheel += (_, e) =>
+        {
+            var ended = e.Delta > 0
+                ? SignaturesViewer.VerticalOffset <= 0
+                : SignaturesViewer.VerticalOffset >= SignaturesViewer.ScrollableHeight;
+            if (ended)
+            {
+                e.Handled = true;
+                Body.RaiseEvent(new MouseWheelEventArgs(e.MouseDevice, e.Timestamp, e.Delta) { RoutedEvent = MouseWheelEvent });
+            }
+        };
         SyncAll();
     }
 
@@ -130,6 +147,13 @@ public partial class SettingsWindow : Window
         }
     }
 
+    // Never taller than the screen it is on: past that the rows scroll. The
+    // window is on its screen before its first layout, so it opens fitted.
+    protected override Size MeasureOverride(Size availableSize) =>
+        base.MeasureOverride(new Size(
+            availableSize.Width,
+            Math.Min(availableSize.Height, _workArea(new WindowInteropHelper(this).Handle).Height)));
+
     // A row that lands after the window is up grows it downward; the whole
     // dialog stays on its screen.
     private void KeepOnScreen()
@@ -139,7 +163,7 @@ public partial class SettingsWindow : Window
             return;
         }
 
-        var area = PreviewWindow.GetWorkAreaDips(new WindowInteropHelper(this).Handle);
+        var area = _workArea(new WindowInteropHelper(this).Handle);
         if (Top + ActualHeight > area.Bottom)
         {
             Top = Math.Max(area.Top, area.Bottom - ActualHeight);

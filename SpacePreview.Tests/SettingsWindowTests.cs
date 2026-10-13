@@ -3,6 +3,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using SpacePreview.Native;
@@ -16,8 +17,9 @@ namespace SpacePreview.Tests;
 /// Settings as the user meets it: the version line claims "Up to date" only
 /// after a check reached GitHub, the update line says what will happen and
 /// fits, the missing pieces say only what is certain, saved
-/// ink goes on the second click, and the rows that were cut stay cut. The
-/// collection runs alone because the ink test moves the data root.
+/// ink goes on the second click, the dialog is never taller than its screen,
+/// and the rows that were cut stay cut. The collection runs alone because
+/// the ink tests move the data root.
 /// </summary>
 [Collection(ProcessEnvironmentCollection.Name)]
 public sealed class SettingsWindowTests
@@ -549,10 +551,190 @@ public sealed class SettingsWindowTests
         return Task.CompletedTask;
     });
 
+    [Fact]
+    public Task SettingsIsNeverTallerThanItsScreenAndKeepsItsTitleAndFooterInView() => WpfApp.RunAsync(async () =>
+    {
+        using var ink = new SavedInk(signatures: 3);
+        var opened = new List<SettingsWindow>();
+        try
+        {
+            // 672 px is what a 1080p screen at 150 % leaves above its taskbar.
+            foreach (var screen in new[] { 672, 600, 500 })
+            {
+                var settings = await OpenFullAsync(screen);
+                opened.Add(settings);
+                var height = LayOut(settings);
+                var title = Bounds(settings.TitleBar, settings);
+                var footer = Bounds(settings.Footer, settings);
+
+                Assert.True(height <= screen, $"Settings is {height:0} px tall on a screen with {screen} px of work area.");
+                Assert.True(title.Top >= 0, $"The title starts at {title.Top:0} px on a {screen} px screen.");
+                Assert.True(footer.Bottom <= height, $"The footer ends at {footer.Bottom:0} px of {height:0} on a {screen} px screen.");
+
+                // Every row can be reached: the last one comes into view, as
+                // Tab would bring it, and the first comes back.
+                foreach (var row in new[] { (FrameworkElement)settings.SignaturesSection.Children[^1], settings.StartupRow })
+                {
+                    row.BringIntoView();
+                    settings.UpdateLayout();
+                    var shown = Bounds(row, settings);
+                    Assert.True(
+                        shown.Top >= title.Bottom && shown.Bottom <= footer.Top,
+                        $"A row sits at {shown.Top:0} to {shown.Bottom:0} px, outside {title.Bottom:0} to {footer.Top:0}, on a {screen} px screen.");
+                }
+            }
+
+            // With room the dialog is as tall as its content and nothing
+            // scrolls, down to a screen of exactly that height.
+            var roomy = await OpenFullAsync(2000);
+            opened.Add(roomy);
+            var natural = LayOut(roomy);
+            var exact = await OpenFullAsync(natural);
+            opened.Add(exact);
+
+            Assert.Equal(natural, LayOut(exact));
+            Assert.All(
+                new[] { roomy, exact }.SelectMany(settings => Descendants(settings).OfType<ScrollViewer>()),
+                viewer => Assert.Equal(0, viewer.ScrollableHeight));
+        }
+        finally
+        {
+            opened.ForEach(settings => settings.Close());
+        }
+    });
+
+    [Fact]
+    public Task ANoticeThatLandsAfterOpeningGrowsTheDialogNoFurtherThanItsScreen() => WpfApp.RunAsync(async () =>
+    {
+        const double Screen = 600;
+        using var ink = new SavedInk(signatures: 3);
+        var asked = new TaskCompletionSource();
+        var settings = Open(
+            findMissingPieces: () =>
+            {
+                asked.Task.Wait();
+                return AllMissing();
+            },
+            screen: Screen);
+        try
+        {
+            var before = LayOut(settings);
+            Assert.True(before < Screen, $"Without its notices Settings is {before:0} px tall, too tall for this test's screen.");
+
+            asked.SetResult();
+            await WaitUntilAsync(() => settings.MissingPiecesSection.Visibility == Visibility.Visible);
+            var after = LayOut(settings);
+
+            Assert.Equal(Screen, after);
+            Assert.True(Bounds(settings.Footer, settings).Bottom <= after, "The notices pushed the footer out of the dialog.");
+        }
+        finally
+        {
+            asked.TrySetResult();
+            settings.Close();
+        }
+    });
+
+    [Fact]
+    public Task TheWheelOverSavedSignaturesTurnsTheRowsOnceTheListEnds() => WpfApp.RunAsync(async () =>
+    {
+        using var ink = new SavedInk(signatures: 3);
+        var opened = new List<SettingsWindow>();
+        try
+        {
+            // Three tiles fit the list, so it has nothing to turn and the
+            // rows around it turn at once.
+            var few = await OpenFullAsync(screen: 500);
+            opened.Add(few);
+            LayOut(few);
+            var top = Bounds(few.StartupRow, few).Top;
+            Wheel(few, few.SignaturesList.Children[0], -120);
+            Assert.True(Bounds(few.StartupRow, few).Top < top, "The wheel over three saved signatures moves nothing.");
+
+            // Five do not fit: the list turns first and hands the wheel on
+            // at either end.
+            ink.Add(signatures: 2);
+            var many = await OpenFullAsync(screen: 500);
+            opened.Add(many);
+            LayOut(many);
+            var list = (ScrollViewer)LogicalTreeHelper.GetParent(many.SignaturesList);
+            var tile = many.SignaturesList.Children[0];
+            top = Bounds(many.StartupRow, many).Top;
+
+            Wheel(many, tile, -120);
+            Assert.True(list.VerticalOffset > 0, "The wheel did not turn the list of saved signatures.");
+            Assert.Equal(top, Bounds(many.StartupRow, many).Top);
+
+            list.ScrollToEnd();
+            many.UpdateLayout();
+            Wheel(many, tile, -120);
+            var turned = Bounds(many.StartupRow, many).Top;
+            Assert.True(turned < top, "The wheel is stranded at the end of the saved signatures.");
+
+            list.ScrollToHome();
+            many.UpdateLayout();
+            Wheel(many, tile, 120);
+            Assert.True(Bounds(many.StartupRow, many).Top > turned, "The wheel is stranded at the top of the saved signatures.");
+        }
+        finally
+        {
+            opened.ForEach(settings => settings.Close());
+        }
+    });
+
+    /// <param name="screen">The height of the work area the dialog finds itself on.</param>
     private static SettingsWindow Open(
         AppUpdater? updates = null,
-        Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null) =>
-        new(updates ?? ReleaseFixture.QuietUpdater(), _ => { }, findMissingPieces ?? (() => []));
+        Func<IReadOnlyList<MissingPiece>>? findMissingPieces = null,
+        double? screen = null) =>
+        new(
+            updates ?? ReleaseFixture.QuietUpdater(),
+            _ => { },
+            findMissingPieces ?? (() => []),
+            screen is { } height ? _ => new Rect(0, 0, 1280, height) : null);
+
+    // The tallest dialog a stock PC shows: every notice, over the saved ink.
+    private static async Task<SettingsWindow> OpenFullAsync(double screen)
+    {
+        var settings = Open(findMissingPieces: AllMissing, screen: screen);
+        await WaitUntilAsync(() => settings.MissingPiecesSection.Visibility == Visibility.Visible);
+        return settings;
+    }
+
+    private static IReadOnlyList<MissingPiece> AllMissing() =>
+        MissingPieces.Describe(officeEngine: false, hevcDecoder: false, heifDecoder: false);
+
+    /// <summary>
+    /// The height Show would give the dialog, with no frame on screen: a
+    /// handle, then the window's own measure and arrange. A window never
+    /// shown is collapsed, and lays nothing out when asked the usual way.
+    /// </summary>
+    private static double LayOut(SettingsWindow settings)
+    {
+        new WindowInteropHelper(settings).EnsureHandle();
+        settings.ApplyTemplate();
+        var size = (Size)Fields.Call(settings, "MeasureOverride", new Size(settings.Width, double.PositiveInfinity))!;
+        Fields.Call(settings, "ArrangeOverride", new Size(settings.Width, size.Height));
+        settings.UpdateLayout();
+        return size.Height;
+    }
+
+    private static Rect Bounds(FrameworkElement element, SettingsWindow settings) =>
+        element.TransformToAncestor(settings).TransformBounds(new Rect(element.RenderSize));
+
+    // The wheel as input routes it: the tunnel, then the bubble unless the
+    // tunnel was handled.
+    private static void Wheel(SettingsWindow settings, UIElement over, int delta)
+    {
+        var tunnel = new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, delta) { RoutedEvent = UIElement.PreviewMouseWheelEvent };
+        over.RaiseEvent(tunnel);
+        if (!tunnel.Handled)
+        {
+            over.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, delta) { RoutedEvent = UIElement.MouseWheelEvent });
+        }
+
+        settings.UpdateLayout();
+    }
 
     private static (Button Trash, ButtonBase Keep, ButtonBase Delete) Controls(SettingsWindow settings, int row)
     {
@@ -640,6 +822,39 @@ public sealed class SettingsWindowTests
         while (!condition() && DateTime.UtcNow < deadline)
         {
             await Task.Delay(20);
+        }
+    }
+
+    /// <summary>The data root moved to a temp folder of saved signatures, and put back on the way out.</summary>
+    private sealed class SavedInk : IDisposable
+    {
+        private readonly TempDirectory _temp = new();
+        private readonly string? _previous;
+        private int _saved;
+
+        public SavedInk(int signatures)
+        {
+            // Settings fixes its file at first use: let that be the run's
+            // root, never this temp one.
+            _ = Settings.Current;
+            _previous = Environment.GetEnvironmentVariable("GLIMPSE_DATA_ROOT");
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", _temp.Path);
+            Add(signatures);
+        }
+
+        public void Add(int signatures)
+        {
+            var folder = _temp.CreateDirectory("signatures");
+            for (var i = 0; i < signatures; i++)
+            {
+                File.WriteAllBytes(Path.Combine(folder, $"sig-20261010-1200{_saved++:00}-000.png"), InkPng());
+            }
+        }
+
+        public void Dispose()
+        {
+            Environment.SetEnvironmentVariable("GLIMPSE_DATA_ROOT", _previous);
+            _temp.Dispose();
         }
     }
 }

@@ -67,7 +67,15 @@
         </Style>
     </Window.Resources>
 
-    <StackPanel Margin="20,0,20,18">
+    <!-- The title and the footer hold still. The rows between them scroll
+         once the dialog would be taller than its screen. -->
+    <Grid Margin="20,0,20,18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
         <Grid x:Name="TitleBar" Height="60" Background="Transparent">
             <TextBlock Text="Settings"
                        FontSize="{x:Static u:Metrics.FontTitle}"
@@ -82,160 +90,192 @@
                     AutomationProperties.Name="Close settings" />
         </Grid>
 
-        <Border x:Name="StartupRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Start with Windows" Style="{StaticResource RowLabel}" />
-                <ToggleButton x:Name="StartupToggle"
-                              Grid.Column="1"
-                              Style="{StaticResource HouseToggle}"
-                              AutomationProperties.Name="Start with Windows" />
-            </Grid>
-        </Border>
-
-        <Border x:Name="AutoUpdateRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Install updates automatically" Style="{StaticResource RowLabel}" />
-                <ToggleButton x:Name="AutoUpdateToggle"
-                              Grid.Column="1"
-                              Style="{StaticResource HouseToggle}"
-                              AutomationProperties.Name="Install updates automatically" />
-            </Grid>
-        </Border>
-
-        <Border Style="{StaticResource SettingsRow}">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Text="Theme" Style="{StaticResource RowLabel}" />
-                <Border Grid.Column="1"
-                        Background="{DynamicResource Theme.RaisedBg}"
-                        BorderBrush="{DynamicResource Theme.RaisedBorder}"
-                        BorderThickness="1"
-                        CornerRadius="{x:Static u:Metrics.MenuCorner}"
-                        Padding="2">
-                    <StackPanel Orientation="Horizontal">
-                        <RadioButton x:Name="ThemeSystem"
-                                     GroupName="Theme"
-                                     Content="System"
-                                     Style="{StaticResource ThemeSegment}"
-                                     AutomationProperties.Name="Follow system theme" />
-                        <RadioButton x:Name="ThemeLight"
-                                     GroupName="Theme"
-                                     Content="Light"
-                                     Margin="2,0,0,0"
-                                     Style="{StaticResource ThemeSegment}"
-                                     AutomationProperties.Name="Light theme" />
-                        <RadioButton x:Name="ThemeDark"
-                                     GroupName="Theme"
-                                     Content="Dark"
-                                     Margin="2,0,0,0"
-                                     Style="{StaticResource ThemeSegment}"
-                                     AutomationProperties.Name="Dark theme" />
-                    </StackPanel>
+        <!-- The viewer reaches into both paddings, so a row's hover is
+             unclipped, and down to the footer's line, so a row leaves
+             under the line. Its bar lies over the right padding: no row
+             moves when it appears. -->
+        <ScrollViewer x:Name="Body"
+                      Grid.Row="1"
+                      Margin="-10,0,-20,-10"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      Focusable="False">
+            <ScrollViewer.Template>
+                <ControlTemplate TargetType="ScrollViewer">
+                    <Grid>
+                        <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" />
+                        <!-- The system's 17 px minimum outranks the style's 11. -->
+                        <ScrollBar x:Name="PART_VerticalScrollBar"
+                                   HorizontalAlignment="Right"
+                                   MinWidth="0"
+                                   Style="{StaticResource PreviewScrollBar}"
+                                   Maximum="{TemplateBinding ScrollableHeight}"
+                                   ViewportSize="{TemplateBinding ViewportHeight}"
+                                   Value="{Binding VerticalOffset, RelativeSource={RelativeSource TemplatedParent}, Mode=OneWay}"
+                                   Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}" />
+                    </Grid>
+                </ControlTemplate>
+            </ScrollViewer.Template>
+            <StackPanel Margin="10,0,20,10">
+                <Border x:Name="StartupRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Start with Windows" Style="{StaticResource RowLabel}" />
+                        <ToggleButton x:Name="StartupToggle"
+                                      Grid.Column="1"
+                                      Style="{StaticResource HouseToggle}"
+                                      AutomationProperties.Name="Start with Windows" />
+                    </Grid>
                 </Border>
-            </Grid>
-        </Border>
 
-        <!-- What this PC lacks, each with its one fix. Filled in a moment
-             after the window opens; absent on a complete PC. Each optional
-             section carries its own divider, so a missing one leaves no
-             gap and no double line. -->
-        <StackPanel x:Name="MissingPiecesSection" Visibility="Collapsed">
+                <Border x:Name="AutoUpdateRow" Style="{StaticResource SettingsRow}" Cursor="Hand">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Install updates automatically" Style="{StaticResource RowLabel}" />
+                        <ToggleButton x:Name="AutoUpdateToggle"
+                                      Grid.Column="1"
+                                      Style="{StaticResource HouseToggle}"
+                                      AutomationProperties.Name="Install updates automatically" />
+                    </Grid>
+                </Border>
+
+                <Border Style="{StaticResource SettingsRow}">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="Theme" Style="{StaticResource RowLabel}" />
+                        <Border Grid.Column="1"
+                                Background="{DynamicResource Theme.RaisedBg}"
+                                BorderBrush="{DynamicResource Theme.RaisedBorder}"
+                                BorderThickness="1"
+                                CornerRadius="{x:Static u:Metrics.MenuCorner}"
+                                Padding="2">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="ThemeSystem"
+                                             GroupName="Theme"
+                                             Content="System"
+                                             Style="{StaticResource ThemeSegment}"
+                                             AutomationProperties.Name="Follow system theme" />
+                                <RadioButton x:Name="ThemeLight"
+                                             GroupName="Theme"
+                                             Content="Light"
+                                             Margin="2,0,0,0"
+                                             Style="{StaticResource ThemeSegment}"
+                                             AutomationProperties.Name="Light theme" />
+                                <RadioButton x:Name="ThemeDark"
+                                             GroupName="Theme"
+                                             Content="Dark"
+                                             Margin="2,0,0,0"
+                                             Style="{StaticResource ThemeSegment}"
+                                             AutomationProperties.Name="Dark theme" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Border>
+
+                <!-- What this PC lacks, each with its one fix. Filled in a moment
+                     after the window opens; absent on a complete PC. Each optional
+                     section carries its own divider, so a missing one leaves no
+                     gap and no double line. -->
+                <StackPanel x:Name="MissingPiecesSection" Visibility="Collapsed">
+                    <Border Style="{StaticResource Divider}" />
+                    <StackPanel x:Name="MissingPiecesList" />
+                </StackPanel>
+
+                <StackPanel x:Name="SignaturesSection" Visibility="Collapsed">
+                    <Border Style="{StaticResource Divider}" />
+                    <TextBlock x:Name="SignaturesHeading"
+                               Margin="0,9,0,8"
+                               Text="Saved signatures"
+                               Style="{StaticResource RowLabel}" />
+                    <!-- Three tiles, then the list scrolls. The viewer reaches into
+                         the right padding so a trash button's hover lines up with
+                         Close above, unclipped. -->
+                    <ScrollViewer x:Name="SignaturesViewer"
+                                  MaxHeight="232"
+                                  Margin="0,0,-8,5"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  Focusable="False">
+                        <ScrollViewer.Resources>
+                            <Style TargetType="ScrollBar" BasedOn="{StaticResource PreviewScrollBar}" />
+                        </ScrollViewer.Resources>
+                        <StackPanel x:Name="SignaturesList" />
+                    </ScrollViewer>
+                    <TextBlock Margin="0,0,0,4"
+                               Text="To add one, open a PDF and press Sign."
+                               FontSize="{x:Static u:Metrics.FontCaption}"
+                               Foreground="{DynamicResource Theme.TextTertiary}" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+
+        <StackPanel Grid.Row="2">
             <Border Style="{StaticResource Divider}" />
-            <StackPanel x:Name="MissingPiecesList" />
-        </StackPanel>
 
-        <StackPanel x:Name="SignaturesSection" Visibility="Collapsed">
-            <Border Style="{StaticResource Divider}" />
-            <TextBlock x:Name="SignaturesHeading"
-                       Margin="0,9,0,8"
-                       Text="Saved signatures"
-                       Style="{StaticResource RowLabel}" />
-            <!-- Three tiles, then the list scrolls: the dialog never outgrows
-                 a small screen. The viewer reaches into the right padding so
-                 a trash button's hover lines up with Close above, unclipped. -->
-            <ScrollViewer MaxHeight="232"
-                          Margin="0,0,-8,5"
-                          VerticalScrollBarVisibility="Auto"
-                          HorizontalScrollBarVisibility="Disabled"
-                          Focusable="False">
-                <ScrollViewer.Resources>
-                    <Style TargetType="ScrollBar" BasedOn="{StaticResource PreviewScrollBar}" />
-                </ScrollViewer.Resources>
-                <StackPanel x:Name="SignaturesList" />
-            </ScrollViewer>
-            <TextBlock Margin="0,0,0,4"
-                       Text="To add one, open a PDF and press Sign."
-                       FontSize="{x:Static u:Metrics.FontCaption}"
-                       Foreground="{DynamicResource Theme.TextTertiary}" />
-        </StackPanel>
-
-        <Border Style="{StaticResource Divider}" />
-
-        <Grid x:Name="Footer" Margin="0,4,0,0">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto" />
-                <RowDefinition Height="Auto" />
-            </Grid.RowDefinitions>
-            <StackPanel x:Name="VersionLine" Orientation="Horizontal" VerticalAlignment="Center">
-                <TextBlock x:Name="VersionText"
-                           VerticalAlignment="Center"
-                           FontSize="{x:Static u:Metrics.FontLabel}"
-                           FontWeight="SemiBold"
-                           Foreground="{DynamicResource Theme.TextSecondary}" />
-                <!-- One slot after the version: a short fact, its link, or both. -->
-                <TextBlock x:Name="UpdateStatusText"
-                           Margin="12,0,0,0"
-                           VerticalAlignment="Center"
-                           FontSize="{x:Static u:Metrics.FontLabel}"
-                           FontWeight="SemiBold"
+            <Grid x:Name="Footer" Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <StackPanel x:Name="VersionLine" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock x:Name="VersionText"
+                               VerticalAlignment="Center"
+                               FontSize="{x:Static u:Metrics.FontLabel}"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource Theme.TextSecondary}" />
+                    <!-- One slot after the version: a short fact, its link, or both. -->
+                    <TextBlock x:Name="UpdateStatusText"
+                               Margin="12,0,0,0"
+                               VerticalAlignment="Center"
+                               FontSize="{x:Static u:Metrics.FontLabel}"
+                               FontWeight="SemiBold"
+                               Foreground="{DynamicResource Theme.TextTertiary}"
+                               Visibility="Collapsed" />
+                    <Button x:Name="UpdateLink"
+                            Margin="6,0,0,0"
+                            Padding="6,2"
+                            Style="{StaticResource LinkButton}"
+                            FontSize="{x:Static u:Metrics.FontLabel}"
+                            FontWeight="SemiBold"
+                            Foreground="{DynamicResource Theme.Accent}"
+                            Visibility="Collapsed" />
+                    <Button x:Name="CheckLink"
+                            Margin="6,0,0,0"
+                            Padding="6,2"
+                            Style="{StaticResource LinkButton}"
+                            Content="Check for updates"
+                            Visibility="Collapsed"
+                            AutomationProperties.Name="Check for updates" />
+                </StackPanel>
+                <Button x:Name="CopyDiagnosticsButton"
+                        Grid.Column="1"
+                        Margin="0,0,-8,0"
+                        Style="{StaticResource LinkButton}"
+                        Content="Copy diagnostics"
+                        AutomationProperties.Name="Copy diagnostics" />
+                <!-- Only when there is something to explain. -->
+                <TextBlock x:Name="UpdateCaption"
+                           Grid.Row="1"
+                           Grid.ColumnSpan="2"
+                           Margin="0,2,0,0"
+                           TextWrapping="Wrap"
+                           FontSize="{x:Static u:Metrics.FontCaption}"
                            Foreground="{DynamicResource Theme.TextTertiary}"
                            Visibility="Collapsed" />
-                <Button x:Name="UpdateLink"
-                        Margin="6,0,0,0"
-                        Padding="6,2"
-                        Style="{StaticResource LinkButton}"
-                        FontSize="{x:Static u:Metrics.FontLabel}"
-                        FontWeight="SemiBold"
-                        Foreground="{DynamicResource Theme.Accent}"
-                        Visibility="Collapsed" />
-                <Button x:Name="CheckLink"
-                        Margin="6,0,0,0"
-                        Padding="6,2"
-                        Style="{StaticResource LinkButton}"
-                        Content="Check for updates"
-                        Visibility="Collapsed"
-                        AutomationProperties.Name="Check for updates" />
-            </StackPanel>
-            <Button x:Name="CopyDiagnosticsButton"
-                    Grid.Column="1"
-                    Margin="0,0,-8,0"
-                    Style="{StaticResource LinkButton}"
-                    Content="Copy diagnostics"
-                    AutomationProperties.Name="Copy diagnostics" />
-            <!-- Only when there is something to explain. -->
-            <TextBlock x:Name="UpdateCaption"
-                       Grid.Row="1"
-                       Grid.ColumnSpan="2"
-                       Margin="0,2,0,0"
-                       TextWrapping="Wrap"
-                       FontSize="{x:Static u:Metrics.FontCaption}"
-                       Foreground="{DynamicResource Theme.TextTertiary}"
-                       Visibility="Collapsed" />
-        </Grid>
-    </StackPanel>
+            </Grid>
+        </StackPanel>
+    </Grid>
 </Window>
