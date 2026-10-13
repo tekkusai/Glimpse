@@ -119,6 +119,7 @@
 | <kbd>Enter</kbd> | Open the file in its app |
 | <kbd>Ctrl</kbd> <kbd>+</kbd>, <kbd>Ctrl</kbd> <kbd>-</kbd>, <kbd>Ctrl</kbd> <kbd>0</kbd> | Zoom in, out, and back to fit |
 | <kbd>Ctrl</kbd> <kbd>R</kbd>, <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>R</kbd> | Turn an image right or left |
+| <kbd>Home</kbd>, <kbd>End</kbd> | The first or the last line of a text file |
 | <kbd>F11</kbd> | Fill the screen |
 
 Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. On a photo you can select words right in the picture and copy them, and Copy text takes all of them. The reading happens on your PC, in the languages your Windows has. The menu beside Open has Open with, Show in Explorer and Share.
@@ -129,7 +130,7 @@ Select several files before you press Space and the arrow keys step through only
 - **Camera RAW.** Sony, Canon, Nikon, Fujifilm, DNG and other RAW files, through Windows' Raw Image Extension, which Glimpse offers when it is missing. A RAW file is never changed.
 - **PDFs and Illustrator files.** In the WebView2 PDF viewer, with a page rail beside them.
 - **Word, Excel and PowerPoint.** Through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
-- **Text.** Markdown, code with syntax colors, JSON, logs and plain text.
+- **Text.** Markdown, code with syntax colors, JSON, logs and plain text. A log of any size opens on its first lines and reads on as you scroll, and End goes to its last line.
 - **Web pages.** Your own saved pages, with scripts off and nothing loaded from the internet.
 - **Video and audio.** With the track's cover and tags.
 - **Folders and archives.** A list of what's inside, largest first.

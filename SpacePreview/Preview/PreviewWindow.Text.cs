@@ -33,17 +33,52 @@ public partial class PreviewWindow
     internal const int LongLineDisplayLimit = 120_000;
     private const int LongLineThreshold = 32_768;
 
-    private static (string Text, bool Wrap)? LoadFormattedText(string path) =>
-        FormatTextPreview(path, TextPreviewLoader.TryLoad(path));
+    // The text file on screen that is read a piece at a time, if one is.
+    private TextFileView? _textFile;
+
+    /// <summary>
+    /// What the native text view opens with. Text that fits is all here.
+    /// A longer file comes with its reader and the piece it opens on, and
+    /// the view reads the rest as the reader goes.
+    /// </summary>
+    internal sealed record TextDocument(string Text, bool Wrap, TextFileReader? Reader = null, TextPiece? Head = null);
+
+    private static TextDocument? LoadTextDocument(string path) =>
+        OpenTextDocument(path, TextPreviewLoader.TryLoad(path));
+
+    internal static TextDocument? OpenTextDocument(string path, TextPreview? preview)
+    {
+        if (FormatTextPreview(path, preview) is not { } formatted)
+        {
+            return null;
+        }
+
+        // Past what the box lays out at once, the file is read a piece at
+        // a time, unwrapped as the cut text always was. One whose first
+        // line is too long for that keeps the cut and its notice.
+        if (ExceedsDisplay(preview!)
+            && TextFileReader.TryOpen(path) is { } reader
+            && TextFileView.TryReadHead(reader) is { } head)
+        {
+            return new TextDocument(head.Text, Wrap: false, reader, head);
+        }
+
+        return new TextDocument(formatted.Text, formatted.Wrap);
+    }
+
+    /// <summary>More text than the box is given at once: the loader stopped short of the file's end, or the display limit cuts it.</summary>
+    internal static bool ExceedsDisplay(TextPreview preview) =>
+        preview.Truncated
+        || preview.Text.Length > (ContainsPathologicalLine(preview.Text) ? LongLineDisplayLimit : TextDisplayLimit);
 
     internal static (string Text, bool Wrap)? FormatTextPreview(string path, TextPreview? preview)
     {
-        // WPF's TextBox lays out the whole document on the UI thread; past
-        // these sizes the first layout visibly stutters, so large previews
-        // trade completeness for instant open. A single enormous record is
-        // more expensive than ordinary multiline text, so it gets a tighter
-        // budget. This covers bencoded metadata, minified source maps,
-        // lockfiles, and malformed CSV/log records without type exceptions.
+        // WPF's TextBox lays out everything it is given on the UI thread;
+        // past these sizes the first layout visibly stutters. Ordinary text
+        // over the limit is read a piece at a time instead (see
+        // OpenTextDocument), and this cut is what remains for a file whose
+        // first line is too long for that: bencoded metadata, minified
+        // source maps, lockfiles, malformed CSV and log records.
         if (preview is null)
         {
             return null;
@@ -97,11 +132,84 @@ public partial class PreviewWindow
     /// 13 px Cascadia Mono at 1.6 line height, the same top inset, primary
     /// text, so a .txt next to a .cs reads as one app.
     /// </summary>
-    private static FrameworkElement BuildTextPreview(TextPreview preview, bool wrap)
+    private FrameworkElement BuildTextPreview(TextDocument document)
+    {
+        var box = BuildTextBox(document.Text, document.Wrap);
+        if (document is { Reader: { } reader, Head: { } head })
+        {
+            // The view on screen answers Home and End: it claims them when
+            // it joins the window and lets go when it leaves.
+            var view = new TextFileView(box, reader, head);
+            box.Loaded += (_, _) => _textFile = view;
+            box.Unloaded += (_, _) =>
+            {
+                if (ReferenceEquals(_textFile, view))
+                {
+                    _textFile = null;
+                }
+            };
+        }
+
+        return box;
+    }
+
+    /// <summary>
+    /// Home, End and the page keys on a text preview. End is the end of the
+    /// file, not of what the box holds. The page keys are the box's own
+    /// once it has the keyboard.
+    /// </summary>
+    internal bool ScrollTextByKey(Key key, ModifierKeys modifiers)
+    {
+        if (PreviewContent.Content is not TextBox box || (modifiers & ~ModifierKeys.Control) != ModifierKeys.None)
+        {
+            return false;
+        }
+
+        var file = _textFile is { } view && ReferenceEquals(view.Box, box) ? view : null;
+        switch (key)
+        {
+            case Key.End:
+                if (file is null)
+                {
+                    box.ScrollToEnd();
+                }
+                else
+                {
+                    file.GoToEnd();
+                }
+
+                return true;
+
+            case Key.Home:
+                if (file is null)
+                {
+                    box.ScrollToHome();
+                }
+                else
+                {
+                    file.GoToStart();
+                }
+
+                return true;
+
+            case Key.PageDown when modifiers == ModifierKeys.None && !box.IsKeyboardFocusWithin:
+                box.PageDown();
+                return true;
+
+            case Key.PageUp when modifiers == ModifierKeys.None && !box.IsKeyboardFocusWithin:
+                box.PageUp();
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private static TextBox BuildTextBox(string text, bool wrap)
     {
         const double fontSize = 13;
         var textBox = BuildSelectableTextBox(
-            preview.Text,
+            text,
             new FontFamily("Cascadia Mono, Consolas"),
             fontSize,
             wrap,

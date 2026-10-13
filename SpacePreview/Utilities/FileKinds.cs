@@ -504,6 +504,38 @@ internal static class TextPreviewLoader
     }
 
     /// <summary>
+    /// The encoding <see cref="Decode"/> reads these bytes in, and how many
+    /// of them are its byte order mark. Null for binary data. A reader that
+    /// takes a file a piece at a time settles the encoding here once, from
+    /// the file's first bytes, so both agree on every file.
+    /// </summary>
+    internal static Encoding? EncodingOf(byte[] buffer, bool truncated, out int preamble)
+    {
+        preamble = 0;
+        if (DetectEncoding(buffer) is { } marked)
+        {
+            preamble = marked.Preamble.Length;
+            return marked;
+        }
+
+        if (LooksBinary(buffer))
+        {
+            return null;
+        }
+
+        var length = truncated ? buffer.Length - IncompleteUtf8Tail(buffer) : buffer.Length;
+        try
+        {
+            StrictUtf8.GetCharCount(buffer, 0, length);
+            return Encoding.UTF8;
+        }
+        catch (DecoderFallbackException)
+        {
+            return Ansi;
+        }
+    }
+
+    /// <summary>
     /// Indents JSON. The relaxed encoder keeps non-ASCII letters and
     /// &lt; &gt; &amp; ' as written, and numbers keep their exact text.
     /// Anything that does not parse (comments, JSON Lines) stays as it is.
@@ -532,7 +564,7 @@ internal static class TextPreviewLoader
     }
 
     /// <summary>Bytes at the end that start a UTF-8 character the buffer does not finish.</summary>
-    private static int IncompleteUtf8Tail(byte[] buffer)
+    internal static int IncompleteUtf8Tail(byte[] buffer)
     {
         for (var back = 1; back <= Math.Min(3, buffer.Length); back++)
         {

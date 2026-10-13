@@ -306,6 +306,12 @@ public partial class PreviewWindow
             return;
         }
 
+        if (ScrollTextByKey(e.Key, Keyboard.Modifiers))
+        {
+            e.Handled = true;
+            return;
+        }
+
         // A pinned window keeps its own Enter and Esc: open the file, close
         // the window.
         if (IsPinned && Keyboard.Modifiers == ModifierKeys.None)

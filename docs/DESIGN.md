@@ -242,6 +242,14 @@ work area tall, so a page shows the layout its author designed. A single
 object (a file card, a folder, an archive, audio, a font) opens at the
 compact default.
 
+A text file longer than the text box lays out at once (400,000 characters)
+is read a piece at a time. It opens on its first lines, takes more while
+the thread is free, and takes more whenever the reader comes within three
+screens of either end of what it holds. It holds two million characters at
+most and lets go of the far end past that. End goes to the file's last line
+as the file is then, Home to its first. A line longer than 32,768 characters
+is not laid out: a line of text says it is there.
+
 Pages Glimpse writes (code, markdown, text, media player, image viewer,
 spreadsheets, EPUB) take their colors from one stylesheet generated from both
 palettes, with one name per token. They style scrollbars to match the WPF ones (no arrow buttons,

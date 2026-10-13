@@ -710,13 +710,13 @@ public partial class PreviewWindow : Window
             // generated lane. Reuse that exact snapshot so uncommon text-like
             // formats do not pay for a second read before first paint.
             var text = await Task.Run(
-                () => FormatTextPreview(
+                () => OpenTextDocument(
                     path,
                     attempt.FallbackText ?? TextPreviewLoader.TryLoad(path)),
                 token);
             if (text is not null)
             {
-                return BuildTextPreview(new TextPreview(text.Value.Text, Truncated: false, TotalBytes: 0), text.Value.Wrap);
+                return BuildTextPreview(text);
             }
         }
 
@@ -748,7 +748,7 @@ public partial class PreviewWindow : Window
             return;
         }
 
-        var text = await Task.Run(() => LoadFormattedText(path));
+        var text = await Task.Run(() => LoadTextDocument(path));
         if (!OwnsCurrentLoad(path, version, token))
         {
             return;
@@ -765,7 +765,7 @@ public partial class PreviewWindow : Window
         }
         else
         {
-            content = BuildTextPreview(new TextPreview(text.Value.Text, Truncated: false, TotalBytes: 0), text.Value.Wrap);
+            content = BuildTextPreview(text);
         }
 
         SetPreviewContent(content, null);
