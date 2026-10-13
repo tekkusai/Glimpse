@@ -126,6 +126,7 @@ Select several files before you press Space and the arrow keys step through only
 ## Everything it opens
 
 - **Photos and images.** JPEG, PNG, HEIC, WebP, AVIF, SVG and Photoshop files. Images zoom around the cursor, and Ctrl+R turns a photo and saves the turn.
+- **Camera RAW.** Sony, Canon, Nikon, Fujifilm, DNG and other RAW files, through Windows' Raw Image Extension, which Glimpse offers when it is missing. A RAW file is never changed.
 - **PDFs and Illustrator files.** In the WebView2 PDF viewer, with a page rail beside them.
 - **Word, Excel and PowerPoint.** Through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
 - **Text.** Markdown, code with syntax colors, JSON, logs and plain text.

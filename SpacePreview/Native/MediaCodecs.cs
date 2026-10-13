@@ -11,10 +11,20 @@ namespace SpacePreview.Native;
 /// </summary>
 internal static class MediaCodecs
 {
-    // MFVideoFormat_HEVC, GUID_ContainerFormatHeif and GUID_ContainerFormatRaw.
+    // MFVideoFormat_HEVC, GUID_ContainerFormatHeif, GUID_ContainerFormatRaw
+    // and GUID_ContainerFormatAdng.
     internal static readonly Guid HevcVideo = new("43564548-0000-0010-8000-00AA00389B71");
     internal static readonly Guid HeifContainer = new("E1E62521-6787-405B-A339-500715B5763F");
     internal static readonly Guid RawContainer = new("FE99CE60-F19C-433C-A3AE-00ACEFA9CA21");
+    private static readonly Guid DngContainer = new("F3FF6D0D-38C0-41C4-B1FE-1F3824F17B84");
+
+    /// <summary>
+    /// Whether the decoder that answered for a file is one that reads a
+    /// camera's RAW data: Raw Image Extension, or Windows' own DNG decoder,
+    /// which takes a real DNG ahead of it.
+    /// </summary>
+    internal static bool ReadsCameraRaw(Guid? containerFormat) =>
+        containerFormat == RawContainer || containerFormat == DngContainer;
 
     private static readonly Guid VideoDecoderCategory = new("D6C02D4B-6833-45B4-971A-05A4B04BAB91");
     private static readonly Guid VideoMajorType = new("73646976-0000-0010-8000-00AA00389B71");

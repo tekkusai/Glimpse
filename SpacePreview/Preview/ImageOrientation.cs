@@ -71,9 +71,9 @@ internal static class ImageOrientation
     {
         try
         {
-            // The RAW decoder leaves a portrait shot on its side and says
-            // so here, whatever the camera's own format calls the tag.
-            var query = frame.Decoder?.CodecInfo?.ContainerFormat == MediaCodecs.RawContainer
+            // A RAW decoder leaves a portrait shot on its side and says so
+            // here, whatever the camera's own format calls the tag.
+            var query = MediaCodecs.ReadsCameraRaw(frame.Decoder?.CodecInfo?.ContainerFormat)
                 ? "System.Photo.Orientation"
                 : MetadataQueryFor(path);
             if (query is not null

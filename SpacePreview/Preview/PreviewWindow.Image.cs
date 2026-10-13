@@ -206,7 +206,10 @@ public partial class PreviewWindow
         var needed = header is null
             ? 0
             : (int)Math.Ceiling(header.LongSide * Math.Min(1, ZoomGestures.Fit(new Size(header.Width, header.Height), stagePixels)));
-        if (header is not null && header.LongSide > MaxImageDecodePixels && needed < MaxImageDecodePixels)
+        // A RAW has one picture (see TryDecodeRaw). A thumbnail shown first
+        // would be the camera's rendering, swapped a moment later for the
+        // decoder's: two different-looking photos of one file.
+        if (header is not null && header.LongSide > MaxImageDecodePixels && needed < MaxImageDecodePixels && !FileKinds.IsCameraRaw(path))
         {
             if (ShellThumbnailProvider.TryGetCachedThumbnail(path, needed) is { } thumbnail)
             {
@@ -348,6 +351,11 @@ public partial class PreviewWindow
             // decode runs, and a rotation saved in that time, by this same
             // preview, was refused the file.
             using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            if (header is not null && FileKinds.IsCameraRaw(path))
+            {
+                return DecodeRaw(stream, header, longSide);
+            }
+
             if (Path.GetExtension(path).Equals(".ico", StringComparison.OrdinalIgnoreCase))
             {
                 var frame = ImageHeader.LargestFrame(
@@ -385,6 +393,37 @@ public partial class PreviewWindow
             return null;
         }
     }
+
+    /// <summary>
+    /// The one picture a RAW shows. A camera saves its own JPEG of the shot
+    /// inside the file: when that is as large as the photo would be shown
+    /// anyway, it is the picture. It is the look the photographer chose and
+    /// what Explorer's thumbnail shows, and it opened in 30 ms where the
+    /// sensor data took 450. A small one is a thumbnail, and the decoder's
+    /// rendering of the sensor is shown instead.
+    /// </summary>
+    private static BitmapSource DecodeRaw(Stream stream, ImageHeader header, int longSide)
+    {
+        var decoder = BitmapDecoder.Create(stream, BitmapCreateOptions.IgnoreColorProfile, BitmapCacheOption.None);
+        BitmapSource picture = decoder.Preview is { } preview
+            && CamerasOwnJpegIsThePicture(Math.Max(preview.PixelWidth, preview.PixelHeight), header.LongSide, longSide)
+                ? preview
+                : decoder.Frames[0];
+        var have = Math.Max(picture.PixelWidth, picture.PixelHeight);
+        if (have > longSide)
+        {
+            var scale = (double)longSide / have;
+            picture = new TransformedBitmap(picture, new ScaleTransform(scale, scale));
+        }
+
+        // Read whole while the file is open: the decoder works on demand.
+        var copy = new WriteableBitmap(picture);
+        copy.Freeze();
+        return copy;
+    }
+
+    internal static bool CamerasOwnJpegIsThePicture(int jpegLongSide, int sensorLongSide, int longSide) =>
+        jpegLongSide >= Math.Min(sensorLongSide, longSide);
 
     // The image on screen owns the keyboard zoom: it claims it when it joins
     // the window and lets go when it leaves, unless a newer image took it.

@@ -139,11 +139,11 @@ internal sealed record ImageHeader(int StoredWidth, int StoredHeight, int Orient
                 stream,
                 BitmapCreateOptions.DelayCreation | BitmapCreateOptions.IgnoreColorProfile,
                 BitmapCacheOption.None);
-            // Most RAW files are built on TIFF. Without the RAW decoder,
+            // Most RAW files are built on TIFF. Without a RAW decoder,
             // Windows opens one as that TIFF and hands back the thumbnail
-            // inside, which is not the photo. Only the RAW decoder's word
+            // inside, which is not the photo. Only a RAW decoder's word
             // is taken for a RAW.
-            if (FileKinds.IsCameraRaw(path) && decoder.CodecInfo?.ContainerFormat != MediaCodecs.RawContainer)
+            if (FileKinds.IsCameraRaw(path) && !MediaCodecs.ReadsCameraRaw(decoder.CodecInfo?.ContainerFormat))
             {
                 return null;
             }

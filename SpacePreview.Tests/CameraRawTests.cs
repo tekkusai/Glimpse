@@ -157,6 +157,30 @@ public sealed class CameraRawTests
         }
     });
 
+    // The sizes are those of five real files: a camera's own JPEG of the
+    // shot is the picture when it is as large as the photo would be shown,
+    // and a thumbnail when it is not. The first is a Sony A7 III, whose
+    // JPEG is 1616 pixels wide beside a 6024 pixel sensor.
+    [Theory]
+    [InlineData(1616, 6024, false)]
+    [InlineData(4416, 6246, true)]
+    [InlineData(5472, 5496, true)]
+    [InlineData(6048, 6064, true)]
+    [InlineData(1600, 1600, true)]
+    public void TheCamerasOwnJpegIsThePictureOnlyWhenItIsLargeEnough(int jpegLongSide, int sensorLongSide, bool expected) =>
+        Assert.Equal(expected, PreviewWindow.CamerasOwnJpegIsThePicture(jpegLongSide, sensorLongSide, longSide: 4096));
+
+    // Windows 11 reads a real DNG with a decoder of its own, ahead of Raw
+    // Image Extension. Both read a camera's data; the TIFF decoder does not.
+    [Fact]
+    public void BothOfWindowsRawDecodersCountAndNoOtherDoes()
+    {
+        Assert.True(MediaCodecs.ReadsCameraRaw(MediaCodecs.RawContainer));
+        Assert.True(MediaCodecs.ReadsCameraRaw(new Guid("F3FF6D0D-38C0-41C4-B1FE-1F3824F17B84")));
+        Assert.False(MediaCodecs.ReadsCameraRaw(new Guid("163BCC30-E2E9-4F0B-961D-A3E9FDB788A3")));
+        Assert.False(MediaCodecs.ReadsCameraRaw(null));
+    }
+
     [Fact]
     public void SettingsNamesRawOnlyWhenThisPcHasNoDecoderForIt()
     {
