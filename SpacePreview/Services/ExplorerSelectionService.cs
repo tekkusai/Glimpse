@@ -547,6 +547,9 @@ internal static class ExplorerSelectionService
         }
     }
 
+    // A selected file with no path on disk is shown from a copy.
+    private static readonly Func<IShellItem, string?> Borrow = item => BorrowedFiles.TryBorrow(item);
+
     /// <summary>
     /// One browse step. An item that is no file at all, neither on disk nor
     /// on a phone or in a zip folder, is skipped in the direction the user
@@ -554,9 +557,6 @@ internal static class ExplorerSelectionService
     /// started. A file whose copy cannot be made is not skipped: its card
     /// says why.
     /// </summary>
-    // A selected file with no path on disk is shown from a copy.
-    private static readonly Func<IShellItem, string?> Borrow = item => BorrowedFiles.TryBorrow(item);
-
     private static ExplorerSelection? Step(IFolderView view, IntPtr targetHwnd, int delta)
     {
         var start = ShellViews.GetPosition(view);
