@@ -39,13 +39,25 @@
 <h2 align="center">It opens almost anything</h2>
 
 <p align="center">
-  <b>Photos</b> · <b>PDFs</b> · <b>Word, Excel and PowerPoint</b> · <b>Videos and music</b><br>
+  <b>Photos</b> · <b>Camera RAW</b> · <b>PDFs</b> · <b>Word, Excel and PowerPoint</b> · <b>Videos and music</b><br>
   <b>Folders and zip files</b> · <b>Code and notes</b> · <b>Fonts</b> · <b>3D models</b> · <b>E-books</b> · <b>Web pages</b>
 </p>
 
 <p align="center">
   No Microsoft Office needed. Every kind gets a window shaped for it.<br>
   The <a href="#everything-it-opens">full list</a> is further down.
+</p>
+
+<h2 align="center">Copy the words in a picture</h2>
+
+<p align="center">
+  Glimpse reads the words in photos and screenshots.<br>
+  Drag across them and press Ctrl+C, or right-click the picture and choose Copy text.<br>
+  The reading happens on your PC, in the languages your Windows has.
+</p>
+
+<p align="center">
+  <img src="docs/readme/words.png" alt="A photo of a printed page in Glimpse, with its first sentence selected">
 </p>
 
 <h2 align="center">Sign a PDF and send it back</h2>
@@ -122,7 +134,7 @@
 | <kbd>Home</kbd>, <kbd>End</kbd> | The first or the last line of a text file, once you click in it |
 | <kbd>F11</kbd> | Fill the screen |
 
-Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. On a photo you can select words right in the picture and copy them, and Copy text takes all of them. The reading happens on your PC, in the languages your Windows has. The menu beside Open has Open with, Show in Explorer and Share.
+Select several files before you press Space and the arrow keys step through only those. The grid shows them all at once, and a slideshow plays them. Right-click a preview to copy its text, the file or its path. On a photo you can select words right in the picture and copy them, and Copy text takes all of them. The menu beside Open has Open with, Show in Explorer and Share.
 
 ## Everything it opens
 
