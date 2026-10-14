@@ -210,6 +210,170 @@ public sealed class TextFileViewTests
         }
     });
 
+    /// <summary>
+    /// End and Home take the caret with the reader, as an editor does: an
+    /// arrow key after End goes on from the last line, not from wherever
+    /// the caret was left. Here the box holds the whole file, so neither
+    /// jump reads anything.
+    /// </summary>
+    [Fact]
+    public Task EndAndHomeTakeTheCaretWithThem() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var (path, text) = Write(temp, Lines(0, 6500));
+        var (window, box, view) = Show(path, characters: 1_000_000);
+        try
+        {
+            await Settle(view);
+            Assert.Equal(text.Length, view.Characters);
+            box.CaretIndex = 5000;
+
+            view.GoToStart();
+            await Settle(view);
+            Assert.Equal(0, box.CaretIndex);
+
+            view.GoToEnd();
+            await Settle(view);
+            Assert.Equal(view.Characters, box.CaretIndex);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// A box with the keyboard scrolls to its caret once the caret has
+    /// moved, and every change here moves the caret with the text it
+    /// stands in. That scroll comes after the change has put the reader
+    /// back, and is taken back in turn, until the dispatcher is idle. The
+    /// reader's own scrolls are never taken back. The scrolls here stand
+    /// in for the box's: a test cannot give a window the keyboard without
+    /// taking it from the person at the PC.
+    /// </summary>
+    [Fact]
+    public Task AScrollTheBoxMakesOfItselfAfterAChangeIsTakenBack() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var (path, _) = Write(temp, Lines(0, 6500));
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            var scroll = Scroll(box);
+            var place = scroll.VerticalOffset;
+            void Change() => Fields.Call(view, "KeepingPlace", true, (Action)(() => { }));
+            void ScrollTo(double offset)
+            {
+                scroll.ScrollToVerticalOffset(offset);
+                box.UpdateLayout();
+                box.UpdateLayout();
+            }
+
+            Change();
+            ScrollTo(place + 300);
+            Assert.Equal(place, scroll.VerticalOffset, 0.5);
+
+            // The wheel is the reader's.
+            Change();
+            Wheel(box, down: true);
+            ScrollTo(place + 300);
+            Assert.Equal(place + 300, scroll.VerticalOffset, 0.5);
+
+            // So is a press, on the text or on the bar.
+            Change();
+            box.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left) { RoutedEvent = UIElement.PreviewMouseDownEvent });
+            ScrollTo(place + 600);
+            Assert.Equal(place + 600, scroll.VerticalOffset, 0.5);
+
+            // And any key.
+            Change();
+            box.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(box), Environment.TickCount, Key.Right) { RoutedEvent = Keyboard.PreviewKeyDownEvent });
+            ScrollTo(place + 900);
+            Assert.Equal(place + 900, scroll.VerticalOffset, 0.5);
+
+            // A change made while the reader holds the mouse on the bar or
+            // a selection holds nothing: they are moving the box.
+            Assert.True(box.CaptureMouse());
+            try
+            {
+                Change();
+                ScrollTo(place + 1200);
+                Assert.Equal(place + 1200, scroll.VerticalOffset, 0.5);
+            }
+            finally
+            {
+                box.ReleaseMouseCapture();
+            }
+
+            // And nothing is held once the dispatcher has been idle.
+            Change();
+            await Dispatcher.Yield(DispatcherPriority.ApplicationIdle);
+            ScrollTo(place + 1500);
+            Assert.Equal(place + 1500, scroll.VerticalOffset, 0.5);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    /// <summary>
+    /// End and Home are the reader's own moves. A place held for a change
+    /// a moment before never holds them back, whether they read the file
+    /// or not.
+    /// </summary>
+    [Fact]
+    public Task EndAndHomeAreNotHeldBackByAChangeJustBefore() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var (path, _) = Write(temp, Lines(0, 6500));
+        var (window, box, view) = Show(path);
+        try
+        {
+            await Settle(view);
+            var scroll = Scroll(box);
+            void Change() => Fields.Call(view, "KeepingPlace", true, (Action)(() => { }));
+            scroll.ScrollToVerticalOffset(scroll.ScrollableHeight / 2);
+            box.UpdateLayout();
+
+            Change();
+            view.GoToEnd();
+            await Landed(view);
+            box.UpdateLayout();
+            Assert.InRange(scroll.VerticalOffset, scroll.ScrollableHeight - 1, scroll.ScrollableHeight + 1);
+
+            Change();
+            view.GoToStart();
+            await Landed(view);
+            box.UpdateLayout();
+            Assert.Equal(0, scroll.VerticalOffset);
+
+            // With the start already held, Home reads nothing.
+            scroll.ScrollToVerticalOffset(scroll.ScrollableHeight / 2);
+            box.UpdateLayout();
+            Change();
+            view.GoToStart();
+            await Landed(view);
+            box.UpdateLayout();
+            Assert.Equal(0, scroll.VerticalOffset);
+        }
+        finally
+        {
+            window.Close();
+        }
+
+        // Until the jump is done, and not one idle turn of the dispatcher
+        // later: a turn at this priority always waits, so idle never comes.
+        static async Task Landed(TextFileView view)
+        {
+            while (view.Busy)
+            {
+                await Dispatcher.Yield(DispatcherPriority.Background);
+            }
+        }
+    });
+
     [Fact]
     public Task AFileThatGrewShowsItsNewLastLineAtEnd() => WpfApp.RunAsync(async () =>
     {

@@ -90,6 +90,12 @@ internal sealed class TextFileView
     private long? _nothingAfterAt;
     private long? _nothingBeforeAt;
 
+    // Where a change made here left the reader, until the dispatcher is
+    // idle again. Every change moves the caret with the text it stands in,
+    // and a box with the keyboard then scrolls to its caret, after the
+    // change has put the reader back. That scroll is taken back.
+    private double? _place;
+
     public TextFileView(
         TextBox box,
         TextFileReader reader,
@@ -133,11 +139,13 @@ internal sealed class TextFileView
         box.PreviewMouseWheel += (_, e) => ReaderMoved(e.Delta < 0 ? 1 : -1);
         box.PreviewKeyDown += (_, e) =>
         {
+            _place = null;
             if (e.Key is Key.Down or Key.PageDown or Key.Up or Key.PageUp)
             {
                 ReaderMoved(e.Key is Key.Down or Key.PageDown ? 1 : -1);
             }
         };
+        box.PreviewMouseDown += (_, _) => _place = null;
     }
 
     /// <summary>The bytes of the file the box holds now.</summary>
@@ -180,6 +188,7 @@ internal sealed class TextFileView
     /// </summary>
     public void ReaderMoved(int direction)
     {
+        _place = null;
         _moved = direction;
         Look();
     }
@@ -247,7 +256,13 @@ internal sealed class TextFileView
                 TakeAfter(more);
             }
 
+            // The caret goes where the reader went, as in an editor: an
+            // arrow key moves on from here.
+            _box.Select(_characters, 0);
             _box.UpdateLayout();
+
+            // A jump is the reader's: no place held a moment ago holds it.
+            _place = null;
             _box.ScrollToEnd();
         }
         catch (Exception ex)
@@ -280,7 +295,9 @@ internal sealed class TextFileView
                 }
             }
 
+            _box.Select(0, 0);
             _box.UpdateLayout();
+            _place = null;
             _box.ScrollToHome();
         }
         catch (Exception ex)
@@ -317,6 +334,18 @@ internal sealed class TextFileView
 
     private void OnScrolled(object sender, ScrollChangedEventArgs e)
     {
+        // The box scrolling to its caret after a change made here: the
+        // reader goes back where the change left them.
+        if (_place is { } place && e.VerticalChange != 0)
+        {
+            if (Math.Abs(e.VerticalOffset - place) > 0.5)
+            {
+                _scroll!.ScrollToVerticalOffset(place);
+            }
+
+            return;
+        }
+
         // The box's own growing and shrinking scroll it too. Only where the
         // reader has gone is a reason to read, and a window made taller
         // is room to fill, not a move.
@@ -544,6 +573,7 @@ internal sealed class TextFileView
             return;
         }
 
+        _place = null;
         var extent = _scroll.ExtentHeight;
         var vertical = _scroll.VerticalOffset;
         var horizontal = _scroll.HorizontalOffset;
@@ -555,6 +585,15 @@ internal sealed class TextFileView
         // A scroll viewer moves at its next layout. The change after this
         // one reads where it is, so it moves now.
         _scroll.UpdateLayout();
+
+        // The reader is held here until the dispatcher is idle. A reader
+        // holding the mouse on the bar or a selection is moving the box
+        // themselves, and is not held.
+        if (!_box.IsMouseCaptureWithin)
+        {
+            _place = _scroll.VerticalOffset;
+            _box.Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () => _place = null);
+        }
     }
 
     private void Begin()
