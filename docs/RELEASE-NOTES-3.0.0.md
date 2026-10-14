@@ -1,5 +1,3 @@
-# Glimpse 3.0
-
 ![Glimpse 3.0 showing a PDF with its page rail, in light theme](https://raw.githubusercontent.com/tekkusai/Glimpse/v3.0.1/docs/screenshots/pdf.png)
 
 **Previews arrive instead of loading.** Every file now opens the same way. When its content is ready within a moment, the window fades in with it already there. When it isn't, the window takes the file's shape right away and shows the best picture of it Glimpse has: page one of a PDF you have opened before, an Office file's own thumbnail, or a quiet outline at the page's exact size. The content then dissolves in over it. The spinner, the dimmed overlay and the zoom-in pop are gone. Arrowing through a folder crossfades from one file to the next with no blank frame in between, and a video waits for its first frame instead of flashing black.

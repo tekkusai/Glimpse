@@ -1,5 +1,3 @@
-# Glimpse 3.0.3
-
 Everything new since Glimpse 2 is on this page.
 
 ## New in Glimpse 3

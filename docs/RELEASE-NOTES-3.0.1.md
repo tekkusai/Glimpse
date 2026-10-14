@@ -1,5 +1,3 @@
-# Glimpse 3.0.1
-
 This page covers everything new since Glimpse 2. The first part is what version 3 brought. The second part is what 3.0.1 fixes. If you already have 3.0, the second part is the news for you. Some of it concerns what a previewed file can do without your say, so please update.
 
 ## New in Glimpse 3
