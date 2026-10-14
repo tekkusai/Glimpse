@@ -548,9 +548,11 @@ internal static class ExplorerSelectionService
     }
 
     /// <summary>
-    /// One browse step. An item with no file behind it (a zip entry, a phone)
-    /// is skipped in the direction the user is going; at the folder's end
-    /// the selection goes back where it started.
+    /// One browse step. An item that is no file at all, neither on disk nor
+    /// on a phone or in a zip folder, is skipped in the direction the user
+    /// is going; at the folder's end the selection goes back where it
+    /// started. A file whose copy cannot be made is not skipped: its card
+    /// says why.
     /// </summary>
     // A selected file with no path on disk is shown from a copy.
     private static readonly Func<IShellItem, string?> Borrow = item => BorrowedFiles.TryBorrow(item);

@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
@@ -191,16 +192,92 @@ public sealed class BorrowedFilesTests
     }
 
     [Fact]
-    public async Task WhatIsNotAFileOrIsTooLargeIsNotCopied()
+    public async Task WhatIsNotAFileIsNotCopied()
     {
         var stream = new OwnerStream(4000);
 
         Assert.Null(Owners.Ask("album", stream, file: false));
-        Assert.Null(Owners.Ask("film.mp4", stream, size: BorrowedFiles.MaxBytes + 1));
         Assert.Null(Owners.Ask("gone.bin", stream, describing: () => throw new InvalidOperationException("the phone was unplugged")));
 
         await Owners.Settled();
         Assert.Equal(0, stream.Reads);
+    }
+
+    /// <summary>
+    /// A file too large to copy is still the file Space was pressed on. It
+    /// has a place, nothing of it is read, and the place says why it
+    /// stays empty.
+    /// </summary>
+    [Fact]
+    public async Task AFileTooLargeHasAPlaceAndNoCopy()
+    {
+        var stream = new OwnerStream(4000);
+        long? size = 812L * 1024 * 1024;
+
+        var target = Owners.Ask("film.mp4", stream, size: size);
+
+        Assert.NotNull(target);
+        Assert.Equal("film.mp4", Path.GetFileName(target));
+        Assert.False(await Owners.Ready(target));
+        Assert.Equal((CopyMiss.TooLarge, size), BorrowedFiles.WhyMissing(target));
+        await Owners.Settled();
+        Assert.Equal(0, stream.Reads);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(target)));
+    }
+
+    /// <summary>An owner that gave no size, or too small a one, is held to the limit as the bytes come.</summary>
+    [Fact]
+    public async Task AFileLargerThanItsOwnerSaidIsTooLargeOnTheWay()
+    {
+        var target = Owners.Ask("clip.mp4", new OwnerStream(4000), maxBytes: 3000)!;
+
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
+        Assert.Equal((CopyMiss.TooLarge, (long?)null), BorrowedFiles.WhyMissing(target));
+    }
+
+    /// <summary>
+    /// Nobody was waiting when the copy's time ran out: the file is looked
+    /// at again only after its copy has ended. Why it is not there is kept.
+    /// </summary>
+    [Fact]
+    public async Task ACopyPastItsDeadlineSaysSoToWhoeverLooksLater()
+    {
+        var slow = new OwnerStream(10_000, () => Thread.Sleep(100));
+        var target = Owners.Ask("slow.bin", slow, deadline: TimeSpan.FromMilliseconds(300))!;
+
+        await Owners.Settled();
+        Assert.False(await Owners.Ready(target));
+        Assert.Equal(CopyMiss.TooSlow, BorrowedFiles.WhyMissing(target).Why);
+    }
+
+    /// <summary>Asked for again, a file is tried again, and why it is not there is about the new try.</summary>
+    [Fact]
+    public async Task AFileAskedForAgainForgetsWhyItsLastCopyFailed()
+    {
+        var target = Owners.Ask("again.bin", new OwnerStream(10_000, () => Thread.Sleep(100)), deadline: TimeSpan.FromMilliseconds(300), identity: "again")!;
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
+        Assert.Equal(CopyMiss.TooSlow, BorrowedFiles.WhyMissing(target).Why);
+
+        Assert.Equal(target, Owners.Ask("again.bin", new OwnerStream(4000, () => throw new IOException("unplugged")), identity: "again"));
+        Assert.False(await Owners.Ready(target));
+        await Owners.Settled();
+        Assert.Equal(CopyMiss.Unreadable, BorrowedFiles.WhyMissing(target).Why);
+    }
+
+    /// <summary>Each reason is read once, soon after it is noted, so only a few are kept.</summary>
+    [Fact]
+    public async Task OnlyAFewReasonsAreKept()
+    {
+        for (var i = 0; i < 40; i++)
+        {
+            Assert.NotNull(Owners.Ask($"film{i}.mp4", new OwnerStream(10), size: BorrowedFiles.MaxBytes + 1));
+        }
+
+        await Owners.Settled();
+        var misses = (System.Collections.ICollection)typeof(BorrowedFiles).GetField("Misses", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+        Assert.InRange(misses.Count, 1, 16);
     }
 
     [Fact]
@@ -224,8 +301,10 @@ public sealed class BorrowedFilesTests
         var stuck = Owners.Ask("stuck.bin", new OwnerStream(4000, never.Wait), deadline: TimeSpan.FromMilliseconds(300), identity: "stuck")!;
 
         // Whoever waits for it is told there is no file when its time is
-        // up, and at once when they ask again.
+        // up, and why, while the thread reading it is still stuck. And at
+        // once when they ask again.
         Assert.False(await Owners.Ready(stuck));
+        Assert.Equal(CopyMiss.TooSlow, BorrowedFiles.WhyMissing(stuck).Why);
         Assert.Equal(stuck, Owners.Ask("stuck.bin", new OwnerStream(4000), identity: "stuck"));
         Assert.False(await Owners.Ready(stuck, within: 100));
 
@@ -251,6 +330,19 @@ public sealed class BorrowedFilesTests
         await Owners.Settled();
         Assert.InRange(first.Reads, 0, 100);
         Assert.False(Directory.Exists(Path.GetDirectoryName(left)));
+    }
+
+    /// <summary>The file moved on to is too large to copy. It is still the one on screen next, so the copy before it stops.</summary>
+    [Fact]
+    public async Task AFileTooLargeAskedForNextStopsTheCopyBeforeIt()
+    {
+        var first = new OwnerStream(200_000, () => Thread.Sleep(20));
+        var left = Owners.Ask("left.bin", first)!;
+        Assert.NotNull(Owners.Ask("film.mp4", new OwnerStream(10), size: BorrowedFiles.MaxBytes + 1));
+
+        Assert.False(await Owners.Ready(left));
+        await Owners.Settled();
+        Assert.InRange(first.Reads, 0, 100);
     }
 
     [Fact]
@@ -518,10 +610,11 @@ internal static class Owners
         Action? opening = null,
         string? identity = null,
         long? size = null,
-        bool file = true) =>
+        bool file = true,
+        long maxBytes = BorrowedFiles.MaxBytes) =>
         BorrowedFiles.Ask(
             new Owner(name, identity ?? Guid.NewGuid().ToString("N"), stream, describing, opening, size, file),
-            BorrowedFiles.MaxBytes,
+            maxBytes,
             deadline ?? TimeSpan.FromSeconds(10),
             patience ?? TimeSpan.FromSeconds(5));
 

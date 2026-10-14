@@ -1406,10 +1406,11 @@ internal sealed class SpacePreviewController : IDisposable
 
     /// <summary>
     /// Shows the selection: at once, or, for a file on a phone or in a zip
-    /// folder whose copy is still on its way, when the copy has arrived.
-    /// The lookups that read Explorer's selection answer with where the
-    /// copy will be and hold nothing while it comes, so the arrow keys and
-    /// a refresh go on working, and what they find next takes its place.
+    /// folder whose copy is still on its way, when the copy has arrived or
+    /// has failed to, and then the card that says why. The lookups that
+    /// read Explorer's selection answer with where the copy will be and
+    /// hold nothing while it comes, so the arrow keys and a refresh go on
+    /// working, and what they find next takes its place.
     /// </summary>
     private void ShowPreview(ExplorerSelection selection, long inputStamp)
     {
@@ -1420,13 +1421,13 @@ internal sealed class SpacePreviewController : IDisposable
 
         var arrival = ++_arrival;
         var ready = BorrowedFiles.WhenReady(selection.Path);
-        if (!ready.IsCompletedSuccessfully)
-        {
-            ShowOnArrival(selection, inputStamp, arrival, ready);
-        }
-        else if (ready.Result)
+        if (ready.IsCompletedSuccessfully)
         {
             Present(selection, inputStamp);
+        }
+        else
+        {
+            ShowOnArrival(selection, inputStamp, arrival, ready);
         }
     }
 
@@ -1443,9 +1444,8 @@ internal sealed class SpacePreviewController : IDisposable
 
         if (!arrived)
         {
-            // Not an empty selection: what is on screen stays.
+            // Explorer is on the file all the same, and so is the glance.
             DiagnosticLog.Write($"copy did not arrive -> {selection.Path}");
-            return;
         }
 
         // A glance that is not up is opened by its own lookup, which waits
@@ -1839,9 +1839,8 @@ internal sealed class SpacePreviewController : IDisposable
 
         if (!arrived)
         {
-            PublishKeyState();
+            // Space was pressed on a file, and the glance opens on it.
             DiagnosticLog.Write($"queued lookup -> copy did not arrive {selection.Path}");
-            return;
         }
 
         DiagnosticLog.Write($"queued lookup -> preview {selection.Path}");

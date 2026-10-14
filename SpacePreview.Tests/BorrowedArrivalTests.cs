@@ -1,9 +1,13 @@
 using System.Diagnostics;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using SpacePreview.Native;
 using SpacePreview.Preview;
 using SpacePreview.Services;
+using SpacePreview.Utilities;
 
 namespace SpacePreview.Tests;
 
@@ -67,15 +71,108 @@ public sealed class BorrowedArrivalTests
         await glance.StillShows(glance.First);
     });
 
+    /// <summary>
+    /// Explorer is on a picture whose copy failed. The glance follows it,
+    /// as it follows any file, and says why it shows nothing of it. There
+    /// is nothing to open or turn, and the header offers neither.
+    /// </summary>
     [Fact]
-    public Task ACopyThatDoesNotArriveLeavesTheGlanceAsItIs() => WithGlance(async glance =>
+    public Task ACopyThatDoesNotArriveIsShownAsItsCard() => WithGlance(async glance =>
     {
-        var copy = Owners.Ask("gone.txt", new OwnerStream(4000, () => throw new IOException("unplugged")))!;
+        var copy = Owners.Ask("gone.jpg", new OwnerStream(4000, () => throw new IOException("unplugged")))!;
         glance.Follow(copy);
 
         Assert.False(await Owners.Ready(copy));
-        await glance.StillShows(glance.First);
-        Assert.True(glance.Visible, "A file that could not be copied is not an empty selection.");
+        await glance.Shows(copy);
+        await Says(glance.Window, Unreadable);
+        Assert.True(glance.Visible);
+        Assert.Equal(Visibility.Collapsed, glance.Window.OpenControl.Visibility);
+        Assert.Equal(Visibility.Collapsed, glance.Window.ContentActions.Visibility);
+    });
+
+    /// <summary>
+    /// A phone's video too large to copy. The glance is on it as Explorer
+    /// is, and nothing is read from the phone.
+    /// </summary>
+    [Fact]
+    public Task AFileTooLargeToCopyIsShownAsItsCard() => WithGlance(async glance =>
+    {
+        var stream = new OwnerStream(10);
+        var film = Owners.Ask("film.mp4", stream, size: 812L * 1024 * 1024)!;
+        glance.Follow(film);
+
+        await glance.Shows(film);
+        await Says(glance.Window, $"It's 812 MB. {Branding.Name} copies files up to 64 MB.");
+        Assert.Equal(0, stream.Reads);
+    });
+
+    /// <summary>
+    /// Explorer comes to a file whose copy's time ran out before the
+    /// glance got there, while the phone still holds the thread reading
+    /// it. There is nothing to wait for, and the card is up at once.
+    /// </summary>
+    [Fact]
+    public Task ACopyWhoseTimeIsUpIsShownAsItsCardAtOnce() => WithGlance(async glance =>
+    {
+        using var owner = new Silence();
+        var copy = Owners.Ask("stuck.txt", new OwnerStream(4000, owner.Wait), deadline: TimeSpan.FromMilliseconds(300))!;
+        Assert.False(await Owners.Ready(copy));
+
+        glance.Follow(copy);
+        Assert.Equal(copy, glance.Window.CurrentPath);
+        await Says(glance.Window, "Copying it took longer than 20 seconds.");
+    });
+
+    /// <summary>A copy that came is shown, not the card for one that did not.</summary>
+    [Fact]
+    public Task ACopyThatCameIsNotShownAsACard() => WithGlance(async glance =>
+    {
+        var copy = Owners.Ask("came.txt", new OwnerStream(4000))!;
+        Assert.True(await Owners.Ready(copy));
+
+        glance.Follow(copy);
+        await glance.Shows(copy);
+        await Says(glance.Window, new string('a', 4000));
+        Assert.DoesNotContain(CardTitle, Lines(glance.Window));
+        Assert.Equal(Visibility.Visible, glance.Window.OpenControl.Visibility);
+    });
+
+    /// <summary>A file of this PC's own that is gone is not a copy, and its card says nothing of one.</summary>
+    [Fact]
+    public Task AFileOnDiskThatIsGoneIsNotShownAsAMissingCopy() => WithGlance(async glance =>
+    {
+        var gone = Path.Combine(Path.GetDirectoryName(glance.First)!, "gone.txt");
+        glance.Follow(gone);
+
+        await glance.Shows(gone);
+        await Settle();
+        Assert.DoesNotContain(Unreadable, Lines(glance.Window));
+    });
+
+    /// <summary>The card in a copy's place says which of the three went wrong, with the numbers.</summary>
+    [Fact]
+    public Task TheCardSaysWhyTheCopyIsNotThere() => WpfApp.RunAsync(async () =>
+    {
+        // One at a time: a newer request stops the copy before it, and
+        // a copy left behind has no reason to give.
+        var slow = Owners.Ask("slow.bin", new OwnerStream(10_000, () => Thread.Sleep(100)), deadline: TimeSpan.FromMilliseconds(300))!;
+        Assert.False(await Owners.Ready(slow));
+        await Owners.Settled();
+        var failed = Owners.Ask("failed.bin", new OwnerStream(4000, () => throw new IOException("unplugged")))!;
+        Assert.False(await Owners.Ready(failed));
+        await Owners.Settled();
+        var unsized = Owners.Ask("unsized.mp4", new OwnerStream(4000), maxBytes: 3000)!;
+        Assert.False(await Owners.Ready(unsized));
+        await Owners.Settled();
+        var large = Owners.Ask("large.mp4", new OwnerStream(10), size: 812L * 1024 * 1024)!;
+
+        Assert.Equal([CardTitle, "Copying it took longer than 20 seconds."], CardLines(slow));
+        Assert.Equal([CardTitle, Unreadable], CardLines(failed));
+        Assert.Equal([CardTitle, $"It's over 64 MB, the most {Branding.Name} copies.", CopyOut], CardLines(unsized));
+        Assert.Equal([CardTitle, $"It's 812 MB. {Branding.Name} copies files up to 64 MB.", CopyOut], CardLines(large));
+
+        static List<string> CardLines(string path) =>
+            [.. Descendants(PreviewWindow.BuildMissingCopyPreview(path)).OfType<TextBlock>().Select(text => text.Text).Where(text => text.Length > 1)];
     });
 
     /// <summary>
@@ -255,8 +352,12 @@ public sealed class BorrowedArrivalTests
         Assert.False(Fields.Get<bool>(controller, "_openPending"));
     });
 
+    /// <summary>
+    /// Space on a phone's file that the phone does not give. The glance
+    /// opens on it all the same, and says why: Space never does nothing.
+    /// </summary>
     [Fact]
-    public Task AnOpenWhoseCopyDoesNotArriveIsOver() => WithOpen(async (controller, window, open) =>
+    public Task AnOpenWhoseCopyDoesNotArriveOpensOnItsCard() => WithOpen(async (controller, window, open) =>
     {
         var copy = Owners.Ask("gone.txt", new OwnerStream(4000, () => throw new IOException("unplugged")))!;
 
@@ -264,13 +365,55 @@ public sealed class BorrowedArrivalTests
         Assert.False(await Owners.Ready(copy));
         await Settle();
 
-        Assert.Null(window.CurrentPath);
-        Assert.False(Fields.Get<bool>(controller, "_previewVisible"));
+        Assert.Equal(copy, window.CurrentPath);
+        Assert.True(Fields.Get<bool>(controller, "_previewVisible"), "Space on a file that could not be copied opened nothing.");
         Assert.False(Fields.Get<bool>(controller, "_openPending"));
         Assert.False(Fields.Get<KeyState>(controller, "_keyState").OpenPending);
+        await Says(window, Unreadable);
     });
 
+    private const string CardTitle = "Can't preview this file";
+    private const string Unreadable = "Windows couldn't read it from where it is.";
+    private const string CopyOut = "Copy it to a folder to preview it.";
+
     private static readonly IntPtr Root = new(0x2000);
+
+    /// <summary>The window shows a line that reads <paramref name="line"/>, once its load is done.</summary>
+    private static async Task Says(PreviewWindow window, string line)
+    {
+        var waited = Stopwatch.StartNew();
+        while (!Lines(window).Contains(line) && waited.ElapsedMilliseconds < 5000)
+        {
+            await Task.Delay(10);
+        }
+
+        Assert.Contains(line, Lines(window));
+    }
+
+    /// <summary>The text the window shows, line by line, in text blocks and text boxes.</summary>
+    private static List<string> Lines(PreviewWindow window)
+    {
+        window.UpdateLayout();
+        return [.. Descendants(window).Select(child => child switch
+        {
+            TextBlock text => text.Text,
+            TextBox box => box.Text,
+            _ => null,
+        }).OfType<string>()];
+    }
+
+    private static IEnumerable<DependencyObject> Descendants(DependencyObject root)
+    {
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            var child = VisualTreeHelper.GetChild(root, i);
+            yield return child;
+            foreach (var descendant in Descendants(child))
+            {
+                yield return descendant;
+            }
+        }
+    }
 
     /// <summary>A glance that is up over a hidden window, showing a file on disk.</summary>
     private sealed record Glance(SpacePreviewController Controller, PreviewWindow Window, IntPtr Owner, string First, string Second)

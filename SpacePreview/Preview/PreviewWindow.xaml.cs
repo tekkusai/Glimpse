@@ -527,6 +527,10 @@ public partial class PreviewWindow : Window
                 content = BuildDirectoryCard(contentPath, token);
                 DiagnosticLog.Write($"folder card ready +{ElapsedSinceInput():0}ms");
             }
+            else if (IsMissingCopy(contentPath, facts))
+            {
+                content = BuildMissingCopyPreview(contentPath);
+            }
             else
             {
                 // A page known by its name starts its browser now, so the

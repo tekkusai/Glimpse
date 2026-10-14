@@ -148,7 +148,7 @@ The Space shortcut uses a low-level keyboard hook, installed only while File Exp
 
 Updates install while you're away from your PC, never while a preview is open or a game or presentation is full screen, and only when their signature matches the key built into the app. Settings has a switch to turn this off and an Install now button. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
 
-A file on a phone or inside a zip folder has no place on disk. To show one, Glimpse copies it into its own folder, read-only. It gives a copy 20 seconds to arrive, keeps the newest four and any that a window is still showing, and removes them all the next time it starts.
+A file on a phone or inside a zip folder has no place on disk. To show one, Glimpse copies it into its own folder, read-only. It copies files up to 64 MB, gives a copy 20 seconds to arrive, keeps the newest four and any that a window is still showing, and removes them all the next time it starts. A file it can't copy still opens, and the preview says why.
 
 Please use the process in [SECURITY.md](SECURITY.md) to report a vulnerability.
 

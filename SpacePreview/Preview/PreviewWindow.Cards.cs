@@ -484,6 +484,33 @@ public partial class PreviewWindow
             [detail],
             action is null ? null : BuildActionPill(action));
 
+    /// <summary>
+    /// Whether the item is a file on a phone or in a zip folder whose copy
+    /// is not there. A copy is on this PC's disk, so what its facts say
+    /// is final: there is nothing to open, turn or show.
+    /// </summary>
+    private static bool IsMissingCopy(string contentPath, ItemFacts facts) =>
+        facts.Content is null && BorrowedFiles.IsBorrowed(contentPath);
+
+    /// <summary>
+    /// A file on a phone or in a zip folder whose copy is not there. The
+    /// glance opens on it all the same, and says why.
+    /// </summary>
+    internal static FrameworkElement BuildMissingCopyPreview(string path)
+    {
+        var (why, size) = BorrowedFiles.WhyMissing(path);
+        var limit = FileKinds.FormatSize(BorrowedFiles.MaxBytes);
+        const string copyOut = "Copy it to a folder to preview it.";
+        string[] lines = why switch
+        {
+            CopyMiss.TooLarge when size is { } bytes => [$"It's {FileKinds.FormatSize(bytes)}. {Branding.Name} copies files up to {limit}.", copyOut],
+            CopyMiss.TooLarge => [$"It's over {limit}, the most {Branding.Name} copies.", copyOut],
+            CopyMiss.TooSlow => [$"Copying it took longer than {BorrowedFiles.Deadline.TotalSeconds:0} seconds."],
+            _ => ["Windows couldn't read it from where it is."],
+        };
+        return BuildFileCard(GlyphTile("\uE7BA", "Theme.Warning"), "Can't preview this file", lines);
+    }
+
     /// <summary>The one action pill: the house pill, centered, opening a URI.</summary>
     internal static FrameworkElement BuildActionPill(PreviewAction action)
     {

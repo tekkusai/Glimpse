@@ -12,6 +12,19 @@ namespace SpacePreview.Services;
 /// <summary>What a file with no path says of itself.</summary>
 internal sealed record BorrowedFacts(string Name, string Identity, long? Size, DateTime? Modified);
 
+/// <summary>Why the copy of a file with no path is not there.</summary>
+internal enum CopyMiss
+{
+    /// <summary>Its owner did not give it, or stopped partway.</summary>
+    Unreadable,
+
+    /// <summary>It is larger than <see cref="BorrowedFiles.MaxBytes"/>.</summary>
+    TooLarge,
+
+    /// <summary>It was still coming when <see cref="BorrowedFiles.Deadline"/> passed.</summary>
+    TooSlow,
+}
+
 /// <summary>
 /// The owner of a file with no path, as the thread that copies the file
 /// sees it. The owner may be a phone that takes its time, or one that has
@@ -88,6 +101,10 @@ internal static class BorrowedFiles
     // just given up, and no folder goes while a copy is headed for it.
     private static readonly Dictionary<string, Copy> Copies = new(StringComparer.OrdinalIgnoreCase);
 
+    // Why a copy asked for is not there, for the card shown in its place.
+    // Under the same lock.
+    private static readonly Dictionary<string, (CopyMiss Why, long? Size)> Misses = new(StringComparer.OrdinalIgnoreCase);
+
     // The copy asked for last: the one somebody is waiting for.
     private static string? _wanted;
     private static int _serial;
@@ -120,11 +137,13 @@ internal static class BorrowedFiles
 
     /// <summary>
     /// Where the copy of <paramref name="item"/> is, or will be once it
-    /// has arrived: <see cref="WhenReady"/> says when. Null when the item
-    /// is not a file that can be read as a stream, is larger than
-    /// <paramref name="maxBytes"/>, or its owner did not say what it is
-    /// in time. Runs on the shell's thread, and takes nothing from the
-    /// item there but its ID list, which is the item's own memory.
+    /// has arrived: <see cref="WhenReady"/> says when, and
+    /// <see cref="WhyMissing"/> why it did not. A file larger than
+    /// <paramref name="maxBytes"/> has a place too, and no copy. Null when
+    /// the item is not a file that can be read as a stream, or its owner
+    /// did not say what it is in time. Runs on the shell's thread, and
+    /// takes nothing from the item there but its ID list, which is the
+    /// item's own memory.
     /// </summary>
     public static string? TryBorrow(IShellItem item, long maxBytes = MaxBytes)
     {
@@ -185,9 +204,43 @@ internal static class BorrowedFiles
         }
 
         var left = copy.Left;
-        return left > TimeSpan.Zero
-            && await Task.WhenAny(copy.Done, Task.Delay(left)).ConfigureAwait(false) == copy.Done
-            && await copy.Done.ConfigureAwait(false);
+        if (left > TimeSpan.Zero && await Task.WhenAny(copy.Done, Task.Delay(left)).ConfigureAwait(false) == copy.Done)
+        {
+            return await copy.Done.ConfigureAwait(false);
+        }
+
+        // Its time is up, whether or not the thread reading it has noticed.
+        lock (Copies)
+        {
+            Miss(path!, CopyMiss.TooSlow);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Why the copy at <paramref name="path"/> is not there, and the
+    /// file's size when that is why. A copy whose reason is not known
+    /// could not be read.
+    /// </summary>
+    public static (CopyMiss Why, long? Size) WhyMissing(string path)
+    {
+        lock (Copies)
+        {
+            return Misses.TryGetValue(path, out var miss) ? miss : (CopyMiss.Unreadable, null);
+        }
+    }
+
+    /// <summary>Notes why a copy is not there. Run under the lock.</summary>
+    private static void Miss(string path, CopyMiss why, long? size = null)
+    {
+        // Each is read once, by the window that shows its card, soon after.
+        if (Misses.Count >= 16)
+        {
+            Misses.Clear();
+        }
+
+        Misses[path] = (why, size);
     }
 
     /// <summary>Nobody is waiting for a copy any more: the one on its way stops at its next read.</summary>
@@ -248,6 +301,9 @@ internal static class BorrowedFiles
         private string? _target;
         private DateTime? _modified;
 
+        // Why the copy did not arrive, when it was not just left behind.
+        private CopyMiss? _miss;
+
         /// <summary>Whether the copy arrived. Never completes for an owner that never answers.</summary>
         public Task<bool> Done => _done.Task;
 
@@ -285,7 +341,7 @@ internal static class BorrowedFiles
                 if (Place() is { } target)
                 {
                     working = $"{target}.{Interlocked.Increment(ref _serial)}.part";
-                    if (Read(owner.Open(), working, maxBytes, StillWanted))
+                    if (Read(owner.Open(), working, maxBytes, StillWanted, out var overLimit))
                     {
                         File.Move(working, target, overwrite: true);
                         if (_modified is { } when)
@@ -300,6 +356,11 @@ internal static class BorrowedFiles
                     }
                     else
                     {
+                        if (overLimit)
+                        {
+                            _miss = CopyMiss.TooLarge;
+                        }
+
                         DiagnosticLog.Write($"borrow: gave up after {_watch.ElapsedMilliseconds} ms: {Path.GetFileName(target)}");
                     }
                 }
@@ -327,10 +388,10 @@ internal static class BorrowedFiles
                 return null;
             }
 
-            if (facts.Size > maxBytes)
+            var tooLarge = facts.Size > maxBytes;
+            if (tooLarge)
             {
                 DiagnosticLog.Write($"borrow: skipped, {facts.Size} bytes is over the limit: {facts.Name}");
-                return null;
             }
 
             var name = SafeName(facts.Name);
@@ -345,6 +406,16 @@ internal static class BorrowedFiles
                 }
 
                 _wanted = target;
+                Misses.Remove(target);
+                if (tooLarge)
+                {
+                    // No copy, and still a place: the glance opens on the
+                    // file and says why it shows nothing of it.
+                    Miss(target, CopyMiss.TooLarge, facts.Size);
+                    Reply(target);
+                    return null;
+                }
+
                 if (Copies.ContainsKey(target))
                 {
                     Reply(target);
@@ -393,6 +464,11 @@ internal static class BorrowedFiles
                     return true;
                 }
 
+                if (Left <= TimeSpan.Zero)
+                {
+                    _miss = CopyMiss.TooSlow;
+                }
+
                 Forget();
                 return false;
             }
@@ -423,6 +499,11 @@ internal static class BorrowedFiles
                 if (!_answered.IsSet)
                 {
                     Reply(null);
+                }
+
+                if (_target is not null && _miss is { } why)
+                {
+                    Miss(_target, why);
                 }
 
                 if (arrived)
@@ -551,9 +632,10 @@ internal static class BorrowedFiles
         }
     }
 
-    /// <summary>False when the stream holds more than <paramref name="maxBytes"/>, or the copy stopped being wanted.</summary>
-    private static bool Read(IStream stream, string working, long maxBytes, Func<bool> wanted)
+    /// <summary>False when the stream holds more than <paramref name="maxBytes"/>, which <paramref name="overLimit"/> tells, or the copy stopped being wanted.</summary>
+    private static bool Read(IStream stream, string working, long maxBytes, Func<bool> wanted, out bool overLimit)
     {
+        overLimit = false;
         var read = Marshal.AllocCoTaskMem(sizeof(int));
         try
         {
@@ -575,6 +657,7 @@ internal static class BorrowedFiles
                 total += count;
                 if (total > maxBytes)
                 {
+                    overLimit = true;
                     return false;
                 }
 

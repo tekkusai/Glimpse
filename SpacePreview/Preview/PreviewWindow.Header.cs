@@ -108,12 +108,13 @@ public partial class PreviewWindow
         _headerFact = null;
         ApplyHeaderSubtitle(path, _shortcutTarget);
 
+        var missing = IsMissingCopy(contentPath, facts);
         _openActions = BuildOpenActions(path, contentPath, facts);
         ShowOpenTarget(ResolveOpenTarget(contentPath, isDirectory));
-        OpenControl.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
+        OpenControl.Visibility = fileDialogMode || missing ? Visibility.Collapsed : Visibility.Visible;
         PinButton.Visibility = fileDialogMode ? Visibility.Collapsed : Visibility.Visible;
         SetBrowseControlsVisible(!fileDialogMode && !IsPinned);
-        ShowTool(ToolFor(contentPath, isDirectory, fileDialogMode));
+        ShowTool(missing ? HeaderTool.None : ToolFor(contentPath, isDirectory, fileDialogMode));
         SyncHeaderTools();
 
         // Only a window on screen keeps its old icon; on a fresh open it

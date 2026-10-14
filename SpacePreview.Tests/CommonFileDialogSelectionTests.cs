@@ -110,7 +110,7 @@ public sealed class CommonFileDialogSelectionTests
         var window = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
         var controller = TestSource.Read(@"SpacePreview\Services\SpacePreviewController.cs");
 
-        Assert.Contains("OpenControl.Visibility = fileDialogMode ? Visibility.Collapsed", window, StringComparison.Ordinal);
+        Assert.Contains("OpenControl.Visibility = fileDialogMode || missing ? Visibility.Collapsed", window, StringComparison.Ordinal);
         Assert.Contains("PinButton.Visibility = fileDialogMode ? Visibility.Collapsed", window, StringComparison.Ordinal);
         Assert.Contains("SetBrowseControlsVisible(!fileDialogMode && !IsPinned)", window, StringComparison.Ordinal);
         Assert.Contains("open suppressed while file dialog owns commit", window, StringComparison.Ordinal);
