@@ -301,14 +301,6 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("startPage", body, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void PdfPageStateCanBeReadFromViewerSource()
-    {
-        Assert.True(PreviewWindow.TryReadPdfPageFromSource("file:///C:/docs/sample.pdf#page=7&view=FitH", out var page));
-        Assert.Equal(7, page);
-        Assert.False(PreviewWindow.TryReadPdfPageFromSource("file:///C:/docs/sample.pdf#view=FitH", out _));
-    }
-
     [Theory]
     [InlineData("7", 51, 7)]
     [InlineData(" 12 ", 51, 12)]

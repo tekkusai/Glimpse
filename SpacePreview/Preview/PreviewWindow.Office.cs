@@ -234,7 +234,20 @@ public partial class PreviewWindow
 
         // A swap in place is one nobody asked for, so it goes ahead only if
         // the reader has still not moved when it is due. A page chosen
-        // while it staged, or while the viewer was asked, is asking.
+        // while it staged, or while the viewer was asked, is asking. A swap
+        // lands where it was sent, though, and a page among the first ones
+        // chosen meanwhile is on screen already: landing elsewhere and
+        // coming back was a jump nobody asked for, so the swap stands down.
+        async Task<bool> SwapStillWantedAsync(int page, bool inPlace)
+        {
+            if (inPlace && !askedPage.HasValue && !await ReaderHasNotMovedAsync() && !askedPage.HasValue)
+            {
+                return false;
+            }
+
+            return askedPage is not { } asked || asked == page || asked > partial.PartialPages;
+        }
+
         void Upgrade(int page, bool inPlace = false)
         {
             upgrading = true;
@@ -247,7 +260,6 @@ public partial class PreviewWindow
                 onSwapped: () =>
                 {
                     upgrading = false;
-                    railState.CurrentPage = page;
                     railState.TryHandleJump = null;
                     say(null);
                     ReleasePartial();
@@ -255,10 +267,12 @@ public partial class PreviewWindow
                     {
                         JumpPdfToPage(railState, later);
                     }
+                    else
+                    {
+                        SetPdfCurrentPageFromViewer(railState, page, logChange: false);
+                    }
                 },
-                stillWanted: inPlace
-                    ? async () => askedPage.HasValue || await ReaderHasNotMovedAsync() || askedPage.HasValue
-                    : null,
+                stillWanted: () => SwapStillWantedAsync(page, inPlace),
                 onCalledOff: () =>
                 {
                     upgrading = false;
@@ -271,8 +285,8 @@ public partial class PreviewWindow
             if (page <= partial.PartialPages)
             {
                 // The last page chosen is the one that counts: one asked
-                // for while it was on the way is no longer wanted. A swap
-                // already staging lands where it was sent, then follows.
+                // for while it was on the way is no longer wanted, and a
+                // swap already staging stands down when it is due.
                 askedPage = upgrading ? page : null;
                 return false;
             }

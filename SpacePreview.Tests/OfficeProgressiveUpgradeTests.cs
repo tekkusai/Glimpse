@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Web.WebView2.Wpf;
@@ -126,6 +127,23 @@ public sealed class OfficeProgressiveUpgradeTests
         Assert.Equal(9, await deck.SwappedAtAsync());
     });
 
+    // A slide on its way, chosen in the rail, stays chosen while the first
+    // slides wait for it. In 3.0.3 the page sync asked the viewer, still on
+    // the first slides, and took the rail back to where the reader had been.
+    [Fact]
+    public Task ASlideChosenInTheRailBeforeItArrivedStaysChosen() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+
+        deck.Click(9);
+
+        Assert.Equal(new[] { 9 }, await deck.RailShowsAsync(TimeSpan.FromSeconds(2)));
+        deck.Land();
+        Assert.Equal(9, await deck.SwappedAtAsync());
+        await UntilAsync(() => deck.Note is null, "The note outlived the swap.");
+        Assert.Equal(new[] { 9 }, await deck.RailShowsAsync(TimeSpan.FromSeconds(1)));
+    });
+
     // The last slide chosen is the one that counts. 3.0.1 never forgot a
     // slide asked for while it was on the way: a reader who then chose one
     // already there was carried off to the first when the rest landed.
@@ -143,18 +161,21 @@ public sealed class OfficeProgressiveUpgradeTests
     });
 
     // The same change of mind, a moment later: the whole deck is already
-    // staging at slide 9 when the reader chooses slide 2.
+    // staging at slide 9 when the reader chooses slide 2. Slide 2 is on
+    // screen already, so the swap stands down. In 3.0.3 the deck landed on
+    // slide 9 and then went back to slide 2.
     [Fact]
     public Task ASlideChosenWhileTheWholeDeckStagesElsewhereIsWhereTheReaderEnds() => WpfApp.RunAsync(async () =>
     {
         using var deck = await Deck.ShowAsync();
+        var shown = deck.Viewer;
         Assert.True(deck.Choose(9));
         deck.Land();
-        await deck.StagedAsync();
+        var staged = await deck.StagedAsync();
 
-        Assert.False(deck.Choose(2));
+        deck.Click(2);
 
-        Assert.Equal(9, await deck.SwappedAtAsync());
+        await deck.CalledOffAsync(shown, staged);
         await deck.ShowsSlideAsync(2);
     });
 
@@ -237,10 +258,44 @@ public sealed class OfficeProgressiveUpgradeTests
         /// <summary>A click on a slide in the rail, as the rail hands it on.</summary>
         public bool Choose(int slide) => (bool)Fields.Get<Delegate>(Rail, "TryHandleJump").DynamicInvoke(Rail, slide)!;
 
+        /// <summary>
+        /// A click on a slide's tile, the way the rail takes it. The rail has
+        /// a slot for every slide of the deck, as the partial's rail does.
+        /// </summary>
+        public void Click(int slide)
+        {
+            if (Tiles.Count != 12)
+            {
+                Fields.Call(Window, "ApplyPdfPageCount", Rail, 12, 400.0 / 300);
+            }
+
+            Tiles[slide].RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
+        }
+
+        /// <summary>Every slide the rail showed over <paramref name="span"/>.</summary>
+        public async Task<int[]> RailShowsAsync(TimeSpan span)
+        {
+            var seen = new List<int>();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            while (clock.Elapsed < span)
+            {
+                seen.AddRange(Tiles.Where(tile => tile.Value.Tag is true).Select(tile => tile.Key));
+                seen.Add(Fields.Get<int>(Rail, "CurrentPage"));
+                await Task.Delay(10);
+            }
+
+            return [.. seen.Distinct()];
+        }
+
+        private Dictionary<int, Border> Tiles => Fields.Get<Dictionary<int, Border>>(Rail, "PageTiles");
+
         /// <summary>Moves the viewer to a slide and waits until the viewer itself says it is there.</summary>
         public async Task ScrollToSlideAsync(int slide)
         {
             var first = Fields.Get<WebView2>(Rail, "WebView");
+
+            // A staged jump goes only where the rail points.
+            Fields.Call(Window, "SetPdfCurrentPageFromViewer", Rail, slide, false);
             Fields.Call(Window, "StagePdfViewerJump", Rail, slide);
             await UntilAsync(
                 () => Fields.Get<WebView2>(Rail, "WebView") is var shown && !ReferenceEquals(shown, first) ? shown : null,

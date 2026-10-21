@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,11 +17,12 @@ public partial class PreviewWindow
     private const int EpubRestOfBookTile = int.MaxValue;
 
     // The section whose top has passed a line a little below the top of the
-    // view. ExecuteScriptAsync runs even with page scripts off.
+    // view, and how far the page is scrolled. ExecuteScriptAsync runs even
+    // with page scripts off.
     private const string EpubCurrentSectionScript =
         "(()=>{let id=null;const y=window.scrollY+96;"
         + "for(const s of document.querySelectorAll('section[data-title]')){if(s.offsetTop<=y)id=s.id;else break;}"
-        + "return id;})()";
+        + "return [id,Math.round(window.scrollY)];})()";
 
     private sealed class EpubRailState(
         ContentControl host,
@@ -42,6 +44,15 @@ public partial class PreviewWindow
         public EpubPreviewLoader.EpubContents Contents { get; set; } = new([], false);
         public DispatcherTimer? ScrollSync { get; set; }
         public bool ScrollSyncInFlight { get; set; }
+
+        /// <summary>Bumped by a chosen chapter, so a look started before it is dropped.</summary>
+        public long ScrollSyncGeneration { get; set; }
+
+        /// <summary>How far the page last said it was scrolled; -1 before it has said.</summary>
+        public int PageScrollY { get; set; } = -1;
+
+        /// <summary>Set by a chosen chapter: the page's next answer is where the jump left it.</summary>
+        public bool MoveUnanswered { get; set; }
     }
 
     /// <summary>
@@ -156,6 +167,8 @@ public partial class PreviewWindow
 
     private void JumpEpubToChapter(EpubRailState state, int spineIndex)
     {
+        state.ScrollSyncGeneration++;
+        state.MoveUnanswered = true;
         SetEpubCurrentChapter(state, spineIndex);
         if (state.WebView.CoreWebView2 is not { } core)
         {
@@ -186,11 +199,25 @@ public partial class PreviewWindow
                 return;
             }
 
+            var generation = state.ScrollSyncGeneration;
             state.ScrollSyncInFlight = true;
             try
             {
                 var result = await core.ExecuteScriptAsync(EpubCurrentSectionScript);
-                if (ParseSectionAnchor(result) is { } index && index != state.CurrentSpineIndex)
+                if (generation != state.ScrollSyncGeneration || ParseSectionPosition(result) is not { } position)
+                {
+                    return;
+                }
+
+                // The rail follows the page when the page scrolls, not
+                // whenever the two disagree. A short chapter at the end
+                // cannot scroll to the top, so after a jump there the page
+                // still names the one before it: that answer is where the
+                // jump left the page, not the reader moving back.
+                var moved = position.ScrollY != state.PageScrollY && !state.MoveUnanswered;
+                state.PageScrollY = position.ScrollY;
+                state.MoveUnanswered = false;
+                if (moved && position.SpineIndex is { } index && index != state.CurrentSpineIndex)
                 {
                     SetEpubCurrentChapter(state, index);
                     state.SelectedChapterTile?.BringIntoView();
@@ -213,6 +240,29 @@ public partial class PreviewWindow
     {
         state.ScrollSync?.Stop();
         state.ScrollSync = null;
+    }
+
+    /// <summary>
+    /// The section on screen and how far the page is scrolled, from the
+    /// script's answer such as ["ch-12",4410]; null when it is not that.
+    /// </summary>
+    internal static (int? SpineIndex, int ScrollY)? ParseSectionPosition(string? scriptResult)
+    {
+        try
+        {
+            using var answer = JsonDocument.Parse(scriptResult ?? string.Empty);
+            var pair = answer.RootElement;
+            return pair.ValueKind == JsonValueKind.Array
+                   && pair.GetArrayLength() == 2
+                   && pair[1].ValueKind == JsonValueKind.Number
+                   && pair[1].TryGetInt32(out var scrollY)
+                ? (pair[0].ValueKind == JsonValueKind.String ? ParseSectionAnchor(pair[0].GetString()) : null, scrollY)
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>The spine index from a script result such as "ch-12"; null for anything else.</summary>

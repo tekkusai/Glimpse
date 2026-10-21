@@ -196,6 +196,22 @@ public sealed class EpubPreviewLoaderTests
     public void TheScrollPositionNamesTheSectionOnScreen(string scriptResult, int? spineIndex) =>
         Assert.Equal(spineIndex, PreviewWindow.ParseSectionAnchor(scriptResult));
 
+    [Theory]
+    [InlineData("[\"ch-12\",4410]", 12, 4410)]
+    [InlineData("[null,0]", null, 0)]
+    [InlineData("[\"intro\",96]", null, 96)]
+    public void TheAnswerSaysHowFarThePageIsScrolled(string scriptResult, int? spineIndex, int scrollY) =>
+        Assert.Equal((spineIndex, scrollY), PreviewWindow.ParseSectionPosition(scriptResult));
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("null")]
+    [InlineData("\"ch-12\"")]
+    [InlineData("[\"ch-12\"]")]
+    [InlineData("[\"ch-12\",\"far\"]")]
+    public void AnAnswerOfAnotherShapeIsNoAnswer(string scriptResult) =>
+        Assert.Null(PreviewWindow.ParseSectionPosition(scriptResult));
+
     [Fact]
     public void GeneratedEpubCacheChangesWhenContentChangesButModifiedTimeDoesNot()
     {
