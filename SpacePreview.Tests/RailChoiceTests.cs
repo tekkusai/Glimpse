@@ -151,6 +151,22 @@ public sealed class RailChoiceTests
         await UntilAsync(() => pages.Shows(3), $"The rail stayed on {pages.CurrentPage}, where the document never went.");
     });
 
+    // A jump the viewer has confirmed is done with the page box. 3.0.4 kept
+    // the box 650 ms longer, so a page chosen soon after waited that out
+    // with its tile already lit: 712 to 744 ms from click to page.
+    [Fact]
+    public Task APageChosenRightAfterAnotherIsNotHeldBack() => WpfApp.RunAsync(async () =>
+    {
+        using var pages = await Pages.ShowAsync(12);
+        pages.Choose(3);
+        await UntilAsync(() => Fields.Get<int>(pages.Rail, "ViewerPage") == 3, "The viewer never confirmed page 3.");
+
+        Assert.False(Fields.Get<bool>(pages.Rail, "JumpInFlight"));
+        pages.Choose(8);
+        await UntilAsync(() => Fields.Get<int>(pages.Rail, "ViewerPage") == 8, "The viewer never confirmed page 8.");
+        Assert.Equal(8, await pages.PageBoxAsync());
+    });
+
     // The rail still follows a reader who moves the pages after a choice.
     [Fact]
     public Task TheRailFollowsTheReaderAfterAChoice() => WpfApp.RunAsync(async () =>

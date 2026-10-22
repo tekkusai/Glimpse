@@ -1511,6 +1511,10 @@ public partial class PreviewWindow
         state.JumpInFlight = true;
         var target = Math.Max(1, page);
         SetPdfCurrentPageFromViewer(state, target, logChange: false);
+
+        // A jump the viewer has confirmed frees the page box at once. One it
+        // missed or left unanswered gives it time to settle first.
+        var settle = TimeSpan.FromMilliseconds(650);
         try
         {
             if (state.Version != _loadVersion || state.WebView.CoreWebView2 is not { } core)
@@ -1555,6 +1559,7 @@ public partial class PreviewWindow
                 {
                     state.ViewerPage = target;
                     state.MoveUnanswered = false;
+                    settle = TimeSpan.Zero;
                 }
             }
             else
@@ -1570,7 +1575,7 @@ public partial class PreviewWindow
         }
         finally
         {
-            RunAfter(TimeSpan.FromMilliseconds(650), () =>
+            RunAfter(settle, () =>
             {
                 state.JumpInFlight = false;
                 if (state.PendingJumpPage is { } pending)
