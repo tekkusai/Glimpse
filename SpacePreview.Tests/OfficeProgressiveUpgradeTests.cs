@@ -52,6 +52,21 @@ public sealed class OfficeProgressiveUpgradeTests
         Assert.Equal(9, await deck.SwappedAtAsync());
     });
 
+    // Zoomed out, the first slides still stand at the top with nothing to
+    // scroll sideways. In 3.0.3 that read as unmoved, and the whole deck
+    // swapped in at fit width and undid the zoom.
+    [Fact]
+    public Task AReaderWhoZoomedOutIsNotMoved() => WpfApp.RunAsync(async () =>
+    {
+        using var deck = await Deck.ShowAsync();
+        await deck.ProveTheWheelAsync();
+        await PdfViewerWheel.ScrollAsync(deck.Viewer.CoreWebView2, 120, ctrl: true);
+
+        deck.Land();
+
+        await deck.HeldAsync(Ready);
+    });
+
     [Fact]
     public Task AReaderWhoClickedIntoTheSlidesIsNotMoved() => WpfApp.RunAsync(async () =>
     {

@@ -10,17 +10,17 @@ namespace SpacePreview.Tests;
 /// </summary>
 internal static class PdfViewerWheel
 {
-    /// <summary>One turn of the wheel over the pages.</summary>
-    public static Task TurnAsync(CoreWebView2 viewer, int distance) =>
+    /// <summary>One turn of the wheel over the pages; with Ctrl held, a zoom.</summary>
+    public static Task TurnAsync(CoreWebView2 viewer, int distance, bool ctrl = false) =>
         viewer.CallDevToolsProtocolMethodAsync(
             "Input.dispatchMouseEvent",
-            $"{{\"type\":\"mouseWheel\",\"x\":450,\"y\":350,\"deltaX\":0,\"deltaY\":{distance}}}");
+            $"{{\"type\":\"mouseWheel\",\"x\":450,\"y\":350,\"deltaX\":0,\"deltaY\":{distance},\"modifiers\":{(ctrl ? 2 : 0)}}}");
 
     /// <summary>
     /// Turns the wheel until the pages move, then waits for them to come to
     /// rest. A viewer still loading its document swallows the wheel.
     /// </summary>
-    public static async Task ScrollAsync(CoreWebView2 viewer, int distance)
+    public static async Task ScrollAsync(CoreWebView2 viewer, int distance, bool ctrl = false)
     {
         var before = await StillPictureAsync(viewer);
         var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
@@ -28,7 +28,7 @@ internal static class PdfViewerWheel
         do
         {
             Assert.True(DateTime.UtcNow < deadline, "The viewer never took the wheel.");
-            await TurnAsync(viewer, distance);
+            await TurnAsync(viewer, distance, ctrl);
             after = await StillPictureAsync(viewer);
         }
         while (after.AsSpan().SequenceEqual(before));

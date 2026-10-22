@@ -1374,10 +1374,20 @@ public partial class PreviewWindow
                 true));
         if (TryCreatePdfAutomationRoot(hwnd)?.FindFirst(System.Windows.Automation.TreeScope.Descendants, scrolls) is { } pages
             && pages.TryGetCurrentPattern(System.Windows.Automation.ScrollPattern.Pattern, out var pattern)
-            && pattern is System.Windows.Automation.ScrollPattern scroll)
+            && pattern is System.Windows.Automation.ScrollPattern scroll
+            && pages.FindFirst(
+                System.Windows.Automation.TreeScope.Descendants,
+                new System.Windows.Automation.PropertyCondition(
+                    System.Windows.Automation.AutomationElement.ControlTypeProperty,
+                    System.Windows.Automation.ControlType.Document)) is { } content)
         {
+            // At fit width the pages begin at the view's left edge. Zoomed
+            // out they stand in its middle, at least 67 px in after one
+            // step, with nothing to scroll: in 3.0.3 that read as unmoved,
+            // and the swap put the reader back at fit width.
             var position = scroll.Current;
-            return position.VerticalScrollPercent <= 0 && !position.HorizontallyScrollable;
+            var inset = content.Current.BoundingRectangle.X - pages.Current.BoundingRectangle.X;
+            return position.VerticalScrollPercent <= 0 && !position.HorizontallyScrollable && Math.Abs(inset) <= 2;
         }
 
         return null;

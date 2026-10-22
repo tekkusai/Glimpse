@@ -176,7 +176,7 @@ public sealed class PdfViewerQuestionTests
         Assert.Equal(
             walks,
             looks.Sum(look => Regex.Matches(TestSource.MethodFrom(source, look), @"TreeScope\.Descendants").Count));
-        Assert.Equal(2, walks);
+        Assert.Equal(3, walks);
 
         // A look is named where it is written and where the asker is handed it.
         foreach (var look in looks)
