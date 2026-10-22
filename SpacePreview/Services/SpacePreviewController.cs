@@ -136,6 +136,10 @@ internal sealed class SpacePreviewController : IDisposable
     // whose copy is still on its way is shown when it arrives only if
     // this has not moved since.
     private int _arrival;
+
+    // Moves with every glance that ends. Explorer's answer to a question
+    // asked in an earlier glance is not about this one.
+    private int _session;
     private readonly DeferredFileDialogPreviewIntentSlot _pendingFileDialogPreview = new();
     private readonly ConcurrentDictionary<long, byte> _elevationChecksInFlight = new();
     private readonly HashSet<(long Hwnd, uint ProcessId)> _observedAccessDialogs = [];
@@ -2211,6 +2215,7 @@ internal sealed class SpacePreviewController : IDisposable
     private void ResetSession()
     {
         _arrival++;
+        _session++;
         _ownerLossTimer.Stop();
         ClearPendingFileDialogPreview();
         ClearNavigationRefreshTokens();
@@ -2326,6 +2331,7 @@ internal sealed class SpacePreviewController : IDisposable
                 var source = _lastSelectionSource;
                 var hwnd = _lastExplorerHwnd;
                 var ownerRoot = _previewOwnerRootHwnd;
+                var session = _session;
                 _lastStartedRefreshGeneration = activeRequest.Generation;
                 var selection = await _lookUpSelection(
                     "refresh",
@@ -2339,15 +2345,17 @@ internal sealed class SpacePreviewController : IDisposable
                     return;
                 }
 
-                // The preview changed hands during the lookup (an unpinned
-                // window took over as the active preview). Writing Explorer's
-                // selection into a window the user just chose to keep would
-                // swap its content under them.
-                if (_previewWindow != target
+                // The glance ended or changed hands during the lookup: closed
+                // and opened again, or an unpinned window took over. The
+                // answer is about a glance that is gone, and writing it into
+                // this one would swap its content under the user. A question
+                // this glance asked meanwhile is still owed an answer.
+                if (_session != session
+                    || _previewWindow != target
                     || _lastSelectionSource != source
                     || _previewOwnerRootHwnd != ownerRoot)
                 {
-                    return;
+                    continue;
                 }
 
                 // Explorer has said what is selected now. A copy on its way
