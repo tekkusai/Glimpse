@@ -261,6 +261,55 @@ public sealed class PictureSelectionTests
         }
     });
 
+    // A large picture opens on a first frame and its full decode lands a
+    // moment later, the same picture, sharper. In 3.0.3 a selection made in
+    // between vanished when it landed, and Copy then copied the file.
+    [Fact]
+    public Task ASelectionStaysWhenTheSharperPictureArrives() => WpfApp.RunAsync(async () =>
+    {
+        if (!PictureText.IsAvailable)
+        {
+            return;
+        }
+
+        using var temp = new TempDirectory();
+        var path = Save(Draw(0, "Invoice 2048 for October", "Total due 315 dollars"), temp, "receipt.png");
+        var window = Park();
+        try
+        {
+            window.ShowPreview(path, IntPtr.Zero);
+            await WaitUntilAsync(() => Revealed(window) && Viewer(window) is { Words.Count: > 0 });
+            var viewer = Viewer(window)!;
+            var first = viewer.Words;
+            viewer.PointerDown(viewer.WordCenter(Find(first, "2048")), clicks: 1);
+            viewer.PointerMove(viewer.WordCenter(Find(first, "October")));
+            viewer.PointerUp();
+
+            var session = Fields.Get<ImageRotationSession>(window, "_rotationSession");
+            Assert.True(session.TryUpgradeDecoded(
+                Draw(0, "Invoice 2048 for October", "Total due 315 dollars"),
+                Fields.Get<int>(session, "_baseOrientation")));
+            Assert.Equal("2048 for October", viewer.SelectedText);
+
+            // The sharper picture is read meanwhile; the selection outlasts it.
+            await Task.Delay(1500);
+            Assert.Equal("2048 for October", viewer.SelectedText);
+
+            // The next press lets go of the selection, and the sharper
+            // picture's words take over.
+            viewer.PointerDown(viewer.WordCenter(Find(first, "Total")), clicks: 1);
+            viewer.PointerUp();
+            Assert.Null(viewer.SelectedText);
+            Assert.NotSame(first, viewer.Words);
+            Assert.Equal(first.Text, viewer.Words.Text);
+        }
+        finally
+        {
+            window.HidePreview();
+            window.Close();
+        }
+    });
+
     private static readonly IEqualityComparer<Rect> Near = EqualityComparer<Rect>.Create((a, b) =>
         Math.Abs(a.X - b.X) < 1e-9 && Math.Abs(a.Y - b.Y) < 1e-9 && Math.Abs(a.Width - b.Width) < 1e-9 && Math.Abs(a.Height - b.Height) < 1e-9);
 

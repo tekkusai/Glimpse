@@ -111,6 +111,10 @@ internal sealed class ImageViewer : IZoomableImage
     private bool _dragging;
     private Point _lastDrag;
     private CancellationTokenSource? _reading;
+
+    // Words read from a sharper decode while the reader was selecting. They
+    // take over at the next press, which lets go of the selection anyway.
+    private PictureWords? _waitingWords;
     private int? _anchorWord;
     private Point _pressedAt;
     private bool _overText;
@@ -190,7 +194,8 @@ internal sealed class ImageViewer : IZoomableImage
         };
 
         // The words are read while the picture is on screen and for the
-        // picture that is on screen: a turn or a sharper decode starts over.
+        // picture that is on screen: a turn starts over, and a sharper
+        // decode is read again.
         _readDelay.Tick += (_, _) =>
         {
             _readDelay.Stop();
@@ -218,7 +223,7 @@ internal sealed class ImageViewer : IZoomableImage
             };
             rotation.QualityUpgraded += () =>
             {
-                ReplaceBitmap(rotation.CurrentBitmap);
+                UpgradeBitmap(rotation.CurrentBitmap);
                 Layout();
             };
         }
@@ -385,6 +390,7 @@ internal sealed class ImageViewer : IZoomableImage
     /// </summary>
     internal bool PointerDown(Point position, int clicks)
     {
+        TakeWaitingWords();
         var word = WordAt(position);
         if (clicks == 2)
         {
@@ -471,6 +477,7 @@ internal sealed class ImageViewer : IZoomableImage
     /// <summary>Selects every word. False when the picture has none, or has not been read yet.</summary>
     public bool SelectAllText()
     {
+        TakeWaitingWords();
         if (_text.Words.Count == 0)
         {
             return false;
@@ -515,9 +522,19 @@ internal sealed class ImageViewer : IZoomableImage
         try
         {
             var words = await PictureText.RecognizeAsync(bitmap, reading.Token);
-            if (ReferenceEquals(bitmap, _bitmap) && !reading.IsCancellationRequested)
+            if (!ReferenceEquals(bitmap, _bitmap) || reading.IsCancellationRequested)
+            {
+                return;
+            }
+
+            // A selection being made or held keeps the words it is made of.
+            if (_text.Selection is null && _anchorWord is null)
             {
                 _text.Words = words;
+            }
+            else
+            {
+                _waitingWords = words;
             }
         }
         catch (OperationCanceledException)
@@ -530,11 +547,21 @@ internal sealed class ImageViewer : IZoomableImage
         }
     }
 
+    private void TakeWaitingWords()
+    {
+        if (_waitingWords is { } words)
+        {
+            _waitingWords = null;
+            _text.Words = words;
+        }
+    }
+
     private void ForgetWords()
     {
         _readDelay.Stop();
         _reading?.Cancel();
         _reading = null;
+        _waitingWords = null;
         _anchorWord = null;
         _overText = false;
         _text.Words = PictureWords.None;
@@ -548,6 +575,27 @@ internal sealed class ImageViewer : IZoomableImage
 
         // The words belonged to the picture that was here.
         ForgetWords();
+        if (_root.IsLoaded)
+        {
+            _readDelay.Start();
+        }
+    }
+
+    /// <summary>
+    /// The same picture, decoded sharper. Its words are where they were,
+    /// as fractions of the picture, so they and any selection stay while
+    /// the sharper picture is read: in 3.0.3 a selection made on the first
+    /// frame vanished when the full decode landed.
+    /// </summary>
+    private void UpgradeBitmap(BitmapSource bitmap)
+    {
+        _bitmap = bitmap;
+        _image.Source = bitmap;
+        ShowTransparency();
+        _reading?.Cancel();
+        _reading = null;
+        _waitingWords = null;
+        _readDelay.Stop();
         if (_root.IsLoaded)
         {
             _readDelay.Start();
