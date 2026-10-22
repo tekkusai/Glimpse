@@ -90,6 +90,64 @@ public sealed class CardsFolderRowsTests
         }
     }
 
+    // The walk ranks its rows by size when it ends. In 3.0.3 that rebuilt
+    // them under the pointer, so a click aimed at one row opened another
+    // and closed the preview. With the pointer on the rows their sizes fill
+    // in where they are, and the ranking waits until it leaves them.
+    [Fact]
+    public void TheRowsAreNotRankedUnderThePointer() => Sta.Run(() =>
+    {
+        static FolderChild Child(string name, long? bytes) => new(name, IsDirectory: true, IsLink: false, bytes, Partial: false);
+        static FolderScan Scan(params FolderChild[] children) =>
+            new(children, 0, 0, children.Length, Stopped: false, ListedEveryChild: true, SkippedFolders: 0, RootUnreadable: false);
+        var walked = Scan(Child("small", 10), Child("large", 1000));
+
+        var pointed = new EntryList(rootCap: 300);
+        Call("ShowFolderRows", pointed, Scan(Child("small", null), Child("large", null)), true);
+        Call("ShowFinalFolderRows", pointed, walked, true, true, CancellationToken.None);
+
+        Assert.Equal(["small", "large"], Names(pointed));
+        Assert.Contains(FolderScanner.DescribeChild(walked.Children[1]), RowTexts(pointed));
+        pointed.Element.RaiseEvent(new System.Windows.Input.MouseEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0)
+        {
+            RoutedEvent = System.Windows.Input.Mouse.MouseLeaveEvent
+        });
+        Assert.Equal(["large", "small"], Names(pointed));
+
+        // With the pointer elsewhere they are ranked at once.
+        var elsewhere = new EntryList(rootCap: 300);
+        Call("ShowFolderRows", elsewhere, Scan(Child("small", null), Child("large", null)), true);
+        Call("ShowFinalFolderRows", elsewhere, walked, true, false, CancellationToken.None);
+        Assert.Equal(["large", "small"], Names(elsewhere));
+
+        static void Call(string method, params object[] args) =>
+            typeof(PreviewWindow).GetMethod(method, BindingFlags.NonPublic | BindingFlags.Static)!.Invoke(null, args);
+
+        static List<string> RowTexts(EntryList list) =>
+            list.Element.Children.OfType<FrameworkElement>()
+                .SelectMany(row => LogicalDescendants(row).OfType<TextBlock>())
+                .Select(text => text.Text)
+                .ToList();
+
+        static List<string> Names(EntryList list) =>
+            RowTexts(list).Where(text => text is "small" or "large").ToList();
+    });
+
+    private static IEnumerable<object> LogicalDescendants(DependencyObject root)
+    {
+        foreach (var child in LogicalTreeHelper.GetChildren(root))
+        {
+            yield return child;
+            if (child is DependencyObject node)
+            {
+                foreach (var descendant in LogicalDescendants(node))
+                {
+                    yield return descendant;
+                }
+            }
+        }
+    }
+
     private static List<string> Texts(PreviewWindow window)
     {
         window.UpdateLayout();

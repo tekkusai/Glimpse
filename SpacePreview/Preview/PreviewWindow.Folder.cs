@@ -187,11 +187,7 @@ public partial class PreviewWindow
             sizeLine.Text = FolderScanner.Describe(scan);
             if (!scan.RootUnreadable)
             {
-                // Sizes are a ranking only when every child has one. Sort
-                // once, at the end, so rows never shuffle under the pointer
-                // while the walk runs.
-                var final = scan.Stopped ? scan : scan with { Children = SortBySize(scan.Children) };
-                ShowFolderRows(list, final, rebuild: !listed || !scan.Stopped);
+                var final = ShowFinalFolderRows(list, scan, listed, list.Element.IsMouseOver, token);
                 _folderHover?.SetWarmPaths(final.Children
                     .Where(child => child.IsDirectory)
                     .Take(FolderBreakdownRowsCap)
@@ -222,6 +218,37 @@ public partial class PreviewWindow
                 _folderSizeScanGate.Release();
             }
         }
+    }
+
+    /// <summary>
+    /// The walk's last word on the rows. Sizes are a ranking only when every
+    /// child has one, so the rows are sorted once, at the end, never while
+    /// the walk runs. Nor at the end under the pointer: the row aimed at
+    /// would be another by the click. With the pointer on the rows their
+    /// sizes fill in where they are, and the ranking waits until it leaves
+    /// them. Returns the rows in the order they end in.
+    /// </summary>
+    private static FolderScan ShowFinalFolderRows(EntryList list, FolderScan scan, bool listed, bool pointerOnRows, CancellationToken token)
+    {
+        var final = scan.Stopped ? scan : scan with { Children = SortBySize(scan.Children) };
+        if (!listed || scan.Stopped || !pointerOnRows)
+        {
+            ShowFolderRows(list, final, rebuild: !listed || !scan.Stopped);
+            return final;
+        }
+
+        ShowFolderRows(list, scan, rebuild: false);
+        void SortWhenLeft(object sender, System.Windows.Input.MouseEventArgs e)
+        {
+            list.Element.MouseLeave -= SortWhenLeft;
+            if (!token.IsCancellationRequested)
+            {
+                ShowFolderRows(list, final, rebuild: true);
+            }
+        }
+
+        list.Element.MouseLeave += SortWhenLeft;
+        return final;
     }
 
     private static IReadOnlyList<FolderChild> SortBySize(IReadOnlyList<FolderChild> children) =>
