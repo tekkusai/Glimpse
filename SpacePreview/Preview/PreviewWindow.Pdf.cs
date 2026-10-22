@@ -1648,7 +1648,17 @@ public partial class PreviewWindow
             state.Path,
             $"pdf jump {state.Path} -> {target}",
             "pdf jump",
-            stillWanted: () => Task.FromResult(state.CurrentPage == target));
+            stillWanted: () => Task.FromResult(state.CurrentPage == target),
+            onCalledOff: () =>
+            {
+                // A rail still on this page points where the document never
+                // went. The viewer's next answer puts it where the reader is.
+                if (state.CurrentPage == target)
+                {
+                    state.ViewerPage = 0;
+                    state.MoveUnanswered = false;
+                }
+            });
     }
 
     /// <summary>
@@ -1657,7 +1667,9 @@ public partial class PreviewWindow
     /// replacement nobody asked for passes <paramref name="stillWanted"/>,
     /// which is asked when the swap is due: a no lets the replacement go,
     /// leaves the viewer on screen as it is and calls
-    /// <paramref name="onCalledOff"/>.
+    /// <paramref name="onCalledOff"/>. So does a replacement that fails to
+    /// load, or has not loaded in 4 s: a working viewer is never traded for
+    /// one that is not.
     /// </summary>
     private void StagePdfViewerReplacement(
         PdfPageRailState state,
@@ -1734,30 +1746,47 @@ public partial class PreviewWindow
             onSwapped?.Invoke();
         }
 
+        void CallOff(string why)
+        {
+            if (finished)
+            {
+                return;
+            }
+
+            var owned = FreshIsOwned();
+            DiscardFresh();
+            if (owned)
+            {
+                DiagnosticLog.Write($"{paintLabel} {why}, the viewer stays");
+                onCalledOff?.Invoke();
+            }
+        }
+
         async Task SwapIfStillWantedAsync()
         {
             if (stillWanted is null || await stillWanted())
             {
                 Swap();
             }
-            else if (!finished)
+            else
             {
-                var owned = FreshIsOwned();
-                DiscardFresh();
-                if (owned)
-                {
-                    onCalledOff?.Invoke();
-                }
+                CallOff("called off");
             }
         }
 
-        // Navigation and the 4 s escape share one owner: only one of them
-        // may start the paint wait, and the escape stands down once it has.
+        // Navigation and the 4 s bound share one owner: only one of them
+        // may start the paint wait, and the bound stands down once it has.
         var paintAttemptStarted = false;
         fresh.NavigationCompleted += async (_, args) =>
         {
-            if (!args.IsSuccess || finished || paintAttemptStarted)
+            if (finished || paintAttemptStarted)
             {
+                return;
+            }
+
+            if (!args.IsSuccess)
+            {
+                CallOff($"failed to load ({args.WebErrorStatus})");
                 return;
             }
 
@@ -1789,10 +1818,9 @@ public partial class PreviewWindow
         {
             if (!paintAttemptStarted)
             {
-                // The escape owns the swap from here: a navigation that
-                // completes while the reader is asked about starts no second one.
+                // A navigation that completes after this starts no paint wait.
                 paintAttemptStarted = true;
-                _ = SwapIfStillWantedAsync();
+                CallOff("not loaded in 4 s");
             }
         });
     }

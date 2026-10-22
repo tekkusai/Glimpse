@@ -125,6 +125,32 @@ public sealed class RailChoiceTests
         Assert.True(pages.Shows(5));
     });
 
+    // A staged viewer that cannot load its document gives up its place.
+    // In 3.0.4 it took the place of the working viewer four seconds later
+    // and showed "File not found" under the document's own header.
+    [Fact]
+    public Task AViewerStaysWhenTheOneStagedToReplaceItCannotLoad() => WpfApp.RunAsync(async () =>
+    {
+        using var pages = await Pages.ShowAsync(12);
+        pages.Choose(3);
+        await pages.SettledAsync();
+        var first = pages.Viewer;
+        File.Move(pages.Document, pages.Document + ".gone");
+
+        // As a jump that missed stages one.
+        Fields.Set(pages.Rail, "JumpInFlight", true);
+        Fields.Call(pages.Window, "SetPdfCurrentPageFromViewer", pages.Rail, 5, false);
+        Fields.Call(pages.Window, "StagePdfViewerJump", pages.Rail, 5);
+        await UntilAsync(() => pages.Surface.Children.OfType<WebView2>().Count() == 1, "The staged viewer was never let go.");
+        Fields.Set(pages.Rail, "JumpInFlight", false);
+
+        Assert.Same(first, pages.Viewer);
+        Assert.Equal(3, await pages.PageBoxAsync());
+
+        // The rail goes back to where the document is.
+        await UntilAsync(() => pages.Shows(3), $"The rail stayed on {pages.CurrentPage}, where the document never went.");
+    });
+
     // The rail still follows a reader who moves the pages after a choice.
     [Fact]
     public Task TheRailFollowsTheReaderAfterAChoice() => WpfApp.RunAsync(async () =>
@@ -260,6 +286,7 @@ public sealed class RailChoiceTests
 
         public PreviewWindow Window { get; private set; } = null!;
         public object Rail { get; private set; } = null!;
+        public string Document { get; private set; } = null!;
 
         public WebView2 Viewer => Fields.Get<WebView2>(Rail, "WebView");
         public Grid Surface => Fields.Get<Grid>(Rail, "Surface");
@@ -269,7 +296,7 @@ public sealed class RailChoiceTests
         public static async Task<Pages> ShowAsync(int count)
         {
             var pages = new Pages();
-            var path = Path.Combine(pages._temp.Path, "pages.pdf");
+            var path = pages.Document = Path.Combine(pages._temp.Path, "pages.pdf");
             FillSignBehaviorTests.WritePdf(path, 612, 792, count);
             pages.Window = new PreviewWindow { Left = -30000, Top = 0, Width = 900, Height = 650 };
             pages.Window.MarkGeometryUserPinnedForProbe();
