@@ -158,6 +158,6 @@ Download **Glimpse-Setup-3.0.4.exe** below and run it, or update from inside Gli
 
 **SHA-256**
 
-`INSTALLER_SHA256`
+`0EC423D063E8655BFE2E92B319CDF6E8D14A6E1EE9A59849EF89CD21BD06D994`
 
 The installer is not code-signed yet, so Windows may show a SmartScreen warning.
