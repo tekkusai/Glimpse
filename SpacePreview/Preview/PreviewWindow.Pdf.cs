@@ -99,11 +99,12 @@ public partial class PreviewWindow
             // included, and the page box is the one native affordance our
             // rail drives for instant jumps.
             //
-            // This exact set is load-bearing. JumpPdfWithNativePageBoxAsync
-            // clicks the page box at a measured offset from the centre of the
-            // viewer, so ANY change here moves the box out from under that
-            // click, and the Ctrl+A that follows lands on the document and
-            // selects the whole thing instead. Adding Fit did exactly that.
+            // This exact set is load-bearing. The rail's first jump clicks
+            // the page box at a measured offset from the centre of the viewer
+            // (PdfPageBoxAsync), so ANY change here moves the box out from
+            // under that click, and the Ctrl+A that follows lands on the
+            // document and selects the whole thing instead. Adding Fit did
+            // exactly that.
             core.Settings.HiddenPdfToolbarItems |=
                 CoreWebView2PdfToolbarItems.Save | CoreWebView2PdfToolbarItems.SaveAs |
                 CoreWebView2PdfToolbarItems.Rotate |
@@ -1522,15 +1523,14 @@ public partial class PreviewWindow
                 return;
             }
 
-            // The synthetic click aims at where the page box sits rather than
-            // at the box itself, so it can miss for reasons this code cannot
-            // see: a runtime that moves the toolbar, a narrow stage, a page
-            // count wide enough to change the control's width. A timeout keeps
+            // The first click can only aim where the page box usually sits,
+            // so it can miss for reasons this code cannot see. A timeout keeps
             // a wedged call from holding the lock, and the viewer is asked
             // afterwards where it actually landed.
             async Task<int> TypeAsync()
             {
-                await JumpPdfWithNativePageBoxAsync(state.WebView, core, target)
+                var box = await PdfPageBoxAsync(state);
+                await JumpPdfWithNativePageBoxAsync(core, box, target)
                     .WaitAsync(PdfPageAutomationTimeout);
                 return await PdfPageAfterJumpAsync(state, target);
             }
@@ -1615,16 +1615,60 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// Clicks the viewer's own page box and types the target. The offset is
-    /// measured against the toolbar set ConfigurePdfViewer keeps: show or hide
-    /// one more item and the box slides out from under this click, after which
-    /// the Ctrl+A selects the document instead of the box. Change one, retest
-    /// the other.
+    /// Where the viewer's page box is, in the viewer's own coordinates. Once
+    /// the viewer has been asked where it stands the box is known, and its
+    /// own rectangle says. Before that, asking would wait while Chromium
+    /// builds its accessibility tree, seconds on a long document, so the
+    /// first jump aims where the box sits in the toolbar ConfigurePdfViewer
+    /// keeps: right of the middle, or left of it when the viewer's language
+    /// reads right to left. Show or hide one more item and that guess misses,
+    /// the Ctrl+A selects the document instead of the box, and only the
+    /// retry finds it. Change one, retest the other.
     /// </summary>
-    private static async Task JumpPdfWithNativePageBoxAsync(WebView2 webView, CoreWebView2 core, int page)
+    private async Task<Point> PdfPageBoxAsync(PdfPageRailState state)
     {
-        var x = Math.Max(160, webView.ActualWidth / 2 + 15);
-        await DispatchMouseClickAsync(core, x, 20);
+        var webView = state.WebView;
+        if (state.PageAutomationElement is { } box
+            && await AskPdfViewerAsync<Rect>(state, _ => ReadBounds(box)) is { IsEmpty: false } bounds
+            && ReferenceEquals(state.WebView, webView))
+        {
+            try
+            {
+                var center = webView.PointFromScreen(new Point(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2));
+                if (center.X >= 0 && center.X < webView.ActualWidth && center.Y >= 0 && center.Y < webView.ActualHeight)
+                {
+                    return center;
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // The viewer left the screen; the guess is as good as any.
+            }
+        }
+
+        // Chromium takes its language from Windows' display language, as .NET does.
+        return System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft
+            ? new Point(Math.Min(webView.ActualWidth - 160, webView.ActualWidth / 2 - 15), 20)
+            : new Point(Math.Max(160, webView.ActualWidth / 2 + 15), 20);
+
+        // A box gone from the tree is no answer to wait for: the guess stands in.
+        static Rect? ReadBounds(System.Windows.Automation.AutomationElement box)
+        {
+            try
+            {
+                return box.Current.BoundingRectangle;
+            }
+            catch
+            {
+                return Rect.Empty;
+            }
+        }
+    }
+
+    /// <summary>Clicks the viewer's own page box at <paramref name="box"/> and types the target.</summary>
+    private static async Task JumpPdfWithNativePageBoxAsync(CoreWebView2 core, Point box, int page)
+    {
+        await DispatchMouseClickAsync(core, box.X, box.Y);
         await Task.Delay(35);
         await DispatchModifiedKeyAsync(core, 65, "KeyA", "a", modifiers: 2);
         await Task.Delay(20);

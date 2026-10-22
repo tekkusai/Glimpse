@@ -38,8 +38,8 @@ public sealed class PreviewChromeRegressionTests
             Assert.Contains($"CoreWebView2PdfToolbarItems.{hidden}", configure, StringComparison.Ordinal);
         }
 
-        var jump = ReadMethod(windowSource, "private static async Task JumpPdfWithNativePageBoxAsync");
-        Assert.Contains("webView.ActualWidth / 2 + 15", jump, StringComparison.Ordinal);
+        var aim = ReadMethod(windowSource, "private async Task<Point> PdfPageBoxAsync");
+        Assert.Contains("webView.ActualWidth / 2 + 15", aim, StringComparison.Ordinal);
     }
 
     /// <summary>
