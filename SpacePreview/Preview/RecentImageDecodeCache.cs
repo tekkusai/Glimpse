@@ -32,17 +32,16 @@ internal readonly record struct ImageFileStamp(string Path, long Length, long La
 internal sealed record CachedImageDecode(BitmapSource Bitmap, int Orientation);
 
 /// <summary>
-/// The preview only needs the image the user is likely to step back to. One
-/// strong entry turns a repeated giant PNG from another full inflate into a
-/// direct bitmap handoff. The window's existing idle retirement bounds the
-/// lifetime; this class bounds the size.
+/// Keep the two images a user just viewed so stepping back and forth does not
+/// decode them again. Each entry is at most 64 MiB; pinning or idle retirement clears both.
 /// </summary>
 internal sealed class RecentImageDecodeCache
 {
-    internal const long MaxRetainedBytes = 64L * 1024 * 1024;
+    internal const long MaxEntryBytes = 64L * 1024 * 1024;
 
     private readonly object _sync = new();
-    private Entry? _entry;
+    private Entry? _recent;
+    private Entry? _older;
     private int _generation;
 
     public int CaptureGeneration()
@@ -57,10 +56,17 @@ internal sealed class RecentImageDecodeCache
     {
         lock (_sync)
         {
-            if (_entry is { } entry
-                && SameStamp(entry.Stamp, stamp))
+            if (_recent is { } recent && SameStamp(recent.Stamp, stamp))
             {
-                decoded = entry.Decoded;
+                decoded = recent.Decoded;
+                return true;
+            }
+
+            if (_older is { } older && SameStamp(older.Stamp, stamp))
+            {
+                _older = _recent;
+                _recent = older;
+                decoded = older.Decoded;
                 return true;
             }
         }
@@ -71,7 +77,7 @@ internal sealed class RecentImageDecodeCache
 
     public bool Store(ImageFileStamp stamp, CachedImageDecode decoded, int generation)
     {
-        if (EstimatedBytes(decoded.Bitmap) > MaxRetainedBytes)
+        if (EstimatedBytes(decoded.Bitmap) > MaxEntryBytes)
         {
             return false;
         }
@@ -83,7 +89,16 @@ internal sealed class RecentImageDecodeCache
                 return false;
             }
 
-            _entry = new Entry(stamp, decoded);
+            var entry = new Entry(stamp, decoded);
+            if (_recent is { } recent && SamePath(recent.Stamp, stamp))
+            {
+                _recent = entry;
+            }
+            else
+            {
+                _older = _recent;
+                _recent = entry;
+            }
             return true;
         }
     }
@@ -92,7 +107,8 @@ internal sealed class RecentImageDecodeCache
     {
         lock (_sync)
         {
-            _entry = null;
+            _recent = null;
+            _older = null;
             _generation++;
         }
     }
@@ -107,7 +123,10 @@ internal sealed class RecentImageDecodeCache
     private static bool SameStamp(ImageFileStamp left, ImageFileStamp right) =>
         left.Length == right.Length
         && left.LastWriteUtcTicks == right.LastWriteUtcTicks
-        && string.Equals(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
+        && SamePath(left, right);
+
+    private static bool SamePath(ImageFileStamp left, ImageFileStamp right) =>
+        string.Equals(left.Path, right.Path, StringComparison.OrdinalIgnoreCase);
 
     private sealed record Entry(ImageFileStamp Stamp, CachedImageDecode Decoded);
 }

@@ -5,6 +5,9 @@ namespace SpacePreview.Native;
 
 internal static class NativeMethods
 {
+    [DllImport("user32.dll")]
+    public static extern uint GetClipboardSequenceNumber();
+
     public const int WH_KEYBOARD_LL = 13;
     public const int WH_MOUSE_LL = 14;
     public const int WM_KEYDOWN = 0x0100;
@@ -16,7 +19,9 @@ internal static class NativeMethods
     public const int WM_RBUTTONDOWN = 0x0204;
     public const int WM_RBUTTONUP = 0x0205;
     public const int WM_MBUTTONDOWN = 0x0207;
+    public const int WM_MBUTTONUP = 0x0208;
     public const int WM_XBUTTONDOWN = 0x020B;
+    public const int WM_XBUTTONUP = 0x020C;
     public const uint WM_QUIT = 0x0012;
     public const uint PM_NOREMOVE = 0x0000;
     public const int WM_CONTEXTMENU = 0x007B;

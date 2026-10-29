@@ -12,7 +12,7 @@ namespace SpacePreview.Services;
 /// thread reads the last answer.
 ///
 /// The one answer the hook thread acts on is "nothing here takes text",
-/// read twice with no key between. Anything else is typing. A Space kept
+/// read twice with no input between. Anything else is typing. A Space kept
 /// from a preview costs a second press; a Space kept from a search box
 /// costs the user their text.
 /// </summary>
@@ -20,8 +20,8 @@ internal sealed class ExplorerHeaderFocus : IDisposable
 {
     internal const int ReadsToTrust = 2;
 
-    // The interval is how long a click from a button into a text box can
-    // go unseen, so it is never lengthened.
+    // Mouse buttons invalidate an answer before Windows moves the focus.
+    // These reads learn where it landed, away from the input hooks.
     internal const int IntervalMilliseconds = 50;
 
     // One read takes 0.9 ms here and about 1 ms of Explorer's own CPU:
@@ -45,23 +45,23 @@ internal sealed class ExplorerHeaderFocus : IDisposable
     private readonly Func<uint> _lastInput;
     private readonly Timer? _timer;
 
-    // What was read, under which key count and which watch. It holds only
-    // while both still stand, so no key and no change of window can come
+    // What was read, under which input count and which watch. It holds only
+    // while both still stand, so no input and no change of window can come
     // between a read and its use.
-    private sealed record Answer(nint Root, int Keys, int Watch);
+    private sealed record Answer(nint Root, int Inputs, int Watch);
 
     private Answer? _answer;
     private long _answerAt;
     private nint _root;
     private int _watch;
 
-    // The hook thread's: keys that reached the app, and the last Tab.
-    private int _keys;
+    // Both hook threads count changes; only the keyboard records Tab.
+    private int _inputs;
     private long _walkedAt;
 
     // The watcher's own.
     private int _reads;
-    private int _readsKeys;
+    private int _readsInputs;
     private int _readsWatch;
     private uint _readInput;
     private bool _readQuiet;
@@ -106,32 +106,32 @@ internal sealed class ExplorerHeaderFocus : IDisposable
 
     /// <summary>
     /// Hook thread. This window's header was read, twice and lately, with
-    /// the keyboard on something that takes no text, and no key has reached
-    /// the app since.
+    /// the keyboard on something that takes no text, and no key or mouse
+    /// button has reached the app since.
     /// </summary>
     public bool IsPlain(IntPtr root) =>
         root != IntPtr.Zero
         && Volatile.Read(ref _answer) is { } answer
         && answer.Root == root
-        && answer.Keys == Volatile.Read(ref _keys)
+        && answer.Inputs == Volatile.Read(ref _inputs)
         && answer.Watch == Volatile.Read(ref _watch)
         && Environment.TickCount64 - Volatile.Read(ref _answerAt) <= FreshMilliseconds;
 
     /// <summary>
-    /// Hook thread. A key reached the app in front and may have moved the
-    /// focus there, so what was read is no longer known. A bare Tab or F6
+    /// Hook threads. A key or mouse button may move the focus, so what was
+    /// read is no longer known. A bare Tab or F6
     /// <paramref name="walks"/> the focus through the header: someone using
     /// the header by keyboard means its buttons, and Space is theirs until
     /// the focus leaves.
     /// </summary>
-    public void KeyWentBy(bool walks)
+    public void InputWentBy(bool walks)
     {
         if (walks)
         {
             Volatile.Write(ref _walkedAt, Environment.TickCount64);
         }
 
-        Volatile.Write(ref _keys, _keys + 1);
+        Interlocked.Increment(ref _inputs);
     }
 
     /// <summary>One look at the header.</summary>
@@ -157,7 +157,7 @@ internal sealed class ExplorerHeaderFocus : IDisposable
     private void Look(long now)
     {
         var root = Volatile.Read(ref _root);
-        var keys = Volatile.Read(ref _keys);
+        var inputs = Volatile.Read(ref _inputs);
         var watch = Volatile.Read(ref _watch);
         var input = _lastInput();
         if (!Facing(root))
@@ -181,7 +181,7 @@ internal sealed class ExplorerHeaderFocus : IDisposable
         // it saw still holds, and Explorer is left alone.
         if (_readQuiet
             && input == _readInput
-            && keys == _readsKeys
+            && inputs == _readsInputs
             && watch == _readsWatch
             && (!_readPlain || _reads >= ReadsToTrust))
         {
@@ -194,16 +194,16 @@ internal sealed class ExplorerHeaderFocus : IDisposable
         }
 
         // The read asks for whatever has the focus, anywhere. It counts
-        // only if this header still had it afterwards. A key or a change
+        // only if this header still had it afterwards. Input or a change
         // of window during it needs no check here: the answer carries the
         // counts it was started under.
         _readPlain = _readsPlain(root) && Facing(root);
         _readInput = input;
         _readQuiet = unchecked((uint)now - input) > QuietMilliseconds;
-        if (keys != _readsKeys || watch != _readsWatch)
+        if (inputs != _readsInputs || watch != _readsWatch)
         {
             _reads = 0;
-            _readsKeys = keys;
+            _readsInputs = inputs;
             _readsWatch = watch;
         }
 
@@ -216,7 +216,7 @@ internal sealed class ExplorerHeaderFocus : IDisposable
         if (++_reads >= ReadsToTrust)
         {
             Volatile.Write(ref _answerAt, now);
-            Volatile.Write(ref _answer, new Answer(root, keys, watch));
+            Volatile.Write(ref _answer, new Answer(root, inputs, watch));
         }
     }
 

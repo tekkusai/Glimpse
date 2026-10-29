@@ -510,6 +510,7 @@ public partial class PreviewWindow
         {
             // A pinned window leaves browse mode; the set surfaces go with it.
             DetachBrowseContext(restoreSlideshowSize: true);
+            _imageDecodeCache.Invalidate();
             _warmBrowser.Stop();
         }
         else if (PreviewContent.Content is FrameworkElement shown && WebViewIn(shown) is not null)

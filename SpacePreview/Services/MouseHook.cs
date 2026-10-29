@@ -4,15 +4,15 @@ using SpacePreview.Native;
 namespace SpacePreview.Services;
 
 /// <summary>
-/// Watches button presses while a preview is on screen. The hook lives on one
-/// observer thread for the app's lifetime. Start and Stop only post to it, so
-/// showing a preview never waits for a hook to install.
+/// Watches buttons while Explorer is in front or a preview is on screen.
+/// The hook lives on one observer thread for the app's lifetime. Start and
+/// Stop only post to it, so showing a preview never waits for installation.
 /// </summary>
 internal sealed class MouseHook : IDisposable
 {
     private const uint WmSync = NativeMethods.WM_APP + 0x40;
 
-    private readonly Action<int, int, int> _onMouseDown;
+    private readonly Action<int, int, int> _onMouseButton;
     private readonly Func<IntPtr, bool> _shouldActivateWindow;
     private readonly NativeMethods.LowLevelMouseProc _proc;
     private uint _threadId;
@@ -20,9 +20,9 @@ internal sealed class MouseHook : IDisposable
     private IntPtr _hook;
     private bool _disposed;
 
-    public MouseHook(Action<int, int, int> onMouseDown, Func<IntPtr, bool> shouldActivateWindow)
+    public MouseHook(Action<int, int, int> onMouseButton, Func<IntPtr, bool> shouldActivateWindow)
     {
-        _onMouseDown = onMouseDown;
+        _onMouseButton = onMouseButton;
         _shouldActivateWindow = shouldActivateWindow;
         _proc = HookCallback;
 
@@ -38,8 +38,16 @@ internal sealed class MouseHook : IDisposable
         ready.Wait();
     }
 
-    internal static bool ShouldRun(bool suspended, bool previewVisible, int pinnedWindowCount) =>
-        !suspended && (previewVisible || pinnedWindowCount > 0);
+    internal static bool ShouldRun(bool suspended, bool previewVisible, int pinnedWindowCount, bool explorerForeground) =>
+        !suspended && (previewVisible || pinnedWindowCount > 0 || explorerForeground);
+
+    public bool IsActive => _wanted && Volatile.Read(ref _hook) != IntPtr.Zero;
+
+    internal static bool IsButtonDown(int message) =>
+        message is NativeMethods.WM_LBUTTONDOWN
+            or NativeMethods.WM_RBUTTONDOWN
+            or NativeMethods.WM_MBUTTONDOWN
+            or NativeMethods.WM_XBUTTONDOWN;
 
     public void Start() => Request(true);
 
@@ -116,7 +124,7 @@ internal sealed class MouseHook : IDisposable
         // Global low-level hook path: keep this lane tiny and fail-open. Do
         // not add disk I/O, waits, sleeps, blocking GC, process lookup, or
         // other slow work here; enqueue or dispatch anything non-trivial.
-        if (nCode < 0)
+        if (nCode < 0 || !_wanted)
         {
             return NativeMethods.CallNextHookEx(_hook, nCode, wParam, lParam);
         }
@@ -124,24 +132,28 @@ internal sealed class MouseHook : IDisposable
         try
         {
             var message = wParam.ToInt32();
-            if (message is NativeMethods.WM_LBUTTONDOWN
-                or NativeMethods.WM_RBUTTONDOWN
-                or NativeMethods.WM_MBUTTONDOWN
-                or NativeMethods.WM_XBUTTONDOWN)
+            var down = IsButtonDown(message);
+            if (down || message is NativeMethods.WM_LBUTTONUP
+                or NativeMethods.WM_RBUTTONUP
+                or NativeMethods.WM_MBUTTONUP
+                or NativeMethods.WM_XBUTTONUP)
             {
                 // Windows grants foreground rights only while the click is
                 // being processed, and a click on web content lands in the
                 // browser process. Take the foreground here or never.
                 var data = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-                var hit = NativeMethods.GetRootWindowAt(data.pt.X, data.pt.Y);
-                if (hit != IntPtr.Zero
-                    && _shouldActivateWindow(hit)
-                    && NativeMethods.GetForegroundWindow() != hit)
+                if (down)
                 {
-                    NativeMethods.SetForegroundWindow(hit);
+                    var hit = NativeMethods.GetRootWindowAt(data.pt.X, data.pt.Y);
+                    if (hit != IntPtr.Zero
+                        && _shouldActivateWindow(hit)
+                        && NativeMethods.GetForegroundWindow() != hit)
+                    {
+                        NativeMethods.SetForegroundWindow(hit);
+                    }
                 }
 
-                _onMouseDown(message, data.pt.X, data.pt.Y);
+                _onMouseButton(message, data.pt.X, data.pt.Y);
             }
         }
         catch

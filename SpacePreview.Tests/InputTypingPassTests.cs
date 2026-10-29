@@ -170,6 +170,29 @@ public sealed class InputTypingPassTests
         Assert.True(header.IsPlain(Owner));
     }
 
+    [Theory]
+    [InlineData(NativeMethods.WM_LBUTTONDOWN)]
+    [InlineData(NativeMethods.WM_LBUTTONUP)]
+    [InlineData(NativeMethods.WM_RBUTTONDOWN)]
+    [InlineData(NativeMethods.WM_RBUTTONUP)]
+    [InlineData(NativeMethods.WM_MBUTTONDOWN)]
+    [InlineData(NativeMethods.WM_MBUTTONUP)]
+    [InlineData(NativeMethods.WM_XBUTTONDOWN)]
+    [InlineData(NativeMethods.WM_XBUTTONUP)]
+    public Task MouseButtonsForgetTheHeaderWithoutWaitingForTheDispatcher(int message) => WithController(controller =>
+    {
+        var header = new ExplorerHeaderFocus(() => Owner, _ => true, _ => true, () => unchecked((uint)Environment.TickCount64));
+        Fields.Set(controller, "_headerFocus", header);
+        header.Watch(Owner);
+        Trust(header);
+
+        Fields.Call(controller, "QueueMouseButton", message, 0, 0);
+
+        Assert.False(header.IsPlain(Owner), "A mouse button left the old header answer trusted.");
+        Assert.True(controller.NoPreviewOpen);
+        return Task.CompletedTask;
+    });
+
     /// <summary>
     /// The latch that tells a held Space from a new press is the hook
     /// thread's own, and it follows every Space, typed or not. Without it a

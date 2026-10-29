@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Windows;
@@ -183,16 +184,26 @@ public partial class PreviewWindow
     {
         try
         {
+            DiagnosticLog.Write($"psd sharp decode requested {path}");
             await _imageDecodeGate.WaitAsync(token);
             BitmapSource? bitmap;
             try
             {
                 token.ThrowIfCancellationRequested();
-                bitmap = await Task.Run(
-                    () => PsdPreviewLoader.TryReadPixelSize(path, out var size)
-                        ? PsdPreviewLoader.TryLoad(path, token, SharpLongSide((int)size.Width, (int)size.Height))
-                        : null,
-                    token);
+                DiagnosticLog.Write($"psd sharp decode started {path}");
+                var started = Stopwatch.GetTimestamp();
+                try
+                {
+                    bitmap = await Task.Run(
+                        () => PsdPreviewLoader.TryReadPixelSize(path, out var size)
+                            ? PsdPreviewLoader.TryLoad(path, token, SharpLongSide((int)size.Width, (int)size.Height))
+                            : null,
+                        token);
+                }
+                finally
+                {
+                    DiagnosticLog.Write($"psd sharp decode finished in {Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}ms {path}");
+                }
             }
             finally
             {
@@ -405,6 +416,7 @@ public partial class PreviewWindow
     {
         try
         {
+            DiagnosticLog.Write($"image sharp decode requested {path}");
             // A first frame's own decode lands first. It may be all the
             // zoom on screen needs, and the viewer may ask again later.
             await Task.WhenAny(earlier);
@@ -422,16 +434,25 @@ public partial class PreviewWindow
             try
             {
                 token.ThrowIfCancellationRequested();
-                (header, bitmap) = await Task.Run<(ImageHeader?, BitmapSource?)>(() =>
+                DiagnosticLog.Write($"image sharp decode started {path}");
+                var started = Stopwatch.GetTimestamp();
+                try
                 {
-                    if (ImageHeader.TryRead(path, token: token) is not { } read)
+                    (header, bitmap) = await Task.Run<(ImageHeader?, BitmapSource?)>(() =>
                     {
-                        return (null, null);
-                    }
+                        if (ImageHeader.TryRead(path, token: token) is not { } read)
+                        {
+                            return (null, null);
+                        }
 
-                    var longSide = SharpLongSide(read.Width, read.Height);
-                    return (read, longSide > MaxImageDecodePixels ? TryDecodeImage(path, read, longSide) : null);
-                }, token);
+                        var longSide = SharpLongSide(read.Width, read.Height);
+                        return (read, longSide > MaxImageDecodePixels ? TryDecodeImage(path, read, longSide) : null);
+                    }, token);
+                }
+                finally
+                {
+                    DiagnosticLog.Write($"image sharp decode finished in {Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}ms {path}");
+                }
             }
             finally
             {
@@ -497,7 +518,7 @@ public partial class PreviewWindow
             }
 
             // A stream has no URI, so WPF's URI cache never answers for it:
-            // our stamp-aware one-entry cache owns reuse, and an externally
+            // our stamp-aware two-entry cache owns reuse, and an externally
             // changed file can never inherit pixels held alive by an entry.
             var bitmap = new BitmapImage();
             bitmap.BeginInit();

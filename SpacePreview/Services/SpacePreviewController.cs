@@ -162,7 +162,7 @@ internal sealed class SpacePreviewController : IDisposable
         _readKey = ReadKey;
         _showPreview = ShowPreview;
         _keyboardHook = new KeyboardHook(OnKeyDown, OnKeyUp);
-        _mouseHook = new MouseHook(QueueMouseDown, IsMouseActivationWindow);
+        _mouseHook = new MouseHook(QueueMouseButton, IsMouseActivationWindow);
         _fullscreenInputSuspension = new FullscreenInputSuspension();
         _fullscreenInputSuspension.SuspensionChanged += OnFullscreenSuspensionChanged;
         _commonFileDialogMonitor = new CommonFileDialogSelectionMonitor(dispatcher);
@@ -306,6 +306,7 @@ internal sealed class SpacePreviewController : IDisposable
             wanted && PreviewInputPolicy.IsExplorerWindowClass(NativeMethods.GetClassNameString(root))
                 ? root
                 : IntPtr.Zero);
+        SyncHooks();
         if (wanted)
         {
             _keyboardHook.Start();
@@ -440,7 +441,9 @@ internal sealed class SpacePreviewController : IDisposable
         // A glance goes with a foreground change; a pin stays through one.
         // With no pin open, nothing runs.
         _fullscreenRecheckTimer.IsEnabled = _pinnedWindows.Count > 0;
-        if (MouseHook.ShouldRun(_fullscreenInputSuspension.IsSuspended, _previewVisible, _pinnedWindows.Count))
+        var explorerForeground = PreviewInputPolicy.IsExplorerWindowClass(
+            NativeMethods.GetClassNameString(_foregroundRoot()));
+        if (MouseHook.ShouldRun(_fullscreenInputSuspension.IsSuspended, _previewVisible, _pinnedWindows.Count, explorerForeground))
         {
             _mouseHook.Start();
         }
@@ -576,7 +579,7 @@ internal sealed class SpacePreviewController : IDisposable
         {
             // It reaches the app, and may move the focus in Explorer's
             // header. A bare Tab or F6 walks it there.
-            _headerFocus.KeyWentBy(
+            _headerFocus.InputWentBy(
                 vk is NativeMethods.VK_TAB or NativeMethods.VK_F6
                 && !NativeMethods.IsKeyDown(NativeMethods.VK_CONTROL)
                 && !NativeMethods.IsKeyDown(NativeMethods.VK_MENU)
@@ -594,7 +597,7 @@ internal sealed class SpacePreviewController : IDisposable
                 _spaceKey.Press(time, acted: false);
             }
 
-            _headerFocus.KeyWentBy(walks: false);
+            _headerFocus.InputWentBy(walks: false);
             return false;
         }
 
@@ -631,7 +634,7 @@ internal sealed class SpacePreviewController : IDisposable
         // move the focus there.
         if (!decision.Swallow)
         {
-            _headerFocus.KeyWentBy(walks: false);
+            _headerFocus.InputWentBy(walks: false);
         }
 
         // A key typed into a text box is the text box's and means nothing
@@ -705,7 +708,7 @@ internal sealed class SpacePreviewController : IDisposable
             Root = root,
             RootIsDesktop = PreviewInputPolicy.IsDesktopWindowClass(NativeMethods.GetClassNameString(root)),
             // The header is typing until it was read as taking no text.
-            RootTyping = typing && !(header && _headerFocus.IsPlain(root)),
+            RootTyping = typing && !(header && _mouseHook.IsActive && _headerFocus.IsPlain(root)),
             RootHeaderFocus = header,
             RootFileListFocus = (space || PreviewKeyMap.IsNavigation(vk))
                 && CommonFileDialogSelectionService.HasFileListFocus(root),
@@ -971,8 +974,16 @@ internal sealed class SpacePreviewController : IDisposable
             DispatcherPriority.Input);
     }
 
-    private void QueueMouseDown(int message, int screenX, int screenY)
+    private void QueueMouseButton(int message, int screenX, int screenY)
     {
+        // A button can move focus on either edge. Forget the old header
+        // answer here, before Windows delivers it, not on the dispatcher.
+        _headerFocus.InputWentBy(walks: false);
+        if (!MouseHook.IsButtonDown(message))
+        {
+            return;
+        }
+
         var stamp = Stopwatch.GetTimestamp();
         _dispatcher.BeginInvoke(
             () => OnMouseDown(message, screenX, screenY, stamp),

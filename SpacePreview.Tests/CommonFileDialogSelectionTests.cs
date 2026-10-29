@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using SpacePreview.Preview;
 using SpacePreview.Services;
 
@@ -5,6 +6,27 @@ namespace SpacePreview.Tests;
 
 public sealed class CommonFileDialogSelectionTests
 {
+    [Fact]
+    public void FailureDiagnosticNamesStageAndHresultWithoutExceptionContent()
+    {
+        var failure = new COMException(@"Selected C:\Private\secret.txt", unchecked((int)0x8000FFFF));
+
+        var line = CommonFileDialogSelectionService.DescribeFailure(
+            IntPtr.Zero, "selected-elements", 37, failure);
+
+        Assert.Contains("stage=selected-elements elapsedMs=37", line, StringComparison.Ordinal);
+        Assert.Contains("hwnd=0x0 pid=0 process=unknown", line, StringComparison.Ordinal);
+        Assert.Contains("error=COMException hr=0x8000FFFF", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", line, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("editor.exe", "editor.exe")]
+    [InlineData("private\r\nfile/path", "private__file_path")]
+    public void ProcessNameCannotAddLogLinesOrPaths(string name, string expected) =>
+        Assert.Equal(expected, CommonFileDialogSelectionService.SafeProcessName(name));
+
     // The row is whatever the shell shows for the file on this PC, with its
     // extension or without. The resolver has to find the file either way.
     [Theory]

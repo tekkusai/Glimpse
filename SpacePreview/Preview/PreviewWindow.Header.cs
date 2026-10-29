@@ -1134,8 +1134,20 @@ public partial class PreviewWindow
                     // hand the copy to the viewer itself through the browser's
                     // input pipe. With nothing selected Chromium copies
                     // nothing: over a document, Ctrl+C means "copy the text".
-                    DiagnosticLog.Write("ctrl+c forwarded into pdf viewer");
+                    var clipboardBefore = NativeMethods.GetClipboardSequenceNumber();
+                    var started = Stopwatch.GetTimestamp();
+                    DiagnosticLog.Write("ctrl+c requested in pdf viewer");
                     await ForwardCtrlCAsync(core);
+                    // Dispatch is not a copy. The browser may write later,
+                    // and a selectionless Ctrl+C writes nothing at all.
+                    while (NativeMethods.GetClipboardSequenceNumber() == clipboardBefore
+                        && Stopwatch.GetElapsedTime(started).TotalMilliseconds < 250)
+                    {
+                        await Task.Delay(25);
+                    }
+
+                    var changed = NativeMethods.GetClipboardSequenceNumber() != clipboardBefore;
+                    DiagnosticLog.Write($"pdf copy dispatched clipboardChanged={changed} elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}");
                     return;
                 }
 

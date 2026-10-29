@@ -100,7 +100,7 @@ public sealed class InputHeaderFocusTests
         Read(watch, 2);
         Assert.True(watch.IsPlain(Explorer));
 
-        watch.KeyWentBy(walks: false);
+        watch.InputWentBy(walks: false);
         Assert.False(watch.IsPlain(Explorer));
 
         watch.Tick(Now);
@@ -114,7 +114,7 @@ public sealed class InputHeaderFocusTests
     {
         var watch = new Header().Watch();
         watch.Tick(Now);
-        watch.KeyWentBy(walks: false);
+        watch.InputWentBy(walks: false);
 
         watch.Tick(Now);
         Assert.False(watch.IsPlain(Explorer), "A read from before the key was counted with one after it.");
@@ -133,7 +133,7 @@ public sealed class InputHeaderFocusTests
         var watch = header.Watch();
         watch.Tick(Now);
 
-        header.DuringRead = () => watch.KeyWentBy(walks: false);
+        header.DuringRead = () => watch.InputWentBy(walks: false);
         watch.Tick(Now);
         Assert.False(watch.IsPlain(Explorer));
 
@@ -160,7 +160,7 @@ public sealed class InputHeaderFocusTests
         // The count moves and nothing else is told: no look runs.
         for (var key = 0; key < 3; key++)
         {
-            watch.KeyWentBy(walks: false);
+            watch.InputWentBy(walks: false);
             Assert.False(watch.IsPlain(Explorer));
         }
     }
@@ -366,6 +366,39 @@ public sealed class InputHeaderFocusTests
         Assert.False(watch.IsPlain(Explorer));
     }
 
+    [Fact]
+    public void AClickIntoSearchForgetsTheHeaderBeforeTheNextRead()
+    {
+        var header = new Header();
+        header.HandsOff();
+        var watch = header.Watch();
+        Read(watch, 2);
+        Assert.True(watch.IsPlain(Explorer));
+
+        header.Touch();
+        header.Plain = false;
+        watch.InputWentBy(walks: false);
+
+        Assert.False(watch.IsPlain(Explorer), "Space could use the button's old focus before the next read.");
+        watch.Tick(Now);
+        Assert.False(watch.IsPlain(Explorer));
+    }
+
+    [Fact]
+    public void AClickOnATabNeedsTwoFreshReadsBeforeSpaceCanPreview()
+    {
+        var header = new Header();
+        var watch = header.Watch();
+        Read(watch, 2);
+
+        watch.InputWentBy(walks: false);
+        Assert.False(watch.IsPlain(Explorer));
+        watch.Tick(Now);
+        Assert.False(watch.IsPlain(Explorer));
+        watch.Tick(Now);
+        Assert.True(watch.IsPlain(Explorer));
+    }
+
     /// <summary>
     /// A click can move the focus a moment after it lands. A read made
     /// while the user was still at it settles nothing: the asking goes on
@@ -419,7 +452,7 @@ public sealed class InputHeaderFocusTests
         var watch = header.Watch();
         Read(watch, 2);
 
-        watch.KeyWentBy(walks: true);
+        watch.InputWentBy(walks: true);
         var reads = header.Reads;
         Read(watch, 5);
         Assert.False(watch.IsPlain(Explorer));
@@ -440,7 +473,7 @@ public sealed class InputHeaderFocusTests
         var header = new Header { In = false };
         var watch = header.Watch();
 
-        watch.KeyWentBy(walks: true);
+        watch.InputWentBy(walks: true);
         watch.Tick(Now);
         header.In = true;
         Read(watch, 5);
@@ -456,7 +489,7 @@ public sealed class InputHeaderFocusTests
         var header = new Header { In = false };
         var watch = header.Watch();
 
-        watch.KeyWentBy(walks: true);
+        watch.InputWentBy(walks: true);
         watch.Tick(Now + ExplorerHeaderFocus.WalkMilliseconds + 1);
         header.In = true;
         Read(watch, 2);
@@ -477,7 +510,7 @@ public sealed class InputHeaderFocusTests
         var watch = header.Watch();
 
         watch.Watch(IntPtr.Zero);
-        watch.KeyWentBy(walks: true);
+        watch.InputWentBy(walks: true);
         watch.Watch(Explorer);
         Read(watch, 2);
 

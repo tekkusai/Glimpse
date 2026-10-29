@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
@@ -120,6 +121,8 @@ internal static class CommonFileDialogSelectionService
             return null;
         }
 
+        var started = Stopwatch.StartNew();
+        var stage = "shell-view";
         try
         {
             var shellViewHwnd = NativeMethods.FindDescendantWindowByClass(
@@ -130,6 +133,7 @@ internal static class CommonFileDialogSelectionService
                 return null;
             }
 
+            stage = "automation-root";
             var shellRoot = AutomationElement.FromHandle(shellViewHwnd);
             var dialogAutomationRoot = AutomationElement.FromHandle(dialogRoot);
             if (shellRoot is null || dialogAutomationRoot is null)
@@ -137,22 +141,27 @@ internal static class CommonFileDialogSelectionService
                 return null;
             }
 
+            stage = "selected-elements";
             var selectedElements = GetSelectedElements(shellRoot);
             if (selectedElements.Count == 0)
             {
                 return null;
             }
 
+            stage = "selection-candidates";
             var candidates = selectedElements.Select(ReadSelectionCandidate).ToArray();
+            stage = "breadcrumb";
             var folderPath = TryGetBreadcrumbFolderPath(dialogRoot, out var breadcrumbState);
             if (folderPath is null)
             {
+                stage = "address";
                 var addressValues = ReadValuesInsideAutomationIds(
                     dialogAutomationRoot,
                     AddressAutomationIds);
                 folderPath = ResolveExistingDirectory(addressValues);
             }
 
+            stage = "resolve";
             var paths = ResolveExistingEntries(folderPath, candidates);
             if (paths.Count == 0)
             {
@@ -175,16 +184,40 @@ internal static class CommonFileDialogSelectionService
         {
             return null;
         }
-        catch (COMException ex)
-        {
-            DiagnosticLog.Write($"file dialog automation unavailable: 0x{ex.HResult:X8}");
-            return null;
-        }
         catch (Exception ex)
         {
-            DiagnosticLog.Write($"file dialog selection failed: {ex.GetType().Name}: {ex.Message}");
+            DiagnosticLog.Write(DescribeFailure(dialogRoot, stage, started.ElapsedMilliseconds, ex));
             return null;
         }
+    }
+
+    internal static string DescribeFailure(IntPtr dialogRoot, string stage, long elapsedMilliseconds, Exception? error)
+    {
+        var processId = NativeMethods.GetWindowProcessId(dialogRoot);
+        var process = "unknown";
+        if (processId is > 0 and <= int.MaxValue)
+        {
+            try
+            {
+                using var owner = Process.GetProcessById((int)processId);
+                process = SafeProcessName(owner.ProcessName);
+            }
+            catch
+            {
+                // A closing or protected owner still leaves the PID and stage.
+            }
+        }
+
+        var failure = error is null ? "timeout" : $"{error.GetType().Name} hr=0x{error.HResult:X8}";
+        return $"file dialog selection failed stage={stage} elapsedMs={elapsedMilliseconds} hwnd=0x{dialogRoot.ToInt64():X} pid={processId} process={process} error={failure}";
+    }
+
+    internal static string SafeProcessName(string name)
+    {
+        var safe = new string(name.Take(64)
+            .Select(c => char.IsAsciiLetterOrDigit(c) || c is '.' or '_' or '-' ? c : '_')
+            .ToArray());
+        return string.IsNullOrEmpty(safe) ? "unknown" : safe;
     }
 
     internal static IReadOnlyList<string> ResolveExistingEntries(

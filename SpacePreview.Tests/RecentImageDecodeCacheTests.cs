@@ -5,8 +5,41 @@ using SpacePreview.Preview;
 
 namespace SpacePreview.Tests;
 
+[Collection(WpfCollection.Name)]
 public sealed class RecentImageDecodeCacheTests
 {
+    [Fact]
+    public Task PinningReleasesCachedDecodesWithoutDroppingVisiblePixels() => WpfApp.RunAsync(() =>
+    {
+        var window = new PreviewWindow { Left = -30000, Top = 0 };
+        try
+        {
+            var cache = Fields.Get<RecentImageDecodeCache>(window, "_imageDecodeCache");
+            var generation = cache.CaptureGeneration();
+            var first = new ImageFileStamp("first.png", 1, 1);
+            var second = new ImageFileStamp("second.png", 1, 1);
+            var current = Bitmap(3, 3);
+            var shown = new System.Windows.Controls.Image { Source = current };
+            window.PreviewContent.Content = shown;
+            Assert.True(cache.Store(first, new CachedImageDecode(Bitmap(2, 2), 1), generation));
+            Assert.True(cache.Store(second, new CachedImageDecode(current, 1), generation));
+
+            window.SetPinned(true);
+
+            Assert.Same(shown, window.PreviewContent.Content);
+            Assert.Same(current, shown.Source);
+            Assert.False(cache.TryGet(first, out _));
+            Assert.False(cache.TryGet(second, out _));
+            Assert.False(cache.Store(first, new CachedImageDecode(Bitmap(2, 2), 1), generation));
+        }
+        finally
+        {
+            window.Close();
+        }
+
+        return Task.CompletedTask;
+    });
+
     [Fact]
     public void StoredDecodeIsReturnedForTheSameFileStamp()
     {
@@ -24,6 +57,46 @@ public sealed class RecentImageDecodeCacheTests
     }
 
     [Fact]
+    public void AlternatingBetweenTwoFilesReusesBothBitmaps()
+    {
+        var first = new ImageFileStamp("first.png", 1, 1);
+        var second = new ImageFileStamp("second.png", 1, 1);
+        var firstBitmap = Bitmap(2, 2);
+        var secondBitmap = Bitmap(3, 3);
+        var cache = new RecentImageDecodeCache();
+        var generation = cache.CaptureGeneration();
+        Assert.True(cache.Store(first, new CachedImageDecode(firstBitmap, 1), generation));
+        Assert.True(cache.Store(second, new CachedImageDecode(secondBitmap, 1), generation));
+
+        for (var i = 0; i < 3; i++)
+        {
+            Assert.True(cache.TryGet(first, out var firstHit));
+            Assert.Same(firstBitmap, firstHit!.Bitmap);
+            Assert.True(cache.TryGet(second, out var secondHit));
+            Assert.Same(secondBitmap, secondHit!.Bitmap);
+        }
+    }
+
+    [Fact]
+    public void ThirdFileEvictsTheLeastRecentlyUsed()
+    {
+        var first = new ImageFileStamp("first.png", 1, 1);
+        var second = new ImageFileStamp("second.png", 1, 1);
+        var third = new ImageFileStamp("third.png", 1, 1);
+        var cache = new RecentImageDecodeCache();
+        var generation = cache.CaptureGeneration();
+        Assert.True(cache.Store(first, new CachedImageDecode(Bitmap(2, 2), 1), generation));
+        Assert.True(cache.Store(second, new CachedImageDecode(Bitmap(3, 3), 1), generation));
+        Assert.True(cache.TryGet(first, out _));
+
+        Assert.True(cache.Store(third, new CachedImageDecode(Bitmap(4, 4), 1), generation));
+
+        Assert.True(cache.TryGet(first, out _));
+        Assert.True(cache.TryGet(third, out _));
+        Assert.False(cache.TryGet(second, out _));
+    }
+
+    [Fact]
     public void ChangedFileStampAndSecondPathDoNotReuseStalePixels()
     {
         using var temp = new TempDirectory();
@@ -38,28 +111,46 @@ public sealed class RecentImageDecodeCacheTests
         cache.Store(firstStamp, new CachedImageDecode(Bitmap(2, 2), 1), generation);
         cache.Store(secondStamp, new CachedImageDecode(Bitmap(3, 3), 1), generation);
 
-        Assert.False(cache.TryGet(firstStamp, out _));
         Assert.True(cache.TryGet(secondStamp, out _));
+        Assert.True(cache.TryGet(firstStamp, out _));
 
         File.WriteAllBytes(second, [2, 3]);
         Assert.True(ImageFileStamp.TryCreate(second, out var changedStamp));
         Assert.False(cache.TryGet(changedStamp, out _));
+        var changedBitmap = Bitmap(4, 4);
+        Assert.True(cache.Store(changedStamp, new CachedImageDecode(changedBitmap, 1), generation));
+        Assert.False(cache.TryGet(secondStamp, out _));
+        Assert.True(cache.TryGet(changedStamp, out var changedHit));
+        Assert.Same(changedBitmap, changedHit!.Bitmap);
+        Assert.True(cache.TryGet(firstStamp, out _));
     }
 
     [Fact]
-    public void InvalidationRejectsAnInFlightOldGeneration()
+    public void OversizedDecodeIsNotStored()
+    {
+        var cache = new RecentImageDecodeCache();
+        var oversized = Bitmap(4097, 4096);
+        Assert.True(RecentImageDecodeCache.EstimatedBytes(oversized) > RecentImageDecodeCache.MaxEntryBytes);
+        Assert.False(cache.Store(new ImageFileStamp("large.png", 1, 1), new CachedImageDecode(oversized, 1), cache.CaptureGeneration()));
+        Assert.False(cache.TryGet(new ImageFileStamp("large.png", 1, 1), out _));
+    }
+
+    [Fact]
+    public void InvalidationClearsBothEntriesAndRejectsAnInFlightOldGeneration()
     {
         using var temp = new TempDirectory();
-        var path = Path.Combine(temp.Path, "image.bin");
-        File.WriteAllBytes(path, [1]);
-        Assert.True(ImageFileStamp.TryCreate(path, out var stamp));
+        var first = new ImageFileStamp(Path.Combine(temp.Path, "first.bin"), 1, 1);
+        var second = new ImageFileStamp(Path.Combine(temp.Path, "second.bin"), 1, 1);
         var cache = new RecentImageDecodeCache();
         var oldGeneration = cache.CaptureGeneration();
+        Assert.True(cache.Store(first, new CachedImageDecode(Bitmap(2, 2), 1), oldGeneration));
+        Assert.True(cache.Store(second, new CachedImageDecode(Bitmap(3, 3), 1), oldGeneration));
 
         cache.Invalidate();
 
-        Assert.False(cache.Store(stamp, new CachedImageDecode(Bitmap(2, 2), 1), oldGeneration));
-        Assert.False(cache.TryGet(stamp, out _));
+        Assert.False(cache.Store(first, new CachedImageDecode(Bitmap(2, 2), 1), oldGeneration));
+        Assert.False(cache.TryGet(first, out _));
+        Assert.False(cache.TryGet(second, out _));
     }
 
     [Fact]

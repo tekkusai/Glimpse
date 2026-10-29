@@ -379,6 +379,8 @@ public sealed class ChromeHeaderTests
         {
             window.ShowPreview(image, IntPtr.Zero);
             await WaitForRevealAsync(window);
+            // The image's commands join on Loaded, after the frame is ready.
+            await WaitUntilAsync(() => ((FrameworkElement)window.PreviewContent.Content).IsLoaded, TimeSpan.FromSeconds(10));
 
             var menu = new ContextMenu();
             window.FillContextMenu(menu, "selected words");

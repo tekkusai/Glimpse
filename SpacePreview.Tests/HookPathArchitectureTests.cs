@@ -21,7 +21,7 @@ public sealed class HookPathArchitectureTests
     private static readonly MethodBase[] MouseRoots =
     [
         Method(typeof(MouseHook), "HookCallback"),
-        Method(typeof(SpacePreviewController), "QueueMouseDown"),
+        Method(typeof(SpacePreviewController), "QueueMouseButton"),
         Method(typeof(SpacePreviewController), "IsMouseActivationWindow")
     ];
 
@@ -77,8 +77,8 @@ public sealed class HookPathArchitectureTests
                 "CommonFileDialogSelectionService.HasFileListFocus",
                 "DeferredFileDialogPreviewIntentSlot.Cancel",
                 "DiagnosticLog.Write",
+                "ExplorerHeaderFocus.InputWentBy",
                 "ExplorerHeaderFocus.IsPlain",
-                "ExplorerHeaderFocus.KeyWentBy",
                 "ExplorerSelectionService.HasTextFocus",
                 "ExplorerSelectionService.IsTyping",
                 "ExplorerSelectionService.TryGetForegroundContext",
@@ -142,7 +142,9 @@ public sealed class HookPathArchitectureTests
     {
         Assert.Equal(
             [
+                "ExplorerHeaderFocus.InputWentBy",
                 "MouseHook.HookCallback",
+                "MouseHook.IsButtonDown",
                 "NativeMethods.CallNextHookEx",
                 "NativeMethods.GetAncestor",
                 "NativeMethods.GetForegroundWindow",
@@ -150,7 +152,7 @@ public sealed class HookPathArchitectureTests
                 "NativeMethods.SetForegroundWindow",
                 "NativeMethods.WindowFromPoint",
                 "SpacePreviewController.IsMouseActivationWindow",
-                "SpacePreviewController.QueueMouseDown"
+                "SpacePreviewController.QueueMouseButton"
             ],
             HookThreadReach.Names(HookThreadReach.From(MouseRoots)));
     }
@@ -187,7 +189,7 @@ public sealed class HookPathArchitectureTests
                 Assert.Equal("OnKeyDown", Fields.Get<Delegate>(keyboard, "_onKeyDown").Method.Name);
                 Assert.Equal("OnKeyUp", Fields.Get<Delegate>(keyboard, "_onKeyUp").Method.Name);
                 Assert.Equal("ReadKey", Fields.Get<Delegate>(controller, "_readKey").Method.Name);
-                Assert.Equal("QueueMouseDown", Fields.Get<Delegate>(mouse, "_onMouseDown").Method.Name);
+                Assert.Equal("QueueMouseButton", Fields.Get<Delegate>(mouse, "_onMouseButton").Method.Name);
                 Assert.Equal("IsMouseActivationWindow", Fields.Get<Delegate>(mouse, "_shouldActivateWindow").Method.Name);
             }
             finally
