@@ -67,6 +67,22 @@ public sealed class SelectionRefreshSessionTests
         Assert.Equal(third, window.CurrentPath);
     });
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task PreviewRequestsLogTheSamePathTagAsLookupAndKeepWindowDetails(bool picker) => WithController(async (controller, _, temp) =>
+    {
+        using var owner = Hidden();
+        var path = temp.CreateFile("selected file.txt");
+        Fields.Set(controller, "_lastSelectionSource", picker ? SelectionSource.CommonFileDialog : SelectionSource.Explorer);
+
+        Show(controller, path, owner.Handle);
+
+        var tag = DiagnosticLog.Redact(path);
+        var details = $"hwnd=0x{owner.Handle.ToInt64():X}{(picker ? " picker" : string.Empty)}";
+        Assert.True(await AppEndTests.LogEventuallyContainsAsync($"preview requested {tag} {details}{Environment.NewLine}"));
+    });
+
     private static void Show(SpacePreviewController controller, string path, IntPtr owner) =>
         Fields.Call(controller, "ShowPreview", new ExplorerSelection(path, owner), 0L);
 

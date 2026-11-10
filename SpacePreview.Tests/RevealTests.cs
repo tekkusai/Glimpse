@@ -295,7 +295,7 @@ public sealed class RevealTrapTests
     {
         // ExecuteScriptAsync cannot be cancelled. The layout check reads the
         // deadline before it touches the page, and never changes the page.
-        var body = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "WaitForDocumentPaintAsync");
+        var body = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "WaitForSavedPageLayoutAsync");
         var deadline = body.IndexOf("if (Date.now() >", StringComparison.Ordinal);
         var firstRead = body.IndexOf("getComputedStyle(root)", StringComparison.Ordinal);
 

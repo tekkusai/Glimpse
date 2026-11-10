@@ -352,9 +352,6 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
-    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
-
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
@@ -879,17 +876,6 @@ internal static class NativeMethods
 
         var builder = new StringBuilder(256);
         return GetClassName(hwnd, builder, builder.Capacity) > 0 ? builder.ToString() : string.Empty;
-    }
-
-    public static string GetWindowTextString(IntPtr hwnd)
-    {
-        if (hwnd == IntPtr.Zero)
-        {
-            return string.Empty;
-        }
-
-        var builder = new StringBuilder(512);
-        return GetWindowText(hwnd, builder, builder.Capacity) > 0 ? builder.ToString() : string.Empty;
     }
 
     public static string GetWindowMessageTextString(IntPtr hwnd, int capacity = 1024)

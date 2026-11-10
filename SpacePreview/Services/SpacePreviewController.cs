@@ -1491,7 +1491,7 @@ internal sealed class SpacePreviewController : IDisposable
         CancelIdleTrim();
         _lastExplorerHwnd = selection.ExplorerHwnd;
         DiagnosticLog.Write(
-            $"preview requested {selection.Path} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
+            $"preview requested {DiagnosticLog.DescribePath(selection.Path)} hwnd=0x{selection.ExplorerHwnd.ToInt64():X}{(fileDialogMode ? " picker" : string.Empty)}");
         _previewWindow.InputStamp = inputStamp;
         var presented = _previewWindow.ShowPreview(
             selection.Path,

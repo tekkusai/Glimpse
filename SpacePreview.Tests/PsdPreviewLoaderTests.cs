@@ -61,6 +61,32 @@ public sealed class PsdPreviewLoaderTests
     }
 
     [Fact]
+    public void MixedPackedRowsAverageClippedAndMissingSamples()
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, "mixed.psd");
+        byte[][] rows =
+        [
+            [3, 2, 4, 6, 8, 0x80, 0xFC, 10], // Repeat clipped at the right edge.
+            [0xFD, 12, 3, 20, 22, 24, 26], // Literal clipped at the right edge.
+            [0xFF, 30, 4, 40, 42], // Literal with missing samples.
+            [1, 50, 51, 0x80, 0xFE] // Repeat with no value.
+        ];
+        WritePackedRows(path, large: false, width: 7, rows);
+
+        var bitmap = PsdPreviewLoader.TryLoad(path, longSide: 3)!;
+
+        Assert.Equal((3, 2), (bitmap.PixelWidth, bitmap.PixelHeight));
+        Assert.Equal(
+            new byte[]
+            {
+                16, 16, 16, 255, 14, 14, 14, 255, 11, 11, 11, 255,
+                34, 34, 34, 255, 0, 0, 0, 255, 0, 0, 0, 255
+            },
+            Pixels(bitmap));
+    }
+
+    [Fact]
     public void AskedForMoreTheCompositeComesAtItsOwnSize()
     {
         using var temp = new TempDirectory();
@@ -166,7 +192,8 @@ public sealed class PsdPreviewLoaderTests
         // of no bytes at all, a 3.6 MB file claimed 300,000 pixels square,
         // and every one of them was visited to bring it down.
         var path = Path.Combine(temp.Path, large ? "short-rows.psb" : "short-rows.psd");
-        WritePackedRows(path, large, side: 2000, [.. Enumerable.Repeat((byte)0x80, packedRow)]);
+        var row = Enumerable.Repeat((byte)0x80, packedRow).ToArray();
+        WritePackedRows(path, large, width: 2000, Enumerable.Repeat(row, 2000).ToArray());
 
         Assert.Null(PsdPreviewLoader.TryLoad(path));
     }
@@ -182,7 +209,7 @@ public sealed class PsdPreviewLoaderTests
         // of 80, in 32 bytes.
         byte[] row = [.. Enumerable.Repeat(new byte[] { 0x81, 200 }, 15).SelectMany(run => run), 0xB1, 200];
         var path = Path.Combine(temp.Path, large ? "flat.psb" : "flat.psd");
-        WritePackedRows(path, large, side: 2000, row);
+        WritePackedRows(path, large, width: 2000, Enumerable.Repeat(row, 2000).ToArray());
 
         var bitmap = PsdPreviewLoader.TryLoad(path);
 
@@ -424,8 +451,8 @@ public sealed class PsdPreviewLoaderTests
         }
     }
 
-    /// <summary>A square RGB picture whose every row, in every plane, is the same packed bytes.</summary>
-    private static void WritePackedRows(string path, bool large, int side, byte[] packedRow)
+    /// <summary>An RGB picture with the same packed rows in each plane.</summary>
+    private static void WritePackedRows(string path, bool large, int width, byte[][] packedRows)
     {
         using var writer = new BinaryWriter(File.Create(path));
         void U16(int value) => writer.Write(BinaryPrimitives.ReverseEndianness((ushort)value));
@@ -434,8 +461,8 @@ public sealed class PsdPreviewLoaderTests
         U16(large ? 2 : 1);
         writer.Write(new byte[6]);
         U16(3);
-        U32(side);
-        U32(side);
+        U32(packedRows.Length);
+        U32(width);
         U16(8);
         U16(3);
         U32(0);
@@ -447,21 +474,22 @@ public sealed class PsdPreviewLoaderTests
 
         U32(0);
         U16(1);
-        for (var row = 0; row < 3 * side; row++)
+        var rows = Enumerable.Repeat(packedRows, 3).SelectMany(plane => plane);
+        foreach (var row in rows)
         {
             if (large)
             {
-                U32(packedRow.Length);
+                U32(row.Length);
             }
             else
             {
-                U16(packedRow.Length);
+                U16(row.Length);
             }
         }
 
-        for (var row = 0; row < 3 * side; row++)
+        foreach (var row in rows)
         {
-            writer.Write(packedRow);
+            writer.Write(row);
         }
     }
 

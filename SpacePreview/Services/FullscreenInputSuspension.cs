@@ -121,9 +121,7 @@ internal sealed class FullscreenInputSuspension
         _ = Task.Run(() =>
         {
             var processName = SanitizeLogValue(GetProcessName(snapshot.HwndProcessId));
-            var title = SanitizeLogValue(NativeMethods.GetWindowTextString(hwnd));
-            var titlePart = string.IsNullOrWhiteSpace(title) ? string.Empty : $" title=\"{title}\"";
-            DiagnosticLog.Write($"input suspended details hwnd=0x{hwnd.ToInt64():X} pid={snapshot.HwndProcessId} process={ValueOrUnknown(processName)} class={ValueOrUnknown(SanitizeLogValue(snapshot.ClassName))}{titlePart}");
+            DiagnosticLog.Write($"input suspended details hwnd=0x{hwnd.ToInt64():X} pid={snapshot.HwndProcessId} process={ValueOrUnknown(processName)} class={ValueOrUnknown(SanitizeLogValue(snapshot.ClassName))}");
         });
     }
 

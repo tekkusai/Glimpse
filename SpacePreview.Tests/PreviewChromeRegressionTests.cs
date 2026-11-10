@@ -166,12 +166,11 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("?jump={target}#page={target}&view=FitH", windowSource, StringComparison.Ordinal);
 
         // Navigation and the 4 s escape share one owner: the escape stands
-        // down once the paint wait has started, so a slow paint is never
-        // swapped in half-drawn and then swapped again.
+        // down once the allowance starts, so only one path owns the swap.
         Assert.True(
-            stagedReplacementBody.IndexOf("paintAttemptStarted = true;", StringComparison.Ordinal)
-            < stagedReplacementBody.IndexOf("await WaitForDocumentPaintAsync", StringComparison.Ordinal));
-        Assert.Contains("if (!paintAttemptStarted)", stagedReplacementBody, StringComparison.Ordinal);
+            stagedReplacementBody.IndexOf("allowanceStarted = true;", StringComparison.Ordinal)
+            < stagedReplacementBody.IndexOf("await WaitForPdfLoadAllowanceAsync", StringComparison.Ordinal));
+        Assert.Contains("if (!allowanceStarted)", stagedReplacementBody, StringComparison.Ordinal);
     }
 
     [Fact]

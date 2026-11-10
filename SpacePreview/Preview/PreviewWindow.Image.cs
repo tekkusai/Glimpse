@@ -700,7 +700,7 @@ public partial class PreviewWindow
 
         _imageDecodeCache.Invalidate();
         session.Rotate(direction);
-        DiagnosticLog.Write($"rotate {(direction > 0 ? "cw" : "ccw")} path={session.Path} persist={session.Persistence}");
+        DiagnosticLog.Write($"rotate {(direction > 0 ? "cw" : "ccw")} path={DiagnosticLog.DescribePath(session.Path)} persist={session.Persistence}");
     }
 
     /// <summary>

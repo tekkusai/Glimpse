@@ -16,12 +16,12 @@ internal static class DiagnosticLog
     private static long _bytesSinceRotationCheck;
 
     private static readonly Regex WindowsPathPattern = new(
-        @"(?<!\w)([A-Za-z]:\\(?:[^\\/:*?""<>|\r\n]+\\)*[^\\/:*?""<>|\r\n]*)",
+        @"(?<!\w)((?:\\\\\?\\)?[A-Za-z]:\\(?:[^\\/:*?""<>|\r\n]+\\)*[^\\/:*?""<>|\r\n]*)",
         RegexOptions.Compiled);
 
     private static readonly Regex UncPathPattern = new(
-        @"\\\\[^\s\\/:*?""<>|]+\\(?:[^\r\n\\/:*?""<>|]+\\?)*[^\r\n\\/:*?""<>|]*",
-        RegexOptions.Compiled);
+        @"\\\\(?:\?\\UNC\\)?[^\s\\/:*?""<>|]+\\(?:[^\r\n\\/:*?""<>|]+\\?)*[^\r\n\\/:*?""<>|]*",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     // A path with spaces runs on into the words after it, so the kind is
     // the last short dotted word, wherever in the run it ends.
@@ -196,7 +196,7 @@ internal static class DiagnosticLog
             match => Describe(match.Groups["name"].Value, match.Groups["hash"].Value));
     }
 
-    private static string DescribePath(string path)
+    public static string DescribePath(string path)
     {
         try
         {

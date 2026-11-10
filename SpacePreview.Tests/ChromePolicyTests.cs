@@ -107,6 +107,32 @@ public sealed class ChromePolicyTests
         Assert.DoesNotContain("someone", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("\"Private project in browser\"")]
+    [InlineData("\"Private project at C:\\Users\\someone\\project.pdf")]
+    public void DiagnosticsKeepFullscreenMetadataWithoutHistoricalTitles(string title)
+    {
+        const string details = "2026-10-10 12:00:00.000 input suspended details hwnd=0x12A pid=123 process=browser class=BrowserWindow";
+        var text = SettingsWindow.BuildDiagnostics("9.9.9", "LibreOffice", [$"{details} title={title}"]);
+
+        Assert.Contains(details + Environment.NewLine, text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Private project", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(@"C:\Users\someone\Secret art.psd")]
+    [InlineData(@"\\nas\photos\Secret art.psd")]
+    [InlineData(@"\\?\C:\Users\someone\Secret art.psd")]
+    [InlineData(@"\\?\UNC\nas\photos\Secret art.psd")]
+    public void PathTagsAgreeWithExistingLookupAndDecodeLogs(string path)
+    {
+        var tag = DiagnosticLog.DescribePath(path);
+
+        Assert.Matches(@"^<path:\*\.psd:[0-9a-f]{8}>$", tag);
+        Assert.Equal($"queued lookup -> preview {tag}", DiagnosticLog.Redact($"queued lookup -> preview {path}"));
+        Assert.Equal($"psd preview skipped {tag}: depth 16", DiagnosticLog.Redact($"psd preview skipped {path}: depth 16"));
+    }
+
     [Fact]
     public void TheLogTailIsTheLastLinesAndReadsBesideAWriter()
     {

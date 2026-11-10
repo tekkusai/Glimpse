@@ -509,8 +509,8 @@ public partial class SettingsWindow : Window
 
     /// <summary>
     /// What a bug report needs: version, document engine, Windows and the
-    /// recent log. Paths are redacted again here, so a line written by an
-    /// older build cannot leak a file name.
+    /// recent log. Strip fullscreen window titles from older logs and
+    /// redact paths again before sharing.
     /// </summary>
     internal static string BuildDiagnostics(string version, string engine, IEnumerable<string> logLines)
     {
@@ -523,7 +523,9 @@ public partial class SettingsWindow : Window
             .AppendLine("Recent log:");
         foreach (var line in logLines)
         {
-            text.AppendLine(DiagnosticLog.Redact(line));
+            var details = line.IndexOf("input suspended details hwnd=", StringComparison.Ordinal);
+            var title = details < 0 ? -1 : line.IndexOf(" title=\"", details, StringComparison.Ordinal);
+            text.AppendLine(DiagnosticLog.Redact(title < 0 ? line : line[..title]));
         }
 
         return text.ToString();

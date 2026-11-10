@@ -26,6 +26,7 @@ public sealed class BorrowedFilesTests
         using var temp = new TempDirectory();
         var modified = new DateTime(2026, 3, 9, 14, 30, 0, DateTimeKind.Local);
         var zip = WriteZip(temp, ("IMG_0412.jpg", Bytes(5000, seed: 7), modified), ("notes.txt", Bytes(40, seed: 1), modified));
+        var shellModifiedUtc = ZipModifiedUtc(zip, "IMG_0412.jpg");
 
         var path = Borrow(zip, "IMG_0412.jpg");
 
@@ -35,8 +36,8 @@ public sealed class BorrowedFilesTests
         Assert.True(BorrowedFiles.IsBorrowed(path));
         Assert.False(BorrowedFiles.IsBorrowed(zip));
 
-        // The copy carries the file's own time, and cannot be saved into.
-        Assert.Equal(modified, File.GetLastWriteTime(path));
+        // The shell owns the timestamp; ZIP wall times carry no UTC offset.
+        Assert.Equal(shellModifiedUtc, File.GetLastWriteTimeUtc(path));
         Assert.True(File.GetAttributes(path).HasFlag(FileAttributes.ReadOnly));
     });
 
@@ -565,6 +566,25 @@ public sealed class BorrowedFilesTests
             // Asked for on this thread and made on another, as in the app.
             var path = BorrowedFiles.TryBorrow(item, maxBytes);
             return path is not null && BorrowedFiles.WhenReady(path).GetAwaiter().GetResult() ? path : null;
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(item);
+        }
+    }
+
+    private static DateTime ZipModifiedUtc(string zip, string entry)
+    {
+        var iid = typeof(IShellItem2).GUID;
+        Marshal.ThrowExceptionForHR(SHCreateItemFromParsingName(Path.Combine(zip, entry), IntPtr.Zero, ref iid, out var itemPtr));
+        var item = (IShellItem2)Marshal.GetUniqueObjectForIUnknown(itemPtr);
+        Marshal.Release(itemPtr);
+        try
+        {
+            var key = new PropertyKey(new Guid("B725F130-47EF-101A-A5F1-02608C9EEBAC"), 14);
+            Marshal.ThrowExceptionForHR(item.GetFileTime(ref key, out var fileTime));
+            Assert.True(fileTime > 0);
+            return DateTime.FromFileTimeUtc(fileTime);
         }
         finally
         {

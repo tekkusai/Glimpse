@@ -7,15 +7,15 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
-    public void ProductAndInstallerVersionsAre306()
+    public void ProductAndInstallerVersionsAre307()
     {
         var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
         var manifest = TestSource.Read(@"SpacePreview\app.manifest");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("<Version>3.0.6</Version>", project, StringComparison.Ordinal);
-        Assert.Contains("version=\"3.0.6.0\"", manifest, StringComparison.Ordinal);
-        Assert.Contains("#define MyAppVersion \"3.0.6\"", installer, StringComparison.Ordinal);
+        Assert.Contains("<Version>3.0.7</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"3.0.7.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"3.0.7\"", installer, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -206,8 +206,8 @@ public sealed class ReleaseHygieneTests
         using var temp = new TempDirectory();
         using var throwaway = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var key = temp.CreateFile("throwaway.pem", throwaway.ExportPkcs8PrivateKeyPem());
-        var setup = Path.Combine(temp.Path, "Glimpse-Setup-3.0.6.exe");
-        File.WriteAllBytes(setup, SetupImage.Create("3.0.6"));
+        var setup = Path.Combine(temp.Path, "Glimpse-Setup-3.0.7.exe");
+        File.WriteAllBytes(setup, SetupImage.Create("3.0.7"));
 
         var (exitCode, output) = await SignAsync(TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"), setup, key);
 

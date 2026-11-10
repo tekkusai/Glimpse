@@ -1695,7 +1695,7 @@ public partial class PreviewWindow
             state,
             () => uri,
             state.Path,
-            $"pdf jump {state.Path} -> {target}",
+            $"pdf jump {DiagnosticLog.DescribePath(state.Path)} -> {target}",
             "pdf jump",
             stillWanted: () => Task.FromResult(state.CurrentPage == target),
             onCalledOff: () =>
@@ -1711,7 +1711,7 @@ public partial class PreviewWindow
     }
 
     /// <summary>
-    /// Keeps the current PDF visible until its owned replacement has painted.
+    /// Keeps the current PDF visible while its owned replacement loads.
     /// Staging takes about half a second, and the reader can move in it. A
     /// replacement nobody asked for passes <paramref name="stillWanted"/>,
     /// which is asked when the swap is due: a no lets the replacement go,
@@ -1725,7 +1725,7 @@ public partial class PreviewWindow
         Func<Uri> source,
         string pdfPath,
         string navigationLabel,
-        string paintLabel,
+        string logLabel,
         Action? onSwapped = null,
         Func<Task<bool>>? stillWanted = null,
         Action? onCalledOff = null)
@@ -1806,7 +1806,7 @@ public partial class PreviewWindow
             DiscardFresh();
             if (owned)
             {
-                DiagnosticLog.Write($"{paintLabel} {why}, the viewer stays");
+                DiagnosticLog.Write($"{logLabel} {why}, the viewer stays");
                 onCalledOff?.Invoke();
             }
         }
@@ -1823,12 +1823,12 @@ public partial class PreviewWindow
             }
         }
 
-        // Navigation and the 4 s bound share one owner: only one of them
-        // may start the paint wait, and the bound stands down once it has.
-        var paintAttemptStarted = false;
+        // Navigation and the 4 s bound share one owner. The bound stands
+        // down as soon as the allowance starts.
+        var allowanceStarted = false;
         fresh.NavigationCompleted += async (_, args) =>
         {
-            if (finished || paintAttemptStarted)
+            if (finished || allowanceStarted)
             {
                 return;
             }
@@ -1845,11 +1845,15 @@ public partial class PreviewWindow
                 return;
             }
 
-            paintAttemptStarted = true;
-            var paintClock = Stopwatch.StartNew();
-            var paintReady = await WaitForDocumentPaintAsync(fresh, state.Token);
-            if (finished)
+            allowanceStarted = true;
+            var started = Stopwatch.GetTimestamp();
+            try
             {
+                await WaitForPdfLoadAllowanceAsync(fresh, state.Token);
+            }
+            catch (OperationCanceledException) when (state.Token.IsCancellationRequested)
+            {
+                DiscardFresh();
                 return;
             }
 
@@ -1860,15 +1864,14 @@ public partial class PreviewWindow
             }
 
             DiagnosticLog.Write(
-                $"{paintLabel} paint gate ready={paintReady} wait={paintClock.Elapsed.TotalMilliseconds:0}ms");
+                $"{logLabel} pdf-load-allowance wait={Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}ms paint=unmeasured");
             await SwapIfStillWantedAsync();
         };
         RunAfter(TimeSpan.FromMilliseconds(4000), () =>
         {
-            if (!paintAttemptStarted)
+            if (!allowanceStarted)
             {
-                // A navigation that completes after this starts no paint wait.
-                paintAttemptStarted = true;
+                allowanceStarted = true;
                 CallOff("not loaded in 4 s");
             }
         });

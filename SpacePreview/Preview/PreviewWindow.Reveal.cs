@@ -108,7 +108,8 @@ public partial class PreviewWindow
         /// <summary>When a navigated document began to wait for its gate.</summary>
         public TimeSpan? Gated { get; set; }
 
-        public Task<bool>? Paint { get; set; }
+        public TimeSpan? RevealWaitStarted { get; set; }
+        public Task<string>? RevealReason { get; set; }
 
         /// <summary>Set by the reveal: when the dissolve is over and what stood under it may go.</summary>
         public TimeSpan? Lands { get; set; }
@@ -707,8 +708,7 @@ public partial class PreviewWindow
     /// content dissolves in. A page shows at once on its transparent view
     /// and dissolves itself in over whatever stands under it. A document
     /// (and a video still waiting for its shape) stays hidden until it has
-    /// navigated, its gate has answered and it has painted, each capped,
-    /// then appears in one cut.
+    /// navigated and its bounded waits have ended, then appears in one cut.
     /// </summary>
     private void Present(Presentation p, Arrival next, TimeSpan now)
     {
@@ -749,7 +749,7 @@ public partial class PreviewWindow
             // that is slow to start is not shown before it has a page.
             if (next.NavigationStarted is { } started && now >= started + RevealPlan.EscapeAfter)
             {
-                RevealWeb(p, next, now, TimeSpan.Zero, ready: true, "timeout");
+                RevealWeb(p, next, now, TimeSpan.Zero, "navigation-timeout");
             }
 
             return;
@@ -772,19 +772,20 @@ public partial class PreviewWindow
             return;
         }
 
-        if (next.Paint is null)
+        if (next.RevealReason is null)
         {
-            next.Paint = WaitForDocumentPaintAsync(view, _loadCancellation?.Token ?? CancellationToken.None);
-            if (!next.Paint.IsCompleted)
+            next.RevealWaitStarted = now;
+            next.RevealReason = WaitForWebRevealAsync(view, _loadCancellation?.Token ?? CancellationToken.None);
+            if (!next.RevealReason.IsCompleted)
             {
-                AdvanceAfter(p, next.Paint);
+                AdvanceAfter(p, next.RevealReason);
             }
         }
 
-        if (next.Paint.IsCompleted)
+        if (next.RevealReason.IsCompleted)
         {
-            var ready = next.Paint.IsCompletedSuccessfully && next.Paint.Result;
-            RevealWeb(p, next, now, now - gated, ready, "navigation");
+            var reason = next.RevealReason.IsCompletedSuccessfully ? next.RevealReason.Result : "reveal-wait-interrupted";
+            RevealWeb(p, next, now, now - gated, reason);
         }
     }
 
@@ -832,11 +833,15 @@ public partial class PreviewWindow
     /// page finishes its own dissolve over it first, an opaque view covers
     /// it at once.
     /// </summary>
-    private void RevealWeb(Presentation p, Arrival next, TimeSpan now, TimeSpan waited, bool ready, string reason)
+    private void RevealWeb(Presentation p, Arrival next, TimeSpan now, TimeSpan waited, string reason)
     {
         var view = next.View!;
+        var pdfTiming = view.Kind == WebSurfaceKind.PdfViewer
+            && next is { Gated: { } gateStart, RevealWaitStarted: { } allowanceStart }
+            ? $" railWait={(allowanceStart - gateStart).TotalMilliseconds:0}ms allowanceWait={(now - allowanceStart).TotalMilliseconds:0}ms paint=unmeasured"
+            : string.Empty;
         DiagnosticLog.Write(
-            $"web gate +{p.Since():0}ms wait={waited.TotalMilliseconds:0}ms kind={view.Kind.ToString().ToLowerInvariant()} ready={ready} reason={reason}");
+            $"web gate +{p.Since():0}ms wait={waited.TotalMilliseconds:0}ms kind={view.Kind.ToString().ToLowerInvariant()} reason={reason}{pdfTiming}");
         MarkRevealed(p, "web");
         if (!ReferenceEquals(_presentation, p))
         {
@@ -1014,57 +1019,41 @@ public partial class PreviewWindow
 
     private static readonly TimeSpan SavedPageLayoutCap = TimeSpan.FromMilliseconds(120);
 
-    /// <summary>
-    /// How long the PDF viewer takes to load a document after navigation:
-    /// 84 to 293 ms over the fixtures, 170 to 180 for an 81-page PDF. Its
-    /// document loads while it is hidden, but it lays out and paints only on
-    /// screen (hidden, clipped, at opacity 0.01 or under an overlay, it
-    /// stalls; measured), so no signal says when it is done.
-    /// </summary>
+    // The hidden PDF viewer loads after navigation and paints when shown.
+    // The allowance overlaps the rail wait and the browse beat.
     private static readonly TimeSpan PdfLoadAllowance = TimeSpan.FromMilliseconds(180);
 
-    /// <summary>
-    /// The narrowest readiness signal each opaque renderer can give. The PDF
-    /// viewer stays staged until its document has had time to load, counted
-    /// from navigation so the wait overlaps the rail decision and the beat:
-    /// shown sooner it shows its bare background, much later its page refits
-    /// on screen. A saved page cannot run its own script, so a host script
-    /// flushes style and layout while the view is hidden and the page shows
-    /// laid out. Pages Glimpse writes need no gate: they dissolve in
-    /// themselves. Every lane is bounded.
-    /// </summary>
-    private static async Task<bool> WaitForDocumentPaintAsync(StagedWebView webView, CancellationToken token)
+    private static Task WaitForPdfLoadAllowanceAsync(StagedWebView webView, CancellationToken token)
+    {
+        var remaining = webView.NavigationCompletedAt is { } done
+            ? PdfLoadAllowance - Stopwatch.GetElapsedTime(done)
+            : PdfLoadAllowance;
+        return remaining > TimeSpan.Zero ? Task.Delay(remaining, token) : Task.CompletedTask;
+    }
+
+    private static async Task<string> WaitForWebRevealAsync(StagedWebView webView, CancellationToken token)
     {
         if (webView.CoreWebView2 is not { } core)
         {
-            return false;
+            return "webview-unavailable";
         }
 
         if (webView.Kind == WebSurfaceKind.PdfViewer)
         {
-            var loading = webView.NavigationCompletedAt is { } done
-                ? PdfLoadAllowance - Stopwatch.GetElapsedTime(done)
-                : PdfLoadAllowance;
-            try
-            {
-                if (loading > TimeSpan.Zero)
-                {
-                    await Task.Delay(loading, token);
-                }
-
-                return true;
-            }
-            catch (OperationCanceledException)
-            {
-                return false;
-            }
+            await WaitForPdfLoadAllowanceAsync(webView, token);
+            return "pdf-load-allowance";
         }
 
-        if (webView.Kind != WebSurfaceKind.SavedPage)
+        if (webView.Kind == WebSurfaceKind.SavedPage)
         {
-            return true;
+            return await WaitForSavedPageLayoutAsync(core, token) ? "saved-page-layout" : "saved-page-layout-unconfirmed";
         }
 
+        return "navigation";
+    }
+
+    private static async Task<bool> WaitForSavedPageLayoutAsync(CoreWebView2 core, CancellationToken token)
+    {
         // One deadline governs script dispatch and the wait. A late script
         // must not get a fresh window after the host gave up on it.
         var deadlineUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()

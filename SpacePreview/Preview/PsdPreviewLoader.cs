@@ -202,13 +202,9 @@ internal static class PsdPreviewLoader
             return null;
         }
 
-        // Nor is it ever shorter than a sixty-fourth of its row: two bytes
-        // become 128 at most. Every pixel the header claims is visited to
-        // bring the picture down, so the claim has to be backed by bytes.
-        // With this and the check below that the planes are in the file,
-        // the work is at most 64 times the file's own size, whatever the
-        // header says. A table of empty rows once passed for a picture
-        // 300,000 pixels square in a file of 3.6 MB.
+        // Two packed bytes become at most 128 pixels. The row lengths have
+        // to account for the pixels the header claims. A table of empty rows
+        // once passed for a picture 300,000 pixels square in a file of 3.6 MB.
         var shortestRow = rowCounts is null ? 0 : rowCounts.Min();
         if (rowCounts is not null && shortestRow < (rowBytes + 127) / 128 * 2)
         {
@@ -252,8 +248,8 @@ internal static class PsdPreviewLoader
         {
             using var source = OpenRead(path);
             source.Position = planeStarts[plane];
-            var rowBuffer = new byte[rowBytes];
-            var compressed = new byte[longestRow];
+            var rowBuffer = rowCounts is null ? new byte[rowBytes] : Array.Empty<byte>();
+            var compressed = rowCounts is null ? Array.Empty<byte>() : new byte[longestRow];
             var sums = new int[outWidth];
             var slot = Slot(plane);
             for (var row = 0; row < height; row++)
@@ -266,16 +262,15 @@ internal static class PsdPreviewLoader
                 if (rowCounts is null)
                 {
                     source.ReadExactly(rowBuffer);
+                    AddRowToBoxes(rowBuffer, bytesPerSample, width, factor, sums);
                 }
                 else
                 {
                     var length = rowCounts[plane * height + row];
                     source.ReadExactly(compressed, 0, length);
-                    Array.Clear(rowBuffer);
-                    DecodePackBits(compressed.AsSpan(0, length), rowBuffer);
+                    DecodePackBitsToBoxes(compressed.AsSpan(0, length), width, factor, sums);
                 }
 
-                AddRowToBoxes(rowBuffer, bytesPerSample, width, factor, sums);
                 var rowsInBox = row % factor + 1;
                 if (rowsInBox == factor || row == height - 1)
                 {
@@ -393,31 +388,53 @@ internal static class PsdPreviewLoader
     }
 
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
-    private static void DecodePackBits(ReadOnlySpan<byte> source, Span<byte> target)
+    private static void DecodePackBitsToBoxes(ReadOnlySpan<byte> source, int width, int factor, int[] sums)
     {
+        // Missing samples contribute zero to their box average.
         var read = 0;
         var write = 0;
-        while (read < source.Length && write < target.Length)
+        var box = 0;
+        var inBox = 0;
+        while (read < source.Length && write < width)
         {
             var control = (sbyte)source[read++];
-            if (control >= 0)
+            if (control == -128)
             {
-                var count = Math.Min(control + 1, Math.Min(target.Length - write, source.Length - read));
-                source.Slice(read, count).CopyTo(target[write..]);
-                read += count;
-                write += count;
+                continue;
             }
-            else if (control != -128)
+
+            var literal = control >= 0;
+            if (!literal && read >= source.Length)
             {
-                if (read >= source.Length)
+                break;
+            }
+
+            var count = literal
+                ? Math.Min(control + 1, Math.Min(width - write, source.Length - read))
+                : Math.Min(1 - control, width - write);
+            var value = literal ? 0 : source[read++];
+            write += count;
+            while (count > 0)
+            {
+                var take = Math.Min(factor - inBox, count);
+                var sum = value * take;
+                if (literal)
                 {
-                    break;
+                    var end = read + take;
+                    for (; read < end; read++)
+                    {
+                        sum += source[read];
+                    }
                 }
 
-                var value = source[read++];
-                var count = Math.Min(1 - control, target.Length - write);
-                target.Slice(write, count).Fill(value);
-                write += count;
+                sums[box] += sum;
+                count -= take;
+                inBox += take;
+                if (inBox == factor)
+                {
+                    box++;
+                    inBox = 0;
+                }
             }
         }
     }
