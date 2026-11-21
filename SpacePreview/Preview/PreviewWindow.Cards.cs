@@ -109,16 +109,69 @@ public partial class PreviewWindow
 
     private const double CardIconSide = 144;
     private const double CardTileSide = 120;
+    private static readonly TimeSpan FileCardVisualWait = TimeSpan.FromMilliseconds(100);
     private static readonly FontFamily GlyphFont = new("Segoe Fluent Icons, Segoe MDL2 Assets");
 
-    private sealed record FileCardData(ShellImage? Image, string Title, IReadOnlyList<string> Facts);
+    private sealed record FileCardFacts(string Title, IReadOnlyList<string> Facts);
 
     private async Task<FrameworkElement> BuildFileCardAsync(string path, CancellationToken token = default)
     {
         var dpi = PixelsPerDip();
         var iconPixels = DevicePixels(CardIconSide, dpi);
-        var data = await Task.Run(() => CollectFileCardData(path, iconPixels, token), token);
-        return BuildFileCard(BuildCardVisual(data.Image, dpi), data.Title, data.Facts, BuildExecutableSwitches(path));
+        var factsTask = Task.Run(() => CollectFileCardFacts(path, token), token);
+        var imageTask = Task.Run(() => ShellThumbnailProvider.TryGetThumbnail(path, iconSize: iconPixels), token);
+
+        var facts = await factsTask;
+        ShellImage? initialImage = null;
+        var imageReady = imageTask.IsCompleted
+            || await Task.WhenAny(imageTask, Task.Delay(FileCardVisualWait, token)) == imageTask;
+        if (imageReady)
+        {
+            initialImage = await imageTask;
+        }
+
+        var footer = BuildExecutableSwitches(path);
+        if (imageReady)
+        {
+            return BuildFileCard(BuildCardVisual(initialImage, dpi), facts.Title, facts.Facts, footer);
+        }
+
+        // A slow shell thumbnail handler must not stall a simple file card:
+        // reveal the card with its quiet tile and swap the icon in once ready.
+        var visualHost = new ContentControl
+        {
+            HorizontalContentAlignment = HorizontalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Content = BuildCardVisual(null, dpi)
+        };
+        _ = UpdateFileCardVisualAsync(visualHost, imageTask, dpi, token);
+        return BuildFileCard(visualHost, facts.Title, facts.Facts, footer);
+    }
+
+    private static async Task UpdateFileCardVisualAsync(
+        ContentControl visualHost,
+        Task<ShellImage?> imageTask,
+        double dpi,
+        CancellationToken token)
+    {
+        try
+        {
+            var shellImage = await imageTask;
+            if (shellImage is null || token.IsCancellationRequested)
+            {
+                return;
+            }
+
+            visualHost.Content = BuildCardVisual(shellImage, dpi);
+        }
+        catch (OperationCanceledException)
+        {
+            // The preview moved on before the shell thumbnail finished.
+        }
+        catch
+        {
+            // Keep the quiet glyph tile if thumbnail extraction fails.
+        }
     }
 
     /// <summary>
@@ -201,10 +254,8 @@ public partial class PreviewWindow
 
     private static int DevicePixels(double dips, double pixelsPerDip) => (int)Math.Ceiling(dips * pixelsPerDip);
 
-    private static FileCardData CollectFileCardData(string path, int iconPixels, CancellationToken token)
+    private static FileCardFacts CollectFileCardFacts(string path, CancellationToken token)
     {
-        token.ThrowIfCancellationRequested();
-        var shellImage = ShellThumbnailProvider.TryGetThumbnail(path, iconSize: iconPixels);
         token.ThrowIfCancellationRequested();
 
         var title = Path.GetFileName(path);
@@ -238,7 +289,7 @@ public partial class PreviewWindow
             facts = CardFacts.Illustrator(path);
         }
 
-        return new FileCardData(shellImage, title, facts);
+        return new FileCardFacts(title, facts);
     }
 
     private static IReadOnlyList<string> ReadExecutableFacts(string path, string title)

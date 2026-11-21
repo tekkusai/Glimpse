@@ -114,6 +114,10 @@ internal static class CommonFileDialogSelectionService
         return false;
     }
 
+    private const int RpcEServerDiedDne = unchecked((int)0x80010012);
+    private static readonly object UnresolvedLogSync = new();
+    private static (IntPtr DialogRoot, int SelectedCount, string BreadcrumbState) _lastUnresolvedLog;
+
     public static ExplorerSelection? TryGetSelection(IntPtr dialogRoot)
     {
         if (!HasDialogWindowClass(dialogRoot))
@@ -121,6 +125,9 @@ internal static class CommonFileDialogSelectionService
             return null;
         }
 
+        // Capture the owner PID up front so a dialog that closes mid-query
+        // still identifies its host process in failure diagnostics.
+        var ownerProcessId = NativeMethods.GetWindowProcessId(dialogRoot);
         var started = Stopwatch.StartNew();
         var stage = "shell-view";
         try
@@ -165,11 +172,11 @@ internal static class CommonFileDialogSelectionService
             var paths = ResolveExistingEntries(folderPath, candidates);
             if (paths.Count == 0)
             {
-                DiagnosticLog.Write(
-                    $"file dialog selection unresolved hwnd=0x{dialogRoot.ToInt64():X} selected={selectedElements.Count} breadcrumb={breadcrumbState}");
+                LogUnresolvedOnce(dialogRoot, selectedElements.Count, breadcrumbState);
                 return null;
             }
 
+            ClearLastUnresolvedLog(dialogRoot);
             return new ExplorerSelection(
                 paths[0],
                 dialogRoot,
@@ -184,16 +191,56 @@ internal static class CommonFileDialogSelectionService
         {
             return null;
         }
+        catch (COMException ex) when (IsExpectedTeardown(dialogRoot, ex))
+        {
+            return null;
+        }
         catch (Exception ex)
         {
-            DiagnosticLog.Write(DescribeFailure(dialogRoot, stage, started.ElapsedMilliseconds, ex));
+            DiagnosticLog.Write(DescribeFailure(dialogRoot, stage, started.ElapsedMilliseconds, ex, ownerProcessId));
             return null;
         }
     }
 
-    internal static string DescribeFailure(IntPtr dialogRoot, string stage, long elapsedMilliseconds, Exception? error)
+    internal static bool IsExpectedTeardown(IntPtr dialogRoot, COMException error) =>
+        error.HResult == RpcEServerDiedDne || (dialogRoot != IntPtr.Zero && !NativeMethods.IsWindow(dialogRoot));
+
+    private static void LogUnresolvedOnce(IntPtr dialogRoot, int selectedCount, string breadcrumbState)
+    {
+        var current = (dialogRoot, selectedCount, breadcrumbState);
+        lock (UnresolvedLogSync)
+        {
+            if (_lastUnresolvedLog == current)
+            {
+                return;
+            }
+
+            _lastUnresolvedLog = current;
+        }
+
+        DiagnosticLog.Write(
+            $"file dialog selection unresolved hwnd=0x{dialogRoot.ToInt64():X} selected={selectedCount} breadcrumb={breadcrumbState}");
+    }
+
+    private static void ClearLastUnresolvedLog(IntPtr dialogRoot)
+    {
+        lock (UnresolvedLogSync)
+        {
+            if (_lastUnresolvedLog.DialogRoot == dialogRoot)
+            {
+                _lastUnresolvedLog = default;
+            }
+        }
+    }
+
+    internal static string DescribeFailure(IntPtr dialogRoot, string stage, long elapsedMilliseconds, Exception? error, uint knownProcessId = 0)
     {
         var processId = NativeMethods.GetWindowProcessId(dialogRoot);
+        if (processId == 0)
+        {
+            processId = knownProcessId;
+        }
+
         var process = "unknown";
         if (processId is > 0 and <= int.MaxValue)
         {

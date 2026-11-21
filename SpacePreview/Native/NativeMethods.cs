@@ -763,15 +763,16 @@ internal static class NativeMethods
 
         try
         {
-            uint length = 0;
-            AssocQueryString(ASSOCF_NOTRUNCATE, assocString, extension, null, null, ref length);
-            if (length <= 1)
-            {
-                return null;
-            }
-
+            const uint initialCapacity = 260;
+            uint length = initialCapacity;
             var builder = new StringBuilder((int)length);
             var hr = AssocQueryString(ASSOCF_NOTRUNCATE, assocString, extension, null, builder, ref length);
+            if ((hr == unchecked((int)0x80004003) || hr == unchecked((int)0x8007007A)) && length > initialCapacity)
+            {
+                builder = new StringBuilder((int)length);
+                hr = AssocQueryString(ASSOCF_NOTRUNCATE, assocString, extension, null, builder, ref length);
+            }
+
             var value = hr == 0 ? builder.ToString().Trim() : null;
             return string.IsNullOrWhiteSpace(value) ? null : value;
         }

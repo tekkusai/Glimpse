@@ -21,6 +21,30 @@ public sealed class CommonFileDialogSelectionTests
         Assert.DoesNotContain("secret", line, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void FailureDiagnosticFallsBackToPreCapturedProcessIdWhenWindowCloses()
+    {
+        var pid = (uint)Environment.ProcessId;
+
+        var line = CommonFileDialogSelectionService.DescribeFailure(
+            IntPtr.Zero, "lookup-timeout", 2003, null, pid);
+
+        Assert.Contains($"pid={pid}", line, StringComparison.Ordinal);
+        Assert.DoesNotContain("process=unknown", line, StringComparison.Ordinal);
+        Assert.Contains("error=timeout", line, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ServerDiedComExceptionIsTreatedAsExpectedTeardown()
+    {
+        Assert.True(CommonFileDialogSelectionService.IsExpectedTeardown(
+            IntPtr.Zero,
+            new COMException("gone", unchecked((int)0x80010012))));
+        Assert.False(CommonFileDialogSelectionService.IsExpectedTeardown(
+            IntPtr.Zero,
+            new COMException("unexpected", unchecked((int)0x8000FFFF))));
+    }
+
     [Theory]
     [InlineData("editor.exe", "editor.exe")]
     [InlineData("private\r\nfile/path", "private__file_path")]

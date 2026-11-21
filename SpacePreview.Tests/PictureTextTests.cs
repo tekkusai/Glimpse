@@ -46,6 +46,43 @@ public sealed class PictureTextTests
         Assert.Equal(string.Empty, await PictureText.ReadAsync(Draw()));
     });
 
+    [Fact]
+    public Task RepeatedRecognitionOfTheSameBitmapReusesCachedWords() => WpfApp.RunAsync(async () =>
+    {
+        if (!PictureText.IsAvailable)
+        {
+            return;
+        }
+
+        var picture = Draw("Invoice 2048 for October", "Total due 315 dollars");
+        var first = await PictureText.RecognizeAsync(picture);
+        var second = await PictureText.RecognizeAsync(picture);
+
+        Assert.Same(first, second);
+    });
+
+    [Fact]
+    public Task LargeImageOcrDownscalesAndAvoidsLargeManagedAllocations() => WpfApp.RunAsync(() =>
+    {
+        var stride = 4096 * 4;
+        var source = BitmapSource.Create(4096, 3686, 96, 96, PixelFormats.Bgra32, null, new byte[stride * 3686], stride);
+        source.Freeze();
+
+        // Warm one-time WinRT/delegate metadata before measuring allocations.
+        using (PictureText.ToSoftwareBitmap(Draw()))
+        {
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        using var software = PictureText.ToSoftwareBitmap(source);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.InRange(software.PixelWidth, 1, PictureText.MaxOcrDimension);
+        Assert.InRange(software.PixelHeight, 1, PictureText.MaxOcrDimension);
+        Assert.True(allocated < 1_000_000, $"Expected direct native copy with <1 MB managed allocation, saw {allocated:N0} bytes.");
+        return Task.CompletedTask;
+    });
+
     // Text photographed sideways is read once the viewer has turned it:
     // the picture is read as it is shown.
     [Fact]

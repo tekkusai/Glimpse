@@ -167,6 +167,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
 
         var back = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _lookups[dialogRoot] = back.Task;
+        var ownerProcessId = NativeMethods.GetWindowProcessId(dialogRoot);
         ExplorerSelection? selection;
         var started = Stopwatch.StartNew();
         try
@@ -179,7 +180,7 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
         }
         catch (TimeoutException)
         {
-            GiveUpOn(dialogRoot, started.ElapsedMilliseconds);
+            GiveUpOn(dialogRoot, started.ElapsedMilliseconds, ownerProcessId);
             return;
         }
         finally
@@ -208,12 +209,12 @@ internal sealed class CommonFileDialogSelectionMonitor : IDisposable
     // The wait counts against the dialog, whatever has been asked of it
     // since. A glance over it would go on showing a file the user has left,
     // so the picker is reported as having nothing selected.
-    private void GiveUpOn(IntPtr dialogRoot, long elapsedMilliseconds)
+    private void GiveUpOn(IntPtr dialogRoot, long elapsedMilliseconds, uint knownProcessId)
     {
         _unanswering.RemoveWhere(dialog => !NativeMethods.IsWindow(dialog));
         _unanswering.Add(dialogRoot);
         DiagnosticLog.Write(CommonFileDialogSelectionService.DescribeFailure(
-            dialogRoot, "lookup-timeout", elapsedMilliseconds, null) + "; disabled for dialog");
+            dialogRoot, "lookup-timeout", elapsedMilliseconds, null, knownProcessId) + "; disabled for dialog");
 
         var cache = _cache;
         if (_disposed || (cache.Cached != dialogRoot && cache.Pending != dialogRoot))

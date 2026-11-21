@@ -73,6 +73,24 @@ public sealed class FullscreenInputSuspensionTests
         Assert.False(FullscreenInputSuspension.ShouldSuspendForWindow(window));
     }
 
+    [Theory]
+    [InlineData("SearchHost", false)]
+    [InlineData("StartMenuExperienceHost", false)]
+    [InlineData("SomeFullscreenUwpGame", true)]
+    public void ShellSearchCoreWindowsDoNotSuspendInputWhileOtherCoreWindowsStillDo(string processName, bool expected)
+    {
+        var window = new FullscreenInputSuspension.WindowSnapshot(
+            "Windows.UI.Core.CoreWindow",
+            OtherProcessId,
+            AppProcessId,
+            Style: 0,
+            Fullscreen,
+            Monitor,
+            processName);
+
+        Assert.Equal(expected, FullscreenInputSuspension.ShouldSuspendForWindow(window));
+    }
+
     /// <summary>
     /// A game going full screen in its own window sends no foreground event.
     /// With a pin open, the window in front is looked at again: pins leave

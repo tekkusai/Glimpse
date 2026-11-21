@@ -33,7 +33,7 @@ internal sealed class SpacePreviewController : IDisposable
     private const int MaxPinnedPreviews = 6;
     private const int MaxObservedAccessDialogs = 64;
     private const int DeferredFileDialogPreviewLifetimeMilliseconds = 1200;
-    private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromSeconds(45);
+    private static readonly TimeSpan IdleTrimDelay = TimeSpan.FromMinutes(3);
 
     // A foreground flicker (a toast, a menu opening) must not end a glance.
     private static readonly TimeSpan OwnerLossDebounce = TimeSpan.FromMilliseconds(100);
@@ -44,9 +44,12 @@ internal sealed class SpacePreviewController : IDisposable
 
     // A moment after a preview shows, the Office files beside it in the
     // folder convert in the background, so arrowing onto a big deck shows it
-    // whole. 2.0 did this; it ends with the glance.
+    // whole. When a glance hides, an already-running conversion gets a short
+    // grace window to finish into disk cache (or be joined if the user opens
+    // that neighbor moments later), while no new neighbor starts.
     private const int OfficeNeighborLimit = 4;
     private static readonly TimeSpan OfficeNeighborDelay = TimeSpan.FromMilliseconds(900);
+    private static readonly TimeSpan OfficeNeighborHideGrace = TimeSpan.FromSeconds(5);
 
     private readonly Dispatcher _dispatcher;
     private readonly KeyboardHook _keyboardHook;
@@ -88,7 +91,7 @@ internal sealed class SpacePreviewController : IDisposable
     private SelectionSource _lastSelectionSource = SelectionSource.Explorer;
     private volatile bool _previewVisible;
     private ExplorerSelection? _officeNeighborSelection;
-    private CancellationTokenSource? _officeNeighbors;
+    private OfficeNeighborWarmUp? _officeNeighbors;
 
     // The hook thread and the dispatcher share no lock. The dispatcher
     // publishes _keyState whole and the hook thread reads it; the hook
@@ -1564,43 +1567,134 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        var cts = new CancellationTokenSource();
-        _officeNeighbors = cts;
+        var warmUp = new OfficeNeighborWarmUp();
+        _officeNeighbors = warmUp;
         _ = WarmOfficeNeighborsAsync(
             selection.ExplorerHwnd,
             _lastSelectionSource == SelectionSource.Desktop,
             selection.Path,
-            cts.Token);
+            warmUp);
+    }
+
+    internal sealed class OfficeNeighborWarmUp
+    {
+        private readonly object _sync = new();
+        private readonly CancellationTokenSource _scheduleCts = new();
+        private readonly CancellationTokenSource _inFlightCts = new();
+        private bool _conversionActive;
+        private bool _disposed;
+
+        public CancellationToken ScheduleToken => _scheduleCts.Token;
+        public CancellationToken InFlightToken => _inFlightCts.Token;
+
+        public bool TryEnterConversion()
+        {
+            lock (_sync)
+            {
+                if (_disposed || _scheduleCts.IsCancellationRequested || _inFlightCts.IsCancellationRequested)
+                {
+                    return false;
+                }
+
+                _conversionActive = true;
+                return true;
+            }
+        }
+
+        public void LeaveConversion()
+        {
+            lock (_sync)
+            {
+                _conversionActive = false;
+            }
+        }
+
+        public void ReleaseOnHide(TimeSpan grace)
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _scheduleCts.Cancel();
+                if (_conversionActive && grace > TimeSpan.Zero)
+                {
+                    _inFlightCts.CancelAfter(grace);
+                }
+                else
+                {
+                    _inFlightCts.Cancel();
+                }
+            }
+        }
+
+        public void StopNow()
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _conversionActive = false;
+                _scheduleCts.Cancel();
+                _inFlightCts.Cancel();
+                _scheduleCts.Dispose();
+                _inFlightCts.Dispose();
+            }
+        }
     }
 
     /// <summary>
     /// One at a time, nearest first, below normal priority: a preview that
     /// asks for the engine takes it, and the warm-up waits its turn.
     /// </summary>
-    private static async Task WarmOfficeNeighborsAsync(IntPtr explorerHwnd, bool isDesktop, string currentPath, CancellationToken token)
+    private static async Task WarmOfficeNeighborsAsync(IntPtr explorerHwnd, bool isDesktop, string currentPath, OfficeNeighborWarmUp warmUp)
     {
         try
         {
-            await Task.Delay(OfficeNeighborDelay, token);
+            var scheduleToken = warmUp.ScheduleToken;
+            await Task.Delay(OfficeNeighborDelay, scheduleToken);
             var neighbors = await StaTask.Run(() =>
                 ExplorerSelectionService.TryGetNeighborPaths(explorerHwnd, isDesktop, currentPath, OfficeNeighborLimit));
             foreach (var path in neighbors ?? [])
             {
-                token.ThrowIfCancellationRequested();
+                scheduleToken.ThrowIfCancellationRequested();
                 var kind = FileKinds.GetOfficeKind(path);
                 if (kind == OfficeKind.None
-                    || await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), token) is not null)
+                    || await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), scheduleToken) is not null)
                 {
                     continue;
                 }
 
-                var job = OfficeDocumentPdfConverter.Convert(path, kind, token, background: true);
-                await job.Complete.WaitAsync(token);
+                if (!warmUp.TryEnterConversion())
+                {
+                    break;
+                }
+
+                try
+                {
+                    var inFlightToken = warmUp.InFlightToken;
+                    var job = OfficeDocumentPdfConverter.Convert(path, kind, inFlightToken, background: true);
+                    await job.Complete.WaitAsync(inFlightToken);
+                }
+                finally
+                {
+                    warmUp.LeaveConversion();
+                }
             }
         }
         catch (OperationCanceledException)
         {
             // The glance ended or moved on.
+        }
+        catch (ObjectDisposedException)
+        {
+            // The warm-up was stopped while unwinding.
         }
         catch (Exception ex)
         {
@@ -1610,14 +1704,8 @@ internal sealed class SpacePreviewController : IDisposable
 
     private void CancelOfficeNeighbors()
     {
-        var cts = Interlocked.Exchange(ref _officeNeighbors, null);
-        if (cts is null)
-        {
-            return;
-        }
-
-        cts.Cancel();
-        cts.Dispose();
+        var warmUp = Interlocked.Exchange(ref _officeNeighbors, null);
+        warmUp?.StopNow();
     }
 
     private void ApplyCommonFileDialogContext(ExplorerSelection selection)
@@ -2204,7 +2292,7 @@ internal sealed class SpacePreviewController : IDisposable
     private void HidePreview()
     {
         _previewVisible = false;
-        ResetSession();
+        ResetSessionCore(allowOfficeNeighborGrace: true);
 
         // A copy still on its way was for this glance.
         BorrowedFiles.StopWaiting();
@@ -2223,7 +2311,9 @@ internal sealed class SpacePreviewController : IDisposable
     /// idle trim all end a session the same way, so nothing from one glance
     /// leaks into the next (a queued arrow step once did).
     /// </summary>
-    private void ResetSession()
+    private void ResetSession() => ResetSessionCore(allowOfficeNeighborGrace: false);
+
+    private void ResetSessionCore(bool allowOfficeNeighborGrace)
     {
         _arrival++;
         _session++;
@@ -2241,7 +2331,14 @@ internal sealed class SpacePreviewController : IDisposable
         _multiSelectionSelectedCount = 0;
         _multiIndex = 0;
         _officeNeighborSelection = null;
-        CancelOfficeNeighbors();
+        if (allowOfficeNeighborGrace)
+        {
+            _officeNeighbors?.ReleaseOnHide(OfficeNeighborHideGrace);
+        }
+        else
+        {
+            CancelOfficeNeighbors();
+        }
     }
 
     private void ClearNavigationRefreshTokens() => Array.Clear(_navigationKeyRefreshTokens);
@@ -2702,7 +2799,7 @@ internal sealed class SpacePreviewController : IDisposable
                 // Blocking and compacting, or the GC may decline: an idle
                 // tray allocates too little for it to come by on its own,
                 // and a stranded animation clock keeps WPF rendering at
-                // 64 Hz until one does. Once, 45 s after the last hide.
+                // 64 Hz until one does. Once, after the idle delay.
                 var started = Stopwatch.GetTimestamp();
                 GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
                 var collected = Stopwatch.GetElapsedTime(started);

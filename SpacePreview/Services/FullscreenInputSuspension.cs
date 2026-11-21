@@ -7,6 +7,14 @@ internal sealed class FullscreenInputSuspension
 {
     private const int MonitorTolerance = 2;
 
+    private const string CoreWindowClass = "Windows.UI.Core.CoreWindow";
+
+    private static readonly HashSet<string> ExemptCoreWindowProcesses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "SearchHost",
+        "StartMenuExperienceHost"
+    };
+
     private static readonly HashSet<string> ExemptClasses = new(StringComparer.OrdinalIgnoreCase)
     {
         "Progman",
@@ -94,7 +102,12 @@ internal sealed class FullscreenInputSuspension
             currentProcessId,
             style,
             windowRect,
-            monitorRect);
+            monitorRect,
+            className.Equals(CoreWindowClass, StringComparison.OrdinalIgnoreCase)
+                && !HasCaption(style)
+                && CoversMonitor(windowRect, monitorRect)
+                ? GetProcessName((int)processId)
+                : string.Empty);
     }
 
     private static string GetProcessName(int processId)
@@ -150,6 +163,8 @@ internal sealed class FullscreenInputSuspension
         if (window.HwndProcessId == 0
             || window.HwndProcessId == window.CurrentProcessId
             || ExemptClasses.Contains(window.ClassName)
+            || (window.ClassName.Equals(CoreWindowClass, StringComparison.OrdinalIgnoreCase)
+                && ExemptCoreWindowProcesses.Contains(window.ProcessName))
             || HasCaption(window.Style))
         {
             return false;
@@ -180,5 +195,6 @@ internal sealed class FullscreenInputSuspension
         int CurrentProcessId,
         long Style,
         NativeMethods.RECT WindowRect,
-        NativeMethods.RECT MonitorRect);
+        NativeMethods.RECT MonitorRect,
+        string ProcessName = "");
 }

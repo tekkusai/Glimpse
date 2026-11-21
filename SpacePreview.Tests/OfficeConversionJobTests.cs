@@ -253,6 +253,30 @@ public sealed class OfficeConversionJobTests
     }
 
     [Fact]
+    public async Task HideGraceLetsAnInFlightNeighborFinishWithoutStartingAnother()
+    {
+        var warmUp = new SpacePreview.Services.SpacePreviewController.OfficeNeighborWarmUp();
+        try
+        {
+            Assert.True(warmUp.TryEnterConversion());
+            warmUp.ReleaseOnHide(TimeSpan.FromMilliseconds(250));
+
+            Assert.True(warmUp.ScheduleToken.IsCancellationRequested);
+            Assert.False(warmUp.InFlightToken.IsCancellationRequested);
+
+            warmUp.LeaveConversion();
+            Assert.False(warmUp.TryEnterConversion());
+
+            await Task.Delay(350);
+            Assert.True(warmUp.InFlightToken.IsCancellationRequested);
+        }
+        finally
+        {
+            warmUp.StopNow();
+        }
+    }
+
+    [Fact]
     public async Task ANeighborWarmUpGivesTheEngineToAPreviewAndGoesOnAfterIt()
     {
         using var temp = new TempDirectory();

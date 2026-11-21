@@ -597,6 +597,10 @@ public partial class PreviewWindow
     // Open. One pill: the app's icon, the word and a chevron.
     // ---------------------------------------------------------------------
 
+    private static readonly TimeSpan OpenTargetCacheTtl = TimeSpan.FromSeconds(60);
+    private sealed record CachedOpenTarget(OpenTarget Target, bool SelfExecutable, long StoredAt);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CachedOpenTarget> OpenTargetCache = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// What Open does: a folder opens in File Explorer, a program or a
     /// shortcut runs itself, a document opens in its default app. With no
@@ -611,10 +615,28 @@ public partial class PreviewWindow
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"));
         }
 
-        var extension = Path.GetExtension(contentPath);
-        var executable = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_EXECUTABLE);
-        if (executable == "%1" || FileKinds.IsShortcut(contentPath) || FileKinds.IsInternetShortcut(contentPath))
+        if (FileKinds.IsShortcut(contentPath) || FileKinds.IsInternetShortcut(contentPath))
         {
+            return new OpenTarget(null, contentPath);
+        }
+
+        var extension = Path.GetExtension(contentPath);
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            return new OpenTarget(null, null);
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        if (OpenTargetCache.TryGetValue(extension, out var cached)
+            && Stopwatch.GetElapsedTime(cached.StoredAt, now) < OpenTargetCacheTtl)
+        {
+            return cached.SelfExecutable ? new OpenTarget(null, contentPath) : cached.Target;
+        }
+
+        var executable = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_EXECUTABLE);
+        if (executable == "%1")
+        {
+            OpenTargetCache[extension] = new CachedOpenTarget(new OpenTarget(null, null), SelfExecutable: true, now);
             return new OpenTarget(null, contentPath);
         }
 
@@ -623,14 +645,18 @@ public partial class PreviewWindow
         var name = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_FRIENDLYAPPNAME);
         if (name is null || executable?.EndsWith(@"\OpenWith.exe", StringComparison.OrdinalIgnoreCase) == true)
         {
-            return new OpenTarget(null, null);
+            var unassociated = new OpenTarget(null, null);
+            OpenTargetCache[extension] = new CachedOpenTarget(unassociated, SelfExecutable: false, now);
+            return unassociated;
         }
 
         // A Store app (its id names the package) shows its tile icon; a
         // desktop app shows its program's icon.
         var appId = NativeMethods.TryQueryAssociation(extension, NativeMethods.ASSOCSTR_APPID);
         var icon = appId?.Contains('!') == true ? $@"shell:AppsFolder\{appId}" : executable;
-        return new OpenTarget(name, icon);
+        var resolved = new OpenTarget(name, icon);
+        OpenTargetCache[extension] = new CachedOpenTarget(resolved, SelfExecutable: false, now);
+        return resolved;
     }
 
     private void ShowOpenTarget(OpenTarget target)
