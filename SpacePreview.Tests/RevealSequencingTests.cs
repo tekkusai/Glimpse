@@ -178,6 +178,56 @@ public sealed class RevealSequencingTests
     });
 
     [Fact]
+    public Task ANonMediaPageNavigatesDuringTheFadeOutBeatWhileMediaWaits() => WpfApp.RunAsync(async () =>
+    {
+        if (!Motion.Enabled)
+        {
+            return;
+        }
+
+        using var temp = new TempDirectory();
+        var window = await OpenAsync(Png(temp, "first.png"));
+        try
+        {
+            await ShowPageAsync(window, Png(temp, "second.png"));
+
+            // Non-media pages (Markdown, code, EPUB, sheets) overlap navigation
+            // with the outgoing fade-out beat while staying hidden.
+            Browse(window, Png(temp, "third.png"));
+            var page = Web(WebSurfaceKind.Page);
+            Hand(window, page);
+            Assert.True(ViewIn(page).MayNavigate.IsCompleted);
+            Assert.Equal(Visibility.Hidden, page.Visibility);
+            Navigate(window, page);
+
+            await WaitUntilAsync(() => Settled(window));
+            Assert.Same(page, Front(window).Content);
+            Assert.Equal(Visibility.Visible, page.Visibility);
+
+            // Media pages still wait for the beat so playback never starts
+            // behind the outgoing preview.
+            Browse(window, Png(temp, "fourth.png"));
+            var mediaStage = Activator.CreateInstance(
+                typeof(PreviewWindow).GetNestedType("MediaStageState", BindingFlags.NonPublic)!,
+                [true])!;
+            var media = Web(WebSurfaceKind.Page);
+            media.Tag = mediaStage;
+            Hand(window, media);
+            Assert.False(ViewIn(media).MayNavigate.IsCompleted);
+            await WaitUntilAsync(() => ViewIn(media).MayNavigate.IsCompleted);
+            Navigate(window, media);
+
+            await WaitUntilAsync(() => Settled(window));
+            Assert.Same(media, Front(window).Content);
+            Assert.Equal(Visibility.Visible, media.Visibility);
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    [Fact]
     public Task AFallbackCardWaitsForItsPageToFadeOut() => WpfApp.RunAsync(async () =>
     {
         if (!Motion.Enabled)

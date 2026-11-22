@@ -493,7 +493,7 @@ public partial class PreviewWindow
     /// The card: <paramref name="visual"/> in the anchored slot, a 20 px
     /// title, at most two fact lines, and an optional footer.
     /// </summary>
-    private static FrameworkElement BuildFileCard(FrameworkElement visual, string title, IReadOnlyList<TextBlock> facts, FrameworkElement? footer)
+    private static FrameworkElement BuildFileCard(FrameworkElement visual, string title, IReadOnlyList<TextBlock> facts, FrameworkElement? footer, double footerRowSnap = 0)
     {
         var body = new StackPanel();
         body.Children.Add(new TextBlock
@@ -509,7 +509,7 @@ public partial class PreviewWindow
             body.Children.Add(fact);
         }
 
-        return new FileCardLayout(visual, body, footer).Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
+        return new FileCardLayout(visual, body, footer, footerRowSnap).Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
     }
 
     private static TextBlock FactLine(string text, int index) => new TextBlock

@@ -277,6 +277,32 @@ public sealed class OfficeConversionJobTests
     }
 
     [Fact]
+    public void CancelScheduleStopsPendingWorkWithoutKillingAnInFlightNeighbor()
+    {
+        var active = new SpacePreview.Services.SpacePreviewController.OfficeNeighborWarmUp();
+        var idle = new SpacePreview.Services.SpacePreviewController.OfficeNeighborWarmUp();
+        try
+        {
+            Assert.True(active.TryEnterConversion());
+            active.CancelSchedule();
+            Assert.True(active.ScheduleToken.IsCancellationRequested);
+            Assert.False(active.InFlightToken.IsCancellationRequested);
+            Assert.True(active.ReleaseWithGrace(TimeSpan.FromSeconds(5)));
+
+            idle.CancelSchedule();
+            Assert.True(idle.ScheduleToken.IsCancellationRequested);
+            Assert.False(idle.TryEnterConversion());
+            Assert.False(idle.ReleaseWithGrace(TimeSpan.FromSeconds(5)));
+            Assert.True(idle.InFlightToken.IsCancellationRequested);
+        }
+        finally
+        {
+            active.StopNow();
+            idle.StopNow();
+        }
+    }
+
+    [Fact]
     public async Task ANeighborWarmUpGivesTheEngineToAPreviewAndGoesOnAfterIt()
     {
         using var temp = new TempDirectory();

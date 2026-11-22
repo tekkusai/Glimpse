@@ -45,8 +45,8 @@ internal sealed class StandIn : Panel
     private const double PosterAspectTolerance = 0.04;
 
     private readonly LandingKind _kind;
-    private readonly double _aspect;
-    private readonly double _railWidth;
+    private double _aspect;
+    private double _railWidth;
     private readonly double _toolbarHeight;
     private readonly double _dpiScale;
     private readonly Grid _visual = new() { ClipToBounds = true };
@@ -124,6 +124,30 @@ internal sealed class StandIn : Panel
     }
 
     public string Description => _posterBlur is not null ? "poster" : _kind != LandingKind.None ? "ghost" : "canvas";
+
+    /// <summary>
+    /// Updates the landing shape and rail reservation when a late probe or
+    /// conversion finishes before reveal, so the stand-in stays aligned with
+    /// where the real content will paint.
+    /// </summary>
+    internal void UpdateLanding(StageFitHint? hint, double fullRailWidth)
+    {
+        var (kind, aspect) = LandingOf(hint);
+        if (kind != _kind || kind == LandingKind.None)
+        {
+            return;
+        }
+
+        var railWidth = hint is { Kind: StageFitHint.FitKind.PageAspect, SinglePage: true } ? 0 : fullRailWidth;
+        if (Math.Abs(aspect - _aspect) < 0.0005 && Math.Abs(railWidth - _railWidth) < 0.5)
+        {
+            return;
+        }
+
+        _aspect = aspect;
+        _railWidth = railWidth;
+        InvalidateArrange();
+    }
 
     /// <summary>
     /// The stand-in for one item: the poster when it is honest, otherwise a

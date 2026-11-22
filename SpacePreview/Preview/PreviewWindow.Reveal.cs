@@ -111,6 +111,9 @@ public partial class PreviewWindow
         public TimeSpan? RevealWaitStarted { get; set; }
         public Task<string>? RevealReason { get; set; }
 
+        /// <summary>Whether navigation was allowed during the outgoing fade-out beat.</summary>
+        public bool StagedDuringBeat { get; set; }
+
         /// <summary>Set by the reveal: when the dissolve is over and what stood under it may go.</summary>
         public TimeSpan? Lands { get; set; }
     }
@@ -171,7 +174,13 @@ public partial class PreviewWindow
     {
         if (p.ContentPath is { } path && StandIn.KnowsShape(CurrentShape()) && LooksLikeLocalDrivePath(path))
         {
-            p.Poster = Task.Run(() => FindPoster(path));
+            var knownOfficePdf = _probedOfficeDocument is { Version: var probedVersion, Path: var probedPath, Document: var probedDoc }
+                && probedVersion == _loadVersion
+                && string.Equals(probedPath, path, StringComparison.OrdinalIgnoreCase)
+                && !probedDoc.DocumentPath.EndsWith(".html", StringComparison.OrdinalIgnoreCase)
+                ? probedDoc.DocumentPath
+                : null;
+            p.Poster = Task.Run(() => FindPoster(path, knownOfficePdf));
         }
 
         Wake(p, RevealPlan.StandInAt);
@@ -301,6 +310,10 @@ public partial class PreviewWindow
                 FadeWindowIn(p);
             }
         }
+        else
+        {
+            p.StandIn.UpdateLanding(shape, PdfPageRailWidth);
+        }
 
         if (view.HasFlag(WaitView.Sheen))
         {
@@ -373,10 +386,30 @@ public partial class PreviewWindow
         ExplorerCachedThumbnail
     ];
 
-    private static BitmapSource? FindPoster(string path)
+    private static BitmapSource? FindPoster(string path, string? knownOfficePdf = null)
     {
+        if (knownOfficePdf is not null)
+        {
+            try
+            {
+                if (PdfRailFirstPageFromPdf(knownOfficePdf) is { } knownPoster)
+                {
+                    return knownPoster;
+                }
+            }
+            catch
+            {
+                // Fall through to the other poster sources.
+            }
+        }
+
         foreach (var source in PosterSources)
         {
+            if (knownOfficePdf is not null && source == PdfRailFirstPage)
+            {
+                continue;
+            }
+
             try
             {
                 if (source(path) is { } poster)
@@ -394,15 +427,13 @@ public partial class PreviewWindow
     }
 
     /// <summary>Page one from the rail cache of a document opened before.</summary>
-    private static BitmapSource? PdfRailFirstPage(string path)
-    {
-        var pdf = RailDocumentPath(path);
-        return pdf is null
-            ? null
-            : TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { Pages.Count: > 0 } rail
-                ? rail.Pages[0].Bitmap
-                : null;
-    }
+    private static BitmapSource? PdfRailFirstPage(string path) =>
+        RailDocumentPath(path) is { } pdf ? PdfRailFirstPageFromPdf(pdf) : null;
+
+    private static BitmapSource? PdfRailFirstPageFromPdf(string pdf) =>
+        TryReadPdfThumbnailManifest(PdfRailCacheDirectory(pdf, PdfPageRailInitialPages, 0)) is { Pages.Count: > 0 } rail
+            ? rail.Pages[0].Bitmap
+            : null;
 
     private static BitmapSource? OfficeEmbeddedThumbnail(string path) =>
         FileKinds.IsOffice(path) ? OfficeThumbnail.TryRead(path) : null;
@@ -581,6 +612,8 @@ public partial class PreviewWindow
         host.Content = null;
         host.ClearValue(WidthProperty);
         host.ClearValue(HeightProperty);
+        host.ClearValue(HorizontalAlignmentProperty);
+        host.ClearValue(VerticalAlignmentProperty);
         (host.Tag as IDisposable)?.Dispose();
         host.Tag = null;
     }
@@ -678,10 +711,13 @@ public partial class PreviewWindow
         content.Visibility = Visibility.Hidden;
         if (p.Swap == SwapStyle.FadeOut && WillStageChange(p.ContentPath ?? string.Empty) == true)
         {
-            // Staged at the size the stage is about to take, so a document
-            // lays out once.
+            // Staged at the size the stage is about to take, pinned to the
+            // top-left so a smaller next item is not centered at a shifted
+            // HWND origin inside a wider or taller outgoing stage.
             var monitor = MonitorFor(Hwnd);
             var window = ComputeStageTarget(monitor.WorkArea, monitor.Scale);
+            _back.HorizontalAlignment = HorizontalAlignment.Left;
+            _back.VerticalAlignment = VerticalAlignment.Top;
             _back.Width = Math.Max(1, window.Width - StageFit.ChromeWidth);
             _back.Height = Math.Max(1, window.Height - StageFit.ChromeHeight);
         }
@@ -703,12 +739,18 @@ public partial class PreviewWindow
     private static StagedWebView? WebViewIn(FrameworkElement content) =>
         content as StagedWebView ?? FindVisualChild<StagedWebView>(content);
 
+    private static bool CanNavigateDuringBeat(FrameworkElement content, StagedWebView view) =>
+        view.Kind != WebSurfaceKind.Page || content.Tag is not MediaStageState;
+
     /// <summary>
     /// Brings the next item on once the old one has left, or holds. WPF
     /// content dissolves in. A page shows at once on its transparent view
-    /// and dissolves itself in over whatever stands under it. A document
-    /// (and a video still waiting for its shape) stays hidden until it has
-    /// navigated and its bounded waits have ended, then appears in one cut.
+    /// and dissolves itself in over whatever stands under it; during a
+    /// fade-out beat, non-media pages also navigate hidden so loading
+    /// overlaps the outgoing fade, then restart their dissolve as they show.
+    /// A document (and a video still waiting for its shape) stays hidden
+    /// until it has navigated and its bounded waits have ended, then appears
+    /// in one cut.
     /// </summary>
     private void Present(Presentation p, Arrival next, TimeSpan now)
     {
@@ -716,10 +758,11 @@ public partial class PreviewWindow
         var view = next.View;
         if (p.Swap == SwapStyle.FadeOut)
         {
-            // An opaque view loads its document while the old item leaves.
-            // A page waits, so its own fade-in plays where it can be seen.
-            if (view is { Kind: not WebSurfaceKind.Page })
+            // Opaque views and non-media pages load while the old item leaves.
+            // Media waits so playback never starts behind an outgoing preview.
+            if (view is not null && CanNavigateDuringBeat(content, view))
             {
+                next.StagedDuringBeat = true;
                 view.AllowNavigation();
             }
 
@@ -727,15 +770,29 @@ public partial class PreviewWindow
         }
 
         // The stage has its shape now, and the host follows it again.
+        var hadStagedBox = _back.ReadLocalValue(WidthProperty) != DependencyProperty.UnsetValue
+            || _back.ReadLocalValue(HeightProperty) != DependencyProperty.UnsetValue;
         _back.ClearValue(WidthProperty);
         _back.ClearValue(HeightProperty);
+        _back.ClearValue(HorizontalAlignmentProperty);
+        _back.ClearValue(VerticalAlignmentProperty);
+        if (hadStagedBox && view is not null)
+        {
+            // SizeChanged does not fire when the staged size already matched
+            // the resized stage, so push the hidden HWND's final origin now
+            // instead of on its first visible frame.
+            _back.UpdateLayout();
+            view.PushBoundsWhileHidden();
+        }
         if (view is null)
         {
             RevealNative(p, next, now);
             return;
         }
 
-        var staged = view.Kind != WebSurfaceKind.Page || content.Tag is MediaStageState { DimensionsKnown: false };
+        var staged = view.Kind != WebSurfaceKind.Page
+            || next.StagedDuringBeat
+            || content.Tag is MediaStageState { DimensionsKnown: false };
         if (!staged)
         {
             content.Visibility = Visibility.Visible;
@@ -775,7 +832,7 @@ public partial class PreviewWindow
         if (next.RevealReason is null)
         {
             next.RevealWaitStarted = now;
-            next.RevealReason = WaitForWebRevealAsync(view, _loadCancellation?.Token ?? CancellationToken.None);
+            next.RevealReason = WaitForWebRevealAsync(view, next.StagedDuringBeat, _loadCancellation?.Token ?? CancellationToken.None);
             if (!next.RevealReason.IsCompleted)
             {
                 AdvanceAfter(p, next.RevealReason);
@@ -857,6 +914,7 @@ public partial class PreviewWindow
         UpdateRotateButtons();
         if (content.Visibility != Visibility.Visible)
         {
+            view.PushBoundsWhileHidden();
             content.Visibility = Visibility.Visible;
 
             // The arrange syncs the browser's bounds in the same tick as the
@@ -1018,6 +1076,7 @@ public partial class PreviewWindow
     private const string ZoomableContentTag = "zoomable";
 
     private static readonly TimeSpan SavedPageLayoutCap = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan PageRevealRetriggerCap = TimeSpan.FromMilliseconds(25);
 
     // The hidden PDF viewer loads after navigation and paints when shown.
     // The allowance overlaps the rail wait and the browse beat.
@@ -1031,7 +1090,7 @@ public partial class PreviewWindow
         return remaining > TimeSpan.Zero ? Task.Delay(remaining, token) : Task.CompletedTask;
     }
 
-    private static async Task<string> WaitForWebRevealAsync(StagedWebView webView, CancellationToken token)
+    private static async Task<string> WaitForWebRevealAsync(StagedWebView webView, bool retriggerPageReveal, CancellationToken token)
     {
         if (webView.CoreWebView2 is not { } core)
         {
@@ -1049,7 +1108,34 @@ public partial class PreviewWindow
             return await WaitForSavedPageLayoutAsync(core, token) ? "saved-page-layout" : "saved-page-layout-unconfirmed";
         }
 
+        if (retriggerPageReveal && Motion.Enabled)
+        {
+            await RestartPageRevealAnimationAsync(core, token);
+        }
+
         return "navigation";
+    }
+
+    /// <summary>
+    /// A page that navigated hidden during the outgoing fade-out beat may have
+    /// already spent its initial CSS dissolve. Resetting the animation right
+    /// before showing keeps the dissolve synced with visibility without
+    /// leaving inline styles that would fight the exit fade.
+    /// </summary>
+    private static async Task RestartPageRevealAnimationAsync(CoreWebView2 core, CancellationToken token)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(PageRevealRetriggerCap);
+        try
+        {
+            await core.ExecuteScriptAsync(
+                "(()=>{const d=document.documentElement;if(!d)return;d.style.animation='none';void d.offsetWidth;d.style.animation='';})();")
+                .WaitAsync(timeout.Token);
+        }
+        catch
+        {
+            // A page that refuses the reset still reveals at once.
+        }
     }
 
     private static async Task<bool> WaitForSavedPageLayoutAsync(CoreWebView2 core, CancellationToken token)

@@ -126,6 +126,15 @@ public sealed class CardsBehaviorTests
     }
 
     [Fact]
+    public void ListingFooterRoomSnapsToWholeRowsSoTheLastVisibleRowIsNeverClipped()
+    {
+        Assert.Equal(168, FileCardLayout.FooterRoom(180, EntryList.RowHeight));
+        Assert.Equal(196, FileCardLayout.FooterRoom(196, EntryList.RowHeight));
+        Assert.Equal(84, FileCardLayout.FooterRoom(95, EntryList.RowHeight));
+        Assert.Equal(180, FileCardLayout.FooterRoom(180, 0));
+    }
+
+    [Fact]
     public void PackageFactsAreThePublisherThenOneMetaLine()
     {
         var info = new AppPackageInfo("Sketchpad", "Contoso Labs", null, "2.4.1.0", "x64", 1, false, [], 0, null, "app.msix");

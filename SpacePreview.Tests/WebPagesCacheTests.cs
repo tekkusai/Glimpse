@@ -50,6 +50,31 @@ public sealed class WebPagesCacheTests
         Assert.True(DateTime.UtcNow - File.GetLastWriteTimeUtc(path) < TimeSpan.FromHours(1));
     }
 
+    [Fact]
+    public void ADeletedVerifiedCacheEntryIsRebuiltInsteadOfReturned()
+    {
+        var key = $"deleted-{Guid.NewGuid():N}";
+        var renders = 0;
+        var path = HtmlCache.Get("CodeHtml", key, () =>
+        {
+            renders++;
+            return "<html>first</html>";
+        })!;
+
+        Assert.Equal(1, renders);
+        File.Delete(path);
+
+        var rebuilt = HtmlCache.Get("CodeHtml", key, () =>
+        {
+            renders++;
+            return "<html>rebuilt</html>";
+        })!;
+
+        Assert.Equal(2, renders);
+        Assert.Equal(path, rebuilt);
+        Assert.Equal("<html>rebuilt</html>", File.ReadAllText(rebuilt));
+    }
+
     // 2.0 kept Office pictures in a folder nothing has written since. It
     // goes whole, where a listed cache folder would only ever be thinned.
     [Fact]

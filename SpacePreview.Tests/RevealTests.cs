@@ -132,6 +132,20 @@ public sealed class StandInTests
     });
 
     [Fact]
+    public void StandInUpdatesItsLandingWhenSinglePageArrivesLate() => Sta.Run(() =>
+    {
+        var standIn = StandIn.Create(StageFitHint.PageAspect(0.75), 1, 132, 40, null);
+        standIn.Measure(new Size(1000, 800));
+        standIn.Arrange(new Rect(0, 0, 1000, 800));
+        Assert.Equal(137, LayoutInformation.GetLayoutSlot((FrameworkElement)standIn.Children[0]).Left);
+
+        standIn.UpdateLanding(StageFitHint.PageAspect(0.75, singlePage: true), 132);
+        standIn.Measure(new Size(1000, 800));
+        standIn.Arrange(new Rect(0, 0, 1000, 800));
+        Assert.Equal(5, LayoutInformation.GetLayoutSlot((FrameworkElement)standIn.Children[0]).Left);
+    });
+
+    [Fact]
     public void AOnePageDocumentIsKnownWithoutARailCache() => Sta.Run(() =>
     {
         // One page renders no rail, so no rail cache ever counts it. The

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.IO;
 using System.IO.Compression;
@@ -446,9 +447,36 @@ internal static partial class GeneratedHtmlPreview
 
     private static string StableTextContentToken(TextPreview preview)
     {
-        var content = $"{preview.Truncated}|{preview.TotalBytes}|{preview.Text}";
-        var bytes = System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(content));
-        return Convert.ToHexString(bytes);
+        using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(
+            System.Security.Cryptography.HashAlgorithmName.SHA256);
+        Span<byte> header = stackalloc byte[9];
+        header[0] = preview.Truncated ? (byte)1 : (byte)0;
+        BinaryPrimitives.WriteInt64LittleEndian(header[1..], preview.TotalBytes);
+        hash.AppendData(header);
+
+        var text = preview.Text.AsSpan();
+        if (!text.IsEmpty)
+        {
+            const int chunkChars = 4096;
+            var rented = ArrayPool<byte>.Shared.Rent(Encoding.UTF8.GetMaxByteCount(Math.Min(text.Length, chunkChars)));
+            try
+            {
+                var offset = 0;
+                while (offset < text.Length)
+                {
+                    var take = Math.Min(chunkChars, text.Length - offset);
+                    var written = Encoding.UTF8.GetBytes(text.Slice(offset, take), rented);
+                    hash.AppendData(rented, 0, written);
+                    offset += take;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rented);
+            }
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset());
     }
 
     internal static string StableEpubContentToken(string path, CancellationToken cancellationToken)

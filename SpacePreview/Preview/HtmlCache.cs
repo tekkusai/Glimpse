@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -16,6 +17,15 @@ namespace SpacePreview.Preview;
 /// </summary>
 internal static class HtmlCache
 {
+    private const int VerifiedMemoLimit = 256;
+
+    // Paths already written or verified complete in this process, keyed with
+    // their on-disk length and write time so an unchanged hit skips reopening
+    // and seeking to the trailer, while a truncated or overwritten file is
+    // re-checked and repaired.
+    private static readonly ConcurrentDictionary<string, (long Length, long LastWriteTicks)> VerifiedComplete =
+        new(StringComparer.OrdinalIgnoreCase);
+
     // A deterministic build gives each distinct compile its own module id:
     // any change to a template retires every page cached before it, with
     // nothing to remember to bump.
@@ -29,9 +39,8 @@ internal static class HtmlCache
     public static string? Get(string folder, string key, Func<string?> render)
     {
         var path = PathFor(folder, key);
-        if (IsComplete(path))
+        if (TryUseCached(path))
         {
-            KeepFresh(path);
             return path;
         }
 
@@ -42,7 +51,69 @@ internal static class HtmlCache
         }
 
         Write(path, html);
+        RememberComplete(path);
         return path;
+    }
+
+    private static bool TryUseCached(string path)
+    {
+        FileInfo file;
+        try
+        {
+            file = new FileInfo(path);
+            if (!file.Exists || file.Length < 7)
+            {
+                VerifiedComplete.TryRemove(path, out _);
+                return false;
+            }
+        }
+        catch
+        {
+            VerifiedComplete.TryRemove(path, out _);
+            return false;
+        }
+
+        var length = file.Length;
+        var lastWrite = file.LastWriteTimeUtc;
+        if (!VerifiedComplete.TryGetValue(path, out var verified)
+            || verified.Length != length
+            || verified.LastWriteTicks != lastWrite.Ticks)
+        {
+            if (!HasHtmlTrailer(path))
+            {
+                VerifiedComplete.TryRemove(path, out _);
+                return false;
+            }
+        }
+
+        var freshWrite = KeepFresh(path, lastWrite);
+        RememberComplete(path, length, freshWrite.Ticks);
+        return true;
+    }
+
+    private static void RememberComplete(string path)
+    {
+        try
+        {
+            var file = new FileInfo(path);
+            if (file.Exists && file.Length >= 7)
+            {
+                RememberComplete(path, file.Length, file.LastWriteTimeUtc.Ticks);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static void RememberComplete(string path, long length, long lastWriteTicks)
+    {
+        if (VerifiedComplete.Count >= VerifiedMemoLimit)
+        {
+            VerifiedComplete.Clear();
+        }
+
+        VerifiedComplete[path] = (length, lastWriteTicks);
     }
 
     internal static string PathFor(string folder, string key, string? buildStamp = null)
@@ -59,11 +130,18 @@ internal static class HtmlCache
         try
         {
             var file = new FileInfo(path);
-            if (!file.Exists || file.Length < 7)
-            {
-                return false;
-            }
+            return file.Exists && file.Length >= 7 && HasHtmlTrailer(path);
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
+    private static bool HasHtmlTrailer(string path)
+    {
+        try
+        {
             Span<byte> ending = stackalloc byte[7];
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             stream.Seek(-ending.Length, SeekOrigin.End);
@@ -78,20 +156,23 @@ internal static class HtmlCache
 
     // A hit restarts the page's clock, so housekeeping drops what goes
     // unused, never a page that is about to be shown.
-    private static void KeepFresh(string path)
+    private static DateTime KeepFresh(string path, DateTime lastWrite)
     {
         try
         {
             var now = DateTime.UtcNow;
-            if (now - File.GetLastWriteTimeUtc(path) > TimeSpan.FromDays(1))
+            if (now - lastWrite > TimeSpan.FromDays(1))
             {
                 File.SetLastWriteTimeUtc(path, now);
+                return File.GetLastWriteTimeUtc(path);
             }
         }
         catch
         {
             // A page that cannot be touched is still a good page.
         }
+
+        return lastWrite;
     }
 
     private static void Write(string path, string html)

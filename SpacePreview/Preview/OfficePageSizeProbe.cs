@@ -12,9 +12,17 @@ internal static class OfficePageSizeProbe
     private const long MaxXmlBytes = 2 * 1024 * 1024;
 
     /// <summary>OOXML only; other formats keep the default stage until the PDF lands.</summary>
-    public static bool TryReadFirstPageAspect(string path, out double aspect)
+    public static bool TryReadFirstPageAspect(string path, out double aspect) =>
+        TryReadFirstPageAspect(path, out aspect, out _);
+
+    /// <summary>
+    /// OOXML first-page shape plus whether app.xml declares a single page/slide,
+    /// so uncached one-page Office documents open without reserving a page rail.
+    /// </summary>
+    public static bool TryReadFirstPageAspect(string path, out double aspect, out bool singlePage)
     {
         aspect = 0;
+        singlePage = false;
         var kind = FileKinds.GetOfficeKind(path);
         if (kind is not (OfficeKind.Presentation or OfficeKind.Document))
         {
@@ -24,16 +32,43 @@ internal static class OfficePageSizeProbe
         try
         {
             using var archive = ZipFile.OpenRead(path);
-            return kind == OfficeKind.Presentation
+            var ok = kind == OfficeKind.Presentation
                 ? TryReadPresentationAspect(archive, out aspect)
                 : TryReadWordAspect(archive, out aspect);
+            if (ok)
+            {
+                var countElement = kind == OfficeKind.Presentation ? "Slides" : "Pages";
+                singlePage = TryReadAppCount(archive, countElement) == 1;
+            }
+
+            return ok;
         }
         catch
         {
             aspect = 0;
+            singlePage = false;
         }
 
         return false;
+    }
+
+    private static int? TryReadAppCount(ZipArchive archive, string elementName)
+    {
+        try
+        {
+            var app = TryLoadXml(archive, "docProps/app.xml");
+            var text = app?
+                .Descendants()
+                .FirstOrDefault(element => element.Name.LocalName == elementName)
+                ?.Value;
+            return int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var count) && count > 0
+                ? count
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static bool TryReadPresentationAspect(ZipArchive archive, out double aspect)

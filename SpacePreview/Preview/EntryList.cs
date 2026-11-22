@@ -28,7 +28,7 @@ internal sealed record EntryNode(
 /// </summary>
 internal sealed class EntryList
 {
-    private const double RowHeight = 28;
+    internal const double RowHeight = 28;
     private const double Indent = 20;
     private const double ChevronColumn = 16;
     private const double MeterWidth = 56;

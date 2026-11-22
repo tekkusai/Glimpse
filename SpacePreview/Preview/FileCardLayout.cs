@@ -27,13 +27,15 @@ internal sealed class FileCardLayout : Panel
     private readonly UIElement _visual;
     private readonly UIElement _body;
     private readonly FrameworkElement? _footer;
+    private readonly double _footerRowSnap;
     private double _footerNeed;
 
-    public FileCardLayout(UIElement visual, UIElement body, FrameworkElement? footer)
+    public FileCardLayout(UIElement visual, UIElement body, FrameworkElement? footer, double footerRowSnap = 0)
     {
         _visual = visual;
         _body = body;
         _footer = footer;
+        _footerRowSnap = footerRowSnap > 0 ? footerRowSnap : 0;
         Children.Add(visual);
         Children.Add(body);
         if (footer is not null)
@@ -41,6 +43,15 @@ internal sealed class FileCardLayout : Panel
             Children.Add(footer);
         }
     }
+
+    /// <summary>
+    /// Available footer room, snapped down to whole rows when a fixed-row
+    /// listing overflows so the bottom visible row is never sliced in half.
+    /// </summary>
+    internal static double FooterRoom(double available, double rowSnap) =>
+        rowSnap > 0 && available >= rowSnap
+            ? Math.Floor(available / rowSnap) * rowSnap
+            : Math.Max(0, available);
 
     /// <summary>The visual slot's height for a canvas this tall.</summary>
     internal static double SlotHeight(double canvasHeight) =>
@@ -81,7 +92,8 @@ internal sealed class FileCardLayout : Panel
         {
             var top = SlotTop(height, _body.DesiredSize.Height, _footerNeed);
             var footerTop = top + slot + SlotToBody + _body.DesiredSize.Height + BodyToFooter;
-            _footer.Measure(new Size(column, Math.Max(0, height - BottomMargin - footerTop)));
+            var room = FooterRoom(Math.Max(0, height - BottomMargin - footerTop), _footerRowSnap);
+            _footer.Measure(new Size(column, room));
         }
 
         return new Size(width, height);
@@ -101,7 +113,7 @@ internal sealed class FileCardLayout : Panel
         if (_footer is not null)
         {
             var footerTop = bodyTop + bodyHeight + BodyToFooter;
-            var room = Math.Max(0, finalSize.Height - BottomMargin - footerTop);
+            var room = FooterRoom(Math.Max(0, finalSize.Height - BottomMargin - footerTop), _footerRowSnap);
             _footer.Arrange(new Rect(left, footerTop, column, Math.Min(room, Math.Max(_footer.DesiredSize.Height, _footer.MinHeight))));
         }
 

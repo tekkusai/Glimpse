@@ -93,6 +93,7 @@ public partial class PreviewWindow : Window
     private StageFitHint? _stageFitHint;
     private long _stageFitVersion;
     private long _stageHoldLogged;
+    private (long Version, string Path, ConvertedOfficeDocument Document)? _probedOfficeDocument;
 
     private FillSignSurface? _fillSignSurface;
     private FrameworkElement? _fillSignParkedContent;
@@ -540,8 +541,13 @@ public partial class PreviewWindow : Window
                     WarmBrowserForNextGlance();
                 }
 
-                var signature = await Task.Run(() => FileSignatures.Detect(contentPath), token);
                 var useSignatureRouting = FileKinds.CanUseSignatureRouting(contentPath);
+                var needsSignature = useSignatureRouting
+                    || FileKinds.IsImage(contentPath)
+                    || FileKinds.IsBrowserImage(contentPath);
+                var signature = needsSignature
+                    ? await Task.Run(() => FileSignatures.Detect(contentPath), token)
+                    : FileSignatureKind.Unknown;
                 if (FileKinds.IsPdf(contentPath) || (useSignatureRouting && signature == FileSignatureKind.Pdf))
                 {
                     // Everything PDF-backed goes to the Chromium viewer, so
@@ -1113,15 +1119,18 @@ public partial class PreviewWindow : Window
 
             if (FileKinds.IsOffice(contentPath))
             {
-                if (OfficeDocumentPdfConverter.TryGetCached(contentPath) is { } cached
-                    && TryHintPdfStage(cached.DocumentPath, version))
+                if (OfficeDocumentPdfConverter.TryGetCached(contentPath) is { } cached)
                 {
-                    return;
+                    _probedOfficeDocument = (version, contentPath, cached);
+                    if (TryHintPdfStage(cached.DocumentPath, version))
+                    {
+                        return;
+                    }
                 }
 
-                if (OfficePageSizeProbe.TryReadFirstPageAspect(contentPath, out var aspect))
+                if (OfficePageSizeProbe.TryReadFirstPageAspect(contentPath, out var aspect, out var singlePage))
                 {
-                    SetStageFitHint(StageFitHint.PageAspect(aspect), version);
+                    SetStageFitHint(StageFitHint.PageAspect(aspect, singlePage), version);
                 }
             }
         }

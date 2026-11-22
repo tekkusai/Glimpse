@@ -22,7 +22,18 @@ public partial class PreviewWindow
     {
         if (OfficeDocumentPdfConverter.IsAvailable)
         {
-            var cached = await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), token);
+            ConvertedOfficeDocument? cached;
+            if (_probedOfficeDocument is { Version: var probedVersion, Path: var probedPath, Document: var probedDoc }
+                && probedVersion == version
+                && string.Equals(probedPath, path, StringComparison.OrdinalIgnoreCase))
+            {
+                cached = probedDoc;
+            }
+            else
+            {
+                cached = await Task.Run(() => OfficeDocumentPdfConverter.TryGetCached(path, kind), token);
+            }
+
             if (cached is not null)
             {
                 return BuildConvertedOfficePreview(cached, null, version, token);
@@ -74,9 +85,9 @@ public partial class PreviewWindow
             ? new Grid { Background = Brushes.Transparent }
             : new Grid().Themed(Panel.BackgroundProperty, "Theme.CanvasBg");
         var initialPath = document.Sheets is { Count: > 1 } sheets ? sheets[0].Path : document.DocumentPath;
-        if (!isHtml && PdfPageSizeProbe.TryReadFirstPageSize(initialPath, out var pageWidth, out var pageHeight))
+        if (!isHtml)
         {
-            SetStageFitHint(StageFitHint.PageAspect(pageWidth / pageHeight), version);
+            HintPdfStage(PdfPageSizeProbe.Read(initialPath), version);
         }
 
         var webView = CreateWebView(

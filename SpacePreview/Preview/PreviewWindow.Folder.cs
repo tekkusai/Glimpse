@@ -114,7 +114,7 @@ public partial class PreviewWindow
             Content = list.Element
         };
         StyleScrollViewer(listScroll);
-        return BuildFileCard(visual, title, [facts], listScroll);
+        return BuildFileCard(visual, title, [facts], listScroll, footerRowSnap: EntryList.RowHeight);
     }
 
     private static string FolderTitle(string path)

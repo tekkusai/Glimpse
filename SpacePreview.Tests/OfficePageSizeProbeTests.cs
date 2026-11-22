@@ -119,6 +119,40 @@ public sealed class OfficePageSizeProbeTests
         Assert.Equal(0, aspect);
     }
 
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(3, false)]
+    public void ReadsSinglePageFlagFromWordAppProperties(int pages, bool expectedSinglePage)
+    {
+        using var temp = new TempDirectory();
+        var path = Path.Combine(temp.Path, $"doc-{pages}.docx");
+        using (var archive = ZipFile.Open(path, ZipArchiveMode.Create))
+        {
+            using (var writer = new StreamWriter(archive.CreateEntry("word/document.xml").Open()))
+            {
+                writer.Write("""
+                    <?xml version="1.0" encoding="UTF-8"?>
+                    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                      <w:body>
+                        <w:sectPr><w:pgSz w:w="12240" w:h="15840"/></w:sectPr>
+                      </w:body>
+                    </w:document>
+                    """);
+            }
+
+            using (var writer = new StreamWriter(archive.CreateEntry("docProps/app.xml").Open()))
+            {
+                writer.Write($"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Properties><Pages>{pages}</Pages></Properties>");
+            }
+        }
+
+        var ok = OfficePageSizeProbe.TryReadFirstPageAspect(path, out var aspect, out var singlePage);
+
+        Assert.True(ok);
+        Assert.Equal(12240.0 / 15840.0, aspect, precision: 3);
+        Assert.Equal(expectedSinglePage, singlePage);
+    }
+
     private static void WriteZipEntry(string path, string entryName, string text)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);

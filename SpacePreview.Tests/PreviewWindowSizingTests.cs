@@ -368,10 +368,10 @@ public sealed class PreviewWindowSizingTests
         var windowSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
 
         Assert.Contains("TryHintPdfStage(contentPath, version)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("PdfPageSizeProbe.TryReadFirstPageSize(initialPath", windowSource, StringComparison.Ordinal);
+        Assert.Contains("HintPdfStage(PdfPageSizeProbe.Read(initialPath), version)", windowSource, StringComparison.Ordinal);
         Assert.Contains("OfficePageSizeProbe.TryReadFirstPageAspect(contentPath", windowSource, StringComparison.Ordinal);
         Assert.Contains("Mp4CodecSniffer.TryRead(contentPath)", windowSource, StringComparison.Ordinal);
-        Assert.Contains("StageFitHint.PageAspect(pageWidth / pageHeight)", windowSource, StringComparison.Ordinal);
+        Assert.Contains("StageFitHint.PageAspect(page.WidthPoints / page.HeightPoints, singlePage: page.PageCount == 1)", windowSource, StringComparison.Ordinal);
     }
 
     // The image lane keeps the same rule where it runs: ImageRouteTests

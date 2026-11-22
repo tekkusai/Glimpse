@@ -1434,7 +1434,11 @@ internal static class OfficeDocumentPdfConverter
     {
         try
         {
-            Directory.SetLastWriteTimeUtc(directory, DateTime.UtcNow);
+            var now = DateTime.UtcNow;
+            if (now - Directory.GetLastWriteTimeUtc(directory) > TimeSpan.FromDays(1))
+            {
+                Directory.SetLastWriteTimeUtc(directory, now);
+            }
         }
         catch
         {

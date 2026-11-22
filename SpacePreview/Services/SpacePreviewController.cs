@@ -92,6 +92,7 @@ internal sealed class SpacePreviewController : IDisposable
     private volatile bool _previewVisible;
     private ExplorerSelection? _officeNeighborSelection;
     private OfficeNeighborWarmUp? _officeNeighbors;
+    private OfficeNeighborWarmUp? _drainingOfficeNeighbors;
 
     // The hook thread and the dispatcher share no lock. The dispatcher
     // publishes _keyState whole and the hook thread reads it; the hook
@@ -1514,6 +1515,12 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
+        // Stop any pending delay timer from the previous file right away so
+        // it cannot fire mid-browse and spawn a conversion that the reveal
+        // will immediately replace. An already-running conversion stays alive
+        // so this preview can attach to it or let it finish cleanly.
+        _officeNeighbors?.CancelSchedule();
+
         if (fileDialogMode)
         {
             ApplyCommonFileDialogContext(selection);
@@ -1558,10 +1565,12 @@ internal sealed class SpacePreviewController : IDisposable
             return;
         }
 
-        // The last file's warm-up gives way only now: if it was converting
-        // this file, this preview has already joined that job.
+        // The last file's warm-up gives way here. If it already has a
+        // conversion in flight, let that single job finish under the short
+        // grace instead of killing and restarting LibreOffice while the user
+        // flips between already-cached files.
         _officeNeighborSelection = null;
-        CancelOfficeNeighbors();
+        ReleasePreviousOfficeNeighbors();
         if (!OfficeDocumentPdfConverter.IsAvailable)
         {
             return;
@@ -1587,6 +1596,19 @@ internal sealed class SpacePreviewController : IDisposable
         public CancellationToken ScheduleToken => _scheduleCts.Token;
         public CancellationToken InFlightToken => _inFlightCts.Token;
 
+        public void CancelSchedule()
+        {
+            lock (_sync)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _scheduleCts.Cancel();
+            }
+        }
+
         public bool TryEnterConversion()
         {
             lock (_sync)
@@ -1609,24 +1631,26 @@ internal sealed class SpacePreviewController : IDisposable
             }
         }
 
-        public void ReleaseOnHide(TimeSpan grace)
+        public void ReleaseOnHide(TimeSpan grace) => ReleaseWithGrace(grace);
+
+        internal bool ReleaseWithGrace(TimeSpan grace)
         {
             lock (_sync)
             {
                 if (_disposed)
                 {
-                    return;
+                    return false;
                 }
 
                 _scheduleCts.Cancel();
                 if (_conversionActive && grace > TimeSpan.Zero)
                 {
                     _inFlightCts.CancelAfter(grace);
+                    return true;
                 }
-                else
-                {
-                    _inFlightCts.Cancel();
-                }
+
+                _inFlightCts.Cancel();
+                return false;
             }
         }
 
@@ -1700,12 +1724,37 @@ internal sealed class SpacePreviewController : IDisposable
         {
             DiagnosticLog.Write($"office neighbor warm-up failed: {ex.GetType().Name}: {ex.Message}");
         }
+        finally
+        {
+            warmUp.StopNow();
+        }
+    }
+
+    private void ReleasePreviousOfficeNeighbors()
+    {
+        var previous = Interlocked.Exchange(ref _officeNeighbors, null);
+        if (previous is null)
+        {
+            return;
+        }
+
+        if (previous.ReleaseWithGrace(OfficeNeighborHideGrace))
+        {
+            var older = Interlocked.Exchange(ref _drainingOfficeNeighbors, previous);
+            older?.StopNow();
+        }
+        else
+        {
+            previous.StopNow();
+        }
     }
 
     private void CancelOfficeNeighbors()
     {
         var warmUp = Interlocked.Exchange(ref _officeNeighbors, null);
         warmUp?.StopNow();
+        var draining = Interlocked.Exchange(ref _drainingOfficeNeighbors, null);
+        draining?.StopNow();
     }
 
     private void ApplyCommonFileDialogContext(ExplorerSelection selection)
