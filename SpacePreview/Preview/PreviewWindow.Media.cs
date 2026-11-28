@@ -29,6 +29,9 @@ namespace SpacePreview.Preview;
 
 public partial class PreviewWindow
 {
+    private AudioPreviewSurface? FindAudioSurface() =>
+        PreviewContent.Content as AudioPreviewSurface ?? FindVisualChild<AudioPreviewSurface>(PreviewContent);
+
     /// <summary>
     /// Space over a media preview always means play/pause. The host toggles
     /// it directly (the hook sees Space before the browser does), so the
@@ -37,8 +40,18 @@ public partial class PreviewWindow
     /// </summary>
     public bool TryToggleMediaPlayback()
     {
-        if (!IsMediaPreview
-            || FindVisualChild<WebView2>(PreviewContent) is not { CoreWebView2: { } core })
+        if (!IsMediaPreview)
+        {
+            return false;
+        }
+
+        if (FindAudioSurface() is { IsRetired: false } audio)
+        {
+            audio.TogglePlayback();
+            return true;
+        }
+
+        if (FindVisualChild<WebView2>(PreviewContent) is not { CoreWebView2: { } core })
         {
             return false;
         }
@@ -71,6 +84,27 @@ public partial class PreviewWindow
         if (!IsPinned && vk is NativeMethods.VK_LEFT or NativeMethods.VK_RIGHT)
         {
             return false;
+        }
+
+        if (FindAudioSurface() is { IsRetired: false } audio)
+        {
+            switch (vk)
+            {
+                case NativeMethods.VK_LEFT:
+                    audio.Skip(-1);
+                    return true;
+                case NativeMethods.VK_RIGHT:
+                    audio.Skip(1);
+                    return true;
+                case NativeMethods.VK_UP:
+                    audio.AdjustVolume(0.05);
+                    return true;
+                case NativeMethods.VK_DOWN:
+                    audio.AdjustVolume(-0.05);
+                    return true;
+                default:
+                    return false;
+            }
         }
 
         // Seeking goes through the page so keys and buttons share one step.
@@ -122,9 +156,26 @@ public partial class PreviewWindow
             new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    private async Task<FrameworkElement> BuildMediaPreviewAsync(string path, long version, CancellationToken token)
+    private async Task<FrameworkElement> BuildMediaPreviewAsync(string path, long version, CancellationToken token, bool forceWeb = false)
     {
         var settings = Settings.Current;
+        if (!forceWeb && FileKinds.UsesNativeAudioPreview(path))
+        {
+            try
+            {
+                return new AudioPreviewSurface(
+                    path,
+                    settings.MediaVolume,
+                    settings.MediaMuted,
+                    token,
+                    ex => { _ = FallbackToWebAudioAsync(path, version, token); });
+            }
+            catch (Exception ex)
+            {
+                DiagnosticLog.Write($"native audio init failed {path}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         var source = await Task.Run(
             () => MediaPlayerPage.Build(path, settings.MediaVolume, settings.MediaMuted),
             token);
@@ -145,7 +196,7 @@ public partial class PreviewWindow
             $"web media {path}",
             _ =>
             {
-                if (IsCurrentContentPath(path))
+                if (!token.IsCancellationRequested && version == _loadVersion && IsCurrentContentPath(path))
                 {
                     SetPreviewContent(BuildMediaFailurePreview(path, null), null);
                 }
@@ -178,6 +229,37 @@ public partial class PreviewWindow
             });
         grid.Children.Add(webView);
         return grid;
+    }
+
+    private async Task FallbackToWebAudioAsync(string path, long version, CancellationToken token)
+    {
+        if (token.IsCancellationRequested || version != _loadVersion || !IsCurrentContentPath(path))
+        {
+            return;
+        }
+
+        try
+        {
+            var web = await BuildMediaPreviewAsync(path, version, token, forceWeb: true);
+            if (token.IsCancellationRequested || version != _loadVersion || !IsCurrentContentPath(path))
+            {
+                WebViewIn(web)?.Dispose();
+                return;
+            }
+
+            SetPreviewContent(web, null);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"web audio fallback failed {path}: {ex.GetType().Name}: {ex.Message}");
+            if (!token.IsCancellationRequested && version == _loadVersion && IsCurrentContentPath(path))
+            {
+                SetPreviewContent(BuildMediaFailurePreview(path, null), null);
+            }
+        }
     }
 
     /// <summary>
@@ -238,7 +320,7 @@ public partial class PreviewWindow
                     && reasonElement.ValueKind == JsonValueKind.String
                         ? reasonElement.GetString()
                         : null;
-                _ = ShowMediaFailureAsync(path, detail, reason);
+                _ = ShowMediaFailureAsync(path, version, token, detail, reason);
                 return;
             }
 
@@ -283,12 +365,12 @@ public partial class PreviewWindow
     /// The failure card gives help for the file's codecs, and the log names
     /// them. They are read from the file, off this thread.
     /// </summary>
-    private async Task ShowMediaFailureAsync(string path, string? detail, string? reason)
+    private async Task ShowMediaFailureAsync(string path, long version, CancellationToken token, string? detail, string? reason)
     {
         var codecs = await Task.Run(() => Mp4CodecSniffer.TryRead(path));
         var codecText = codecs is null ? string.Empty : $" codecs {codecs.DiagnosticText}";
         DiagnosticLog.Write($"media decode failed {path}: {detail}{(string.IsNullOrWhiteSpace(reason) ? string.Empty : $" {reason}")}{codecText}");
-        if (IsCurrentContentPath(path))
+        if (!token.IsCancellationRequested && version == _loadVersion && IsCurrentContentPath(path))
         {
             SetPreviewContent(BuildMediaFailurePreview(path, codecs), null);
         }

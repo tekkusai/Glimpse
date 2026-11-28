@@ -13,10 +13,10 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.9/Glimpse-Setup-3.0.9.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
 </p>
 
-<p align="center"><sub>Free · Windows 10 and 11 · <a href="https://github.com/tekkusai/Glimpse/releases/latest">What's new in 3.0.9</a></sub></p>
+<p align="center"><sub>Free · Windows 10 and 11 · <a href="https://github.com/tekkusai/Glimpse/releases/latest">What's new in 3.1.0</a></sub></p>
 
 <p align="center">
   <img src="docs/readme/hero.png" alt="A photo and a PDF open in Glimpse">
@@ -102,7 +102,7 @@
 <h2 align="center">Get Glimpse</h2>
 
 <p align="center">
-  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.0.9/Glimpse-Setup-3.0.9.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
+  <a href="https://github.com/tekkusai/Glimpse/releases/download/v3.1.0/Glimpse-Setup-3.1.0.exe"><img src="docs/readme/download.png" width="232" alt="Download for Windows"></a>
 </p>
 
 <p align="center">
@@ -140,7 +140,7 @@ Select several files before you press Space and the arrow keys step through only
 
 - **Photos and images.** JPEG, PNG, HEIC, WebP, AVIF, SVG and Photoshop files (PSD and PSB). Images zoom around the cursor, and Ctrl+R turns a photo and saves the turn.
 - **Camera RAW.** Sony, Canon, Nikon, Fujifilm, DNG and other RAW files, through Windows' Raw Image Extension, which Glimpse offers when it is missing. A RAW file is never changed.
-- **PDFs and Illustrator files.** In the WebView2 PDF viewer, with a page rail beside them.
+- **PDFs and Illustrator files.** In Glimpse's built-in PDF viewer, with a page rail beside them.
 - **Word, Excel and PowerPoint.** Through LibreOffice or OpenOffice. A big deck shows its first slides in a few seconds while the rest converts. Without either engine, Glimpse shows the text.
 - **Text.** Markdown, code with syntax colors, JSON, logs and plain text. A log of any size opens on its first lines and reads on as you scroll, and End goes to its last line.
 - **Web pages.** Your own saved pages, with scripts off and nothing loaded from the internet.
@@ -156,7 +156,7 @@ Photos, video and pages take their own shape. Anything you scroll through opens 
 
 Glimpse reads a file only when you ask to preview it. Files never leave your PC, and Glimpse doesn't change their default apps. The only request Glimpse makes on its own is to GitHub, to look for a new release.
 
-The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Before a document is converted, Glimpse removes links that point outside the file from modern Office and OpenDocument files, and the converter's web access is blocked. Old-format Office files (`.doc`, `.xls`, `.ppt`, `.rtf`) can't be cleaned that way yet: one that links a picture from a shared folder can make the converter contact that folder when the file is previewed.
+The Space shortcut uses a low-level keyboard hook, installed only while File Explorer, the desktop, a file dialog or Glimpse itself is in front. Before a document is converted, Glimpse removes links that point outside the file from modern Office and OpenDocument files, strips known fetchable external fields, linked OLE objects and templates from a private snapshot of RTF files, and blocks the converter's web access. Old-format Office files (`.doc`, `.xls`, `.ppt`, and exotic `.rtf` constructs outside standard fields) still can't be guaranteed clean: one that links a picture from a shared folder can make the converter contact that folder when the file is previewed.
 
 Updates install while you're away from your PC, never while a preview is open or a game or presentation is full screen, and only when their signature matches the key built into the app. Settings has a switch to turn this off and an Install now button. Diagnostic logs stay in `%LOCALAPPDATA%\Glimpse`, rotate by size, and hide file paths.
 

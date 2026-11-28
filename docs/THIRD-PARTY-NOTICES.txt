@@ -1,6 +1,6 @@
 Glimpse includes and uses third-party components at runtime.
 
-PDF rendering is provided through Docnet.Core 2.6.0 and its bundled PDFium binary. The PDFium license and notices are published as LICENSE. Web-backed previews use Microsoft WebView2; its license and notice are published under THIRD-PARTY. Syntax highlighting uses TextMateSharp and Onigwrap; their notices are also published under THIRD-PARTY.
+PDF viewing is provided through Mozilla PDF.js (pdfjs-dist 4.10.38, Apache License 2.0); its license is published under THIRD-PARTY as pdfjs-dist-LICENSE.txt. PDF page thumbnails, Fill & Sign rendering, and rewrite proofs are provided through Docnet.Core 2.6.0 and its bundled PDFium binary. The PDFium license and notices are published as LICENSE. Web-backed previews use Microsoft WebView2; its license and notice are published under THIRD-PARTY. Syntax highlighting uses TextMateSharp and Onigwrap; their notices are also published under THIRD-PARTY.
 
 The remaining dependency licenses follow.
 

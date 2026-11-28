@@ -154,17 +154,16 @@ public sealed class PdfLaneRailTests
         Assert.Equal(new[] { "PdfViewerLink.cs", "Program.cs" }, Callers(sources, "\"--prove-pdf-scale\""));
     }
 
-    // The first UI Automation question turns on Chromium's accessibility
-    // tree: about 3.5 s of renderer CPU on an 81-page document, paid on
-    // every open, for a highlight nobody looked at. Only reading pays it.
+    // Our owned PDF viewer reports page movement directly over postMessage,
+    // so Glimpse never turns on Chromium's UI Automation accessibility tree.
     [Fact]
-    public void PageSyncAsksTheViewerOnlyOnceTheUserReads()
+    public void PageSyncUsesDirectViewerMessagesInsteadOfUiAutomation()
     {
-        var sync = TestSource.Method(@"SpacePreview\Preview\PreviewWindow.xaml.cs", "private async void SyncPdfPageFromViewer");
+        var pdfSource = TestSource.Read(@"SpacePreview\Preview\PreviewWindow.Pdf.cs");
 
-        var gate = sync.IndexOf("if (!state.Reading)", StringComparison.Ordinal);
-        var ask = sync.IndexOf("ProbePdfPageAsync(state)", StringComparison.Ordinal);
-        Assert.True(gate >= 0 && ask > gate, "Page sync must not ask the viewer before the user reads.");
+        Assert.DoesNotContain("AutomationElement", pdfSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("TreeScope.Descendants", pdfSource, StringComparison.Ordinal);
+        Assert.Contains("HandlePdfViewerMessage", pdfSource, StringComparison.Ordinal);
     }
 
     private static string[] Callers(List<(string Name, string Text)> sources, string call) =>

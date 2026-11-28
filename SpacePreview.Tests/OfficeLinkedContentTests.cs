@@ -173,6 +173,143 @@ public sealed class OfficeLinkedContentTests
         Assert.False(HoldsAPicture(pdf));
     }
 
+    [Fact]
+    public void RtfFetchableFieldsLinkedObjectsAndTemplatesAreCutAndHyperlinksKept()
+    {
+        using var temp = new TempDirectory();
+        // Renamed as .doc on purpose: RTF sniffing protects disguised .doc files too.
+        var source = Path.Combine(temp.Path, "linked.doc");
+        var rtf =
+            @"{\rtf1\ansi\deff0"
+            + @"{\*\template \\preview-server\share\evil.dotm}"
+            + @"Hello {\field{\*\fldinst HYPERLINK ""https://example.com/safe""}{\fldrslt safe link}}."
+            + @"{\field{\*\fldinst INCLUDEPICTURE ""\\\\preview-server\\share\\pixel.png""}{\fldrslt }}"
+            + @"{\field{\*\fldinst \'49NCLUDETEXT ""C:\\secret.txt""}{\fldrslt }}"
+            + @"{\field{\*\fldinst {\f0 DDEAUTO c:\\windows\\system32\\cmd.exe ""/k calc""}}{\fldrslt }}"
+            + @"{\object\objlink{\*\objclass Package}{\*\objdata 0105}}"
+            + @"{\pict\bin4}{{} Keep after bin}"
+            + @" Tail text.}";
+        File.WriteAllText(source, rtf, Encoding.ASCII);
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(5, prepared.ExternalRelationshipsRemoved);
+        Assert.NotEqual(source, prepared.Path);
+        var sanitized = File.ReadAllText(prepared.Path, Encoding.ASCII);
+        Assert.DoesNotContain("evil.dotm", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("INCLUDEPICTURE", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret.txt", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("DDEAUTO", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(@"\objlink", sanitized, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("https://example.com/safe", sanitized, StringComparison.Ordinal);
+        Assert.Contains("safe link", sanitized, StringComparison.Ordinal);
+        Assert.Contains("Keep after bin", sanitized, StringComparison.Ordinal);
+        Assert.Contains("Tail text.", sanitized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AnRtfWithoutLinksIsConvertedFromAPrivateSnapshot()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "plain.rtf");
+        const string original = @"{\rtf1\ansi Plain {\field{\*\fldinst HYPERLINK ""https://example.com/""}{\fldrslt link}} only.}";
+        File.WriteAllText(source, original, Encoding.ASCII);
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        // Always hands the engine a private snapshot so the source cannot change after scanning.
+        Assert.NotEqual(source, prepared.Path);
+        Assert.Equal(0, prepared.ExternalRelationshipsRemoved);
+        Assert.Equal(original, File.ReadAllText(prepared.Path, Encoding.ASCII));
+    }
+
+    [Fact]
+    public void RtfUnicodeEscapesUcFallbacksAndMalformedGroupsAreHandledFailClosed()
+    {
+        using var temp = new TempDirectory();
+        var source = Path.Combine(temp.Path, "unicode.rtf");
+        var rtf =
+            @"{\rtf1\ansi"
+            + @"{\field{\*\fldinst \u81?UOTE ""kept quote""}{\fldrslt kept quote}}"
+            + @"{\field{\*\fldinst \u73?NCLUDEPICTURE ""file:///C:/pixel.png""}{\fldrslt }}"
+            + @"{\field{\*\fldinst \uc2\u73??NCLUDETEXT ""\\\\preview-server\\share\\x.txt""}{\fldrslt }}"
+            + @"{\field{\*\fldinst CUSTOMFIELD ""\\\\preview-server\\share\\y.png""}{\fldrslt }}"
+            + @"}";
+        File.WriteAllText(source, rtf, Encoding.ASCII);
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+
+        Assert.Equal(3, prepared.ExternalRelationshipsRemoved);
+        var sanitized = File.ReadAllText(prepared.Path, Encoding.ASCII);
+        Assert.Contains("kept quote", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("pixel.png", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("x.txt", sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain("y.png", sanitized, StringComparison.Ordinal);
+
+        // Malformed unbalanced braces fail closed instead of passing through to LibreOffice.
+        var broken = Path.Combine(temp.Path, "broken.rtf");
+        File.WriteAllText(broken, @"{\rtf1\ansi {\field{\*\fldinst INCLUDEPICTURE ""x""}", Encoding.ASCII);
+        Assert.Throws<InvalidDataException>(() =>
+            OfficePreviewSourceSanitizer.Prepare(broken, Path.Combine(temp.Path, "staging"), CancellationToken.None));
+
+        // Excessive nesting depth fails closed in linear time.
+        var tooDeep = Path.Combine(temp.Path, "deep.rtf");
+        File.WriteAllText(tooDeep, @"{\rtf1" + new string('{', 4200) + new string('}', 4200) + "}", Encoding.ASCII);
+        Assert.Throws<InvalidDataException>(() =>
+            OfficePreviewSourceSanitizer.Prepare(tooDeep, Path.Combine(temp.Path, "staging"), CancellationToken.None));
+
+        // Truncated or unreadable .rtf fails closed instead of reaching LibreOffice unchecked.
+        var truncated = Path.Combine(temp.Path, "truncated.rtf");
+        File.WriteAllText(truncated, "{", Encoding.ASCII);
+        Assert.Throws<InvalidDataException>(() =>
+            OfficePreviewSourceSanitizer.Prepare(truncated, Path.Combine(temp.Path, "staging"), CancellationToken.None));
+
+        // Unsupported \uc fallback counts fail closed instead of silently clamping.
+        var badUc = Path.Combine(temp.Path, "baduc.rtf");
+        File.WriteAllText(badUc, @"{\rtf1\ansi\uc50 hello}", Encoding.ASCII);
+        Assert.Throws<InvalidDataException>(() =>
+            OfficePreviewSourceSanitizer.Prepare(badUc, Path.Combine(temp.Path, "staging"), CancellationToken.None));
+
+        // Overflowing \bin length fails closed without wrapping past EOF or backward.
+        var badBin = Path.Combine(temp.Path, "badbin.rtf");
+        File.WriteAllText(badBin, @"{\rtf1\ansi\bin9223372036854775807 hello}", Encoding.ASCII);
+        Assert.Throws<InvalidDataException>(() =>
+            OfficePreviewSourceSanitizer.Prepare(badBin, Path.Combine(temp.Path, "staging"), CancellationToken.None));
+
+        // 100 KB body at nesting depth 512 scans in O(N) time without per-byte stack walks.
+        var nested = Encoding.ASCII.GetBytes(@"{\rtf1" + new string('{', 512) + new string('a', 100_000) + new string('}', 512) + "}");
+        var sw = Stopwatch.StartNew();
+        var cleaned = OfficePreviewSourceSanitizer.SanitizeRtfBytes(nested, CancellationToken.None, out var removed);
+        sw.Stop();
+        Assert.Equal(0, removed);
+        Assert.Equal(nested, cleaned);
+        Assert.True(sw.Elapsed < TimeSpan.FromMilliseconds(250), $"Nested 100 KB RTF scan took {sw.Elapsed.TotalMilliseconds:0}ms");
+    }
+
+    [Fact]
+    public void ALinkedPictureInAnRtfIsCutBeforeTheEngineSeesIt()
+    {
+        if (FindEngine() is not { } soffice)
+        {
+            return;
+        }
+
+        using var temp = new TempDirectory();
+        var picture = WriteNoisePicture(temp.Path);
+        var escapedPicture = picture.Replace(@"\", @"\\", StringComparison.Ordinal);
+        var source = Path.Combine(temp.Path, "linked.rtf");
+        File.WriteAllText(
+            source,
+            $"{{\\rtf1\\ansi Linked picture {{\\field{{\\*\\fldinst INCLUDEPICTURE \"{escapedPicture}\" \\\\* MERGEFORMAT}}{{\\fldrslt }}}}}}",
+            Encoding.ASCII);
+
+        using var prepared = OfficePreviewSourceSanitizer.Prepare(source, Path.Combine(temp.Path, "staging"), CancellationToken.None);
+        var pdf = ConvertToPdf(soffice, prepared.Path, temp.Path);
+
+        Assert.Equal(1, prepared.ExternalRelationshipsRemoved);
+        Assert.False(HoldsAPicture(pdf));
+    }
+
     private static string LinkedPicture(string picture, string placement) =>
         $"""<draw:frame draw:name="linked" {placement} svg:width="8cm" svg:height="8cm"><draw:image xlink:href="{new Uri(picture).AbsoluteUri}" xlink:type="simple" xlink:show="embed" xlink:actuate="onLoad"/></draw:frame>""";
 

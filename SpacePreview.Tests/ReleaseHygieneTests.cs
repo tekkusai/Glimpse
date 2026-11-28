@@ -7,15 +7,15 @@ namespace SpacePreview.Tests;
 public sealed class ReleaseHygieneTests
 {
     [Fact]
-    public void ProductAndInstallerVersionsAre309()
+    public void ProductAndInstallerVersionsAre310()
     {
         var project = TestSource.Read(@"SpacePreview\SpacePreview.csproj");
         var manifest = TestSource.Read(@"SpacePreview\app.manifest");
         var installer = TestSource.Read(@"SpacePreview\installer\Glimpse.iss");
 
-        Assert.Contains("<Version>3.0.9</Version>", project, StringComparison.Ordinal);
-        Assert.Contains("version=\"3.0.9.0\"", manifest, StringComparison.Ordinal);
-        Assert.Contains("#define MyAppVersion \"3.0.9\"", installer, StringComparison.Ordinal);
+        Assert.Contains("<Version>3.1.0</Version>", project, StringComparison.Ordinal);
+        Assert.Contains("version=\"3.1.0.0\"", manifest, StringComparison.Ordinal);
+        Assert.Contains("#define MyAppVersion \"3.1.0\"", installer, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -108,7 +108,9 @@ public sealed class ReleaseHygieneTests
         Assert.Contains("Microsoft.Web.WebView2-LICENSE.txt", project, StringComparison.Ordinal);
         Assert.Contains("Microsoft.Web.WebView2-NOTICE.txt", project, StringComparison.Ordinal);
         Assert.Contains("Onigwrap-THIRD-PARTY-NOTICES.txt", project, StringComparison.Ordinal);
+        Assert.Contains("pdfjs-dist-LICENSE.txt", project, StringComparison.Ordinal);
         Assert.Contains("CopyToPublishDirectory=\"PreserveNewest\"", project, StringComparison.Ordinal);
+        Assert.Contains("Mozilla PDF.js", notices, StringComparison.Ordinal);
         Assert.Contains("Copyright (c) 2018 Modestas Petravicius", notices, StringComparison.Ordinal);
         Assert.Contains("Copyright (c) 2014 Adam Hathcock", notices, StringComparison.Ordinal);
         Assert.Contains("Copyright (c) 2018-2019, Alexandre Mutel", notices, StringComparison.Ordinal);
@@ -206,8 +208,8 @@ public sealed class ReleaseHygieneTests
         using var temp = new TempDirectory();
         using var throwaway = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var key = temp.CreateFile("throwaway.pem", throwaway.ExportPkcs8PrivateKeyPem());
-        var setup = Path.Combine(temp.Path, "Glimpse-Setup-3.0.9.exe");
-        File.WriteAllBytes(setup, SetupImage.Create("3.0.9"));
+        var setup = Path.Combine(temp.Path, "Glimpse-Setup-3.1.0.exe");
+        File.WriteAllBytes(setup, SetupImage.Create("3.1.0"));
 
         var (exitCode, output) = await SignAsync(TestSource.FilePath(@"SpacePreview\scripts\sign-installer.ps1"), setup, key);
 

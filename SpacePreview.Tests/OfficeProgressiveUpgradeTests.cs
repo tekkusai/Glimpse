@@ -235,6 +235,8 @@ public sealed class OfficeProgressiveUpgradeTests
         private readonly List<string?> _said = [];
         private OfficeConversionJob _job = null!;
 
+        private WebView2 _initialViewer = null!;
+
         public PreviewWindow Window { get; private set; } = null!;
         public object Rail { get; private set; } = null!;
         public string WholePath { get; private set; } = null!;
@@ -253,6 +255,7 @@ public sealed class OfficeProgressiveUpgradeTests
             deck.Rail = await UntilAsync(
                 () => Fields.Get<bool>(deck.Window, "_loadFinished") ? Fields.Get<object?>(deck.Window, "_activePdfRail") : null,
                 "The PDF never showed.");
+            deck._initialViewer = deck.Viewer;
 
             // The rail's thumbnails come from a helper this host cannot start.
             if (Fields.Get<object?>(deck.Rail, "Document") is null)
@@ -307,14 +310,7 @@ public sealed class OfficeProgressiveUpgradeTests
         /// <summary>Moves the viewer to a slide and waits until the viewer itself says it is there.</summary>
         public async Task ScrollToSlideAsync(int slide)
         {
-            var first = Fields.Get<WebView2>(Rail, "WebView");
-
-            // A staged jump goes only where the rail points.
-            Fields.Call(Window, "SetPdfCurrentPageFromViewer", Rail, slide, false);
-            Fields.Call(Window, "StagePdfViewerJump", Rail, slide);
-            await UntilAsync(
-                () => Fields.Get<WebView2>(Rail, "WebView") is var shown && !ReferenceEquals(shown, first) ? shown : null,
-                "The viewer never moved.");
+            Fields.Call(Window, "JumpPdfToPage", Rail, slide);
             await ShowsSlideAsync(slide);
         }
 
@@ -327,7 +323,7 @@ public sealed class OfficeProgressiveUpgradeTests
         {
             var replacement = await UntilAsync(Replacement, "The whole deck never took the viewer's place.");
             return int.Parse(
-                System.Text.RegularExpressions.Regex.Match(replacement.Source.Fragment, @"page=(\d+)").Groups[1].Value,
+                System.Text.RegularExpressions.Regex.Match(replacement.Source.Query, @"page=(\d+)").Groups[1].Value,
                 System.Globalization.CultureInfo.InvariantCulture);
         }
 
@@ -393,9 +389,8 @@ public sealed class OfficeProgressiveUpgradeTests
 
         private WebView2? Replacement()
         {
-            var whole = new Uri(WholePath).AbsoluteUri;
-            return Fields.Get<Grid>(Rail, "Surface").Children.OfType<WebView2>()
-                .FirstOrDefault(view => view.Source?.AbsoluteUri.StartsWith(whole, StringComparison.OrdinalIgnoreCase) == true);
+            var current = Viewer;
+            return !ReferenceEquals(current, _initialViewer) ? current : null;
         }
 
         private async Task<int> ReadPageAsync()

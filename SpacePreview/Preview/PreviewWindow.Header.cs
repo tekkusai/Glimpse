@@ -965,8 +965,7 @@ public partial class PreviewWindow
     {
         var core = webView.CoreWebView2;
         if (_contextMenu is not { } menu
-            || RootChrome.ContextMenu is null
-            || IsPdfViewerSource(core.Source ?? string.Empty))
+            || RootChrome.ContextMenu is null)
         {
             ArmWebContextMenu(core);
             return;
@@ -1154,34 +1153,18 @@ public partial class PreviewWindow
         {
             if (webView.CoreWebView2 is { } core)
             {
-                if (IsPdfViewerSource(core.Source ?? string.Empty))
-                {
-                    // The PDF plugin's selection is invisible to the DOM, so
-                    // hand the copy to the viewer itself through the browser's
-                    // input pipe. With nothing selected Chromium copies
-                    // nothing: over a document, Ctrl+C means "copy the text".
-                    var clipboardBefore = NativeMethods.GetClipboardSequenceNumber();
-                    var started = Stopwatch.GetTimestamp();
-                    DiagnosticLog.Write("ctrl+c requested in pdf viewer");
-                    await ForwardCtrlCAsync(core);
-                    // Dispatch is not a copy. The browser may write later,
-                    // and a selectionless Ctrl+C writes nothing at all.
-                    while (NativeMethods.GetClipboardSequenceNumber() == clipboardBefore
-                        && Stopwatch.GetElapsedTime(started).TotalMilliseconds < 250)
-                    {
-                        await Task.Delay(25);
-                    }
-
-                    var changed = NativeMethods.GetClipboardSequenceNumber() != clipboardBefore;
-                    DiagnosticLog.Write($"pdf copy dispatched clipboardChanged={changed} elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}");
-                    return;
-                }
-
+                var isPdf = IsPdfViewerSource(core.Source ?? string.Empty);
                 var json = await core.ExecuteScriptAsync("window.getSelection().toString()");
                 var text = JsonSerializer.Deserialize<string>(json);
                 if (!string.IsNullOrEmpty(text))
                 {
                     SetClipboard(() => Clipboard.SetText(text), "copy web selection");
+                    return;
+                }
+
+                if (isPdf)
+                {
+                    // Over a document, Ctrl+C with nothing selected leaves the clipboard alone.
                     return;
                 }
             }

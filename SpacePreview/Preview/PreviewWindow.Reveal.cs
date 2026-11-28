@@ -508,6 +508,27 @@ public partial class PreviewWindow
         Settle(before);
 
         var shown = _front.Content as FrameworkElement;
+        if (shown is not null)
+        {
+            // Stop outgoing native audio and flush its saved volume right away
+            // so two tracks never overlap during a same-size dissolve.
+            (shown as AudioPreviewSurface ?? FindVisualChild<AudioPreviewSurface>(shown))?.RetirePlayback();
+
+            // Mute outgoing web media immediately so browsing from web audio or
+            // video to a native audio track never plays both during fade-out.
+            if (FindVisualChild<WebView2>(shown) is { CoreWebView2: { } outgoingCore })
+            {
+                try
+                {
+                    outgoingCore.IsMuted = true;
+                }
+                catch
+                {
+                    // WebView already tearing down.
+                }
+            }
+        }
+
         var standInShows = StandInLayer.Visibility == Visibility.Visible;
         var shownIsWeb = shown is not null && FindVisualChild<WebView2>(shown) is not null;
 
@@ -675,7 +696,7 @@ public partial class PreviewWindow
     private void SetPreviewContent(FrameworkElement content, IDisposable? disposable)
     {
         var view = WebViewIn(content);
-        var owned = disposable ?? view;
+        var owned = disposable ?? (IDisposable?)view ?? content as IDisposable;
         if (_presentation is not { } p)
         {
             owned?.Dispose();
@@ -832,7 +853,7 @@ public partial class PreviewWindow
         if (next.RevealReason is null)
         {
             next.RevealWaitStarted = now;
-            next.RevealReason = WaitForWebRevealAsync(view, next.StagedDuringBeat, _loadCancellation?.Token ?? CancellationToken.None);
+            next.RevealReason = WaitForWebRevealAsync(view, content, next.StagedDuringBeat, _loadCancellation?.Token ?? CancellationToken.None);
             if (!next.RevealReason.IsCompleted)
             {
                 AdvanceAfter(p, next.RevealReason);
@@ -894,8 +915,8 @@ public partial class PreviewWindow
     {
         var view = next.View!;
         var pdfTiming = view.Kind == WebSurfaceKind.PdfViewer
-            && next is { Gated: { } gateStart, RevealWaitStarted: { } allowanceStart }
-            ? $" railWait={(allowanceStart - gateStart).TotalMilliseconds:0}ms allowanceWait={(now - allowanceStart).TotalMilliseconds:0}ms paint=unmeasured"
+            && next is { Gated: { } gateStart, RevealWaitStarted: { } paintStart }
+            ? $" railWait={(paintStart - gateStart).TotalMilliseconds:0}ms paintWait={(now - paintStart).TotalMilliseconds:0}ms paint={(reason == "pdf-first-paint" ? "measured" : "timeout")}"
             : string.Empty;
         DiagnosticLog.Write(
             $"web gate +{p.Since():0}ms wait={waited.TotalMilliseconds:0}ms kind={view.Kind.ToString().ToLowerInvariant()} reason={reason}{pdfTiming}");
@@ -1078,19 +1099,22 @@ public partial class PreviewWindow
     private static readonly TimeSpan SavedPageLayoutCap = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan PageRevealRetriggerCap = TimeSpan.FromMilliseconds(25);
 
-    // The hidden PDF viewer loads after navigation and paints when shown.
-    // The allowance overlaps the rail wait and the browse beat.
-    private static readonly TimeSpan PdfLoadAllowance = TimeSpan.FromMilliseconds(180);
-
-    private static Task WaitForPdfLoadAllowanceAsync(StagedWebView webView, CancellationToken token)
+    private static async Task<string> WaitForPdfFirstPaintAsync(Task<bool> firstPaint, CancellationToken token)
     {
-        var remaining = webView.NavigationCompletedAt is { } done
-            ? PdfLoadAllowance - Stopwatch.GetElapsedTime(done)
-            : PdfLoadAllowance;
-        return remaining > TimeSpan.Zero ? Task.Delay(remaining, token) : Task.CompletedTask;
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+            timeout.CancelAfter(PdfFirstPaintCap);
+            var painted = await firstPaint.WaitAsync(timeout.Token);
+            return painted ? "pdf-first-paint" : "pdf-first-paint-failed";
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            return "pdf-first-paint-timeout";
+        }
     }
 
-    private static async Task<string> WaitForWebRevealAsync(StagedWebView webView, bool retriggerPageReveal, CancellationToken token)
+    private static async Task<string> WaitForWebRevealAsync(StagedWebView webView, FrameworkElement content, bool retriggerPageReveal, CancellationToken token)
     {
         if (webView.CoreWebView2 is not { } core)
         {
@@ -1099,8 +1123,9 @@ public partial class PreviewWindow
 
         if (webView.Kind == WebSurfaceKind.PdfViewer)
         {
-            await WaitForPdfLoadAllowanceAsync(webView, token);
-            return "pdf-load-allowance";
+            return content.Tag is PdfPageRailState rail
+                ? await WaitForPdfFirstPaintAsync(rail.FirstPaintReady.Task, token)
+                : "pdf-first-paint";
         }
 
         if (webView.Kind == WebSurfaceKind.SavedPage)
@@ -1205,6 +1230,7 @@ public partial class PreviewWindow
         StopSlideshow(restoreSize: false);
         Interlocked.Increment(ref _loadVersion);
         _loadCancellation?.Cancel();
+        _pageScanRetryPending = false;
         _pageScan?.Cancel();
 
         // The load ends here. What it had still arriving settles first, so
@@ -1215,8 +1241,10 @@ public partial class PreviewWindow
         _shortcutTarget = null;
         _facts = ItemFacts.Unknown;
         _escapeYieldsToContent = false;
+        _pdfTextInputFocused = false;
         _lastContentClickInViewerChrome = false;
         _userEngagedContent = false;
+        FindAudioSurface()?.RetirePlayback();
         (StandInLayer.Content as StandIn)?.Stop();
 
         if (!IsVisible)
@@ -1527,5 +1555,6 @@ public partial class PreviewWindow
         _folderHover?.Reset();
         _folderHover = null;
         _activePdfRail = null;
+        _pdfTextInputFocused = false;
     }
 }

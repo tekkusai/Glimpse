@@ -31,9 +31,11 @@ public partial class PreviewWindow
     // A page in the rail: the sheet is this wide, its height follows the page.
     private const double PdfRailSheetWidth = 92;
 
-    // A jump's page box reads the typed page within 7 ms of Enter on an idle
-    // machine. One that reads another page this long after was not typed into.
-    private static readonly TimeSpan PdfJumpLandingBound = TimeSpan.FromMilliseconds(250);
+    // How long a state round-trip to our owned PDF viewer may wait.
+    private static readonly TimeSpan PdfViewerQueryTimeout = TimeSpan.FromSeconds(2);
+
+    // Upper bound on waiting for page one to paint before revealing the viewer.
+    private static readonly TimeSpan PdfFirstPaintCap = TimeSpan.FromMilliseconds(1500);
 
     internal enum PdfNavigationAction
     {
@@ -81,68 +83,56 @@ public partial class PreviewWindow
         }
     }
 
-    // FitH is what keeps the page filling the stage when the window resizes:
-    // without it the viewer holds whatever zoom it opened at, so maximizing
-    // just adds empty canvas around an unchanged page.
     private static Uri PdfViewerSource(string path, int page = 1) =>
-        new(new Uri(path, UriKind.Absolute).AbsoluteUri + $"#page={Math.Max(1, page)}&view=FitH");
+        PdfViewerPage.SourceUri(page);
 
-    private static void ConfigurePdfViewer(CoreWebView2 core, string sourcePath)
+    private void ConfigurePdfViewer(
+        StagedWebView webView,
+        CoreWebView2 core,
+        string sourcePath,
+        PdfPageRailState? railState = null,
+        TaskCompletionSource<bool>? readySignal = null,
+        Action<string>? onError = null,
+        bool allowPasswordReveal = true)
     {
-        try
+        var source = PdfViewerPage.Attach(
+            core,
+            sourcePath,
+            OpenExternalUri,
+            json => HandlePdfViewerMessage(railState, core, json, readySignal, onError, allowPasswordReveal));
+        webView.AttachOwnedResource(source);
+    }
+
+    /// <summary>
+    /// Single error handler for whichever PDF viewer currently owns the stage:
+    /// ignores stale or retired viewers and defers replacement while Fill &amp;
+    /// Sign holds unsaved work on screen.
+    /// </summary>
+    private void ReportPdfSurfaceFailure(
+        PdfPageRailState? state,
+        CoreWebView2? core,
+        long version,
+        string label,
+        Action showFallback)
+    {
+        if (version != _loadVersion)
         {
-            // The toolbar keeps the zoom pair, the page box, search, and
-            // print - a fixed set that fits at every stage width, so the
-            // responsive overflow never rearranges it and nothing appears or
-            // disappears when the rail resizes the viewer. Hiding more is not
-            // an option: removing Search collapses the entire strip, page box
-            // included, and the page box is the one native affordance our
-            // rail drives for instant jumps.
-            //
-            // This exact set is load-bearing. The rail's first jump clicks
-            // the page box at a measured offset from the centre of the viewer
-            // (PdfPageBoxAsync), so ANY change here moves the box out from
-            // under that click, and the Ctrl+A that follows lands on the
-            // document and selects the whole thing instead. Adding Fit did
-            // exactly that.
-            core.Settings.HiddenPdfToolbarItems |=
-                CoreWebView2PdfToolbarItems.Save | CoreWebView2PdfToolbarItems.SaveAs |
-                CoreWebView2PdfToolbarItems.Rotate |
-                CoreWebView2PdfToolbarItems.FitPage | CoreWebView2PdfToolbarItems.PageLayout |
-                CoreWebView2PdfToolbarItems.Bookmarks |
-                CoreWebView2PdfToolbarItems.FullScreen | CoreWebView2PdfToolbarItems.MoreSettings;
-        }
-        catch (Exception ex)
-        {
-            DiagnosticLog.Write($"pdf toolbar settings unavailable: {ex.GetType().Name}: {ex.Message}");
+            return;
         }
 
-        // The PDF viewer owns same-file fragments and query changes: its
-        // sidebar, page box, and thumbnails all jump by navigating the loaded
-        // document to a new in-document target. Other files stay out.
-        core.NavigationStarting += (_, args) =>
+        if (state is not null && core is not null && !ReferenceEquals(state.WebView.CoreWebView2, core))
         {
-            switch (DecidePdfNavigation(sourcePath, args.Uri))
-            {
-                case PdfNavigationAction.Allow:
-                    break;
-                case PdfNavigationAction.OpenExternally:
-                    args.Cancel = true;
-                    OpenExternalUri(args.Uri);
-                    break;
-                default:
-                    args.Cancel = true;
-                    break;
-            }
-        };
-        core.NewWindowRequested += (_, args) =>
+            return;
+        }
+
+        if (_fillSignSurface is not null)
         {
-            args.Handled = true;
-            if (DecidePdfNavigation(sourcePath, args.Uri) == PdfNavigationAction.OpenExternally)
-            {
-                OpenExternalUri(args.Uri);
-            }
-        };
+            _deferredWebFailure = () => ReportPdfSurfaceFailure(state, core, version, label, showFallback);
+            DiagnosticLog.Write($"{label} failure deferred during fill-sign");
+            return;
+        }
+
+        showFallback();
     }
 
     private FrameworkElement BuildPdfWebPreview(string path, long version, CancellationToken token)
@@ -152,27 +142,30 @@ public partial class PreviewWindow
         var railColumn = new ColumnDefinition { Width = new GridLength(0) };
         grid.ColumnDefinitions.Add(railColumn);
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        // FitH = fit the page to the window's width, the way PDF apps open
-        // documents. The viewer's default fits the whole page instead, which
-        // renders portrait documents at ~two-thirds size.
-        var webView = CreateWebView(
-            WebSurfaceKind.PdfViewer,
-            () => PdfViewerSource(path),
-            $"pdf preview {path}",
-            _ =>
-            {
-                if (version == _loadVersion)
-                {
-                    SetPreviewContent(BuildPdfErrorPreview(path), null);
-                }
-            },
-            configure: core => ConfigurePdfViewer(core, path));
-        Grid.SetColumn(webView, 1);
         var railHost = BuildPdfPageRailHost();
         Grid.SetColumn(railHost, 0);
         grid.Children.Add(railHost);
+
+        PdfPageRailState? railState = null;
+        StagedWebView? webView = null;
+        void ShowPdfFallback() => SetPreviewContent(BuildPdfErrorPreview(path), null);
+
+        webView = CreateWebView(
+            WebSurfaceKind.PdfViewer,
+            () => PdfViewerSource(path),
+            $"pdf preview {path}",
+            _ => ReportPdfSurfaceFailure(railState, webView?.CoreWebView2, version, $"pdf preview {path}", ShowPdfFallback),
+            configure: core => ConfigurePdfViewer(
+                webView!,
+                core,
+                path,
+                railState,
+                railState?.FirstPaintReady,
+                _ => ReportPdfSurfaceFailure(railState, core, version, $"pdf preview {path}", ShowPdfFallback)));
+        Grid.SetColumn(webView, 1);
+        webView.HoldCachePath(path);
         grid.Children.Add(webView);
-        var railState = new PdfPageRailState(railHost, railColumn, webView, path, version, token) { Surface = grid };
+        railState = new PdfPageRailState(railHost, railColumn, webView, path, version, token) { Surface = grid };
         grid.Tag = railState;
         TrackPdfRailLifetime(grid, railState);
         _ = LoadPdfPageRailOutOfProcessAsync(railState);
@@ -297,20 +290,18 @@ public partial class PreviewWindow
     /// </summary>
     private void TrackPdfRailLifetime(Grid grid, PdfPageRailState railState)
     {
-        grid.Loaded += (_, _) =>
-        {
-            _activePdfRail = railState;
-            StartPdfPageSync(railState);
-        };
+        grid.Loaded += (_, _) => _activePdfRail = railState;
         grid.Unloaded += (_, _) =>
         {
-            StopPdfPageSync(railState);
+            CancelPendingPdfQueries(railState);
             if (ReferenceEquals(_activePdfRail, railState))
             {
                 _activePdfRail = null;
             }
         };
     }
+
+    private readonly record struct PdfViewerSnapshot(int Page, int TotalPages, bool AtOpening, int Zoom, bool FindOpen);
 
     private sealed class PdfPageRailState(
         ContentControl host,
@@ -324,11 +315,6 @@ public partial class PreviewWindow
         public ColumnDefinition RailColumn { get; } = railColumn;
         public WebView2 WebView { get; set; } = webView;
         public Grid? Surface { get; set; }
-        public bool JumpInFlight { get; set; }
-
-        /// <summary>The page asked for while a jump was mid-sequence. Last one wins.</summary>
-        public int? PendingJumpPage { get; set; }
-
         public int CurrentPage { get; set; } = 1;
         public string Path { get; set; } = path;
         public long Version { get; } = version;
@@ -354,37 +340,31 @@ public partial class PreviewWindow
         public Dictionary<int, Border> PageSheets { get; } = [];
         public Border? SelectedPageTile { get; set; }
         public ScrollViewer? PageRailScrollViewer { get; set; }
-        public DispatcherTimer? PageSyncTimer { get; set; }
-        public bool PageSyncInFlight { get; set; }
-        public long PageSyncGeneration { get; set; }
 
-        /// <summary>Held by the one question the viewer is being asked.</summary>
-        public SemaphoreSlim ViewerTurn { get; } = new(1, 1);
-
-        /// <summary>Latched when the viewer kept a question past its bound. It is not asked again.</summary>
-        public bool ViewerSilent { get; set; }
-
-        /// <summary>Latched when the user shows they are reading; page sync asks the viewer only after.</summary>
-        public bool Reading { get; set; }
-
-        /// <summary>The page the viewer last said it was on; 0 before it has said.</summary>
+        /// <summary>The page the viewer last reported; 0 before first paint.</summary>
         public int ViewerPage { get; set; }
 
-        /// <summary>
-        /// Set by a page chosen in the rail. The viewer's next answer is
-        /// where the choice left it, not the reader moving; until then the
-        /// chosen page is where the reader is going.
-        /// </summary>
-        public bool MoveUnanswered { get; set; }
+        /// <summary>True while the viewer has neither scrolled, zoomed, selected text, nor opened find.</summary>
+        public bool AtOpening { get; set; } = true;
 
-        public System.Windows.Automation.AutomationElement? PageAutomationElement { get; set; }
+        /// <summary>
+        /// Set by a rail click until the viewer acknowledges the jump ID, so an
+        /// in-flight scroll event from before the jump never snaps the rail back.
+        /// </summary>
+        public int? PendingRailJumpTarget { get; set; }
+
+        public int NextJumpId { get; set; }
+        public int? PendingJumpId { get; set; }
+
+        public int NextQueryId { get; set; }
+        public Dictionary<int, TaskCompletionSource<PdfViewerSnapshot>> PendingQueries { get; } = [];
+
         public TaskCompletionSource<bool> FirstRailReady { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
 
-    private readonly record struct PdfPageAutomationProbeResult(
-        int Page,
-        System.Windows.Automation.AutomationElement? PageElement);
+        public TaskCompletionSource<bool> FirstPaintReady { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
 
     /// <summary>
     /// The rail is the truth the parser cannot always reach: the first page
@@ -879,11 +859,7 @@ public partial class PreviewWindow
                 selected,
                 page =>
                 {
-                    MarkPdfReading(state, "rail click");
-
-                    // A question asked before the choice describes the viewer before it.
-                    state.PageSyncGeneration++;
-                    state.MoveUnanswered = true;
+                    state.PendingRailJumpTarget = page;
                     SetPdfCurrentPageFromViewer(state, page, logChange: false);
                     if (state.TryHandleJump?.Invoke(state, page) == true)
                     {
@@ -946,8 +922,6 @@ public partial class PreviewWindow
                     }));
             });
 
-        // Looking at the rail is reading: it is worth keeping its highlight true.
-        surface.MouseEnter += (_, _) => MarkPdfReading(state, "rail");
         return surface;
     }
 
@@ -972,223 +946,285 @@ public partial class PreviewWindow
         }
     }
 
-    /// <summary>
-    /// Page sync asks the viewer through UI Automation, which turns on
-    /// Chromium's accessibility tree, seconds of renderer work on a long
-    /// document. So it waits until the user shows they are reading: a click
-    /// in the document, the keyboard in it, the rail, or Fill &amp; Sign.
-    /// The viewer's address is no guide: its page box moves the pages
-    /// without changing it, and the page a staged viewer's address names is
-    /// the one Glimpse sent it to, which read back as the reader moving.
-    /// </summary>
-    private void StartPdfPageSync(PdfPageRailState state)
+    // ---------------------------------------------------------------------
+    // Direct viewer bridge (postMessage). No UI Automation, no toolbar pixel
+    // guessing, and no SendKeys.
+    // ---------------------------------------------------------------------
+
+    private void HandlePdfViewerMessage(
+        PdfPageRailState? state,
+        CoreWebView2 core,
+        string json,
+        TaskCompletionSource<bool>? readySignal,
+        Action<string>? onError,
+        bool allowPasswordReveal = true)
     {
-        if (state.PageSyncTimer is not null)
-        {
-            return;
-        }
-
-        state.ViewerSilent = false;
-        var timer = new DispatcherTimer(DispatcherPriority.Background)
-        {
-            Interval = TimeSpan.FromMilliseconds(350)
-        };
-        timer.Tick += (_, _) => SyncPdfPageFromViewer(state);
-        state.PageSyncTimer = timer;
-        timer.Start();
-    }
-
-    private static void StopPdfPageSync(PdfPageRailState state)
-    {
-        state.PageSyncTimer?.Stop();
-        state.PageSyncTimer = null;
-        state.PageSyncGeneration++;
-        state.PageAutomationElement = null;
-    }
-
-    private static void MarkPdfReading(PdfPageRailState state, string reason)
-    {
-        if (state.Reading)
-        {
-            return;
-        }
-
-        state.Reading = true;
-        DiagnosticLog.Write($"pdf page sync reading ({reason})");
-    }
-
-    private async void SyncPdfPageFromViewer(PdfPageRailState state)
-    {
-        if (state.JumpInFlight)
-        {
-            return;
-        }
-
-        if (state.Token.IsCancellationRequested || state.Version != _loadVersion || state.WebView.CoreWebView2 is null)
-        {
-            StopPdfPageSync(state);
-            return;
-        }
-
         try
         {
-            if (!state.Reading)
-            {
-                if (_userEngagedContent)
-                {
-                    MarkPdfReading(state, "content click");
-                }
-                else if (ContentOwnsKeyboard())
-                {
-                    MarkPdfReading(state, "keyboard");
-                }
-                else
-                {
-                    return;
-                }
-            }
-
-            // One tick's question at a time: the next tick does not queue behind it.
-            if (state.PageSyncInFlight || state.ViewerSilent)
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("type", out var typeProp)
+                || typeProp.ValueKind != JsonValueKind.String)
             {
                 return;
             }
 
-            var generation = state.PageSyncGeneration;
-            state.PageSyncInFlight = true;
-            try
+            var type = typeProp.GetString();
+            switch (type)
             {
-                var page = await ProbePdfPageAsync(state);
-                if (page <= 0
-                    || generation != state.PageSyncGeneration
-                    || state.Version != _loadVersion
-                    || state.Token.IsCancellationRequested)
+                case "ready":
                 {
-                    return;
+                    var pages = ReadInt(root, "pages", 0);
+                    var page = ReadInt(root, "page", 1);
+                    var rendered = ReadBool(root, "rendered", false);
+                    var atOpening = ReadBool(root, "atOpening", true);
+                    if (!rendered || pages <= 0)
+                    {
+                        return;
+                    }
+
+                    readySignal?.TrySetResult(true);
+
+                    if (state is not null
+                        && state.Version == _loadVersion
+                        && ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        state.FirstPaintReady.TrySetResult(true);
+                        state.ViewerPage = page;
+                        state.AtOpening = atOpening;
+                        if (state.Document is null)
+                        {
+                            ApplyPdfPageCount(state, pages, state.PageAspect);
+                        }
+
+                        SetPdfCurrentPageFromViewer(state, page, logChange: false);
+                    }
+                    break;
                 }
 
-                // The rail follows the viewer when the viewer moves, not
-                // whenever the two disagree: a page chosen in the rail
-                // stands until the reader moves the viewer after it, even
-                // while the viewer has not got there yet.
-                var moved = page != state.ViewerPage && !state.MoveUnanswered;
-                state.ViewerPage = page;
-                state.MoveUnanswered = false;
-                if (moved)
+                case "password":
                 {
-                    SetPdfCurrentPageFromViewer(state, page);
+                    // Prompt readiness lets the initial preview reveal the password box
+                    // immediately, while a staged replacement never promotes an unrendered prompt.
+                    if (allowPasswordReveal
+                        && state is not null
+                        && state.Version == _loadVersion
+                        && ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        _pdfTextInputFocused = true;
+                        state.FirstPaintReady.TrySetResult(true);
+                    }
+                    break;
+                }
+
+                case "jumpAck":
+                {
+                    if (state is null
+                        || state.Version != _loadVersion
+                        || !ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        return;
+                    }
+
+                    var id = ReadInt(root, "id", 0);
+                    var page = ReadInt(root, "page", state.CurrentPage);
+                    state.AtOpening = ReadBool(root, "atOpening", state.AtOpening);
+                    if (state.PendingJumpId == id)
+                    {
+                        state.PendingJumpId = null;
+                        state.PendingRailJumpTarget = null;
+                        state.ViewerPage = page;
+                        SetPdfCurrentPageFromViewer(state, page, logChange: false);
+                    }
+                    break;
+                }
+
+                case "state":
+                {
+                    if (state is null
+                        || state.Version != _loadVersion
+                        || !ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        return;
+                    }
+
+                    var page = ReadInt(root, "page", state.CurrentPage);
+                    var atOpening = ReadBool(root, "atOpening", state.AtOpening);
+                    state.AtOpening = atOpening;
+
+                    if (state.PendingJumpId is not null)
+                    {
+                        return;
+                    }
+
+                    var moved = page != state.ViewerPage;
+                    state.ViewerPage = page;
+                    if (moved)
+                    {
+                        SetPdfCurrentPageFromViewer(state, page);
+                    }
+                    break;
+                }
+
+                case "stateReply":
+                {
+                    if (state is null)
+                    {
+                        return;
+                    }
+
+                    var id = ReadInt(root, "id", 0);
+                    if (state.PendingQueries.Remove(id, out var pending))
+                    {
+                        var snapshot = new PdfViewerSnapshot(
+                            ReadInt(root, "page", state.CurrentPage),
+                            ReadInt(root, "totalPages", state.Document?.TotalPages ?? 0),
+                            ReadBool(root, "atOpening", state.AtOpening),
+                            ReadInt(root, "zoom", 100),
+                            ReadBool(root, "findOpen", false));
+                        state.AtOpening = snapshot.AtOpening;
+                        pending.TrySetResult(snapshot);
+                    }
+                    break;
+                }
+
+                case "find":
+                {
+                    if (state is not null
+                        && state.Version == _loadVersion
+                        && ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        _escapeYieldsToContent = ReadBool(root, "open", false);
+                    }
+                    break;
+                }
+
+                case "inputFocus":
+                {
+                    if (state is not null
+                        && state.Version == _loadVersion
+                        && ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        _pdfTextInputFocused = ReadBool(root, "active", false);
+                    }
+                    break;
+                }
+
+                case "openExternal":
+                {
+                    if (root.TryGetProperty("url", out var urlProp)
+                        && urlProp.ValueKind == JsonValueKind.String
+                        && urlProp.GetString() is { } url
+                        && PdfViewerPage.IsExternalWebUri(url))
+                    {
+                        OpenExternalUri(url);
+                    }
+                    break;
+                }
+
+                case "printError":
+                {
+                    var message = root.TryGetProperty("message", out var msgProp) && msgProp.ValueKind == JsonValueKind.String
+                        ? msgProp.GetString() ?? "print-failed"
+                        : "print-failed";
+                    DiagnosticLog.Write($"pdf viewer print failed: {message}");
+                    break;
+                }
+
+                case "error":
+                {
+                    var message = root.TryGetProperty("message", out var msgProp) && msgProp.ValueKind == JsonValueKind.String
+                        ? msgProp.GetString() ?? "load-failed"
+                        : "load-failed";
+                    DiagnosticLog.Write($"pdf viewer load failed: {message}");
+                    readySignal?.TrySetResult(false);
+                    if (state is not null && ReferenceEquals(state.WebView.CoreWebView2, core))
+                    {
+                        state.FirstPaintReady.TrySetResult(false);
+                    }
+
+                    onError?.Invoke(message);
+                    break;
                 }
             }
-            finally
-            {
-                state.PageSyncInFlight = false;
-            }
+        }
+        catch (Exception ex)
+        {
+            DiagnosticLog.Write($"pdf viewer message parse failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static int ReadInt(JsonElement root, string name, int fallback) =>
+        root.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value)
+            ? value
+            : fallback;
+
+    private static bool ReadBool(JsonElement root, string name, bool fallback) =>
+        root.TryGetProperty(name, out var prop) && prop.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? prop.GetBoolean()
+            : fallback;
+
+    private static void CancelPendingPdfQueries(PdfPageRailState state)
+    {
+        foreach (var pending in state.PendingQueries.Values)
+        {
+            pending.TrySetCanceled();
+        }
+
+        state.PendingQueries.Clear();
+    }
+
+    private void SendPdfViewerCommand(object command)
+    {
+        if (_activePdfRail?.WebView.CoreWebView2 is not { } core)
+        {
+            return;
+        }
+
+        try
+        {
+            core.PostWebMessageAsJson(JsonSerializer.Serialize(command));
         }
         catch
         {
-            state.PageAutomationElement = null;
+            // A torn-down view cannot take commands.
         }
     }
 
-    /// <summary>
-    /// The one way to ask the viewer where it stands. Glimpse cannot script
-    /// the viewer, so <paramref name="look"/> reads it through UI
-    /// Automation, which crosses into Chromium, can block and cannot be
-    /// cancelled. So a look runs off the dispatcher, and one viewer is
-    /// asked one question at a time, whoever asks. A viewer that keeps a
-    /// question past its bound is not asked again: more questions would
-    /// only stack behind the blocked one.
-    ///
-    /// A look that finds nothing is not an answer. The first one can find
-    /// nothing of the viewer at all, because only then does Chromium start
-    /// to build the tree it was asked for, so the look is repeated until it
-    /// answers or the bound passes. Null means the viewer gave no answer.
-    /// </summary>
-    private async Task<T?> AskPdfViewerAsync<T>(PdfPageRailState state, Func<IntPtr, T?> look)
-        where T : struct
+    private async Task<PdfViewerSnapshot?> QueryPdfStateAsync(PdfPageRailState state)
     {
-        await state.ViewerTurn.WaitAsync();
+        if (state.WebView.CoreWebView2 is not { } core)
+        {
+            return null;
+        }
+
+        var webView = state.WebView;
+        var id = ++state.NextQueryId;
+        var tcs = new TaskCompletionSource<PdfViewerSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        state.PendingQueries[id] = tcs;
         try
         {
-            var webView = state.WebView;
-            var hwnd = TryGetPdfAutomationHwnd(webView);
-            if (state.ViewerSilent || hwnd == IntPtr.Zero)
-            {
-                return null;
-            }
-
-            var question = Task.Run<T?>(() =>
-            {
-                var clock = Stopwatch.StartNew();
-                while (true)
-                {
-                    try
-                    {
-                        if (look(hwnd) is { } answer)
-                        {
-                            return answer;
-                        }
-                    }
-                    catch
-                    {
-                        // The tree changed under the look; look again.
-                    }
-
-                    if (clock.Elapsed >= PdfPageAutomationTimeout)
-                    {
-                        return null;
-                    }
-
-                    Thread.Sleep(50);
-                }
-            });
-
-            // The last look may start just inside the bound, so the wait
-            // for it runs a second longer than the looking does.
-            var patience = PdfPageAutomationTimeout + TimeSpan.FromSeconds(1);
-            if (await Task.WhenAny(question, Task.Delay(patience)) != question)
-            {
-                // A viewer replaced meanwhile took the blocked look with it.
-                if (ReferenceEquals(state.WebView, webView))
-                {
-                    state.ViewerSilent = true;
-                    DiagnosticLog.Write($"pdf page sync disabled after {patience.TotalSeconds:0}s timeout");
-                }
-
-                return null;
-            }
-
-            // An answer about a viewer that has since been replaced is no answer.
-            return ReferenceEquals(state.WebView, webView) ? await question : null;
+            core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "queryState", id }));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
+            timeout.CancelAfter(PdfViewerQueryTimeout);
+            var snapshot = await tcs.Task.WaitAsync(timeout.Token);
+            return ReferenceEquals(state.WebView, webView) ? snapshot : null;
+        }
+        catch
+        {
+            return null;
         }
         finally
         {
-            state.ViewerTurn.Release();
+            state.PendingQueries.Remove(id);
         }
     }
 
-    /// <summary>
-    /// The page in the viewer's own page box, or 0 when the viewer gave no
-    /// answer. A document of one page, or one nothing has counted yet, is
-    /// not asked: without the count its page box cannot be told from any
-    /// other field.
-    /// </summary>
-    private async Task<int> ProbePdfPageAsync(PdfPageRailState state)
+    private async Task<bool> QueryPdfAtOpeningAsync(PdfPageRailState state)
     {
-        var totalPages = state.Document?.TotalPages ?? 0;
-        if (totalPages <= 1)
-        {
-            return 0;
-        }
-
-        var pageBox = state.PageAutomationElement;
-        if (await AskPdfViewerAsync(state, hwnd => LookForPdfPage(hwnd, totalPages, pageBox)) is not { } answer)
-        {
-            return 0;
-        }
-
-        state.PageAutomationElement = answer.PageElement;
-        return answer.Page;
+        var snapshot = await QueryPdfStateAsync(state);
+        return snapshot is { AtOpening: true };
     }
 
     /// <summary>
@@ -1202,30 +1238,17 @@ public partial class PreviewWindow
             return (1, 0);
         }
 
-        MarkPdfReading(state, "fill and sign");
-        await ReadPdfPageFromViewerAsync(state);
-        return (state.CurrentPage, state.Document?.TotalPages ?? 0);
-    }
-
-    /// <summary>
-    /// Asks the viewer which page the reader is on, now. Page sync waits for
-    /// signs of reading, so a document scrolled by wheel alone has a stale
-    /// CurrentPage. A viewer that cannot answer leaves it as it was, and so
-    /// does a page chosen in the rail before the viewer has answered it, or
-    /// while it is asked: that page is where the reader is going.
-    /// </summary>
-    private async Task ReadPdfPageFromViewerAsync(PdfPageRailState state)
-    {
-        var generation = state.PageSyncGeneration;
-        if (!state.MoveUnanswered
-            && await ProbePdfPageAsync(state) is > 0 and var page
-            && generation == state.PageSyncGeneration
+        if (state.PendingJumpId is null
+            && await QueryPdfStateAsync(state) is { Page: > 0 } snapshot
             && state.Version == _loadVersion)
         {
-            state.ViewerPage = page;
-            state.MoveUnanswered = false;
-            SetPdfCurrentPageFromViewer(state, page, logChange: false);
+            state.ViewerPage = snapshot.Page;
+            SetPdfCurrentPageFromViewer(state, snapshot.Page, logChange: false);
+            var total = snapshot.TotalPages > 0 ? snapshot.TotalPages : state.Document?.TotalPages ?? 0;
+            return (state.CurrentPage, total);
         }
+
+        return (state.CurrentPage, state.Document?.TotalPages ?? 0);
     }
 
     private void SetPdfCurrentPageFromViewer(
@@ -1253,12 +1276,14 @@ public partial class PreviewWindow
         {
             DiagnosticLog.Write($"pdf rail sync -> page {target}");
         }
+
         if (!state.IsVisible || state.PageTiles.Count == 0)
         {
             if (target != previousPage)
             {
                 state.RailNeedsSelectedPageScroll = true;
             }
+
             return;
         }
 
@@ -1318,407 +1343,43 @@ public partial class PreviewWindow
         }
     }
 
-    /// <summary>
-    /// One look for the viewer's page box: the page it shows, or null while
-    /// no field under the window holds a page of this document.
-    /// </summary>
-    private static PdfPageAutomationProbeResult? LookForPdfPage(
-        IntPtr hwnd,
-        int totalPages,
-        System.Windows.Automation.AutomationElement? cachedElement)
+    private void JumpPdfToPage(PdfPageRailState state, int page)
     {
-        if (TryReadPdfPageFromAutomationElement(cachedElement, totalPages, out var page))
-        {
-            return new PdfPageAutomationProbeResult(page, cachedElement);
-        }
-
-        if (TryCreatePdfAutomationRoot(hwnd) is not { } root)
-        {
-            return null;
-        }
-
-        var condition = new System.Windows.Automation.OrCondition(
-            new System.Windows.Automation.PropertyCondition(
-                System.Windows.Automation.AutomationElement.ControlTypeProperty,
-                System.Windows.Automation.ControlType.Edit),
-            new System.Windows.Automation.PropertyCondition(
-                System.Windows.Automation.AutomationElement.ControlTypeProperty,
-                System.Windows.Automation.ControlType.Spinner));
-
-        foreach (System.Windows.Automation.AutomationElement candidate
-            in root.FindAll(System.Windows.Automation.TreeScope.Descendants, condition))
-        {
-            if (TryReadPdfPageFromAutomationElement(candidate, totalPages, out page))
-            {
-                return new PdfPageAutomationProbeResult(page, candidate);
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// One look at the pages themselves: whether the viewer still shows the
-    /// top of the document at fit width, which is where it opened. A wheel,
-    /// a touchpad or a pinch moves it without passing through this window.
-    /// Of the documents nested in the viewer only the pages scroll; its
-    /// frame and toolbar never do. Null while no pages are there to ask.
-    /// </summary>
-    private static bool? LookForPdfPagesAtOpening(IntPtr hwnd)
-    {
-        var scrolls = new System.Windows.Automation.AndCondition(
-            new System.Windows.Automation.PropertyCondition(
-                System.Windows.Automation.AutomationElement.ControlTypeProperty,
-                System.Windows.Automation.ControlType.Document),
-            new System.Windows.Automation.PropertyCondition(
-                System.Windows.Automation.ScrollPattern.VerticallyScrollableProperty,
-                true));
-        if (TryCreatePdfAutomationRoot(hwnd)?.FindFirst(System.Windows.Automation.TreeScope.Descendants, scrolls) is { } pages
-            && pages.TryGetCurrentPattern(System.Windows.Automation.ScrollPattern.Pattern, out var pattern)
-            && pattern is System.Windows.Automation.ScrollPattern scroll
-            && pages.FindFirst(
-                System.Windows.Automation.TreeScope.Descendants,
-                new System.Windows.Automation.PropertyCondition(
-                    System.Windows.Automation.AutomationElement.ControlTypeProperty,
-                    System.Windows.Automation.ControlType.Document)) is { } content)
-        {
-            // At fit width the pages begin at the view's left edge. Zoomed
-            // out they stand in its middle, at least 67 px in after one
-            // step, with nothing to scroll: in 3.0.3 that read as unmoved,
-            // and the swap put the reader back at fit width.
-            var position = scroll.Current;
-            var inset = content.Current.BoundingRectangle.X - pages.Current.BoundingRectangle.X;
-            return position.VerticalScrollPercent <= 0 && !position.HorizontallyScrollable && Math.Abs(inset) <= 2;
-        }
-
-        return null;
-    }
-
-    private IntPtr TryGetPdfAutomationHwnd(WebView2 webView)
-    {
-        try
-        {
-            return PresentationSource.FromVisual(webView) is HwndSource source
-                ? source.Handle
-                : new WindowInteropHelper(this).Handle;
-        }
-        catch
-        {
-            return IntPtr.Zero;
-        }
-    }
-
-    private static System.Windows.Automation.AutomationElement? TryCreatePdfAutomationRoot(IntPtr hwnd)
-    {
-        try
-        {
-            return hwnd == IntPtr.Zero
-                ? null
-                : System.Windows.Automation.AutomationElement.FromHandle(hwnd);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static bool TryReadPdfPageFromAutomationElement(
-        System.Windows.Automation.AutomationElement? element,
-        int totalPages,
-        out int page)
-    {
-        page = 0;
-        if (element is null)
-        {
-            return false;
-        }
-
-        try
-        {
-            if (element.TryGetCurrentPattern(
-                    System.Windows.Automation.ValuePattern.Pattern,
-                    out var valuePattern)
-                && valuePattern is System.Windows.Automation.ValuePattern value
-                && TryReadPdfAutomationPageValue(value.Current.Value, totalPages, out page))
-            {
-                return true;
-            }
-
-            if (element.TryGetCurrentPattern(
-                    System.Windows.Automation.RangeValuePattern.Pattern,
-                    out var rangePattern)
-                && rangePattern is System.Windows.Automation.RangeValuePattern range)
-            {
-                var current = range.Current.Value;
-                if (current >= 1
-                    && current <= totalPages
-                    && Math.Abs(current - Math.Round(current)) < 0.01)
-                {
-                    page = (int)Math.Round(current);
-                    return true;
-                }
-            }
-        }
-        catch
-        {
-            return false;
-        }
-
-        return false;
-    }
-
-    internal static bool TryReadPdfAutomationPageValue(string? value, int totalPages, out int page)
-    {
-        page = 0;
-        if (totalPages <= 1 || string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        var text = value.Trim();
-        if (int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var number)
-            && number >= 1
-            && number <= totalPages)
-        {
-            page = number;
-            return true;
-        }
-
-        return false;
-    }
-
-    private void JumpPdfToPage(PdfPageRailState state, int page) =>
-        _ = JumpPdfToPageAsync(state, page);
-
-    /// <summary>
-    /// The PDF viewer's own page box jumps instantly, so our rail clicks the
-    /// box and types the target page instead of reloading the document. If
-    /// WebView stops honoring that path, we fall back to the staged reload
-    /// path that kept the previous page visible.
-    /// </summary>
-    private async Task JumpPdfToPageAsync(PdfPageRailState state, int page)
-    {
-        if (state.JumpInFlight)
-        {
-            // The jump types into the viewer's page box, so two sequences
-            // cannot overlap without typing over each other. Hold the click
-            // rather than dropping it: the rail has already moved its
-            // highlight there, and a rail pointing at a page the document
-            // never went to is worse than a wait.
-            state.PendingJumpPage = page;
-            return;
-        }
-
-        state.JumpInFlight = true;
         var target = Math.Max(1, page);
         SetPdfCurrentPageFromViewer(state, target, logChange: false);
 
-        // A jump the viewer has confirmed frees the page box at once. One it
-        // missed or left unanswered gives it time to settle first.
-        var settle = TimeSpan.FromMilliseconds(650);
+        if (state.Version != _loadVersion || state.WebView.CoreWebView2 is not { } core)
+        {
+            state.PendingJumpId = null;
+            state.PendingRailJumpTarget = null;
+            return;
+        }
+
+        var id = ++state.NextJumpId;
+        state.PendingJumpId = id;
+        state.PendingRailJumpTarget = target;
         try
         {
-            if (state.Version != _loadVersion || state.WebView.CoreWebView2 is not { } core)
-            {
-                return;
-            }
-
-            // The first click can only aim where the page box usually sits,
-            // so it can miss for reasons this code cannot see. A timeout keeps
-            // a wedged call from holding the lock, and the viewer is asked
-            // afterwards where it actually landed.
-            async Task<int> TypeAsync()
-            {
-                var box = await PdfPageBoxAsync(state);
-                await JumpPdfWithNativePageBoxAsync(core, box, target)
-                    .WaitAsync(PdfPageAutomationTimeout);
-                return await PdfPageAfterJumpAsync(state, target);
-            }
-
-            // A viewer that has shown its document for less than about half a
-            // second can turn the typed page away. Typed again, it takes it;
-            // a reload for that was the flash after a quick first click.
-            var landed = 0;
-            for (var attempt = 1; attempt <= 3; attempt++)
-            {
-                landed = await TypeAsync();
-                if (landed == 0 || landed == target)
-                {
-                    break;
-                }
-
-                DiagnosticLog.Write($"pdf rail native jump missed page {target} (viewer on {landed}), try {attempt}");
-            }
-
-            if (landed == 0 || landed == target)
-            {
-                DiagnosticLog.Write($"pdf rail native jump -> page {target}");
-
-                // The viewer's answer to the move: from here a change is the reader's.
-                if (landed == target)
-                {
-                    state.ViewerPage = target;
-                    state.MoveUnanswered = false;
-                    settle = TimeSpan.Zero;
-                }
-            }
-            else
-            {
-                DiagnosticLog.Write($"pdf rail native jump missed page {target}, staging reload");
-                StagePdfViewerJump(state, target);
-            }
+            core.PostWebMessageAsJson(JsonSerializer.Serialize(new { type = "jump", page = target, id }));
+            DiagnosticLog.Write($"pdf rail jump -> page {target}");
         }
         catch (Exception ex)
         {
-            DiagnosticLog.Write($"pdf rail native jump failed: {ex.GetType().Name}: {ex.Message}");
-            StagePdfViewerJump(state, target);
-        }
-        finally
-        {
-            RunAfter(settle, () =>
-            {
-                state.JumpInFlight = false;
-                if (state.PendingJumpPage is { } pending)
-                {
-                    state.PendingJumpPage = null;
-                    JumpPdfToPage(state, pending);
-                }
-            });
+            state.PendingJumpId = null;
+            state.PendingRailJumpTarget = null;
+            DiagnosticLog.Write($"pdf rail jump failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
     /// <summary>
-    /// Asks the viewer, through its own page control, where the jump landed:
-    /// the target, another page, or 0 when it gives no answer. Unknown
-    /// counts as landed: the probe is a check on the jump, not a second
-    /// gate, and a viewer that will not answer must not cost the user a
-    /// document reload.
-    ///
-    /// The box reads the typed page a few milliseconds after Enter, not at
-    /// once. Asked at once, one jump in four still found the page before and
-    /// reloaded the document for nothing, a flash the reader saw. So it is
-    /// asked until it reads the target or the bound passes.
-    /// </summary>
-    private async Task<int> PdfPageAfterJumpAsync(PdfPageRailState state, int target)
-    {
-        var clock = Stopwatch.StartNew();
-        while (true)
-        {
-            var page = await ProbePdfPageAsync(state);
-            if (page == 0 || page == target || clock.Elapsed >= PdfJumpLandingBound)
-            {
-                return page;
-            }
-
-            await Task.Delay(20);
-        }
-    }
-
-    /// <summary>
-    /// Where the viewer's page box is, in the viewer's own coordinates. Once
-    /// the viewer has been asked where it stands the box is known, and its
-    /// own rectangle says. Before that, asking would wait while Chromium
-    /// builds its accessibility tree, seconds on a long document, so the
-    /// first jump aims where the box sits in the toolbar ConfigurePdfViewer
-    /// keeps: right of the middle, or left of it when the viewer's language
-    /// reads right to left. Show or hide one more item and that guess misses,
-    /// the Ctrl+A selects the document instead of the box, and only the
-    /// retry finds it. Change one, retest the other.
-    /// </summary>
-    private async Task<Point> PdfPageBoxAsync(PdfPageRailState state)
-    {
-        var webView = state.WebView;
-        if (state.PageAutomationElement is { } box
-            && await AskPdfViewerAsync<Rect>(state, _ => ReadBounds(box)) is { IsEmpty: false } bounds
-            && ReferenceEquals(state.WebView, webView))
-        {
-            try
-            {
-                var center = webView.PointFromScreen(new Point(bounds.X + bounds.Width / 2, bounds.Y + bounds.Height / 2));
-                if (center.X >= 0 && center.X < webView.ActualWidth && center.Y >= 0 && center.Y < webView.ActualHeight)
-                {
-                    return center;
-                }
-            }
-            catch (InvalidOperationException)
-            {
-                // The viewer left the screen; the guess is as good as any.
-            }
-        }
-
-        // Chromium takes its language from Windows' display language, as .NET does.
-        return System.Globalization.CultureInfo.CurrentUICulture.TextInfo.IsRightToLeft
-            ? new Point(Math.Min(webView.ActualWidth - 160, webView.ActualWidth / 2 - 15), 20)
-            : new Point(Math.Max(160, webView.ActualWidth / 2 + 15), 20);
-
-        // A box gone from the tree is no answer to wait for: the guess stands in.
-        static Rect? ReadBounds(System.Windows.Automation.AutomationElement box)
-        {
-            try
-            {
-                return box.Current.BoundingRectangle;
-            }
-            catch
-            {
-                return Rect.Empty;
-            }
-        }
-    }
-
-    /// <summary>Clicks the viewer's own page box at <paramref name="box"/> and types the target.</summary>
-    private static async Task JumpPdfWithNativePageBoxAsync(CoreWebView2 core, Point box, int page)
-    {
-        await DispatchMouseClickAsync(core, box.X, box.Y);
-        await Task.Delay(35);
-        await DispatchModifiedKeyAsync(core, 65, "KeyA", "a", modifiers: 2);
-        await Task.Delay(20);
-        await core.CallDevToolsProtocolMethodAsync(
-            "Input.insertText",
-            JsonSerializer.Serialize(new { text = page.ToString(System.Globalization.CultureInfo.InvariantCulture) }));
-        await DispatchPlainKeyAsync(core, 13, "Enter", "Enter");
-    }
-
-    /// <summary>
-    /// Fallback only. It is slower, but it never leaves a blank page behind:
-    /// the old viewer stays visible until the new one has loaded. The viewer
-    /// honours #page only at document load, so this is a real load with a
-    /// cache-busting query, never a runtime hash change. A page chosen
-    /// while it stages, or a reader who has moved since, calls it off: a
-    /// viewer landing on a page the reader has left is the jump back.
-    /// </summary>
-    private void StagePdfViewerJump(PdfPageRailState state, int target)
-    {
-        var uri = new Uri(
-            $"{new Uri(state.Path, UriKind.Absolute).AbsoluteUri}?jump={target}#page={target}&view=FitH",
-            UriKind.Absolute);
-        StagePdfViewerReplacement(
-            state,
-            () => uri,
-            state.Path,
-            $"pdf jump {DiagnosticLog.DescribePath(state.Path)} -> {target}",
-            "pdf jump",
-            stillWanted: () => Task.FromResult(state.CurrentPage == target),
-            onCalledOff: () =>
-            {
-                // A rail still on this page points where the document never
-                // went. The viewer's next answer puts it where the reader is.
-                if (state.CurrentPage == target)
-                {
-                    state.ViewerPage = 0;
-                    state.MoveUnanswered = false;
-                }
-            });
-    }
-
-    /// <summary>
-    /// Keeps the current PDF visible while its owned replacement loads.
-    /// Staging takes about half a second, and the reader can move in it. A
-    /// replacement nobody asked for passes <paramref name="stillWanted"/>,
-    /// which is asked when the swap is due: a no lets the replacement go,
-    /// leaves the viewer on screen as it is and calls
-    /// <paramref name="onCalledOff"/>. So does a replacement that fails to
-    /// load, or has not loaded in 4 s: a working viewer is never traded for
-    /// one that is not.
+    /// Keeps the current PDF visible while its owned replacement loads (for
+    /// example when the full converted Office document replaces its first
+    /// pages). Swaps once the replacement confirms a rendered canvas and
+    /// <paramref name="stillWanted"/> still agrees; a replacement that fails
+    /// to load or misses its 4 s cap is discarded and the working viewer stays.
+    /// After promotion, any later renderer failure routes through
+    /// <paramref name="onActiveFailure"/> so the promoted viewer keeps full
+    /// error handling.
     /// </summary>
     private void StagePdfViewerReplacement(
         PdfPageRailState state,
@@ -1728,71 +1389,37 @@ public partial class PreviewWindow
         string logLabel,
         Action? onSwapped = null,
         Func<Task<bool>>? stillWanted = null,
-        Action? onCalledOff = null)
+        Action? onCalledOff = null,
+        Action? onActiveFailure = null)
     {
         if (state.Surface is not { } surface)
         {
             return;
         }
 
-        var fresh = CreateWebView(
-            WebSurfaceKind.PdfViewer,
-            source,
-            navigationLabel,
-            onFailed: null,
-            configure: core => ConfigurePdfViewer(core, pdfPath));
-        Grid.SetColumn(fresh, 1);
-        fresh.Visibility = Visibility.Hidden;
-        fresh.AllowNavigation();
-        surface.Children.Add(fresh);
-
         var finished = false;
+        var promoted = false;
+        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        StagedWebView? fresh = null;
+
         bool FreshIsOwned() =>
-            state.Version == _loadVersion
+            fresh is not null
+            && state.Version == _loadVersion
             && !state.Token.IsCancellationRequested
             && ReferenceEquals(fresh.Parent, surface);
 
         void DiscardFresh()
         {
             finished = true;
-            if (ReferenceEquals(fresh.Parent, surface))
+            if (fresh is not null)
             {
-                surface.Children.Remove(fresh);
+                if (ReferenceEquals(fresh.Parent, surface))
+                {
+                    surface.Children.Remove(fresh);
+                }
+
+                fresh.Dispose();
             }
-
-            fresh.Dispose();
-        }
-
-        void Swap()
-        {
-            if (finished)
-            {
-                return;
-            }
-
-            finished = true;
-            var old = state.WebView;
-            if (state.Version != _loadVersion || !ReferenceEquals(old.Parent, surface))
-            {
-                DiscardFresh();
-                return;
-            }
-
-            fresh.Visibility = Visibility.Visible;
-            fresh.UpdateLayout();
-            old.Visibility = Visibility.Collapsed;
-            surface.Children.Remove(old);
-            if (ReferenceEquals(_currentDisposable, old))
-            {
-                _currentDisposable = fresh;
-            }
-
-            old.Dispose();
-            state.WebView = fresh;
-            state.PageSyncGeneration++;
-            state.ViewerSilent = false;
-            state.PageAutomationElement = null;
-            onSwapped?.Invoke();
         }
 
         void CallOff(string why)
@@ -1811,69 +1438,119 @@ public partial class PreviewWindow
             }
         }
 
-        async Task SwapIfStillWantedAsync()
+        void HandleReplacementFailure(string why)
         {
-            if (stillWanted is null || await stillWanted())
+            if (promoted)
             {
-                Swap();
+                if (onActiveFailure is not null)
+                {
+                    ReportPdfSurfaceFailure(state, fresh?.CoreWebView2, state.Version, navigationLabel, onActiveFailure);
+                }
+
+                return;
             }
-            else
-            {
-                CallOff("called off");
-            }
+
+            CallOff(why);
         }
 
-        // Navigation and the 4 s bound share one owner. The bound stands
-        // down as soon as the allowance starts.
-        var allowanceStarted = false;
-        fresh.NavigationCompleted += async (_, args) =>
+        void Swap()
         {
-            if (finished || allowanceStarted)
+            if (finished || fresh is null)
             {
                 return;
             }
 
-            if (!args.IsSuccess)
-            {
-                CallOff($"failed to load ({args.WebErrorStatus})");
-                return;
-            }
-
-            if (!FreshIsOwned())
+            finished = true;
+            var old = state.WebView;
+            if (state.Version != _loadVersion || !ReferenceEquals(old.Parent, surface))
             {
                 DiscardFresh();
                 return;
             }
 
-            allowanceStarted = true;
-            var started = Stopwatch.GetTimestamp();
+            CancelPendingPdfQueries(state);
+            fresh.Visibility = Visibility.Visible;
+            fresh.UpdateLayout();
+            old.Visibility = Visibility.Collapsed;
+            surface.Children.Remove(old);
+            if (ReferenceEquals(_currentDisposable, old))
+            {
+                _currentDisposable = fresh;
+            }
+
+            old.Dispose();
+            state.WebView = fresh;
+            state.PendingJumpId = null;
+            state.PendingRailJumpTarget = null;
+            promoted = true;
+            onSwapped?.Invoke();
+        }
+
+        fresh = CreateWebView(
+            WebSurfaceKind.PdfViewer,
+            source,
+            navigationLabel,
+            onFailed: _ => HandleReplacementFailure("failed to load"),
+            configure: core => ConfigurePdfViewer(
+                fresh!,
+                core,
+                pdfPath,
+                state,
+                ready,
+                onError: reason => HandleReplacementFailure($"failed to load ({reason})"),
+                allowPasswordReveal: false));
+        Grid.SetColumn(fresh, 1);
+        fresh.HoldCachePath(pdfPath);
+        fresh.Visibility = Visibility.Hidden;
+        fresh.AllowNavigation();
+        surface.Children.Add(fresh);
+
+        var started = Stopwatch.GetTimestamp();
+        _ = CompleteReplacementAsync();
+
+        async Task CompleteReplacementAsync()
+        {
             try
             {
-                await WaitForPdfLoadAllowanceAsync(fresh, state.Token);
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
+                timeout.CancelAfter(TimeSpan.FromMilliseconds(4000));
+                var painted = await ready.Task.WaitAsync(timeout.Token);
+                if (finished)
+                {
+                    return;
+                }
+
+                if (!painted)
+                {
+                    CallOff("failed to load");
+                    return;
+                }
+
+                if (!FreshIsOwned())
+                {
+                    DiscardFresh();
+                    return;
+                }
+
+                DiagnosticLog.Write(
+                    $"{logLabel} pdf-first-paint wait={Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}ms paint=measured");
+                if (stillWanted is null || await stillWanted())
+                {
+                    Swap();
+                }
+                else
+                {
+                    CallOff("called off");
+                }
             }
             catch (OperationCanceledException) when (state.Token.IsCancellationRequested)
             {
                 DiscardFresh();
-                return;
             }
-
-            if (!FreshIsOwned())
+            catch (OperationCanceledException)
             {
-                DiscardFresh();
-                return;
-            }
-
-            DiagnosticLog.Write(
-                $"{logLabel} pdf-load-allowance wait={Stopwatch.GetElapsedTime(started).TotalMilliseconds:0}ms paint=unmeasured");
-            await SwapIfStillWantedAsync();
-        };
-        RunAfter(TimeSpan.FromMilliseconds(4000), () =>
-        {
-            if (!allowanceStarted)
-            {
-                allowanceStarted = true;
                 CallOff("not loaded in 4 s");
             }
-        });
+        }
     }
 }

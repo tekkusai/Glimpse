@@ -71,10 +71,13 @@ public sealed class WarmBrowserTests
     [InlineData("notes.md", true)]
     [InlineData("guide.pdf", true)]
     [InlineData("clip.mp4", true)]
+    [InlineData("voice.ogg", true)]
     [InlineData("report.docx", true)]
     [InlineData("book.epub", true)]
     [InlineData("page.html", true)]
     [InlineData("logo.svg", true)]
+    [InlineData("track.mp3", false)]
+    [InlineData("sound.wav", false)]
     [InlineData("photo.jpg", false)]
     [InlineData("readme.txt", false)]
     [InlineData("README", false)]
@@ -209,6 +212,62 @@ public sealed class WarmBrowserTests
             await ScanAnsweredAsync(window);
 
             Assert.Equal(setHoldsPage, WarmBrowserStarted(window));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    // A quick glance that closes before the dwell delay expires never starts
+    // the ~80 MB browser, even when pages sit beside the photo.
+    [Fact]
+    public Task AQuickGlanceHidingWithinTheDwellDelayStartsNoBrowser() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        temp.CreateFile("notes.md", "# Notes");
+        var window = new PreviewWindow { Left = -30000, Top = 0, Width = 900, Height = 650 };
+        window.MarkGeometryUserPinnedForProbe();
+        try
+        {
+            window.ShowPreview(Png(temp, "photo.png"), IntPtr.Zero);
+            await WaitAsync(() => Fields.Get<bool>(window, "_loadFinished"), "Timed out waiting for the photo.");
+            await Task.Delay(80);
+            window.HidePreview();
+            await ScanEndedAsync(window);
+
+            Assert.False(WarmBrowserStarted(window));
+        }
+        finally
+        {
+            window.Close();
+        }
+    });
+
+    // Moving to a second folder while the first folder's dwell is waiting
+    // cancels the stale dwell and warms the browser for the new folder.
+    [Fact]
+    public Task SwitchingFoldersDuringDwellCancelsTheOldWaitAndWarmsTheNewFolder() => WpfApp.RunAsync(async () =>
+    {
+        using var temp = new TempDirectory();
+        var photosOnly = temp.CreateDirectory("photos-only");
+        var mixed = temp.CreateDirectory("mixed");
+        var photoA = Path.Combine(photosOnly, "a.png");
+        var photoB = Path.Combine(mixed, "b.png");
+        File.WriteAllText(photoA, "x");
+        File.WriteAllText(photoB, "x");
+        File.WriteAllText(Path.Combine(mixed, "notes.md"), "# Notes");
+
+        var window = NewWindow();
+        try
+        {
+            AskAbout(window, photoA);
+            await Task.Delay(80);
+            AskAbout(window, photoB);
+            await ScanAnsweredAsync(window);
+
+            Assert.Equal(mixed, Fields.Get<object?>(window, "_pageScope"));
+            Assert.True(WarmBrowserStarted(window));
         }
         finally
         {

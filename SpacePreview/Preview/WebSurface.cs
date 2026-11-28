@@ -32,6 +32,7 @@ internal sealed class StagedWebView : WebView2
 {
     private readonly TaskCompletionSource _mayNavigate = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private IDisposable? _cacheHold;
+    private IDisposable? _attachedResource;
 
     public StagedWebView(WebSurfaceKind kind)
     {
@@ -73,13 +74,32 @@ internal sealed class StagedWebView : WebView2
     /// </summary>
     public void Open(Uri address)
     {
-        _cacheHold?.Dispose();
-        _cacheHold = address.IsFile ? CacheHousekeeping.Hold(address.LocalPath) : null;
+        if (address.IsFile)
+        {
+            HoldCachePath(address.LocalPath);
+        }
+
         Source = address;
+    }
+
+    /// <summary>Holds a local file's cache entry while this view displays it (including virtual-host PDFs).</summary>
+    public void HoldCachePath(string path)
+    {
+        _cacheHold?.Dispose();
+        _cacheHold = CacheHousekeeping.Hold(path);
+    }
+
+    /// <summary>Owns a resource (such as the stable PDF file handle) for the lifetime of this view.</summary>
+    public void AttachOwnedResource(IDisposable resource)
+    {
+        _attachedResource?.Dispose();
+        _attachedResource = resource;
     }
 
     protected override void Dispose(bool disposing)
     {
+        _attachedResource?.Dispose();
+        _attachedResource = null;
         _cacheHold?.Dispose();
         _cacheHold = null;
         base.Dispose(disposing);

@@ -373,24 +373,54 @@ public partial class PreviewWindow
     private const int PageScanEntries = 5000;
     private static readonly TimeSpan PageScanTime = TimeSpan.FromMilliseconds(200);
 
+    // Quick single-photo glances should not pay the ~80 MB browser startup.
+    internal static TimeSpan NearbyPageWarmDelay = TimeSpan.FromMilliseconds(500);
+
     // The folder or set last asked about, its answer, and a scan still asking.
     private object? _pageScope;
     private bool _pageScopeHoldsPage;
     private CancellationTokenSource? _pageScan;
+    private object? _pageScanScope;
+    private bool _pageScanEnumerating;
+    private bool _pageScanRetryPending;
+    private bool _windowClosed;
 
     /// <summary>
     /// A window that has shown only photos runs no browser, but the next
-    /// arrow may land on a page. Once an item that is not a page shows, one
-    /// scan off the UI thread asks whether its folder holds one (a
-    /// multi-selection asks its set), and the browser starts if it does.
-    /// The answer keeps until the folder changes; a hide or close stops the
-    /// scan. One scan at a time, so a share that hangs holds one thread.
+    /// arrow may land on a page. Once an item that is not a page stays up
+    /// past the dwell delay, one scan off the UI thread asks whether its
+    /// folder holds one (a multi-selection asks its set), and the browser
+    /// starts if it does. The answer keeps until the folder changes; a hide
+    /// or close stops the wait or scan, and moving to a different folder
+    /// replaces the pending dwell (or schedules one retry once an active
+    /// enumeration returns, so a stalled share still holds at most one thread).
     /// </summary>
     private async void WarmBrowserForPagesNearby()
     {
-        if (IsPinned || _pageScan is not null || BrowseScope() is not { } scope)
+        if (_windowClosed || IsPinned || BrowseScope() is not { } scope)
         {
             return;
+        }
+
+        if (_pageScan is not null)
+        {
+            if (Equals(scope, _pageScanScope))
+            {
+                return;
+            }
+
+            if (_pageScanEnumerating)
+            {
+                // One thread-pool enumeration at a time: cancel the in-flight scan
+                // and let it schedule a fresh dwell for the current scope when it exits.
+                _pageScanRetryPending = true;
+                _pageScan.Cancel();
+                return;
+            }
+
+            _pageScan.Cancel();
+            _pageScan = null;
+            _pageScanScope = null;
         }
 
         if (Equals(scope, _pageScope))
@@ -405,10 +435,57 @@ public partial class PreviewWindow
 
         using var scan = new CancellationTokenSource();
         _pageScan = scan;
+        _pageScanScope = scope;
+        _pageScanEnumerating = false;
+        _pageScanRetryPending = false;
         _pageScope = null;
+        try
+        {
+            if (NearbyPageWarmDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(NearbyPageWarmDelay, scan.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(_pageScan, scan))
+            {
+                _pageScan = null;
+                _pageScanScope = null;
+            }
+
+            return;
+        }
+
+        if (scan.IsCancellationRequested || IsPinned || !Equals(scope, BrowseScope()))
+        {
+            if (ReferenceEquals(_pageScan, scan))
+            {
+                _pageScan = null;
+                _pageScanScope = null;
+            }
+
+            return;
+        }
+
+        _pageScanEnumerating = true;
         var holds = await Task.Run(() => HoldsPage(scope, scan.Token));
-        _pageScan = null;
-        if (scan.IsCancellationRequested)
+        var retry = _pageScanRetryPending;
+        if (ReferenceEquals(_pageScan, scan))
+        {
+            _pageScan = null;
+            _pageScanScope = null;
+            _pageScanEnumerating = false;
+            _pageScanRetryPending = false;
+        }
+
+        if (retry && !_windowClosed && !IsPinned)
+        {
+            WarmBrowserForPagesNearby();
+            return;
+        }
+
+        if (_windowClosed || scan.IsCancellationRequested || IsPinned)
         {
             return;
         }

@@ -143,6 +143,8 @@ public partial class PreviewWindow : Window
         SourceInitialized += (_, _) => ApplyWindowNativeStyle();
         Closed += (_, _) =>
         {
+            _windowClosed = true;
+            _pageScanRetryPending = false;
             _pageScan?.Cancel();
             _warmBrowser.Stop();
         };
@@ -583,9 +585,9 @@ public partial class PreviewWindow : Window
 
             if (token.IsCancellationRequested || version != _loadVersion || !string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase))
             {
-                // A load that was replaced lets go of the browser view it
-                // built, and of nothing else.
-                WebViewIn(content)?.Dispose();
+                // A load that was replaced lets go of the browser view or
+                // native media surface it built, and of nothing else.
+                (WebViewIn(content) as IDisposable ?? content as IDisposable)?.Dispose();
                 return;
             }
 

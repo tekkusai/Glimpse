@@ -90,39 +90,31 @@ public partial class PreviewWindow
             HintPdfStage(PdfPageSizeProbe.Read(initialPath), version);
         }
 
-        var webView = CreateWebView(
-            isHtml ? WebSurfaceKind.Page : WebSurfaceKind.PdfViewer,
-            () => isHtml ? new Uri(initialPath, UriKind.Absolute) : PdfViewerSource(initialPath),
-            $"converted document {document.DocumentPath}",
-            _ =>
-            {
-                if (version == _loadVersion)
+        if (isHtml)
+        {
+            var htmlView = CreateWebView(
+                WebSurfaceKind.Page,
+                () => new Uri(initialPath, UriKind.Absolute),
+                $"converted document {document.DocumentPath}",
+                _ =>
                 {
-                    SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null);
-                }
-            },
-            configure: core =>
-            {
-                if (isHtml)
+                    if (version == _loadVersion)
+                    {
+                        SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null);
+                    }
+                },
+                configure: core =>
                 {
                     HardenForUntrustedHtml(core);
                     OpenWebLinksExternally(core);
-                }
-                else
-                {
-                    ConfigurePdfViewer(core, initialPath);
-                }
-            });
-
-        if (isHtml)
-        {
-            grid.Children.Add(webView);
+                });
+            grid.Children.Add(htmlView);
             // Multi-sheet workbooks get a bottom tab strip, one page per sheet.
             if (document.Sheets is { Count: > 1 } tabs)
             {
                 grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
                 grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-                var tabBar = BuildSheetTabBar(tabs, webView);
+                var tabBar = BuildSheetTabBar(tabs, htmlView);
                 Grid.SetRow(tabBar, 1);
                 grid.Children.Add(tabBar);
             }
@@ -145,12 +137,31 @@ public partial class PreviewWindow
         railStack.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         railStack.Children.Add(railHost);
         grid.Children.Add(railStack);
+
+        PdfPageRailState? railState = null;
+        StagedWebView? webView = null;
+        void ShowOfficeFallback() =>
+            SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null);
+
+        webView = CreateWebView(
+            WebSurfaceKind.PdfViewer,
+            () => PdfViewerSource(initialPath),
+            $"converted document {document.DocumentPath}",
+            _ => ReportPdfSurfaceFailure(railState, webView?.CoreWebView2, version, $"converted document {document.DocumentPath}", ShowOfficeFallback),
+            configure: core => ConfigurePdfViewer(
+                webView!,
+                core,
+                initialPath,
+                railState,
+                railState?.FirstPaintReady,
+                _ => ReportPdfSurfaceFailure(railState, core, version, $"converted document {document.DocumentPath}", ShowOfficeFallback)));
         Grid.SetColumn(webView, 1);
+        webView.HoldCachePath(initialPath);
         grid.Children.Add(webView);
 
         // Thumbnails render in a short helper process: if pdfium dislikes a
         // LibreOffice PDF, the helper dies instead of the resident app.
-        var railState = new PdfPageRailState(railHost, railColumn, webView, initialPath, version, token) { Surface = grid };
+        railState = new PdfPageRailState(railHost, railColumn, webView, initialPath, version, token) { Surface = grid };
         grid.Tag = railState;
         TrackPdfRailLifetime(grid, railState);
 
@@ -232,7 +243,7 @@ public partial class PreviewWindow
         async Task<bool> ReaderHasNotMovedAsync() =>
             !_userEngagedContent
             && !ContentOwnsKeyboard()
-            && await AskPdfViewerAsync<bool>(railState, LookForPdfPagesAtOpening) == true
+            && await QueryPdfAtOpeningAsync(railState)
             && !_userEngagedContent
             && !ContentOwnsKeyboard();
 
@@ -288,7 +299,9 @@ public partial class PreviewWindow
                 {
                     upgrading = false;
                     Hold();
-                });
+                },
+                onActiveFailure: () =>
+                    SetPreviewContent(BuildErrorPreview("Can't show this document", "Open it in its app instead."), null));
         }
 
         railState.TryHandleJump = (_, page) =>

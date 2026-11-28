@@ -10,7 +10,7 @@
     <ApplicationIcon>Assets\Glimpse.ico</ApplicationIcon>
     <StartupObject>SpacePreview.Program</StartupObject>
     <AssemblyName>Glimpse</AssemblyName>
-    <Version>3.0.9</Version>
+    <Version>3.1.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Product>Glimpse</Product>
     <Company>Glimpse</Company>
@@ -51,5 +51,21 @@
           CopyToOutputDirectory="PreserveNewest"
           CopyToPublishDirectory="PreserveNewest"
           Condition="Exists('$(PkgOnigwrap)\THIRD-PARTY-NOTICES.TXT')" />
+    <None Include="Assets\PdfJs\LICENSE"
+          Link="THIRD-PARTY\pdfjs-dist-LICENSE.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\PdfJs\pdf.min.mjs"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\PdfJs\pdf.worker.min.mjs"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\PdfJs\cmaps\**"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\PdfJs\standard_fonts\**"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

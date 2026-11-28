@@ -22,40 +22,37 @@ public sealed class PreviewChromeRegressionTests
     }
 
     /// <summary>
-    /// The rail jumps pages by clicking the viewer's page box at a measured
-    /// offset, so the visible toolbar set is load-bearing. Showing Fit moved
-    /// the box out from under that click and the following Ctrl+A selected the
-    /// whole document instead of the page number.
+    /// Glimpse owns its PDF viewer page directly via PDF.js and postMessage,
+    /// with no UI Automation or Chromium PDF toolbar coordinate guessing.
     /// </summary>
     [Fact]
-    public void ThePdfToolbarSetStaysPinnedToTheRailsJumpCoordinate()
+    public void TheOwnedPdfViewerUsesDirectMessagingAndMeasuredFirstPaint()
     {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var configure = ReadMethod(windowSource, "private static void ConfigurePdfViewer");
+        var pdfSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.Pdf.cs");
+        var viewerSource = ReadSource(@"SpacePreview\Preview\PdfViewerPage.cs");
+        var revealSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.Reveal.cs");
 
-        foreach (var hidden in new[] { "Save", "SaveAs", "Rotate", "FitPage", "PageLayout", "Bookmarks", "FullScreen", "MoreSettings" })
-        {
-            Assert.Contains($"CoreWebView2PdfToolbarItems.{hidden}", configure, StringComparison.Ordinal);
-        }
-
-        var aim = ReadMethod(windowSource, "private async Task<Point> PdfPageBoxAsync");
-        Assert.Contains("webView.ActualWidth / 2 + 15", aim, StringComparison.Ordinal);
+        Assert.DoesNotContain("CoreWebView2PdfToolbarItems", pdfSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("TreeScope.Descendants", pdfSource, StringComparison.Ordinal);
+        Assert.DoesNotContain("PdfLoadAllowance", revealSource, StringComparison.Ordinal);
+        Assert.Contains("WaitForPdfFirstPaintAsync", revealSource, StringComparison.Ordinal);
+        Assert.Contains("isEvalSupported: false", viewerSource, StringComparison.Ordinal);
+        Assert.Contains("Accept-Ranges: bytes", viewerSource, StringComparison.Ordinal);
     }
 
     /// <summary>
-    /// Two jump sequences cannot overlap, but a click during one used to be
-    /// discarded while the rail had already moved its highlight, leaving the
-    /// strip pointing at a page the document never went to.
+    /// Clicking a rail page records the target and sends a direct jump message
+    /// to the viewer without staging a full document reload.
     /// </summary>
     [Fact]
-    public void ARailClickDuringAJumpIsHeldRatherThanDropped()
+    public void ARailClickJumpsDirectlyThroughPostMessage()
     {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
-        var jump = ReadMethod(windowSource, "private async Task JumpPdfToPageAsync");
+        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.Pdf.cs");
+        var jump = ReadMethod(windowSource, "private void JumpPdfToPage");
 
-        Assert.Contains("state.PendingJumpPage = page;", jump, StringComparison.Ordinal);
-        Assert.Contains("state.PendingJumpPage = null;", jump, StringComparison.Ordinal);
-        Assert.Contains("JumpPdfToPage(state, pending);", jump, StringComparison.Ordinal);
+        Assert.Contains("state.PendingRailJumpTarget = target;", jump, StringComparison.Ordinal);
+        Assert.Contains("PostWebMessageAsJson", jump, StringComparison.Ordinal);
+        Assert.DoesNotContain("StagePdfViewerJump", windowSource, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -144,33 +141,16 @@ public sealed class PreviewChromeRegressionTests
         Assert.Contains("scroll-margin-top", themeSource, StringComparison.Ordinal);
     }
 
-    /// <summary>
-    /// The PDF traps no behavior test can reach, because they live inside the
-    /// Chromium viewer. Hiding Search collapses the whole toolbar strip, page
-    /// box included, and the rail's instant jump types into that box. The
-    /// viewer honours #page only at document load, so a staged jump is a real
-    /// load with a cache-busting query; a runtime location.hash does nothing.
-    /// </summary>
     [Fact]
     public void PdfViewerTrapsStayGuarded()
     {
-        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.xaml.cs");
+        var windowSource = ReadSource(@"SpacePreview\Preview\PreviewWindow.Pdf.cs");
         var stagedReplacementBody = ReadMethod(windowSource, "private void StagePdfViewerReplacement");
 
-        foreach (var visible in new[] { "Search", "Print", "ZoomIn", "ZoomOut", "PageSelector" })
-        {
-            Assert.DoesNotContain($"CoreWebView2PdfToolbarItems.{visible}", windowSource, StringComparison.Ordinal);
-        }
-
         Assert.DoesNotContain("location.hash", windowSource, StringComparison.Ordinal);
-        Assert.Contains("?jump={target}#page={target}&view=FitH", windowSource, StringComparison.Ordinal);
-
-        // Navigation and the 4 s escape share one owner: the escape stands
-        // down once the allowance starts, so only one path owns the swap.
-        Assert.True(
-            stagedReplacementBody.IndexOf("allowanceStarted = true;", StringComparison.Ordinal)
-            < stagedReplacementBody.IndexOf("await WaitForPdfLoadAllowanceAsync", StringComparison.Ordinal));
-        Assert.Contains("if (!allowanceStarted)", stagedReplacementBody, StringComparison.Ordinal);
+        Assert.Contains("ready.Task.WaitAsync", stagedReplacementBody, StringComparison.Ordinal);
+        Assert.Contains("pdf-first-paint", stagedReplacementBody, StringComparison.Ordinal);
+        Assert.Contains("not loaded in 4 s", stagedReplacementBody, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -194,7 +174,7 @@ public sealed class PreviewChromeRegressionTests
         // after the media engine fails and the container confirms it.
         Assert.Contains("Can't play this file", windowSource, StringComparison.Ordinal);
         var failureBody = ReadMethod(windowSource, "private async Task ShowMediaFailureAsync");
-        Assert.Contains("ShowMediaFailureAsync(path, detail, reason)", messageBody, StringComparison.Ordinal);
+        Assert.Contains("ShowMediaFailureAsync(path, version, token, detail, reason)", messageBody, StringComparison.Ordinal);
         Assert.Contains("Task.Run(() => Mp4CodecSniffer.TryRead(path))", failureBody, StringComparison.Ordinal);
         Assert.Contains("BuildMediaFailurePreview(path, codecs)", failureBody, StringComparison.Ordinal);
         Assert.Contains("MediaCodecStoreAction(codecs)", windowSource, StringComparison.Ordinal);
@@ -301,15 +281,20 @@ public sealed class PreviewChromeRegressionTests
     }
 
     [Theory]
-    [InlineData("7", 51, 7)]
-    [InlineData(" 12 ", 51, 12)]
-    [InlineData("52", 51, 0)]
-    [InlineData("page 7", 51, 0)]
-    public void PdfPageStateCanBeReadFromAutomationValue(string value, int totalPages, int expected)
+    [InlineData("bytes=0-1023", 5000, true, 0, 1023)]
+    [InlineData("bytes=1000-", 5000, true, 1000, 4999)]
+    [InlineData("bytes=-500", 5000, true, 4500, 4999)]
+    [InlineData("bytes=5000-6000", 5000, false, 0, 0)]
+    [InlineData("invalid", 5000, false, 0, 0)]
+    public void PdfByteRangesParseCleanly(string header, long length, bool valid, long expectedStart, long expectedEnd)
     {
-        var parsed = PreviewWindow.TryReadPdfAutomationPageValue(value, totalPages, out var page);
-        Assert.Equal(expected > 0, parsed);
-        Assert.Equal(expected, page);
+        var parsed = PdfViewerPage.TryParseByteRange(header, length, out var start, out var end);
+        Assert.Equal(valid, parsed);
+        if (valid)
+        {
+            Assert.Equal(expectedStart, start);
+            Assert.Equal(expectedEnd, end);
+        }
     }
 
     private static string ReadSource(string relativePath) => TestSource.Read(relativePath);

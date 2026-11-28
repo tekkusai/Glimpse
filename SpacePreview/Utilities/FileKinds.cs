@@ -109,7 +109,7 @@ internal static partial class FileKinds
     public static bool OpensAsPage(string path) =>
         Path.GetExtension(path).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
         || IsOffice(path)
-        || IsMedia(path)
+        || (IsMedia(path) && !UsesNativeAudioPreview(path))
         || IsGif(path)
         || (IsBrowserImage(path) && !IsImage(path))
         || IsEpub(path)
@@ -121,9 +121,17 @@ internal static partial class FileKinds
         ".mp3", ".wav", ".m4a", ".aac", ".flac", ".wma", ".ogg", ".opus"
     };
 
+    private static readonly HashSet<string> NativeAudioExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp3", ".wav", ".m4a", ".aac", ".flac", ".wma"
+    };
+
     public static bool IsMedia(string path) => MediaExtensions.Contains(Path.GetExtension(path));
 
     public static bool IsAudio(string path) => AudioExtensions.Contains(Path.GetExtension(path));
+
+    public static bool UsesNativeAudioPreview(string path) =>
+        NativeAudioExtensions.Contains(Path.GetExtension(path));
 
     public static bool IsGif(string path) => Path.GetExtension(path).Equals(".gif", StringComparison.OrdinalIgnoreCase);
 

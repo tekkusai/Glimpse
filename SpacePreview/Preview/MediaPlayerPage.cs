@@ -33,7 +33,7 @@ internal static class MediaPlayerPage
         var volume = double.IsFinite(savedVolume) ? Math.Clamp(savedVolume, 0, 1) : 0.75;
         var query = new List<string>
         {
-            Pair("src", new Uri(mediaPath, UriKind.Absolute).AbsoluteUri),
+            Pair("src", LiteralFileUri(mediaPath)),
             Pair("volume", volume.ToString("0.###", CultureInfo.InvariantCulture)),
             Pair("muted", muted ? "1" : "0")
         };
@@ -60,6 +60,48 @@ internal static class MediaPlayerPage
 
     private static string Pair(string name, string? value) =>
         string.IsNullOrWhiteSpace(value) ? string.Empty : $"{name}={Uri.EscapeDataString(value.Trim())}";
+
+    /// <summary>
+    /// Builds a file:// URI escaping every path segment as literal text so
+    /// filenames containing percent sequences such as "%20" never alias
+    /// sibling files with spaces.
+    /// </summary>
+    internal static string LiteralFileUri(string path)
+    {
+        var normalized = path;
+        var unc = false;
+        if (normalized.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = normalized[8..];
+            unc = true;
+        }
+        else if (normalized.StartsWith(@"\\?\", StringComparison.Ordinal))
+        {
+            normalized = normalized[4..];
+        }
+        else if (normalized.StartsWith(@"\\", StringComparison.Ordinal))
+        {
+            normalized = normalized[2..];
+            unc = true;
+        }
+
+        var parts = normalized.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0)
+        {
+            return new Uri(path, UriKind.Absolute).AbsoluteUri;
+        }
+
+        if (unc)
+        {
+            var host = parts[0];
+            var escaped = parts.Skip(1).Select(Uri.EscapeDataString);
+            return $"file://{host}/{string.Join('/', escaped)}";
+        }
+
+        var root = parts[0];
+        var tail = parts.Skip(1).Select(Uri.EscapeDataString);
+        return $"file:///{root}/{string.Join('/', tail)}";
+    }
 
     internal static string Page(bool isAudio)
     {

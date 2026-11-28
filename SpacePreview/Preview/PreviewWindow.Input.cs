@@ -30,6 +30,7 @@ public partial class PreviewWindow
         if (TakesFindShortcut)
         {
             _escapeYieldsToContent = true;
+            SendPdfViewerCommand(new { type = "find" });
         }
     }
 
@@ -52,6 +53,7 @@ public partial class PreviewWindow
 
         _escapeYieldsToContent = false;
         _lastContentClickInViewerChrome = false;
+        SendPdfViewerCommand(new { type = "escape" });
         return true;
     }
 
@@ -82,19 +84,22 @@ public partial class PreviewWindow
         return yield;
     }
 
-    /// <summary>The viewer's Source may carry open parameters (#view=FitH).</summary>
+    /// <summary>Recognizes Glimpse's own PDF viewer host and direct .pdf addresses.</summary>
     private static bool IsPdfViewerSource(string source) =>
-        Uri.TryCreate(source, UriKind.Absolute, out var uri)
+        PdfViewerPage.IsViewerUri(source)
+        || (Uri.TryCreate(source, UriKind.Absolute, out var uri)
             ? uri.AbsolutePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)
-            : source.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase);
+            : source.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Media by what is actually playing: a shortcut to a video counts.</summary>
     public bool IsMediaPreview =>
         CurrentPath is not null && FileKinds.IsMedia(_shortcutTarget ?? CurrentPath);
 
-    /// <summary>A player whose page is up, so Space and the arrows can reach it.</summary>
+    /// <summary>A player whose surface is live, so Space and the arrows can reach it.</summary>
     internal bool IsMediaPlayable =>
-        IsMediaPreview && FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2: not null };
+        IsMediaPreview
+        && (FindAudioSurface() is { IsRetired: false }
+            || FindVisualChild<WebView2>(PreviewContent) is { CoreWebView2: not null });
 
     private bool IsCurrentContentPath(string path) =>
         string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase)
@@ -110,6 +115,17 @@ public partial class PreviewWindow
             if (direction is { } step)
             {
                 image.ZoomBy(step);
+            }
+
+            return direction is not null;
+        }
+
+        if (_zoomWebView is null && _activePdfRail is not null)
+        {
+            var direction = IsZoomInKey(vk) ? 1 : IsZoomOutKey(vk) ? -1 : IsZoomResetKey(vk) ? 0 : (int?)null;
+            if (direction is { } step)
+            {
+                SendPdfViewerCommand(new { type = "zoom", delta = step });
             }
 
             return direction is not null;
@@ -144,9 +160,12 @@ public partial class PreviewWindow
     /// <summary>The user clicked into the content, so up and down may be its keys.</summary>
     internal bool UserEngagedContent => _userEngagedContent;
 
-    /// <summary>A WPF text box in this window holds the keyboard.</summary>
+    private bool _pdfTextInputFocused;
+
+    /// <summary>A WPF text box or editable PDF viewer input (password/find/page) holds the keyboard.</summary>
     internal bool HasTextFocus =>
-        Keyboard.FocusedElement is TextBoxBase box && GetWindow(box) == this;
+        _pdfTextInputFocused
+        || (Keyboard.FocusedElement is TextBoxBase box && GetWindow(box) == this);
 
     internal bool CanRotateFromKeyboard => !_isFileDialogMode && _rotationSession is not null;
 

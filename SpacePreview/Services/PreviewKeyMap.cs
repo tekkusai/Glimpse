@@ -574,6 +574,16 @@ internal static class PreviewKeyMap
 
     private static KeyDecision RouteEnter(in KeyFacts f, bool bare)
     {
+        // An armed find bar or editable text input inside the preview (such as
+        // a PDF password prompt) owns Enter regardless of whether the preview
+        // was opened from Explorer or a common file dialog.
+        if (f.Target == KeyTarget.Preview && (!bare || f.FindBarArmed || f.TextFocus))
+        {
+            return f.Ctrl && f.Source != SelectionSource.CommonFileDialog
+                ? (f.MultiSelection ? Claim(KeyAction.GridToggle) : Pass)
+                : Pass;
+        }
+
         // The picker owns commit. With its list in front the original Enter
         // reaches its Open button; from the preview, focus goes back to it
         // instead of launching a second app behind the modal dialog.
@@ -604,22 +614,27 @@ internal static class PreviewKeyMap
         }
 
         // Enter opens the file in its default app even when the browser
-        // holds the keyboard. The armed find bar means "next match", and a
-        // click in the PDF toolbar means "go to this page".
-        if (!bare || f.FindBarArmed)
-        {
-            return Pass;
-        }
-
+        // holds the keyboard. A click in the PDF toolbar means "go to this page".
         return f.EnterYield ? Let(KeyAction.YieldEnter) : Claim(KeyAction.OpenCurrent);
     }
 
     private static KeyDecision RouteNavigation(in KeyFacts f, bool bare)
     {
         // The picker owns its arrows, Home, End, Page and Delete. A quiet
-        // refresh follows the native move.
+        // refresh follows the native move. When the user clicked into a media
+        // preview opened from a picker, bare Up/Down still adjusts volume.
         if (f.Source == SelectionSource.CommonFileDialog)
         {
+            if (bare
+                && f.Target == KeyTarget.Preview
+                && f.Vk is NativeMethods.VK_UP or NativeMethods.VK_DOWN
+                && f.Media
+                && f.ContentEngaged
+                && !f.TextFocus)
+            {
+                return Claim(KeyAction.NudgeMedia);
+            }
+
             return f.Target == KeyTarget.Owner && f.PickerListFocus
                 ? Let(KeyAction.FollowPicker)
                 : Pass;
@@ -636,9 +651,10 @@ internal static class PreviewKeyMap
             if (f.Target == KeyTarget.Preview)
             {
                 // Left and right always browse. Up and down yield to content
-                // the user clicked into: a page scrolls, a player sets volume.
+                // the user clicked into: a page scrolls, a player (web or
+                // native WPF audio) sets volume.
                 var contentKeepsArrow = f.TextFocus
-                    || (vertical && f.ContentEngaged && f.ContentOwnsKeyboard);
+                    || (vertical && f.ContentEngaged && (f.ContentOwnsKeyboard || f.Media));
                 if (f.Browsable && !contentKeepsArrow)
                 {
                     return Claim(KeyAction.Browse);
@@ -680,14 +696,15 @@ internal static class PreviewKeyMap
         }
 
         // Holding Space never machine-guns a toggle. Its repeats stay away
-        // from Explorer and a player; a find box keeps its spaces.
+        // from Explorer and a player; a find or password box keeps its spaces.
         if (f.SpaceRepeat)
         {
             return f.Target == KeyTarget.Owner || f.Media ? Claim(KeyAction.None) : Pass;
         }
 
         // Space ends the glance even after a click into the content. A
-        // player keeps it as play/pause, an armed find bar as a space.
+        // player keeps it as play/pause; an armed find bar or focused text
+        // input (such as a PDF password prompt) keeps Space as a character.
         if (f.Target == KeyTarget.Preview)
         {
             if (f.Media)
@@ -695,7 +712,7 @@ internal static class PreviewKeyMap
                 return Claim(KeyAction.ToggleMedia);
             }
 
-            if (f.FindBarArmed)
+            if (f.FindBarArmed || f.TextFocus)
             {
                 return Pass;
             }

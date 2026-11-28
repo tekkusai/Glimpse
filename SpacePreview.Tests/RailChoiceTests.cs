@@ -1,9 +1,7 @@
 using System.IO.Compression;
 using System.Windows;
-using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Interop;
 using System.Windows.Media;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
@@ -12,17 +10,12 @@ using SpacePreview.Preview;
 namespace SpacePreview.Tests;
 
 /// <summary>
-/// A page chosen in a rail stays chosen. The rail follows the document when
-/// the reader moves it, and only then: in 3.0.3 a choice could jump back to
-/// the page before, with a flash, when an answer about the document from
-/// before the choice, or about Glimpse's own move, read as the reader moving.
+/// A page chosen in a rail stays chosen, jumps directly without reloading the
+/// document, and stays in sync when the reader scrolls the viewer afterwards.
 /// </summary>
 [Collection(WpfCollection.Name)]
 public sealed class RailChoiceTests
 {
-    // The viewer's page box reads the typed page a few milliseconds after
-    // Enter. Asked at once, one jump in four found the page before, counted
-    // the jump as missed and reloaded the whole document: the flash.
     [Fact]
     public Task AChosenPageIsReachedWithoutReloadingTheDocument() => WpfApp.RunAsync(async () =>
     {
@@ -32,148 +25,72 @@ public sealed class RailChoiceTests
         foreach (var page in new[] { 4, 5, 4, 5, 7, 4, 5, 4, 2, 6, 9, 12, 6, 3, 8, 5 })
         {
             pages.Choose(page);
-            await pages.SettledAsync();
+            await pages.SettledOnAsync(page);
 
             Assert.Same(viewer, pages.Viewer);
             Assert.Equal(page, await pages.PageBoxAsync());
         }
     });
 
-    // A jump that missed stages a viewer at its page, and the staged
-    // viewer's address names that page. In 3.0.3 the page sync read the
-    // address as the reader moving, and took the rail back there after the
-    // reader had chosen another page. The jump holds the sync off while the
-    // viewer stages, as it does here.
     [Fact]
-    public Task AStagedViewerDoesNotTakeTheRailBackToItsPage() => WpfApp.RunAsync(async () =>
-    {
-        using var pages = await Pages.ShowAsync(12);
-        pages.Choose(3);
-        await pages.SettledAsync();
-        var first = pages.Viewer;
-
-        Fields.Set(pages.Rail, "JumpInFlight", true);
-        Fields.Call(pages.Window, "SetPdfCurrentPageFromViewer", pages.Rail, 5, false);
-        Fields.Call(pages.Window, "StagePdfViewerJump", pages.Rail, 5);
-        await UntilAsync(() => !ReferenceEquals(first, pages.Viewer), "The staged viewer never took the place of the first.");
-
-        // Long enough for the staged viewer to take typing.
-        await Task.Delay(800);
-        Fields.Set(pages.Rail, "JumpInFlight", false);
-        pages.Choose(9);
-
-        Assert.Equal(new[] { 9 }, await pages.RailShowsAsync(TimeSpan.FromSeconds(2)));
-        Assert.Equal(9, await pages.PageBoxAsync());
-    });
-
-    // A staged viewer lands on the page it was sent to, half a second or
-    // more later. A page chosen meanwhile is where the reader ends.
-    [Fact]
-    public Task APageChosenWhileAViewerStagesIsWhereTheReaderEnds() => WpfApp.RunAsync(async () =>
-    {
-        using var pages = await Pages.ShowAsync(12);
-        var first = pages.Viewer;
-
-        Fields.Call(pages.Window, "SetPdfCurrentPageFromViewer", pages.Rail, 7, false);
-        Fields.Call(pages.Window, "StagePdfViewerJump", pages.Rail, 7);
-        pages.Choose(9);
-        await pages.SettledAsync();
-        await UntilAsync(() => pages.Surface.Children.OfType<WebView2>().Count() == 1, "The staged viewer was never let go.");
-
-        Assert.Same(first, pages.Viewer);
-        Assert.Equal(9, await pages.PageBoxAsync());
-        Assert.Equal(new[] { 9 }, await pages.RailShowsAsync(TimeSpan.FromSeconds(1)));
-    });
-
-    // Sign opens on the page the reader is on. A page chosen in the rail is
-    // where they are going, even before the viewer has got there: Sign asked
-    // the viewer, still on the page before, and took the rail back with it.
-    [Fact]
-    public Task SignOpensOnAPageChosenBeforeTheViewerGotThere() => WpfApp.RunAsync(async () =>
+    public Task SignOpensOnAPageChosenInTheRail() => WpfApp.RunAsync(async () =>
     {
         using var pages = await Pages.ShowAsync(12);
 
-        // A jump still typing into the viewer holds this one back.
-        Fields.Set(pages.Rail, "JumpInFlight", true);
         pages.Choose(5);
 
         Assert.Equal((5, 12), await pages.ReadPositionAsync());
         Assert.True(pages.Shows(5));
     });
 
-    // The same, with the page chosen while Sign's question waits its turn:
-    // the answer describes the viewer before the choice.
-    [Fact]
-    public Task SignOpensOnAPageChosenWhileItAskedTheViewer() => WpfApp.RunAsync(async () =>
-    {
-        using var pages = await Pages.ShowAsync(12);
-        var turn = Fields.Get<SemaphoreSlim>(pages.Rail, "ViewerTurn");
-        await turn.WaitAsync();
-        Task<(int, int)> asked;
-        try
-        {
-            asked = pages.ReadPositionAsync();
-            Fields.Set(pages.Rail, "JumpInFlight", true);
-            pages.Choose(5);
-        }
-        finally
-        {
-            turn.Release();
-        }
-
-        Assert.Equal((5, 12), await asked);
-        Assert.True(pages.Shows(5));
-    });
-
-    // A staged viewer that cannot load its document gives up its place.
-    // In 3.0.4 it took the place of the working viewer four seconds later
-    // and showed "File not found" under the document's own header.
     [Fact]
     public Task AViewerStaysWhenTheOneStagedToReplaceItCannotLoad() => WpfApp.RunAsync(async () =>
     {
         using var pages = await Pages.ShowAsync(12);
         pages.Choose(3);
-        await pages.SettledAsync();
+        await pages.SettledOnAsync(3);
         var first = pages.Viewer;
-        File.Move(pages.Document, pages.Document + ".gone");
+        var missing = pages.Document + ".gone";
 
-        // As a jump that missed stages one.
-        Fields.Set(pages.Rail, "JumpInFlight", true);
-        Fields.Call(pages.Window, "SetPdfCurrentPageFromViewer", pages.Rail, 5, false);
-        Fields.Call(pages.Window, "StagePdfViewerJump", pages.Rail, 5);
-        await UntilAsync(() => pages.Surface.Children.OfType<WebView2>().Count() == 1, "The staged viewer was never let go.");
-        Fields.Set(pages.Rail, "JumpInFlight", false);
+        var calledOff = false;
+        Fields.Call(
+            pages.Window,
+            "StagePdfViewerReplacement",
+            pages.Rail,
+            (Func<Uri>)(() => PdfViewerPage.SourceUri(5)),
+            missing,
+            "missing replacement test",
+            "pdf test",
+            null,
+            null,
+            (Action)(() => calledOff = true),
+            null);
+
+        await UntilAsync(() => calledOff && pages.Surface.Children.OfType<WebView2>().Count() == 1, "The broken staged viewer was never called off.");
 
         Assert.Same(first, pages.Viewer);
         Assert.Equal(3, await pages.PageBoxAsync());
-
-        // The rail goes back to where the document is.
-        await UntilAsync(() => pages.Shows(3), $"The rail stayed on {pages.CurrentPage}, where the document never went.");
+        Assert.True(pages.Shows(3));
     });
 
-    // A jump the viewer has confirmed is done with the page box. 3.0.4 kept
-    // the box 650 ms longer, so a page chosen soon after waited that out
-    // with its tile already lit: 712 to 744 ms from click to page.
     [Fact]
     public Task APageChosenRightAfterAnotherIsNotHeldBack() => WpfApp.RunAsync(async () =>
     {
         using var pages = await Pages.ShowAsync(12);
         pages.Choose(3);
-        await UntilAsync(() => Fields.Get<int>(pages.Rail, "ViewerPage") == 3, "The viewer never confirmed page 3.");
+        await pages.SettledOnAsync(3);
 
-        Assert.False(Fields.Get<bool>(pages.Rail, "JumpInFlight"));
         pages.Choose(8);
-        await UntilAsync(() => Fields.Get<int>(pages.Rail, "ViewerPage") == 8, "The viewer never confirmed page 8.");
+        await pages.SettledOnAsync(8);
         Assert.Equal(8, await pages.PageBoxAsync());
     });
 
-    // The rail still follows a reader who moves the pages after a choice.
     [Fact]
     public Task TheRailFollowsTheReaderAfterAChoice() => WpfApp.RunAsync(async () =>
     {
         using var pages = await Pages.ShowAsync(12);
         pages.Choose(3);
-        await pages.SettledAsync();
+        await pages.SettledOnAsync(3);
 
         await PdfViewerWheel.ScrollAsync(pages.Viewer.CoreWebView2, 3000);
 
@@ -183,9 +100,6 @@ public sealed class RailChoiceTests
         Assert.True(pages.Shows(shown));
     });
 
-    // A short last chapter cannot scroll to the top of the view, so the page
-    // still names the chapter before it after a jump there. The rail took
-    // that for the reader moving back.
     [Fact]
     public Task AShortLastChapterStaysChosen() => WpfApp.RunAsync(async () =>
     {
@@ -217,7 +131,6 @@ public sealed class RailChoiceTests
             Assert.Equal(new[] { "Short end" }, seen.Distinct());
             Assert.NotEqual("0", await page!.ExecuteScriptAsync("Math.round(window.scrollY)"));
 
-            // And the rail follows the reader who scrolls back from there.
             await PdfViewerWheel.ScrollAsync(page!, -300);
             await UntilAsync(() => tiles["Long three"].Tag is true, "The rail stopped following the page.");
         }
@@ -230,7 +143,6 @@ public sealed class RailChoiceTests
     private static void Click(Border tile) =>
         tile.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, 0, MouseButton.Left) { RoutedEvent = UIElement.MouseLeftButtonUpEvent });
 
-    /// <summary>The window's chapter tiles by title, once the rail has one for each.</summary>
     private static Dictionary<string, Border>? ChapterTiles(PreviewWindow window, string[] titles)
     {
         var tiles = FindDescendants<Border>(window)
@@ -257,7 +169,6 @@ public sealed class RailChoiceTests
         }
     }
 
-    /// <summary>A book whose chapters each fill the view several times, but for a last one of a line.</summary>
     private static void WriteBook(string path, string[] titles)
     {
         using var stream = File.Create(path);
@@ -295,7 +206,6 @@ public sealed class RailChoiceTests
             + $"<manifest>{manifest}</manifest><spine>{spine}</spine></package>");
     }
 
-    /// <summary>A PDF in a real viewer with its page rail, on a window that stays off screen.</summary>
     private sealed class Pages : IDisposable
     {
         private readonly TempDirectory _temp = new();
@@ -321,21 +231,17 @@ public sealed class RailChoiceTests
                 () => Fields.Get<bool>(pages.Window, "_loadFinished") ? Fields.Get<object?>(pages.Window, "_activePdfRail") : null,
                 "The PDF never showed.");
 
-            // The rail's thumbnails come from a helper this host may not start.
             if (pages.Tiles.Count != count)
             {
                 Fields.Call(pages.Window, "ApplyPdfPageCount", pages.Rail, count, 612.0 / 792);
             }
 
-            // The viewer has its page box once it has answered.
             await UntilAsync(async () => await pages.PageBoxAsync() == 1, "The viewer never said where it was.");
             return pages;
         }
 
-        /// <summary>A click on a page's tile, the way the rail takes it.</summary>
         public void Choose(int page) => Click(Tiles[page]);
 
-        /// <summary>The page and count Fill &amp; Sign opens on, asked the way it asks.</summary>
         public async Task<(int, int)> ReadPositionAsync()
         {
             var read = (Task)Fields.Call(Window, "ReadPdfPositionAsync")!;
@@ -343,53 +249,18 @@ public sealed class RailChoiceTests
             return ((int, int))read.GetType().GetProperty("Result")!.GetValue(read)!;
         }
 
-        /// <summary>Waits until the last jump is done with the viewer.</summary>
-        public Task SettledAsync() =>
-            UntilAsync(() => !Fields.Get<bool>(Rail, "JumpInFlight"), "The jump never finished.");
+        public Task SettledOnAsync(int page) =>
+            UntilAsync(
+                () => Fields.Get<int?>(Rail, "PendingRailJumpTarget") is null && Fields.Get<int>(Rail, "ViewerPage") == page,
+                $"The viewer never settled on page {page}.");
 
-        /// <summary>Whether the rail highlights <paramref name="page"/> and only it.</summary>
         public bool Shows(int page) =>
             Tiles.Where(tile => tile.Value.Tag is true).Select(tile => tile.Key).SequenceEqual([page]);
 
-        /// <summary>Every page the rail highlighted over <paramref name="span"/>.</summary>
-        public async Task<int[]> RailShowsAsync(TimeSpan span)
-        {
-            var seen = new List<int>();
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            while (clock.Elapsed < span)
-            {
-                seen.AddRange(Tiles.Where(tile => tile.Value.Tag is true).Select(tile => tile.Key));
-                seen.Add(CurrentPage);
-                await Task.Delay(10);
-            }
-
-            return [.. seen.Distinct()];
-        }
-
-        /// <summary>What the viewer's own page box says, read without the product's asker.</summary>
         public async Task<int> PageBoxAsync()
         {
-            var hwnd = new WindowInteropHelper(Window).Handle;
-            return await Task.Run(() =>
-            {
-                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(30);
-                while (true)
-                {
-                    foreach (AutomationElement edit in AutomationElement.FromHandle(hwnd).FindAll(
-                        TreeScope.Descendants,
-                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit)))
-                    {
-                        if (edit.TryGetCurrentPattern(ValuePattern.Pattern, out var pattern)
-                            && int.TryParse(((ValuePattern)pattern).Current.Value, out var page))
-                        {
-                            return page;
-                        }
-                    }
-
-                    Assert.True(DateTime.UtcNow < deadline, "The viewer never showed a page box.");
-                    Thread.Sleep(50);
-                }
-            });
+            var raw = await Viewer.CoreWebView2.ExecuteScriptAsync("document.getElementById('pageInput').value");
+            return int.Parse(raw.Trim('"'), System.Globalization.CultureInfo.InvariantCulture);
         }
 
         public void Dispose()
@@ -424,7 +295,7 @@ public sealed class RailChoiceTests
         while (!await condition())
         {
             Assert.True(DateTime.UtcNow < deadline, failure);
-            await Task.Delay(100);
+            await Task.Delay(50);
         }
     }
 }
